@@ -54,6 +54,7 @@ class BoundRoleConfiguration:
             raise BoundRoleConfigurationError(RoleConfigurationFailure.BYTES)
         self._directories = directories
         self._content = content
+        self._parent: BoundCheckout | None = None
         self._placements: list[BoundCheckout] = []
         self._config: int | None = None
         self._identity: FileIdentity | None = None
@@ -68,20 +69,20 @@ class BoundRoleConfiguration:
             for placement in self._placements
         )
 
-    def prepare(self, cutoff_ns: int, clock: Clock) -> None:
+    def prepare(self, root: BoundCheckout, cutoff_ns: int, clock: Clock) -> None:
         if self._started or self._closing:
             raise BoundRoleConfigurationError(RoleConfigurationFailure.UNAVAILABLE)
         self._started = True
-        for path in self._directories.paths:
-            _require_time(cutoff_ns, clock)
-            try:
-                self._placements.append(BoundCheckout.capture(path))
-            except BoundCheckoutError:
-                raise BoundRoleConfigurationError(
-                    RoleConfigurationFailure.PLACEMENT
-                ) from None
-        if len(set(self.placement_identities)) != len(self._placements):
-            raise BoundRoleConfigurationError(RoleConfigurationFailure.PLACEMENT)
+        _require_time(cutoff_ns, clock)
+        try:
+            self._parent = root.create_child(self._directories.home.parent)
+            for path in self._directories.paths:
+                _require_time(cutoff_ns, clock)
+                self._placements.append(self._parent.create_child(path))
+        except BoundCheckoutError:
+            raise BoundRoleConfigurationError(
+                RoleConfigurationFailure.PLACEMENT
+            ) from None
         _require_time(cutoff_ns, clock)
         try:
             descriptor = open_file_at(
@@ -154,12 +155,17 @@ class BoundRoleConfiguration:
             if self._config is not None:
                 self._close_descriptor(self._config)
             for placement in reversed(self._placements):
-                try:
-                    placement.close()
-                except BoundCheckoutError:
-                    self._close_failed = True
+                self._close_placement(placement)
+            if self._parent is not None:
+                self._close_placement(self._parent)
         if self._close_failed:
             raise BoundRoleConfigurationError(RoleConfigurationFailure.CLEANUP)
+
+    def _close_placement(self, placement: BoundCheckout) -> None:
+        try:
+            placement.close()
+        except BoundCheckoutError:
+            self._close_failed = True
 
 
 def _require_time(cutoff_ns: int, clock: Clock) -> None:

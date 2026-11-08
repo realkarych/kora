@@ -5,6 +5,7 @@ from kora.protocols.time import Clock
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
+    create_directory,
     open_local_directory,
 )
 
@@ -39,6 +40,16 @@ class BoundCheckout:
     @classmethod
     def capture(cls, path: Path) -> "BoundCheckout":
         return cls(path, _open_checkout(path))
+
+    def create_child(self, path: Path) -> "BoundCheckout":
+        if self._closing or path.parent != self.path:
+            raise BoundCheckoutError(CheckoutFailure.IDENTITY)
+        try:
+            child = create_directory(self.anchor, path.name)
+        except (OSError, FilesystemError):
+            raise BoundCheckoutError(CheckoutFailure.UNAVAILABLE) from None
+        child.ancestors = (*self.anchor.ancestors, child.identity)
+        return BoundCheckout(path, child)
 
     def verify(self, path: Path, cutoff_ns: int, clock: Clock) -> None:
         _require_time(cutoff_ns, clock)

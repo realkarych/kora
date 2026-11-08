@@ -6,7 +6,6 @@ import platform
 import re
 import secrets
 import select
-import shutil
 import signal
 import socket
 import subprocess
@@ -3417,6 +3416,10 @@ def selected_launch_workspace(bound: "BoundEnvironmentProbe | None") -> Generato
         with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
             yield Path(scratch)
         return
+    from tests.plugins.harness.codex.selected_bound_environment import (
+        BoundEnvironmentError,
+    )
+
     root = Path(mkdtemp(prefix="kora-codex-", dir="/tmp"))
     try:
         yield root
@@ -3424,16 +3427,12 @@ def selected_launch_workspace(bound: "BoundEnvironmentProbe | None") -> Generato
         original_failure = sys.exception()
         if bound.settled:
             try:
-                shutil.rmtree(root)
+                bound.remove_workspace(root)
                 if bound.configuration_case:
-                    require(
-                        not os.path.lexists(root),
-                        "selected_bound_workspace_still_present",
-                    )
                     diagnostic(
                         "INFO", "probe.selected_bound_workspace_removed", bound.case
                     )
-            except OSError:
+            except (OSError, BoundEnvironmentError):
                 if original_failure is None:
                     raise ProbeFailure(
                         "selected_bound_workspace_cleanup_failed"

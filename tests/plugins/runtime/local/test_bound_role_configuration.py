@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from kora.plugins.runtime.local.bound_checkout import BoundCheckout
 from kora.plugins.runtime.local.bound_role_configuration import (
     CONFIG_NAME,
     MAX_CONFIG_BYTES,
@@ -23,12 +24,8 @@ CUTOFF = ORIGIN_NS + 100
 
 
 def role_directories(root: Path) -> RoleDirectories:
-    return RoleDirectories(root / "home", root / "codex", root / "tmp")
-
-
-def create_directories(paths: RoleDirectories) -> None:
-    for path in paths.paths:
-        path.mkdir(mode=0o700)
+    role = root / "role"
+    return RoleDirectories(role / "home", role / "codex", role / "tmp")
 
 
 def create_private_config(path: Path, content: bytes) -> None:
@@ -38,22 +35,49 @@ def create_private_config(path: Path, content: bytes) -> None:
 
 def test_configuration_releases_partial_placement_capture(tmp_path: Path) -> None:
     paths = role_directories(tmp_path.resolve())
-    paths.home.mkdir(mode=0o700)
-    paths.codex_home.symlink_to(paths.home, target_is_directory=True)
+    root = BoundCheckout.capture(tmp_path.resolve())
     baseline = set(os.listdir("/dev/fd"))
-    role = BoundRoleConfiguration(paths, CONTENT)
+    role = BoundRoleConfiguration(
+        RoleDirectories(paths.home, paths.home, paths.temporary), CONTENT
+    )
 
     try:
         with pytest.raises(BoundRoleConfigurationError) as refused:
-            role.prepare(CUTOFF, StepClock())
+            role.prepare(root, CUTOFF, StepClock())
         captured = set(os.listdir("/dev/fd"))
     finally:
         role.close()
         role.close()
+        released = set(os.listdir("/dev/fd"))
+        root.close()
 
     assert refused.value.reason is RoleConfigurationFailure.PLACEMENT
-    assert len(captured - baseline) == 1
-    assert set(os.listdir("/dev/fd")) == baseline
+    assert len(captured - baseline) == 2
+    assert released == baseline
+
+
+def test_configuration_never_creates_placements_through_role_parent_symlink(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    scratch = tmp_path.resolve() / "scratch"
+    paths = role_directories(scratch)
+    outside.mkdir(mode=0o700)
+    scratch.mkdir(mode=0o700)
+    paths.home.parent.symlink_to(outside, target_is_directory=True)
+    root = BoundCheckout.capture(scratch)
+    role = BoundRoleConfiguration(paths, CONTENT)
+
+    try:
+        with pytest.raises(BoundRoleConfigurationError) as refused:
+            role.prepare(root, CUTOFF, StepClock())
+    finally:
+        role.close()
+        root.close()
+
+    assert refused.value.reason is RoleConfigurationFailure.PLACEMENT
+    assert tuple(outside.iterdir()) == ()
+    assert paths.home.parent.is_symlink()
 
 
 def test_configuration_rejects_oversized_expected_bytes(tmp_path: Path) -> None:
@@ -82,13 +106,13 @@ def test_configuration_distinguishes_bytes_identity_and_private_placements(
     tmp_path: Path, change: str, failure: RoleConfigurationFailure
 ) -> None:
     paths = role_directories(tmp_path.resolve())
-    create_directories(paths)
     config = paths.codex_home / CONFIG_NAME
+    root = BoundCheckout.capture(tmp_path.resolve())
     baseline = set(os.listdir("/dev/fd"))
     role = BoundRoleConfiguration(paths, CONTENT)
     clock = StepClock()
     try:
-        role.prepare(CUTOFF, clock)
+        role.prepare(root, CUTOFF, clock)
         role.verify(paths, CUTOFF, clock)
         owned = set(os.listdir("/dev/fd"))
         if change == "bytes":
@@ -115,11 +139,13 @@ def test_configuration_distinguishes_bytes_identity_and_private_placements(
         retained = set(os.listdir("/dev/fd"))
     finally:
         role.close()
+        released = set(os.listdir("/dev/fd"))
+        root.close()
 
     assert refused.value.reason is failure
     assert retained == owned
-    assert len(owned - baseline) == 4
-    assert set(os.listdir("/dev/fd")) == baseline
+    assert len(owned - baseline) == 5
+    assert released == baseline
 
 
 @dataclass
@@ -136,12 +162,12 @@ def test_configuration_checks_cutoff_after_comparison_descriptor_is_closed(
     tmp_path: Path,
 ) -> None:
     paths = role_directories(tmp_path.resolve())
-    create_directories(paths)
+    root = BoundCheckout.capture(tmp_path.resolve())
     baseline = set(os.listdir("/dev/fd"))
     role = BoundRoleConfiguration(paths, CONTENT)
     clock = DescriptorObservationClock(1)
     try:
-        role.prepare(CUTOFF, StepClock())
+        role.prepare(root, CUTOFF, StepClock())
         owned = set(os.listdir("/dev/fd"))
 
         with pytest.raises(BoundRoleConfigurationError) as expired:
@@ -149,10 +175,12 @@ def test_configuration_checks_cutoff_after_comparison_descriptor_is_closed(
         retained = set(os.listdir("/dev/fd"))
     finally:
         role.close()
+        released = set(os.listdir("/dev/fd"))
+        root.close()
 
     assert expired.value.reason is RoleConfigurationFailure.DEADLINE
     assert clock.offset_ns == 8
     assert clock.observed == owned
     assert retained == owned
-    assert len(owned - baseline) == 4
-    assert set(os.listdir("/dev/fd")) == baseline
+    assert len(owned - baseline) == 5
+    assert released == baseline

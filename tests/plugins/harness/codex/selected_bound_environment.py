@@ -245,6 +245,7 @@ class BoundEnvironmentProbe:
     configuration_refused: RoleConfigurationFailure | None = field(
         default=None, init=False
     )
+    _configuration_root: BoundCheckout | None = field(default=None, init=False)
     _configurations: dict[BoundRole, BoundRoleConfiguration] = field(
         default_factory=dict[BoundRole, BoundRoleConfiguration], init=False
     )
@@ -385,6 +386,29 @@ class BoundEnvironmentProbe:
                 failed = True
         if failed:
             raise BoundEnvironmentError("selected_bound_configuration_cleanup_failed")
+
+    def remove_workspace(self, root: Path) -> None:
+        owner = self._configuration_root
+        if owner is None:
+            shutil.rmtree(root)
+            return
+        try:
+            identity = owner.anchor.identity
+            if owner.path != root or entry_identity(root) != (
+                identity.device,
+                identity.inode,
+            ):
+                raise BoundEnvironmentError("selected_bound_workspace_identity")
+            shutil.rmtree(root)
+            if os.fstat(owner.anchor.descriptor).st_nlink != 0 or os.path.lexists(root):
+                raise BoundEnvironmentError("selected_bound_workspace_still_present")
+        finally:
+            try:
+                owner.close()
+            except BoundCheckoutError:
+                raise BoundEnvironmentError(
+                    "selected_bound_workspace_anchor_close"
+                ) from None
 
     def replace_checkout(self, checkout: BoundCheckout) -> None:
         workspace = checkout.path
@@ -550,7 +574,7 @@ class BoundEnvironmentProbe:
             for recipe in (inputs.app_server, inputs.exec_server)
         ):
             raise BoundEnvironmentError("selected_bound_executable_recipe_mismatch")
-        self.prepare_configurations(inputs, cutoff_ns, clock)
+        self.prepare_configurations(root, inputs, cutoff_ns, clock)
         slots = BoundRoleSlots(binding, clock, cutoff_ns)
         if self.case == "duplicate":
             slots.claim("exec")
@@ -586,23 +610,22 @@ class BoundEnvironmentProbe:
         )
 
     def prepare_configurations(
-        self, inputs: CodexLaunchInputs, cutoff_ns: int, clock: SystemClock
+        self, root: Path, inputs: CodexLaunchInputs, cutoff_ns: int, clock: SystemClock
     ) -> None:
         recipes: tuple[tuple[BoundRole, NativeProcessInputs], ...] = (
             ("app", inputs.app_server),
             ("exec", inputs.exec_server),
         )
         try:
+            self._configuration_root = BoundCheckout.capture(root)
             for role, recipe in recipes:
                 directories = role_directories(recipe)
                 configuration = BoundRoleConfiguration(
                     directories, recipe.config.encode()
                 )
                 self._configurations[role] = configuration
-                for path in directories.paths:
-                    path.mkdir(mode=0o700, parents=True)
-                configuration.prepare(cutoff_ns, clock)
-        except (OSError, BoundRoleConfigurationError):
+                configuration.prepare(self._configuration_root, cutoff_ns, clock)
+        except (BoundCheckoutError, BoundRoleConfigurationError):
             raise BoundEnvironmentError(
                 "selected_bound_configuration_capture_failed"
             ) from None
