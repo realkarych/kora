@@ -73,12 +73,12 @@ class DescriptorReadiness:
 
     def close(self) -> None:
         if not self._closed:
+            self._wake()
             if self._writing:
                 self._loop.remove_writer(self._descriptor)
             else:
                 self._loop.remove_reader(self._descriptor)
             self._closed = True
-            self._wake()
 
 
 class BoundedChannel:
@@ -107,16 +107,21 @@ class BoundedChannel:
         if self._closed:
             return
         first: OSError | None = None
-        for resource in (self._reader, self._writer, self._endpoint):
-            if resource is not None:
+        for watcher in (self._reader, self._writer):
+            if watcher is not None:
                 try:
-                    resource.close()
+                    watcher.close()
                 except OSError as error:
                     if first is None:
                         first = error
         if first is not None:
             self._close_failed = True
             raise first
+        try:
+            self._endpoint.close()
+        except OSError:
+            self._close_failed = True
+            raise
         self._closed = True
 
     def _close_after_failure(self) -> None:

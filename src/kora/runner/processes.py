@@ -687,6 +687,7 @@ class GatedProcess:
         self._closing = False
         self._released = False
         self._gate_close_failed = False
+        self._unstarted_capture_close_failed = False
         self._start(cwd_descriptor, stdio_limit)
 
     @property
@@ -703,8 +704,10 @@ class GatedProcess:
 
     @property
     def gate_close_failed(self) -> bool:
-        return self._gate_close_failed or (
-            self._channel is not None and self._channel.close_failed
+        return (
+            self._gate_close_failed
+            or self._unstarted_capture_close_failed
+            or (self._channel is not None and self._channel.close_failed)
         )
 
     @property
@@ -799,6 +802,12 @@ class GatedProcess:
                     )
         except OSError:
             self._start_failed = True
+            if self._process is None:
+                for capture in self._captures:
+                    try:
+                        capture.close()
+                    except OSError:
+                        self._unstarted_capture_close_failed = True
             self._close_gate_after_failure()
 
     def _registered(self) -> ProcessRegistration:
@@ -896,15 +905,8 @@ class GatedProcess:
 
     def close_gate(self) -> None:
         self._closing = True
-        unstarted = self._start_failed and self._process is None
-        resources: tuple[BoundedChannel | GatedStdio | CaptureDrain | None, ...] = (
-            self._channel,
-            self._stdio,
-        )
-        if unstarted:
-            resources += tuple(self._captures)
         first: OSError | None = None
-        for resource in resources:
+        for resource in (self._channel, self._stdio):
             if resource is not None:
                 try:
                     resource.close()
@@ -914,7 +916,11 @@ class GatedProcess:
         if first is not None:
             self._gate_close_failed = True
             raise first
-        if unstarted:
+        if (
+            self._start_failed
+            and self._process is None
+            and not self._unstarted_capture_close_failed
+        ):
             self._released = True
 
     def _close_gate_after_failure(self) -> None:
