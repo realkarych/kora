@@ -62,7 +62,8 @@ def _native_fields(
         raise GraphValueRejected(GraphValueFailure.INVALID)
     fields: dict[str, object] = vars(value)
     if (
-        len(fields) != len(expected)
+        type(fields) is not dict
+        or len(fields) != len(expected)
         or any(type(name) is not str for name in fields)
         or any(name not in fields for name in expected)
         or getattr(value, "__pydantic_extra__", None) is not None

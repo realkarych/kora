@@ -56,6 +56,11 @@ ATTACH_LIMITS = GraphDeploymentAttachmentLimits(
 )
 
 
+class ForeignReferenceFields(dict[str, object]):
+    def __len__(self) -> int:
+        raise AssertionError("foreign reference fields were inspected")
+
+
 def attachment_inputs(
     scope: GraphResourceScope,
 ) -> tuple[str, tuple[CommandResourceContent, ...], tuple[GraphResourceOwner, ...]]:
@@ -187,15 +192,27 @@ def test_attachment_preserves_exact_pair_and_detaches_nested_reference_aliases()
     finished = attach_graph_deployment_references(
         prepared, scope, (owners[2], owners[0], owners[1]), limits=exact
     )
-    for short in (
+    short_aggregate = (
         replace(exact, max_retained_bytes=exact.max_retained_bytes - 1),
         replace(exact, max_work=exact.max_work - 1),
+    )
+    for short in (
+        *short_aggregate,
         replace(exact, physical_input_bytes=exact.physical_input_bytes - 1),
         replace(exact, resources=replace(exact.resources, scratch=1)),
     ):
         with pytest.raises(GraphValueRejected) as refused:
             attach_graph_deployment_references(prepared, scope, owners, limits=short)
         assert_attachment_refused(refused.value, GraphValueFailure.BUDGET)
+    malformed = with_reference(
+        owners[0], owners[0].reference.model_copy(update={"total_size": False})
+    )
+    for short in short_aggregate:
+        with pytest.raises(GraphValueRejected) as before_reference:
+            attach_graph_deployment_references(
+                prepared, scope, (malformed, *owners[1:]), limits=short
+            )
+        assert_attachment_refused(before_reference.value, GraphValueFailure.BUDGET)
     owners[0].reference.address.storage_identity.__init__(
         version=1, store_id="changed-store"
     )
@@ -247,7 +264,12 @@ def test_attachment_refuses_malformed_and_inconsistent_references() -> None:
     original = first.reference
     address = original.address
     identity = address.storage_identity
+    foreign_fields = original.model_copy()
+    object.__setattr__(
+        foreign_fields, "__dict__", ForeignReferenceFields(vars(original))
+    )
     references = (
+        foreign_fields,
         original.model_copy(update={"version": True}),
         original.model_copy(update={"total_size": False}),
         original.model_copy(update={"unknown": PRIVATE_OBJECT}),
@@ -291,6 +313,11 @@ def test_attachment_refuses_malformed_and_inconsistent_references() -> None:
             store=PRIVATE_STORE,
             digest=address.payload_digest,
             size=original.total_size + 1,
+        ),
+        content(
+            store=PRIVATE_STORE,
+            digest=ZERO,
+            size=original.total_size,
         ),
         content(
             store=PRIVATE_STORE, digest=address.payload_digest, size=original.total_size
@@ -342,6 +369,9 @@ def test_attachment_requires_a_complete_single_store_address_partition() -> None
     overlap = PreparedCommandStageGroup(
         shared.store_id, shared.payload_digest, shared.data, (0, 1)
     )
+    misplaced = PreparedCommandStageGroup(
+        empty.store_id, empty.payload_digest, empty.data, (2,)
+    )
     unsorted = PreparedCommandStageGroup(
         shared.store_id, shared.payload_digest, shared.data, (2, 0)
     )
@@ -357,6 +387,7 @@ def test_attachment_requires_a_complete_single_store_address_partition() -> None
     malformed = (
         (narrowed, empty),
         (overlap, empty),
+        (overlap, misplaced),
         (unsorted, empty),
         (invalid, empty),
         (shared, foreign),
