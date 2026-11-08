@@ -135,8 +135,30 @@ def _storage_key(store_id: str, payload_digest: str) -> tuple[str, str]:
     return store_id, payload_digest
 
 
+def _bounded_storage_keys(
+    addresses: tuple[tuple[str, str], ...], max_addresses: int
+) -> frozenset[tuple[str, str]]:
+    if (
+        type(max_addresses) is not int
+        or not 0 <= max_addresses <= MAX_COUNT
+        or type(addresses) is not tuple
+        or len(addresses) > max_addresses
+    ):
+        raise_private_metadata_error(LockError("invalid storage address set"))
+    keys: set[tuple[str, str]] = set()
+    for address in addresses:
+        if type(address) is not tuple or len(address) != 2:
+            raise_private_metadata_error(LockError("invalid storage address set"))
+        keys.add(_storage_key(*address))
+    return frozenset(keys)
+
+
 async def _lock_existing_address(
-    connection: AsyncConnection, dialect: str, address: tuple[str, str]
+    connection: AsyncConnection,
+    dialect: str,
+    address: tuple[str, str],
+    *,
+    guard_table: bool,
 ) -> bool:
     store_id, payload_digest = address
     fields = storage_address_fence.c
@@ -149,13 +171,14 @@ async def _lock_existing_address(
         )
         .limit(2)
     )
+    if dialect == POSTGRESQL:
+        statement = statement.with_for_update(nowait=True)
     try:
-        if dialect == POSTGRESQL:
+        if dialect == POSTGRESQL and guard_table:
             table_lock = await connection.execute(
                 text("LOCK TABLE storage_address_fence IN ROW SHARE MODE NOWAIT")
             )
             table_lock.close()
-            statement = statement.with_for_update(nowait=True)
         result = await connection.execute(
             statement, {"store_id": store_id, "payload_digest": payload_digest}
         )
@@ -354,7 +377,7 @@ class TransitionLocks:
         self._lease.claim_lock_context()
         self._run_id: str | None = None
         self._scopes: frozenset[Scope] | None = None
-        self._storage_address: tuple[str, str] | None = None
+        self._storage_addresses: frozenset[tuple[str, str]] | None = None
         self._graph_preparation: GraphPreparationBinding | None = None
         self._usable: bool = True
         self._dialect: str = connection.dialect.name
@@ -462,7 +485,7 @@ class TransitionLocks:
                 Scope(ScopeKind.GRAPH, (selected_graph_id,)),
             ),
         )
-        if self._storage_address is not None:
+        if self._storage_addresses is not None:
             raise LockError("the graph publication target precedes storage addresses")
 
     async def read_graph_publication_target(
@@ -483,24 +506,39 @@ class TransitionLocks:
     async def acquire_existing_storage_address(
         self, store_id: str, payload_digest: str
     ) -> None:
+        await self.acquire_existing_storage_addresses(
+            ((store_id, payload_digest),), max_addresses=1
+        )
+
+    async def acquire_existing_storage_addresses(
+        self,
+        addresses: tuple[tuple[str, str], ...],
+        *,
+        max_addresses: int,
+    ) -> None:
         self._require_current()
-        if self._scopes is None or self._storage_address is not None:
+        if self._scopes is None or self._storage_addresses is not None:
             raise LockError("the storage address is acquired once after scopes")
         self._usable = False
-        address = _storage_key(store_id, payload_digest)
-        if not await _lock_existing_address(
-            self._lease.connection, self._dialect, address
-        ):
-            raise_private_metadata_error(StorageAddressMissing())
-        self._lease.require_active()
-        self._storage_address = address
+        keys = _bounded_storage_keys(addresses, max_addresses)
+        for index, address in enumerate(sorted(keys)):
+            if not await _lock_existing_address(
+                self._lease.connection,
+                self._dialect,
+                address,
+                guard_table=index == 0,
+            ):
+                raise_private_metadata_error(StorageAddressMissing())
+            self._lease.require_active()
+        self._storage_addresses = keys
         self._usable = True
 
     def require_existing_storage_address(
         self, connection: AsyncConnection, store_id: str, payload_digest: str
     ) -> None:
         self.require_connection(connection)
-        if self._storage_address != _storage_key(store_id, payload_digest):
+        key = _storage_key(store_id, payload_digest)
+        if self._storage_addresses is None or key not in self._storage_addresses:
             raise LockError("the required storage address lock is not held")
 
     async def acquire_open_graph_preparation(
