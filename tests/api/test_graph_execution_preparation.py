@@ -286,17 +286,37 @@ def check_logical_roundtrip() -> None:
         )
         assert_idle(evaluator.owner, 1)
     assert type(logical) is PreparedLogicalExecutionContract
+    assert isinstance(original, PreparedExecutionContract)
+    assert isinstance(alternative, PreparedExecutionContract)
+    original_resources = original.resources
+    original_digests = original.digests
     with pytest.raises(AttributeError, match="immutable"):
         logical.canonical_ir = MARKER
     with pytest.raises(AttributeError, match="immutable"):
         delattr(logical, "canonical_contract")
+    with pytest.raises(AttributeError, match="immutable"):
+        logical.__init__(MARKER, MARKER, original_digests)
+    with pytest.raises(AttributeError, match="immutable"):
+        PreparedLogicalExecutionContract.__init__(
+            original, MARKER, MARKER, original_digests
+        )
+    with pytest.raises(AttributeError, match="immutable"):
+        original.__init__(
+            replace(SCOPE, graph_id=MARKER),
+            MARKER,
+            MARKER,
+            original_digests,
+            alternative.resources,
+            alternative.owners,
+        )
     with pytest.raises(TypeError, match="explicit access") as pickling:
         pickle.dumps(logical)
     with pytest.raises(ValueError, match="not iterable") as encoder:
         jsonable_encoder(logical)
 
-    assert isinstance(original, PreparedExecutionContract)
-    assert isinstance(alternative, PreparedExecutionContract)
+    assert original.scope == SCOPE
+    assert original.resources is original_resources
+    assert original.owners == tuple(reversed(owners))
     assert original.resources.text != alternative.resources.text
     assert (
         logical.canonical_ir

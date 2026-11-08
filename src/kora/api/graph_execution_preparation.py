@@ -84,6 +84,8 @@ class PreparedLogicalExecutionContract:
         canonical_contract: str,
         digests: GraphVersionDigests,
     ) -> None:
+        if hasattr(self, "canonical_ir"):
+            raise AttributeError("prepared execution contract is immutable")
         object.__setattr__(self, "canonical_ir", canonical_ir)
         object.__setattr__(self, "canonical_contract", canonical_contract)
         object.__setattr__(self, "digests", digests)
