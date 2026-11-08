@@ -3090,7 +3090,7 @@ def verify_shell_patch_policy(case: SelectedLaunchCase) -> None:
 
 
 async def run_selected_launch(case: SelectedLaunchCase) -> None:
-    if case in SELECTED_AUTH_CASES:
+    if case in SELECTED_AUTH_CASES or case in SELECTED_HOOK_INVENTORY_REFUSALS:
         decision = (
             "selected-allow"
             if case == "selected-startup-ready"
@@ -3099,6 +3099,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             or case in SELECTED_BASH_STARTUP_CASES
             or case in SELECTED_TLS_CASES
             or case in SELECTED_TOOL_INVENTORY_CASES
+            or case in SELECTED_HOOK_INVENTORY_REFUSALS
             else case
         )
         (CONTROL / "decision").write_text(decision, encoding="utf-8")
