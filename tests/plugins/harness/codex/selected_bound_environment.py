@@ -237,9 +237,6 @@ class BoundEnvironmentProbe:
         pin = SELECTED_EXECUTABLE_PIN
         if self.case == "executable-pin":
             pin = ExecutablePin(pin.size, "0" * 64)
-        if expected_failure is not None:
-            self.attempt_scope.release()
-            self.app_scope.release()
         try:
             verified = verify_installed_executable(binary, pin, cutoff_ns, clock)
         except ExecutableVerificationError as error:
@@ -262,6 +259,8 @@ class BoundEnvironmentProbe:
         key: str,
         deadline: float,
     ) -> BoundLaunch | None:
+        if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (65_532,) * 4:
+            raise BoundEnvironmentError("selected_bound_unexpected_identity")
         self._cwd = str(workspace)
         clock = SystemClock()
         cutoff_ns = runner_deadline(deadline, clock)
@@ -277,7 +276,9 @@ class BoundEnvironmentProbe:
         )
         attempt_token = self.attempt_scope.admit(ATTEMPT_CANARY)
         grant = self.app_scope.admit(key)
-        if self.case in ENVIRONMENT_REFUSALS:
+        if self.case in INSTALLATION_REFUSALS:
+            self.attempt_scope.release()
+        if self.case in ENVIRONMENT_REFUSALS or self.case in INSTALLATION_REFUSALS:
             self.app_scope.release()
         try:
             inputs = prepare_native_inputs(
@@ -309,6 +310,8 @@ class BoundEnvironmentProbe:
             )
             if self.case in ENVIRONMENT_REFUSALS:
                 raise BoundEnvironmentError("selected_bound_preflight_not_refused")
+        except SecretRevealRefused:
+            raise BoundEnvironmentError("selected_bound_preflight_reveal") from None
         except LaunchConfigurationError as error:
             if (
                 self.case != "reserved"

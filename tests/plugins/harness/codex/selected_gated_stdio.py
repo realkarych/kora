@@ -30,6 +30,7 @@ from kora.runner.processes import (
 MAX_DESCRIPTORS = 256
 MAX_ENVIRONMENT = 65_536
 MAX_PROCESS_MAPS = 1_048_576
+ROSETTA_EXECUTABLE = "/run/rosetta/rosetta"
 GateBoundary = Literal["before-activation", "before-delivery"]
 
 
@@ -77,7 +78,7 @@ def live_pid(pid: int) -> Generator[int]:
         os.close(identity)
 
 
-def maps_executable(pid: int, executable: InstalledExecutable) -> bool:
+def executable_mapping(pid: int, executable: InstalledExecutable) -> bool:
     with Path(f"/proc/{pid}/maps").open("rb") as source:
         mappings = source.read(MAX_PROCESS_MAPS + 1)
     if len(mappings) > MAX_PROCESS_MAPS:
@@ -86,11 +87,31 @@ def maps_executable(pid: int, executable: InstalledExecutable) -> bool:
         f"{os.major(executable.device):02x}:{os.minor(executable.device):02x}".encode()
     )
     inode = str(executable.inode).encode()
+    path = os.fsencode(executable.path)
     for line in mappings.splitlines():
         fields = line.split(maxsplit=5)
-        if len(fields) >= 5 and fields[3:5] == [device, inode]:
+        if (
+            len(fields) == 6
+            and fields[1] == b"r-xp"
+            and fields[3:] == [device, inode, path]
+        ):
             return True
     return False
+
+
+def verify_executed_image(pid: int, executable: InstalledExecutable) -> None:
+    exe = f"/proc/{pid}/exe"
+    entry = os.stat(exe)
+    identity = (entry.st_dev, entry.st_ino)
+    if identity == (executable.device, executable.inode):
+        return
+    if os.readlink(exe) == ROSETTA_EXECUTABLE:
+        translator = os.stat(ROSETTA_EXECUTABLE)
+        if identity == (translator.st_dev, translator.st_ino) and executable_mapping(
+            pid, executable
+        ):
+            return
+    raise GatedObservationError("selected_bound_executable_mismatch")
 
 
 def verify_role(
@@ -292,12 +313,7 @@ class SelectedGatedApp:
                 with Path(f"/proc/{self._pid}/cmdline").open("rb") as source:
                     if source.read(len(expected) + 1) != expected:
                         raise GatedObservationError("selected_bound_argv_mismatch")
-                entry = os.stat(f"/proc/{self._pid}/exe")
-                if (entry.st_dev, entry.st_ino) != (
-                    executable.device,
-                    executable.inode,
-                ) and not maps_executable(self._pid, executable):
-                    raise GatedObservationError("selected_bound_executable_mismatch")
+                verify_executed_image(self._pid, executable)
         except OSError:
             raise GatedObservationError(
                 "selected_bound_executable_observation_failed"

@@ -9,8 +9,8 @@ from kora.runner.installed_executable import (
     ExecutableFailure,
     ExecutablePin,
     ExecutableVerificationError,
-    _require_executable,
-    _verify_contents,
+    check_executable_entry,
+    verify_executable_contents,
     verify_installed_executable,
 )
 from tests.plugins.runtime.local.frames_support import ORIGIN_NS, TickingClock
@@ -44,6 +44,33 @@ def test_checked_installed_file_releases_all_its_descriptors() -> None:
     assert set(os.listdir("/dev/fd")) == baseline
 
 
+def test_checked_install_closes_descriptors_at_cutoff() -> None:
+    path = PROTECTED_EXECUTABLE
+    pin = pin_for(path.read_bytes())
+    clock = TickingClock(1)
+    deadline = ORIGIN_NS + 7
+    baseline = set(os.listdir("/dev/fd"))
+
+    with pytest.raises(ExecutableVerificationError) as expired:
+        verify_installed_executable(path, pin, deadline, clock)
+
+    assert expired.value.reason is ExecutableFailure.DEADLINE
+    assert set(os.listdir("/dev/fd")) == baseline
+
+
+def test_checked_install_requires_actual_execute_access() -> None:
+    path = Path("/etc/passwd").resolve()
+    pin = ExecutablePin(1, "0" * 64)
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 5_000_000_000
+
+    with pytest.raises(ExecutableVerificationError) as refused:
+        verify_installed_executable(path, pin, deadline, clock)
+
+    assert not os.access(path, os.X_OK, effective_ids=True)
+    assert refused.value.reason is ExecutableFailure.PROTECTION
+
+
 def test_checked_install_rejects_replaceable_ancestry(tmp_path: Path) -> None:
     parent = tmp_path.resolve() / "candidate"
     parent.mkdir()
@@ -74,11 +101,11 @@ def test_file_check_refuses_writable_file_and_special_objects(tmp_path: Path) ->
     alias.symlink_to(PROTECTED_EXECUTABLE)
 
     with pytest.raises(ExecutableVerificationError) as writable:
-        _require_executable(executable.stat())
+        check_executable_entry(executable.stat())
     with pytest.raises(ExecutableVerificationError) as special:
-        _require_executable(fifo.stat())
+        check_executable_entry(fifo.stat())
     with pytest.raises(ExecutableVerificationError) as symbolic:
-        _require_executable(alias.lstat())
+        check_executable_entry(alias.lstat())
 
     assert writable.value.reason is ExecutableFailure.PROTECTION
     assert special.value.reason is ExecutableFailure.LOCATION
@@ -97,9 +124,11 @@ def test_file_scan_checks_identity_size_and_final_deadline(tmp_path: Path) -> No
 
     with selected.open("rb") as original, replacement.open("rb") as other:
         with pytest.raises(ExecutableVerificationError) as changed:
-            _verify_contents(other.fileno(), entry, pin, ORIGIN_NS + 5, TickingClock(1))
+            verify_executable_contents(
+                other.fileno(), entry, pin, ORIGIN_NS + 5, TickingClock(1)
+            )
         with pytest.raises(ExecutableVerificationError) as wrong_size:
-            _verify_contents(
+            verify_executable_contents(
                 original.fileno(),
                 entry,
                 pin_for(FILE_BYTES + b"!"),
@@ -107,7 +136,7 @@ def test_file_scan_checks_identity_size_and_final_deadline(tmp_path: Path) -> No
                 TickingClock(1),
             )
         with pytest.raises(ExecutableVerificationError) as expired:
-            _verify_contents(original.fileno(), entry, pin, deadline, clock)
+            verify_executable_contents(original.fileno(), entry, pin, deadline, clock)
 
     assert changed.value.reason is ExecutableFailure.IDENTITY
     assert wrong_size.value.reason is ExecutableFailure.SIZE

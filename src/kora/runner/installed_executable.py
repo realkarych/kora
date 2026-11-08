@@ -84,11 +84,19 @@ def verify_installed_executable(
             _require_time(clock, deadline_ns)
             name = parts[-1]
             entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            _require_executable(entry)
+            check_executable_entry(entry)
+            if not os.access(
+                name,
+                os.X_OK,
+                dir_fd=parent,
+                effective_ids=True,
+                follow_symlinks=False,
+            ):
+                raise ExecutableVerificationError(ExecutableFailure.PROTECTION)
             _require_time(clock, deadline_ns)
             descriptor = os.open(name, EXECUTABLE_FLAGS, dir_fd=parent)
             owned.callback(os.close, descriptor)
-            _verify_contents(descriptor, entry, pin, deadline_ns, clock)
+            verify_executable_contents(descriptor, entry, pin, deadline_ns, clock)
             if _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _stamp(
                 entry
             ):
@@ -105,11 +113,11 @@ def _require_protection(entry: os.stat_result) -> None:
         raise ExecutableVerificationError(ExecutableFailure.PROTECTION)
 
 
-def _require_executable(entry: os.stat_result) -> None:
+def check_executable_entry(entry: os.stat_result) -> None:
     if not stat.S_ISREG(entry.st_mode):
         raise ExecutableVerificationError(ExecutableFailure.LOCATION)
     _require_protection(entry)
-    if not entry.st_mode & stat.S_IXOTH or entry.st_mode & PRIVILEGED_EXECUTION:
+    if entry.st_mode & PRIVILEGED_EXECUTION:
         raise ExecutableVerificationError(ExecutableFailure.PROTECTION)
 
 
@@ -132,7 +140,7 @@ def _require_time(clock: Clock, deadline_ns: int) -> None:
         raise ExecutableVerificationError(ExecutableFailure.DEADLINE)
 
 
-def _verify_contents(
+def verify_executable_contents(
     descriptor: int,
     entry: os.stat_result,
     pin: ExecutablePin,
