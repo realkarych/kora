@@ -103,3 +103,12 @@ inherited option can expose trace to the model and that an inherited
 trace prefix can produce an extra effect even when the approved command
 enables trace itself. Complete declarations and production environment
 assembly retain their existing acceptance criteria.
+
+## Subsequent selected model TLS reservations
+
+[#1026](https://github.com/realkarych/kora/issues/1026) reserves the exact
+unset `CODEX_CA_CERTIFICATE`, `SSL_CERT_FILE`, and `SSL_CERT_DIR` names
+in private launch preflight. The [dated record](codex-model-tls-roots-2026-11-08.md)
+shows that each independently changes selected app-server trust on
+loopback HTTPS. Complete declarations, installation trust and production
+environment assembly retain their existing acceptance criteria.
