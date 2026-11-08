@@ -6,7 +6,10 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from kora.protocols.harness import NativeLaunchReader, NativeLaunchWriter
 
 READ_SIZE = 8192
 MAX_ENCODING_DEPTH = 64
@@ -225,8 +228,8 @@ def encode_frame(message: dict[str, object], limit: int) -> bytes:
 class AppServerRpc:
     def __init__(
         self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
+        reader: "NativeLaunchReader",
+        writer: "NativeLaunchWriter",
         *,
         clock: Callable[[], float],
         next_request_id: Callable[[], int],

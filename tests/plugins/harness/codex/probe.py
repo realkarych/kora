@@ -347,6 +347,7 @@ HTTP_FIELD_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 if TYPE_CHECKING:
+    from kora.protocols.harness import NativeLaunch
     from tests.plugins.harness.codex.selected_bash import BashWitness
     from tests.plugins.harness.codex.selected_bound_environment import (
         BoundEnvironmentProbe,
@@ -2823,6 +2824,7 @@ async def drive(
     gated_executor = None
     bound_launch = None
     bound_exec_writer: asyncio.StreamWriter | None = None
+    native_executor: NativeLaunch | None = None
     bash_witness: BashWitness | None = None
     natural_app_refusal = False
     gated_executor_identity: int | None = None
@@ -2879,14 +2881,25 @@ async def drive(
                     raise BoundProbeRefusal("selected_bound_environment_refused")
                 inputs = bound_launch.inputs
                 child_env = dict(inputs.app_server.environment)
-                gated_executor = bound.start_role(bound_launch, "exec")
-                if gated_executor is None:
-                    if bound.configuration_refused is not None:
-                        raise BoundProbeRefusal(bound.configuration_refused.value)
-                    if bound.original_checkout is not None:
-                        raise BoundProbeRefusal("selected_bound_checkout_refused")
-                    raise BoundProbeRefusal("selected_bound_slot_refused")
-                exec_reader, bound_exec_writer = await gated_executor.prepare()
+                if bound_launch.context is not None:
+                    if bound.context_legacy:
+                        await bound.verify_legacy_context_refusal(bound_launch)
+                        raise BoundProbeRefusal(
+                            "selected_native_context_legacy_refused"
+                        )
+                    native_executor, gated_executor = await bound.start_context_role(
+                        bound_launch, "exec"
+                    )
+                    exec_reader = native_executor.reader
+                else:
+                    gated_executor = bound.start_role(bound_launch, "exec")
+                    if gated_executor is None:
+                        if bound.configuration_refused is not None:
+                            raise BoundProbeRefusal(bound.configuration_refused.value)
+                        if bound.original_checkout is not None:
+                            raise BoundProbeRefusal("selected_bound_checkout_refused")
+                        raise BoundProbeRefusal("selected_bound_slot_refused")
+                    exec_reader, bound_exec_writer = await gated_executor.prepare()
                 line = await exec_reader.readline()
                 match = EXECUTOR_LISTEN_URL.fullmatch(line)
                 require(
@@ -2986,7 +2999,25 @@ async def drive(
                 Path(child_env["CODEX_HOME"]),
                 bound=bound_launch is not None,
             )
-            if bound_launch is not None:
+            if bound_launch is not None and bound_launch.context is not None:
+                assert bound is not None
+                assert gated_executor is not None
+                assert native_executor is not None
+                if bound.case == "context-cancel":
+                    await bound.cancel_context_app(
+                        bound_launch, gated_executor, native_executor
+                    )
+                    diagnostic(
+                        "INFO",
+                        "probe.selected_native_context_cancel_verified",
+                        bound.case,
+                    )
+                    raise BoundProbeRefusal("selected_native_context_app_cancelled")
+                native_app, gated_app = await bound.start_context_role(
+                    bound_launch, "app"
+                )
+                reader, writer = native_app.reader, native_app.writer
+            elif bound_launch is not None:
                 assert bound is not None
                 if bound.case == "partial":
                     assert bound_exec_writer is not None
@@ -3187,6 +3218,12 @@ async def drive(
                     "INFO", "probe.selected_bound_checkout_verified", fixture.case
                 )
                 diagnostic("INFO", "probe.selected_bound_roles_verified", fixture.case)
+                if bound_launch.context is not None:
+                    diagnostic(
+                        "INFO",
+                        "probe.selected_native_context_verified",
+                        "context-ready",
+                    )
             elif gated_app is not None:
                 assert executor is not None
                 assert gated_executor_identity is not None
@@ -3551,7 +3588,7 @@ async def run_selected_launch(
             fenced = bound.case in {"before-activation", "before-delivery"}
             expected_roles = (
                 2
-                if fenced or bound.phase_refusal
+                if fenced or bound.phase_refusal or bound.case == "context-cancel"
                 else int(
                     bound.late_configuration_case
                     or bound.case
@@ -3598,7 +3635,8 @@ async def run_selected_launch(
             raise bound_refusal
         if bound is not None:
             require(
-                bound.case in {"ready", "bash-live", "configuration-ready"}
+                bound.case
+                in {"ready", "bash-live", "configuration-ready", "context-ready"}
                 and bound.settled
                 and bound.cwd_opens == 0
                 and bound.starts == 2
@@ -4022,6 +4060,10 @@ async def run_selected_bound(name: str) -> None:
 
     if name not in (
         "ready",
+        "context-ready",
+        "context-legacy-live",
+        "context-legacy-released",
+        "context-cancel",
         "path",
         "grant",
         "reserved",

@@ -2,7 +2,15 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final, Literal, Protocol, Self, get_args
+from typing import (
+    Annotated,
+    Final,
+    Literal,
+    Protocol,
+    Self,
+    get_args,
+    runtime_checkable,
+)
 
 from pydantic import (
     AfterValidator,
@@ -190,6 +198,29 @@ class LaunchContext(Protocol):
     placements: Mapping[Placement, Path]
 
     async def allocate(self, inputs: LaunchInputs) -> Launch: ...
+
+
+class NativeLaunchReader(Protocol):
+    async def read(self, size: int, /) -> bytes: ...
+
+    async def readline(self) -> bytes: ...
+
+
+class NativeLaunchWriter(Protocol):
+    def write(self, data: bytes, /) -> None: ...
+
+    async def drain(self) -> None: ...
+
+
+@dataclass(frozen=True, repr=False, slots=True)
+class NativeLaunch:
+    reader: NativeLaunchReader
+    writer: NativeLaunchWriter
+
+
+@runtime_checkable
+class NativeLaunchContext(LaunchContext, Protocol):
+    async def start_bound(self, role: str) -> NativeLaunch: ...
 
 
 class SessionSpec(BoundaryModel):

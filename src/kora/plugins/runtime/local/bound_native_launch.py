@@ -201,6 +201,10 @@ class BoundNativeLaunch:
         self._inputs = MappingProxyType(inputs)
 
     @property
+    def stream_limit(self) -> int:
+        return self._stdio_limit
+
+    @property
     def stopped(self) -> bool:
         return self._slots.stopped
 

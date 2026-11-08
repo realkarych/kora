@@ -57,6 +57,14 @@ def descriptor_targets(pid: int) -> dict[int, str]:
     return targets
 
 
+def parent_sockets() -> frozenset[str]:
+    return frozenset(
+        target
+        for target in descriptor_targets(os.getpid()).values()
+        if target.startswith("socket:[")
+    )
+
+
 def native_environment(pid: int) -> frozenset[bytes]:
     with Path(f"/proc/{pid}/environ").open("rb") as source:
         payload = source.read(MAX_ENVIRONMENT + 1)
@@ -227,17 +235,7 @@ class SelectedGatedApp:
         self, boundary: Callable[[GateBoundary], None] | None = None
     ) -> StdioStreams:
         registration = await self._owner.prepare()
-        self._pid = registration.process.pid
-        with live_pid(self._pid):
-            self._gate_targets = descriptor_targets(self._pid)
-        child = self._gate_targets.get(0)
-        if (
-            child is None
-            or not child.startswith("socket:[")
-            or self._gate_targets.get(1) != child
-            or sum(value == child for value in self._gate_targets.values()) != 2
-        ):
-            raise GatedObservationError("selected_gated_unexpected_child_stdio")
+        child = self._observe_child_stdio(registration.process.pid)
         if boundary is not None:
             boundary("before-activation")
         await self._owner.acknowledge()
@@ -256,6 +254,47 @@ class SelectedGatedApp:
         self._peer = peer
         self._child = child
         return streams
+
+    @classmethod
+    def observe_started(
+        cls,
+        owner: GatedProcess,
+        clock: SystemClock,
+        previous: frozenset[str],
+    ) -> "SelectedGatedApp":
+        registration = owner.registration
+        if registration is None:
+            raise GatedObservationError("selected_context_gate_unregistered")
+        observation = cls(owner, clock)
+        child = observation._observe_child_stdio(registration.process.pid)
+        current = parent_sockets()
+        added = current - previous
+        if not previous.issubset(current) or len(added) != 1 or child in current:
+            raise GatedObservationError("selected_context_parent_endpoint")
+        (peer,) = added
+        if peer in observation._gate_targets.values():
+            raise GatedObservationError("selected_context_parent_endpoint_inherited")
+        observation._peer = peer
+        observation._child = child
+        return observation
+
+    def _observe_child_stdio(self, pid: int) -> str:
+        self._pid = pid
+        with live_pid(pid):
+            self._gate_targets = descriptor_targets(pid)
+        child = self._gate_targets.get(0)
+        if (
+            child is None
+            or not child.startswith("socket:[")
+            or self._gate_targets.get(1) != child
+            or sum(value == child for value in self._gate_targets.values()) != 2
+        ):
+            raise GatedObservationError("selected_gated_unexpected_child_stdio")
+        return child
+
+    def verify_revoked(self) -> None:
+        if self._peer is None or self._peer in parent_sockets():
+            raise GatedObservationError("selected_context_parent_endpoint_open")
 
     def verify(self, executor: int, executor_identity: int, provider_key: str) -> None:
         assert self._pid is not None
