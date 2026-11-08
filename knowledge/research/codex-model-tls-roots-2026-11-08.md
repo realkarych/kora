@@ -13,7 +13,7 @@ The pinned [CA bundle selector](https://github.com/openai/codex/blob/6ff1e1ca3b3
 | `SSL_CERT_FILE` | Two exact synthetic-authenticated Responses requests | Exact hook receipt, tool exit zero and ordinary marker |
 | `SSL_CERT_DIR` | Two exact synthetic-authenticated Responses requests | Exact hook receipt, tool exit zero and ordinary marker |
 
-The default observer binds the failure to the stream protocol created by this listener with the exact SSL context. The failed TLS transport itself can already be detached by the time asyncio calls the observer. A fixed alert code triggers fixture stop. The fixture restores its temporary loop observer and checks the absence of requests, hook invocations and ordinary file effects after both direct children settle. This is transport refusal. Native terminal behavior after the refusal remains unverified. An earlier scratch run reached the turn deadline without a terminal.
+The default observer binds the failure to the stream protocol created by this listener with the exact SSL context. The failed TLS transport itself can already be detached by the time asyncio calls the observer. A fixed alert code triggers fixture stop. The fixture prevents incidental slow-callback output during observation, restores the temporary loop settings and checks the absence of requests, hook invocations and ordinary file effects after both direct children settle. This is transport refusal. Native terminal behavior after the refusal remains unverified. An earlier scratch run reached the turn deadline without a terminal.
 
 The positive cases use the existing managed Bash receipt and fixed tool result check. The ordinary marker records the selected Bash and executor home. The command requires non-login mode and absence of the app-server key. The fixture generates a fresh synthetic root and leaf inside the container with bundled OpenSSL and an IP-only SAN for `127.0.0.1`. It unlinks both private key files after use. System trust is untouched. No certificate or key files enter the source, image layers or logs.
 
@@ -21,7 +21,7 @@ Actual runtime assembly, complete declarations and fail-closed Policy remain wit
 
 ## Reproduction
 
-Executable revision `102463d7ca9806c18176bd79a59ff9b8e1ae48b0`, Codex provider tree `690c6bb624825c7b37026a11d6f49cb7eaf23a8c`, fixture tree `38a2a72a946b7bb86bc0ef365b2713832f3bec1c`. The build verifies [official Codex 0.166.0](https://github.com/openai/codex/releases/tag/rust-v0.166.0) at `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`, with Linux amd64 musl archive SHA-256 `a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978`. The Python 3.11.17 image manifest is `sha256:8fb0b110b022c70cbe09d3ff1fb313654f31f9c814abb0d48180af56d906a199`. Its OpenSSL CLI and library both reported 3.0.22.
+Executable revision `f07a94640e8fcf6a67adf9d5bef52eb25366f520`, Codex provider tree `690c6bb624825c7b37026a11d6f49cb7eaf23a8c`, fixture tree `49ebd2276881d48cd586572ae6336fa6d3f590a4`. The build verifies [official Codex 0.166.0](https://github.com/openai/codex/releases/tag/rust-v0.166.0) at `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`, with Linux amd64 musl archive SHA-256 `a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978`. The Python 3.11.17 image manifest is `sha256:8fb0b110b022c70cbe09d3ff1fb313654f31f9c814abb0d48180af56d906a199`. Its OpenSSL CLI and library both reported 3.0.22.
 
 Run from the checkout with GNU `timeout` and a local Docker socket with Buildx. The measured environment used Linux amd64 containers on Docker 29.9.2, Buildx 0.38.1 and LinuxKit 7.0.14 on macOS arm64. The build can fetch pinned inputs. Execution uses nonroot containers with `--network none`, no host mounts, synthetic credentials and loopback model traffic. The existing case, cleanup and attach deadlines are 30, 5 and 75 seconds. Each fixed certificate operation is separately bounded to five seconds.
 
@@ -33,10 +33,12 @@ sh tests/plugins/harness/codex/run_hook_probe.sh --check-selected-bash-trace
 
 | Mode | Cases | Direct children reaped | Exact container removals | Exit | Diagnostic wall time |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Selected TLS roots | 4 | 8 | 4 | 0 | 35.48 s |
-| Selected launch | 4 | 8 | 4 | 0 | 30.47 s |
-| Selected Bash trace | 4 | 8 | 4 | 0 | 30.81 s |
+| Selected TLS roots | 4 | 8 | 4 | 0 | 35.15 s |
+| Selected launch | 4 | 8 | 4 | 0 | 30.65 s |
+| Selected Bash trace | 4 | 8 | 4 | 0 | 30.99 s |
 
-Each mode closed its owned local model server and streams. Probe-container inventories were empty before the run and after each mode. The combined stdout/stderr log SHA-256 values in table order were `234c2817f0b889db7ad829ba34f3957a958ab37ea29a62946d6e73497a76fc95`, `443eed6857910d6994690604a6806cd2fc3e3b35075d85022de9d4f0613d9ee2` and `16b50f2c4fb2efb3a1878751db40c036acd0aeda6aec17fb4ba4620971fbb699`.
+Each mode closed its owned local model server and streams. Probe-container inventories were empty before the run and after each mode. The combined stdout/stderr log SHA-256 values in table order were `2e9a81be0d743b14414e19ec33ba7e71176bcfc56b4fbfdbf6f9ed0fee60fa2c`, `a1190f2c83ec6bfa21df38b5cc63651db4594f37129076a3e9b8875767d8d131` and `c2ac5e0448f3ee342290a49ba18896abb7aa949aaaee93a3e5f222429236794f`.
 
 The first local implementation run at `be244d2` reached the turn deadline because its exception handler tried to inspect a detached TLS transport. The listener-owned protocol revision `4da7e25` observed the expected alert and reaped both processes but used the positive marker assertion for the default case. The final executable revision requires marker absence for the default. Both failed runs removed the exact container and left an empty inventory.
+
+The initial passing run at `102463d` preceded an independent finding about asyncio debug mode's slow-callback warnings. The final source scopes and restores the slow-callback threshold so that warning path cannot print callback arguments during TLS observation. The table records fresh runs after that correction.
