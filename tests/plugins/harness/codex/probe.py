@@ -84,6 +84,7 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
+    SELECTED_HOOK_INVENTORY_REFUSALS,
     SELECTED_HOOK_TIMEOUT_CASES,
     SELECTED_LAUNCH_CASES,
     SELECTED_MODEL,
@@ -109,6 +110,7 @@ from tests.plugins.harness.codex.selected_launch import (
     prepare_native_inputs,
     role_homes,
     selected_command,
+    selected_managed_hook,
     workspace_remains_untrusted,
 )
 from tests.plugins.harness.codex.selected_tls import (
@@ -1712,6 +1714,8 @@ class Stdio:
             if case == "selected-startup-bash"
             else None
         )
+        if case in SELECTED_HOOK_INVENTORY_REFUSALS:
+            expected_failure = SelectedStartupFailure.HOOK_INVENTORY
         if case == "selected-startup-bearer":
             bearer = ("b" if bearer.startswith("a") else "a") + bearer[1:]
         expected = SelectedEnvironment(
@@ -1724,6 +1728,7 @@ class Stdio:
             ),
             workspace,
             SELECTED_MODEL,
+            selected_managed_hook(case),
         )
         try:
             thread_id = await prepare_selected_thread(
@@ -2870,6 +2875,7 @@ async def drive(
                         Path("/bin/bash"),
                         workspace,
                         SELECTED_MODEL,
+                        selected_managed_hook(fixture.case),
                     ),
                     bearer,
                     process,

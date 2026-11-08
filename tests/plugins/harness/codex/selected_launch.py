@@ -10,6 +10,7 @@ from kora.plugins.harness.codex.launch_configuration import (
     NativeProcessInputs,
     build_launch_inputs,
 )
+from kora.plugins.harness.codex.selected_startup import SelectedManagedHook
 
 SelectedPatchCase = Literal[
     "selected-patch-allow",
@@ -60,6 +61,9 @@ SelectedToolInventoryCase = Literal[
     "selected-tool-inventory-disabled",
     "selected-tool-search",
 ]
+SelectedHookInventoryRefusal = Literal[
+    "selected-startup-hook-missing", "selected-startup-hook-matcher"
+]
 SelectedLaunchCase = (
     SelectedToolInventoryCase
     | SelectedNoiseRegistryCase
@@ -68,6 +72,7 @@ SelectedLaunchCase = (
     | SelectedBashStartupCase
     | SelectedBashTraceCase
     | SelectedTlsCase
+    | SelectedHookInventoryRefusal
     | Literal[
         "selected-command-metadata",
         "selected-allow",
@@ -148,6 +153,9 @@ SELECTED_TLS_OVERRIDES = {
     "selected-tls-cert-dir": "SSL_CERT_DIR",
 }
 SELECTED_TLS_CASES = frozenset({"selected-tls-default", *SELECTED_TLS_OVERRIDES})
+SELECTED_HOOK_INVENTORY_REFUSALS: frozenset[SelectedHookInventoryRefusal] = frozenset(
+    {"selected-startup-hook-missing", "selected-startup-hook-matcher"}
+)
 SELECTED_LAUNCH_CASES = frozenset(
     {
         *SELECTED_NOISE_REGISTRY_CASES,
@@ -158,6 +166,7 @@ SELECTED_LAUNCH_CASES = frozenset(
         *SELECTED_BASH_STARTUP_CASES,
         *SELECTED_BASH_TRACE_CASES,
         *SELECTED_TLS_CASES,
+        *SELECTED_HOOK_INVENTORY_REFUSALS,
         "selected-command-metadata",
         "selected-allow",
         "selected-deny",
@@ -185,6 +194,7 @@ SELECTED_AUTH_CASES = frozenset(
 SELECTED_REFUSALS = frozenset(
     {
         *SELECTED_NOISE_REGISTRY_CASES,
+        *SELECTED_HOOK_INVENTORY_REFUSALS,
         "selected-tls-default",
         "selected-key-absent",
         "selected-startup-bearer",
@@ -235,6 +245,23 @@ def selected_command(case: str) -> str:
     if case == "selected-command-exit-seven":
         return SELECTED_COMMAND + " && exit 7"
     return METADATA_COMMAND if case == "selected-command-metadata" else SELECTED_COMMAND
+
+
+def selected_managed_hook(case: str) -> SelectedManagedHook:
+    short = case in (
+        SELECTED_PATCH_CASES | SELECTED_SHELL_PATCH_CASES | SELECTED_HOOK_TIMEOUT_CASES
+    )
+    fingerprint = (
+        "sha256:5f52a9101194f0b251dfc933d2b60b224d35886081a5bcd35d23d27a2c979b9c"
+        if short
+        else "sha256:ccdc59d5bf14a68a82a519397df8fd7f46c6b7daefe5a12198365b6d4aa434f6"
+    )
+    return SelectedManagedHook(
+        Path("/opt/kora-probe"),
+        "/usr/local/bin/python3 -I /opt/kora-probe/managed_hook.py",
+        5 if short else 60,
+        fingerprint,
+    )
 
 
 def role_homes(root: Path) -> NativeHomes:

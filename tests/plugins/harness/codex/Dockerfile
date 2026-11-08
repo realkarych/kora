@@ -56,3 +56,15 @@ FROM selected-hook-failures AS selected-shell-patch-policy
 COPY linux-packages /usr/local/lib/python3.11/site-packages/
 COPY kora /usr/local/lib/python3.11/site-packages/kora/
 COPY selected_shell_patch.py /usr/local/lib/python3.11/site-packages/tests/plugins/harness/codex/
+
+FROM shell-controls AS missing-managed-hook
+USER root
+RUN sed -i '/^\[hooks\]/,/^timeout = 60$/d' /etc/codex/requirements.toml && \
+    ! grep -q '^\[hooks\]' /etc/codex/requirements.toml
+USER 65532:65532
+
+FROM shell-controls AS wrong-managed-matcher
+USER root
+RUN sed -i 's/^matcher = "\.\*"/matcher = "^Unrelated$"/' /etc/codex/requirements.toml && \
+    grep -Fxq 'matcher = "^Unrelated$"' /etc/codex/requirements.toml
+USER 65532:65532
