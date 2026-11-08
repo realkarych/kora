@@ -1,8 +1,12 @@
+import gc
 import sys
+from dataclasses import replace
 from traceback import format_exception, walk_tb
+from typing import cast
 
 import pytest
 
+from kora.engine import parameter_schema_support
 from kora.engine.parameter_schema_references import ParameterReferenceBudget
 from kora.engine.parameter_schema_support import (
     ParameterSchemaSupport,
@@ -329,26 +333,53 @@ def test_parameter_schema_support_charges_both_references_to_one_target() -> Non
 
 
 @pytest.mark.parametrize(
-    ("schema", "reason"),
+    ("schema", "scratch_bytes", "reason"),
     [
-        ({"allOf": [True, {"pattern": PRIVATE}]}, ParameterSupportFailure.EXCLUDED),
+        (
+            {"allOf": [True, {"pattern": PRIVATE}]},
+            None,
+            ParameterSupportFailure.EXCLUDED,
+        ),
         (
             {"allOf": [True, {"$ref": "#/$defs/" + PRIVATE}]},
+            None,
             ParameterSupportFailure.INVALID,
         ),
+        (
+            {"$defs": {PRIVATE: True}, "allOf": [True, {"$ref": "#/$defs/" + PRIVATE}]},
+            0,
+            ParameterSupportFailure.CAPACITY,
+        ),
     ],
-    ids=["excluded", "invalid-reference"],
+    ids=["excluded", "invalid-reference", "resolver-capacity"],
 )
 def test_parameter_schema_support_refusal_retains_no_private_traversal(
-    schema: JsonObject, reason: ParameterSupportFailure
+    schema: JsonObject, scratch_bytes: int | None, reason: ParameterSupportFailure
 ) -> None:
     sources = sources_for(schema)
+    budget = (
+        ample()
+        if scratch_bytes is None
+        else replace(ample(), scratch_bytes=scratch_bytes)
+    )
+    owner_type = cast("type[object]", vars(parameter_schema_support)["_Traversal"])
+    collecting = gc.isenabled()
 
+    gc.disable()
     try:
-        raise RuntimeError(PRIVATE)
-    except RuntimeError:
-        with pytest.raises(ParameterSupportRejected) as refusal:
-            check(sources)
+        try:
+            raise RuntimeError(PRIVATE)
+        except RuntimeError:
+            with pytest.raises(ParameterSupportRejected) as refusal:
+                check(sources, budget)
+        retained = any(
+            type(candidate) is owner_type
+            and object.__getattribute__(candidate, "arena") is sources.arena
+            for candidate in gc.get_objects()
+        )
+    finally:
+        if collecting:
+            gc.enable()
     frames = {
         frame.f_code.co_name: frame.f_locals
         for frame, _ in walk_tb(refusal.value.__traceback__)
@@ -361,6 +392,7 @@ def test_parameter_schema_support_refusal_retains_no_private_traversal(
         frames
     )
     assert PRIVATE not in "".join(format_exception(refusal.value))
+    assert not retained
 
 
 @pytest.mark.parametrize("frames", [True, -1, sys.maxsize + 1])

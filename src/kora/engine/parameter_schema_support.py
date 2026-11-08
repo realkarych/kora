@@ -275,6 +275,7 @@ def check_parameter_schema_support(
             if rejected.reason is ParameterReferenceFailure.CAPACITY
             else ParameterSupportFailure.INVALID
         )
+        rejected.__traceback__ = None
     except MemoryError:
         reason = ParameterSupportFailure.CAPACITY
     del arena, type_roots, budget, max_active_frames, max_call_depth
