@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from pydantic import MISSING
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -21,6 +22,7 @@ from kora.engine.start_capacity import (
     check_manual_start_capacity,
 )
 from kora.ir.json import JsonValue
+from kora.ir.runtime import Retention
 from kora.protocols.authentication import NamespaceGrant, Principal
 from tests.db.seed import Seeder
 
@@ -54,6 +56,8 @@ class CapacityScenario:
         connection: AsyncConnection,
         locks: TransitionLocks,
         overlap: Overlap = "allow",
+        *,
+        graph_retention: Retention | MISSING | None = None,
     ) -> StartCapacity:
         return await check_manual_start_capacity(
             connection,
@@ -63,11 +67,22 @@ class CapacityScenario:
             self.graph_id,
             self.run_id,
             overlap,
+            graph_retention=graph_retention,
         )
 
-    async def read(self, overlap: Overlap = "allow") -> StartCapacity:
+    async def read(
+        self,
+        overlap: Overlap = "allow",
+        *,
+        graph_retention: Retention | MISSING | None = None,
+    ) -> StartCapacity:
         async with self.database.transaction() as connection:
-            return await self.check(connection, await self.acquire(connection), overlap)
+            return await self.check(
+                connection,
+                await self.acquire(connection),
+                overlap,
+                graph_retention=graph_retention,
+            )
 
     async def policy(self, value: JsonValue) -> None:
         async with self.database.transaction() as connection:

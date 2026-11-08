@@ -1,6 +1,7 @@
 from dataclasses import replace
 
 import pytest
+from pydantic import MISSING
 
 from kora.db.connection import Database
 from kora.engine.start_capacity import CapacityOutcome, InvalidCapacityPolicy, Overlap
@@ -21,7 +22,10 @@ from tests.observability.conftest import (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("level", [Level.DEBUG, Level.INFO])
-@pytest.mark.parametrize("outcome", ["room", "full", "skipped", "refused", "invalid"])
+@pytest.mark.parametrize(
+    "outcome",
+    ["room", "full", "skipped", "refused", "retention_unavailable", "invalid"],
+)
 async def test_start_capacity_diagnostics_are_content_free(
     database: Database,
     configure: Configure,
@@ -46,6 +50,8 @@ async def test_start_capacity_diagnostics_are_content_free(
                 scenario.principal.model_dump() | {"namespaces": ()}
             ),
         )
+    elif outcome == "retention_unavailable":
+        await scenario.policy({"retention": {"transcripts": PRIVATE}})
     elif outcome == "invalid":
         await scenario.policy({"concurrency": {"max_pending_runs": PRIVATE}})
     before = await scenario.snapshot()
@@ -55,7 +61,9 @@ async def test_start_capacity_diagnostics_are_content_free(
         with pytest.raises(InvalidCapacityPolicy):
             await scenario.read(overlap)
     else:
-        assert (await scenario.read(overlap)).outcome.value == outcome
+        graph_retention = MISSING if outcome == "retention_unavailable" else None
+        result = await scenario.read(overlap, graph_retention=graph_retention)
+        assert result.outcome.value == outcome
     output = finished_output(diagnostics, pipe)
 
     records = [
