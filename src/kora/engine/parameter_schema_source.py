@@ -16,8 +16,9 @@ from kora.engine.parameter_schema_scalars import (
     ParameterScalarRejected,
     prepare_parameter_schema_scalar,
 )
+from kora.engine.parameter_schema_selection import select_parameter_schema_documents
 from kora.ir.structured_schema_input import SchemaNode
-from kora.ir.structured_schema_work import merge_sort
+from kora.ir.structured_schema_work import PreparationRefused, merge_sort
 
 _FRAME_ENTRIES: int = 8
 _ROW_ENTRIES: int = 8
@@ -240,11 +241,19 @@ def _build(
     budget: ParameterReferenceBudget,
     max_container_depth: int,
     max_integer_bits: int,
+    selection_budget: ParameterReferenceBudget | None,
 ) -> ParameterSchemaArena:
     if (
         type(parameters) is not dict
         or type(type_records) is not list
         or not valid_parameter_reference_budget(budget)
+        or (
+            selection_budget is not None
+            and (
+                selection_budget is budget
+                or not valid_parameter_reference_budget(selection_budget)
+            )
+        )
         or any(
             type(limit) is not int or not 0 <= limit <= sys.maxsize
             for limit in (max_container_depth, max_integer_bits)
@@ -253,8 +262,15 @@ def _build(
         raise ParameterSchemaSourceRejected(ParameterSchemaSourceFailure.INVALID)
     builder = _Builder(budget, max_container_depth, max_integer_bits)
     root = builder.document(cast("dict[object, object]", parameters))
-    type_roots = builder.named_table(cast("list[object]", type_records))
-    return builder.finish(root, type_roots)
+    records = cast("list[object]", type_records)
+    if selection_budget is None:
+        return builder.finish(root, builder.named_table(records))
+    selected = select_parameter_schema_documents(
+        builder.nodes, root, records, selection_budget
+    )
+    arena = builder.finish(root, builder.named_table(selected.records))
+    selected.verify(arena, selection_budget)
+    return arena
 
 
 def build_parameter_schema_arena(
@@ -264,10 +280,16 @@ def build_parameter_schema_arena(
     budget: ParameterReferenceBudget,
     max_container_depth: int,
     max_integer_bits: int,
+    selection_budget: ParameterReferenceBudget | None = None,
 ) -> ParameterSchemaArena:
     try:
         return _build(
-            parameters, type_records, budget, max_container_depth, max_integer_bits
+            parameters,
+            type_records,
+            budget,
+            max_container_depth,
+            max_integer_bits,
+            selection_budget,
         )
     except ParameterSchemaSourceRejected as rejected:
         reason = rejected.reason
@@ -284,7 +306,17 @@ def build_parameter_schema_arena(
             if rejected.reason is ParameterReferenceFailure.CAPACITY
             else ParameterSchemaSourceFailure.INVALID
         )
+        rejected.__traceback__ = None
+    except PreparationRefused:
+        reason = ParameterSchemaSourceFailure.INVALID
     except MemoryError:
         reason = ParameterSchemaSourceFailure.CAPACITY
-    del parameters, type_records, budget, max_container_depth, max_integer_bits
+    del (
+        parameters,
+        type_records,
+        budget,
+        max_container_depth,
+        max_integer_bits,
+        selection_budget,
+    )
     raise_safe(ParameterSchemaSourceRejected(reason))

@@ -12,6 +12,7 @@ from kora.ir.structured_schema_work import PreparationRefused
 class ParameterReferenceKeyword(StrEnum):
     REF = "$ref"
     DYNAMIC_REF = "$dynamicRef"
+    RECURSIVE_REF = "$recursiveRef"
 
 
 class ParameterReferenceFailure(StrEnum):
@@ -183,6 +184,14 @@ def valid_parameter_reference_budget(budget: ParameterReferenceBudget) -> bool:
     return all(type(limit) is int and 0 <= limit <= sys.maxsize for limit in limits)
 
 
+def decode_parameter_reference(
+    reference: str, budget: ParameterReferenceBudget
+) -> tuple[str | None, list[str], int]:
+    length = len(reference) + 1
+    budget.reserve(length, 20 * length, 8 * length)
+    return decode_reference(reference, budget)
+
+
 def _resolve(
     arena: ParameterSchemaArena,
     origin: ParameterSchemaPosition,
@@ -205,9 +214,7 @@ def _resolve(
     if member is None:
         raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
     reference = _name(nodes, member, budget)
-    length = len(reference) + 1
-    budget.reserve(length, 20 * length, 8 * length)
-    name, pool, used = decode_reference(reference, budget)
+    name, pool, used = decode_parameter_reference(reference, budget)
     if name is not None:
         named = schema_node(nodes, arena.type_roots, budget)
         selected = schema_member(nodes, named, name, budget)

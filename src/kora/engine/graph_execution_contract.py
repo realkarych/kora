@@ -66,6 +66,9 @@ class ParameterSchemaReadLimits:
     entries: int
     max_container_depth: int
     max_integer_bits: int
+    selection_work: int
+    selection_payload_bytes: int
+    selection_entries: int
 
 
 class CheckedExecutionContract:
@@ -237,6 +240,11 @@ def _prepare_parameter_schema(
         ),
         max_container_depth=limits.max_container_depth,
         max_integer_bits=limits.max_integer_bits,
+        selection_budget=ParameterReferenceBudget(
+            limits.selection_work,
+            limits.selection_payload_bytes,
+            limits.selection_entries,
+        ),
     )
 
 
@@ -284,6 +292,7 @@ def _checked_result(
             parameter_schema,
         )
     except GraphValueRejected as rejected:
+        rejected.__traceback__ = None
         return rejected.reason
     except ParameterSchemaSourceRejected as rejected:
         rejected.__traceback__ = None

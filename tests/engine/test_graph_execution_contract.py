@@ -56,6 +56,7 @@ from tests.engine.test_graph_resource_references import (
     physical_file,
 )
 from tests.engine.test_graph_types import custom
+from tests.engine.test_parameter_schema_selection import named_roots
 
 LIMITS = ExecutionContractReadLimits(
     VERSION_LIMITS,
@@ -66,8 +67,11 @@ LIMITS = ExecutionContractReadLimits(
     1_000_000_000_000_000,
 )
 MARKER = "protected-complete-contract-marker"
-SCHEMA_LIMITS = ParameterSchemaReadLimits(100_000, 100_000, 100_000, 32, 4096)
+SCHEMA_LIMITS = ParameterSchemaReadLimits(
+    100_000, 100_000, 100_000, 32, 4096, 100_000, 100_000, 100_000
+)
 NO_SCHEMA_WORK = replace(SCHEMA_LIMITS, work=0)
+NO_SELECTION_WORK = replace(SCHEMA_LIMITS, selection_work=0)
 
 
 def complete_inputs(
@@ -100,6 +104,9 @@ def complete_inputs(
         }
         child(raw, "type_contracts")["example/Parameter"] = custom(
             {"$defs": {"alias": {"$ref": "#/$defs/leaf"}, "leaf": True}}
+        )
+        child(raw, "type_contracts")["example/Unselected"] = custom(
+            {"$ref": "#/$defs/actual", "$defs": {"actual": True, "second": True}}
         )
     raw["x-protected"] = MARKER
     if long_integer:
@@ -472,8 +479,8 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
         namespace = await seeder.namespace()
         graph = await seeder.graph(namespace)
         foreign = await seeder.namespace("other")
-        scope, bad_scope, empty_scope = (
-            GraphResourceScope(namespace, graph, seeder.new_id()) for _ in range(3)
+        scope, bad_scope, empty_scope, tampered_scope = (
+            GraphResourceScope(namespace, graph, seeder.new_id()) for _ in range(4)
         )
     raw, envelope, refs, owners = complete_inputs(scope, parameter_reference=True)
     good, pin = prepared_case(raw, envelope, scope)
@@ -488,11 +495,25 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
         empty_scope, resources=False
     )
     empty, empty_pin = prepared_case(empty_raw, empty_envelope, empty_scope)
+    tampered_raw, tampered_envelope, tampered_refs, tampered_owners = complete_inputs(
+        tampered_scope, resources=False, parameter_reference=True
+    )
+    unselected = next(
+        row
+        for row in cast("list[JsonObject]", tampered_envelope["type_contracts"])
+        if row["name"] == "example/Unselected"
+    )
+    binding = cast("list[JsonObject]", unselected["references"])[0]
+    binding["target_path"] = ["$defs", "second"]
+    tampered, tampered_pin = prepared_case(
+        tampered_raw, tampered_envelope, tampered_scope
+    )
     async with database.transaction() as connection:
         seeder = Seeder(connection)
         await insert_case(seeder, scope, 1, good, refs)
         await insert_case(seeder, bad_scope, 2, wrong, refs)
         await insert_case(seeder, empty_scope, 3, empty, empty_refs)
+        await insert_case(seeder, tampered_scope, 4, tampered, tampered_refs)
     before_read = ledger.checkouts
 
     async with database.read_transaction() as connection:
@@ -504,19 +525,21 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
                 selected.version_id,
                 max_encoded_bytes=LIMITS.identity.max_encoded_bytes,
             )
-            for selected in (scope, bad_scope, empty_scope)
+            for selected in (scope, bad_scope, empty_scope, tampered_scope)
         ]
-        native, bad_native, empty_native = [
+        native, bad_native, empty_native, tampered_native = [
             await graph_version_by_number(connection, namespace, graph, number)
-            for number in (1, 2, 3)
+            for number in (1, 2, 3, 4)
         ]
-    acquired, bad_acquired, empty_acquired = pairs
+    acquired, bad_acquired, empty_acquired, tampered_acquired = pairs
     assert acquired is not None
     assert bad_acquired is not None
     assert empty_acquired is not None
     assert native is not None
     assert bad_native is not None
     assert empty_native is not None
+    assert tampered_acquired is not None
+    assert tampered_native is not None
     assert ledger.checkouts > before_read
     assert ledger.outstanding == database.units_in_flight() == 0
     after_read = ledger.checkouts
@@ -568,6 +591,26 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
             limits=LIMITS,
             parameter_schema_limits=NO_SCHEMA_WORK,
         )
+    with pytest.raises(GraphValueRejected) as exhausted_selection:
+        check_detached_execution_contract(
+            acquired,
+            pin,
+            scope,
+            native.resources,
+            owners,
+            limits=LIMITS,
+            parameter_schema_limits=NO_SELECTION_WORK,
+        )
+    with pytest.raises(GraphValueRejected) as invalid_unselected:
+        check_detached_execution_contract(
+            tampered_acquired,
+            tampered_pin,
+            tampered_scope,
+            tampered_native.resources,
+            tampered_owners,
+            limits=LIMITS,
+            parameter_schema_limits=NO_SELECTION_WORK,
+        )
     await database.close()
 
     assert acquired.namespace_id == scope.namespace_id
@@ -577,10 +620,13 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
     assert checked_empty.parameter_schema is None
     assert checked.canonical_contract == good.values.execution_contract
     assert ObjectReader(checked.resources.text).object() == refs
+    assert named_roots(arena) == ["example/Parameter"]
     assert leaf.document_root == alias.document_root != arena.root
     assert arena.nodes[leaf.node].value is True
     assert_refused(invalid_output.value, GraphValueFailure.INVALID)
     assert_refused(invalid_namespace.value, GraphValueFailure.INVALID)
+    assert_refused(exhausted_selection.value, GraphValueFailure.BUDGET)
+    assert_refused(invalid_unselected.value, GraphValueFailure.INVALID)
     assert ledger.checkouts == after_read
     assert ledger.opened == ledger.closed
     assert ledger.outstanding == ledger.closed_while_checked_out == 0

@@ -60,7 +60,12 @@ class Sources:
 
 
 def sources_for(
-    schema: JsonObject, contracts: JsonObject | None = None, *, nested: bool = False
+    schema: JsonObject,
+    contracts: JsonObject | None = None,
+    *,
+    nested: bool = False,
+    selection_budget: ParameterReferenceBudget | None = None,
+    materialization_budget: ParameterReferenceBudget | None = None,
 ) -> Sources:
     raw = document()
     cast("JsonObject", raw["graph"])["params"] = schema
@@ -80,7 +85,8 @@ def sources_for(
     arena = build_parameter_schema_arena(
         parameter_value["schema"],
         records,
-        budget=ample(),
+        budget=ample() if materialization_budget is None else materialization_budget,
+        selection_budget=selection_budget,
         max_container_depth=64,
         max_integer_bits=20_000,
     )
