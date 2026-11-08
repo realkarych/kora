@@ -139,7 +139,7 @@ def main() -> int:
     )
     receipt_identity = (
         {"session_id": call.session_id, "turn_id": call.turn_id}
-        if decision in SELECTED_HOOK_CASES
+        if decision in SELECTED_HOOK_CASES or (CONTROL / "executor-guard").is_file()
         else {}
     )
     with (CONTROL / "receipts.jsonl").open("a", encoding="utf-8") as receipts:

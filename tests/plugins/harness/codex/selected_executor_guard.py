@@ -9,10 +9,13 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Literal, cast
 
-from kora.plugins.harness.codex.app_server_rpc import AppServerRpc
-from kora.plugins.harness.codex.app_server_turn import observe_app_server_turn
+from kora.plugins.harness.codex.app_server_rpc import AppServerRpc, RpcError
+from kora.plugins.harness.codex.app_server_turn import (
+    TurnError,
+    observe_app_server_turn,
+)
 from kora.plugins.harness.codex.selected_startup import (
     SelectedEnvironment,
     prepare_selected_thread,
@@ -24,12 +27,16 @@ from tests.plugins.harness.codex.guarded_executor import (
     GuardAction,
     GuardFailure,
     GuardKind,
+    HookOutcome,
+    verify_malformed_header_refused,
+    verify_non_upgrade_refused,
     verify_upgrade_refused,
 )
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
     SELECTED_HOOK_CASES,
     SELECTED_MODEL,
+    SelectedHookCase,
     SelectedLaunchCase,
     materialize_native_inputs,
     prepare_native_inputs,
@@ -52,10 +59,10 @@ class Scenario:
         return probe.PATCH if self.kind == "patch" else selected_command(self.case)
 
     @property
-    def hook_status(self) -> str:
-        if self.mode == "allow":
-            return "completed"
-        return "blocked" if self.mode == "deny" else "failed"
+    def hook_outcome(self) -> HookOutcome:
+        if self.case in SELECTED_HOOK_CASES:
+            return probe.SELECTED_HOOK_OUTCOMES[cast("SelectedHookCase", self.case)]
+        return "completed", None
 
     @property
     def counts(self) -> tuple[int, int, int]:
@@ -90,6 +97,7 @@ class GuardResponses(probe.ResponsesFixture):
         self._scenario = scenario
 
     def respond(self, request: dict[str, object]) -> bytes:
+        probe.require(request.get("model") == SELECTED_MODEL, "guard_model_mismatch")
         if self.requests != 1 or self._scenario.mode in {"allow", "deny"}:
             return super().respond(request)
         self.requests += 1
@@ -142,9 +150,7 @@ def stdio(
 def hook_pid(scenario: Scenario) -> int:
     if scenario.kind == "patch":
         return probe.verify_patch_hook(selected_binding=True)
-    return probe.verify_shell_hook(
-        scenario.command, selected_binding=scenario.case in SELECTED_HOOK_CASES
-    )
+    return probe.verify_shell_hook(scenario.command, selected_binding=True)
 
 
 async def witness_timeout(
@@ -271,10 +277,13 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
                     deadline,
                     probe.MAX_FRAME_BYTES,
                     probe.MAX_MESSAGES,
+                    scenario.hook_outcome,
                 )
                 endpoint = await guard.start()
                 await verify_upgrade_refused(endpoint, None, 401)
                 await verify_upgrade_refused(endpoint, "wrong", 401)
+                await verify_non_upgrade_refused(endpoint, token)
+                await verify_malformed_header_refused(endpoint)
                 environment = materialize_native_inputs(recipe.app_server)
                 environment["CODEX_API_KEY"] = probe.SYNTHETIC_BEARER
                 app = await spawn(recipe.app_server.argv, workspace, environment)
@@ -322,6 +331,12 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
                     observe=guard.observe,
                     on_started=guard.started,
                 )
+                guard.fence()
+                if timeout_watcher is not None:
+                    await timeout_watcher
+                await guard.close_connection()
+                await verify_upgrade_refused(endpoint, token, 409)
+                await guard.close()
                 probe.require(
                     terminal.status == "completed", "guard_turn_not_completed"
                 )
@@ -332,7 +347,7 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
                 )
                 probe.require(
                     guard.failure is None
-                    and guard.hook_status == scenario.hook_status
+                    and guard.hook_matches(terminal.turn_id)
                     and (guard.attempted, guard.forwarded, guard.withheld)
                     == scenario.counts,
                     "guard_effect_outcome_mismatch",
@@ -343,11 +358,13 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
                     "guard_permit_outcome_mismatch",
                 )
                 hook_pid(scenario)
+                receipt = probe.read_hook_receipt()
+                probe.require(
+                    receipt.get("session_id") == thread
+                    and receipt.get("turn_id") == terminal.turn_id,
+                    "guard_hook_receipt_identity_mismatch",
+                )
                 verify_marker(scenario, root, workspace)
-                if timeout_watcher is not None:
-                    await timeout_watcher
-                await guard.close_connection()
-                await verify_upgrade_refused(endpoint, token, 409)
                 probe.diagnostic(
                     "INFO", "probe.selected_executor_guard_verified", scenario.case
                 )
@@ -369,8 +386,20 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
 def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] not in SCENARIOS:
         return 2
-    with TemporaryDirectory(prefix="kora-codex-guard-", dir="/tmp") as scratch:
-        asyncio.run(run_guard(Path(scratch), SCENARIOS[sys.argv[1]]))
+    try:
+        with TemporaryDirectory(prefix="kora-codex-guard-", dir="/tmp") as scratch:
+            asyncio.run(run_guard(Path(scratch), SCENARIOS[sys.argv[1]]))
+    except probe.ProbeFailure as error:
+        probe.diagnostic("ERROR", "probe.selected_executor_guard_failed", str(error))
+        return 1
+    except GuardFailure as error:
+        probe.diagnostic("ERROR", "probe.selected_executor_guard_failed", str(error))
+        return 1
+    except (RpcError, TurnError, OSError, TimeoutError, ValueError) as error:
+        probe.diagnostic(
+            "ERROR", "probe.selected_executor_guard_failed", type(error).__name__
+        )
+        return 1
     return 0
 
 

@@ -525,7 +525,15 @@ case "${1:-}" in
             release_container
         done
         for probe_case in bash-allow bash-deny bash-error bash-timeout patch-allow patch-deny patch-error patch-timeout patch-staged-timeout; do
-            run_variant selected-executor-guard "$probe_case"
+            guard_status=0
+            run_variant selected-executor-guard "$probe_case" >"$reservation/guard.log" 2>&1 || guard_status=$?
+            if grep -Fq 'kora-executor-guard-malformed-header-canary' "$reservation/guard.log"; then
+                printf '%s\n' '{"level":"ERROR","event":"probe.executor_guard_http_payload_logged"}' >&2
+                exit 1
+            fi
+            cat "$reservation/guard.log"
+            [ "$guard_status" -eq 0 ] || exit "$guard_status"
+            grep -Fq '"event":"probe.executor_guard_http_error"' "$reservation/guard.log"
             release_container
         done
         ;;

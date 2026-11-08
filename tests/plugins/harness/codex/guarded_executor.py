@@ -1,10 +1,13 @@
 import asyncio
 import base64
 import json
+import logging
 import secrets
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
+from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, WSMsgType, WSServerHandshakeError, web
 
@@ -17,19 +20,15 @@ from kora.plugins.harness.codex.launch_configuration import CODEX_VERSION
 
 GuardKind = Literal["bash", "patch"]
 REFUSAL = "kora fixture withheld the executor effect"
-SETUP = frozenset(
-    {
-        "initialize",
-        "initialized",
-        "environment/info",
-        "environment/status",
-        "environmentConfig/read",
-        "fs/readFile",
-        "fs/getMetadata",
-        "fs/watchMissing",
-    }
-)
-FOLLOW_UP = frozenset({"process/read", "process/terminate", "process/signal"})
+MALFORMED_HEADER_CANARY = "kora-executor-guard-malformed-header-canary"
+HookOutcome = tuple[str, tuple[str, str] | None]
+
+
+class FrameworkDiagnostics(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        sys.stderr.write(
+            '{"level":"WARNING","event":"probe.executor_guard_http_error"}\n'
+        )
 
 
 class GuardFailure(Exception):
@@ -56,6 +55,10 @@ def encoded_message(frame: dict[str, object]) -> bytes:
     return json.dumps(frame, separators=(",", ":")).encode() + b"\n"
 
 
+def exact_fields(actual: object, expected: object) -> bool:
+    return json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
+
+
 class ExecutorGuard:
     def __init__(
         self,
@@ -67,6 +70,7 @@ class ExecutorGuard:
         deadline: float,
         max_frame_bytes: int,
         max_messages: int,
+        hook_outcome: HookOutcome,
     ) -> None:
         self._backend_reader = backend_reader
         self._backend_writer = backend_writer
@@ -76,6 +80,18 @@ class ExecutorGuard:
         self._deadline = deadline
         self._max_frame_bytes = max_frame_bytes
         self._max_messages = max_messages
+        self._hook_status, entry = hook_outcome
+        self._hook_entries = (
+            [] if entry is None else [{"kind": entry[0], "text": entry[1]}]
+        )
+        self._watched_paths = frozenset(
+            (parent / ".git").as_uri()
+            for parent in (action.workspace, *action.workspace.parents)
+        ) | {(action.workspace / ".agents" / "skills").as_uri()}
+        self._marker_uri = (action.workspace / action.marker).as_uri()
+        self._initialized = False
+        self._init_requested = False
+        self._settled = False
         self._thread: str | None = None
         self._turn: str | None = None
         self._hook: tuple[str, str, object] | None = None
@@ -92,7 +108,11 @@ class ExecutorGuard:
         self.withheld = 0
         app = web.Application()
         app.router.add_get("/", self._handle)
-        self._runner = web.AppRunner(app, access_log=None, shutdown_timeout=1)
+        logger = logging.Logger("executor_fixture", logging.WARNING)
+        logger.addHandler(FrameworkDiagnostics())
+        self._runner = web.AppRunner(
+            app, access_log=None, logger=logger, shutdown_timeout=1
+        )
 
     async def start(self) -> str:
         await self._runner.setup()
@@ -136,16 +156,21 @@ class ExecutorGuard:
             self._hook is not None
             or fields.get("threadId") != self._thread
             or not isinstance(turn, str)
-            or not isinstance(status, str)
-            or any(run.get(key) != value for key, value in identity.items())
+            or not 0 < len(turn) <= 256
+            or status != self._hook_status
+            or not exact_fields(run.get("entries"), self._hook_entries)
+            or not exact_fields({key: run.get(key) for key in identity}, identity)
         ):
             raise GuardFailure("executor fixture hook identity mismatch")
-        self._hook = (turn, status, run.get("entries"))
+        self._hook = (turn, self._hook_status, run.get("entries"))
         self._changed.set()
 
-    @property
-    def hook_status(self) -> str | None:
-        return self._hook[1] if self._hook is not None else None
+    def hook_matches(self, turn: str) -> bool:
+        return self._turn == turn and self._hook == (
+            turn,
+            self._hook_status,
+            self._hook_entries,
+        )
 
     def permit_matches(self) -> bool:
         try:
@@ -186,112 +211,179 @@ class ExecutorGuard:
         if not isinstance(process_id, str) or not 0 < len(process_id) <= 64:
             return False
         self._process_id = process_id
-        return values == {
-            "arg0": None,
-            "argv": ["/bin/bash", "-c", self._action.command],
-            "cwd": self._action.workspace.as_uri(),
-            "enforceManagedNetwork": False,
-            "env": {
-                "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS": "1",
-                "CODEX_CI": "1",
-                "CODEX_SESSION_ID": self._thread,
-                "CODEX_THREAD_ID": self._thread,
-                "CODEX_TOOL_CALL_ID": self._action.call_id,
-                "CODEX_VERSION": CODEX_VERSION,
-                "COLORTERM": "",
-                "GH_PAGER": "cat",
-                "GIT_PAGER": "cat",
-                "LC_ALL": "C.UTF-8",
-                "LC_CTYPE": "C.UTF-8",
-                "NO_COLOR": "1",
-                "PAGER": "cat",
-                "TERM": "dumb",
+        return exact_fields(
+            values,
+            {
+                "arg0": None,
+                "argv": ["/bin/bash", "-c", self._action.command],
+                "cwd": self._action.workspace.as_uri(),
+                "enforceManagedNetwork": False,
+                "env": {
+                    "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS": "1",
+                    "CODEX_CI": "1",
+                    "CODEX_SESSION_ID": self._thread,
+                    "CODEX_THREAD_ID": self._thread,
+                    "CODEX_TOOL_CALL_ID": self._action.call_id,
+                    "CODEX_VERSION": CODEX_VERSION,
+                    "COLORTERM": "",
+                    "GH_PAGER": "cat",
+                    "GIT_PAGER": "cat",
+                    "LC_ALL": "C.UTF-8",
+                    "LC_CTYPE": "C.UTF-8",
+                    "NO_COLOR": "1",
+                    "PAGER": "cat",
+                    "TERM": "dumb",
+                },
+                "envPolicy": {
+                    "inherit": "all",
+                    "ignoreDefaultExcludes": True,
+                    "exclude": [
+                        "CODEX_API_KEY",
+                        "CODEX_EXEC_SERVER_URL",
+                        "CODEX_PERMISSION_PROFILE",
+                        "CODEX_VERSION",
+                        "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+                        "CODEX_PLUGIN_METRICS_OUTPUT",
+                    ],
+                    "set": {},
+                    "includeOnly": [],
+                },
+                "managedNetwork": None,
+                "metadata": {
+                    "threadId": self._thread,
+                    "toolCallId": self._action.call_id,
+                },
+                "pipeStdin": False,
+                "processId": process_id,
+                "sandbox": None,
+                "tty": False,
             },
-            "envPolicy": {
-                "inherit": "all",
-                "ignoreDefaultExcludes": True,
-                "exclude": [
-                    "CODEX_API_KEY",
-                    "CODEX_EXEC_SERVER_URL",
-                    "CODEX_PERMISSION_PROFILE",
-                    "CODEX_VERSION",
-                    "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
-                    "CODEX_PLUGIN_METRICS_OUTPUT",
-                ],
-                "set": {},
-                "includeOnly": [],
-            },
-            "managedNetwork": None,
-            "metadata": {"threadId": self._thread, "toolCallId": self._action.call_id},
-            "pipeStdin": False,
-            "processId": process_id,
-            "sandbox": None,
-            "tty": False,
-        }
+        )
 
     def _matches_effect(self, method: str, values: dict[str, object]) -> bool:
         if self._action.kind == "bash":
             return method == "process/start" and self._matches_process(values)
-        return method == "fs/writeFile" and values == {
-            "path": (self._action.workspace / self._action.marker).as_uri(),
-            "dataBase64": base64.b64encode(self._action.patch_bytes).decode(),
-            "sandbox": None,
-        }
+        return method == "fs/writeFile" and exact_fields(
+            values,
+            {
+                "path": self._marker_uri,
+                "dataBase64": base64.b64encode(self._action.patch_bytes).decode(),
+                "sandbox": None,
+            },
+        )
 
-    async def _forward(self, frame: dict[str, object]) -> None:
+    def _setup_matches(self, method: str, params: object) -> bool:
+        if method == "initialize":
+            if self._init_requested or not exact_fields(
+                params, {"clientName": "codex-environment", "resumeSessionId": None}
+            ):
+                return False
+            self._init_requested = True
+            return True
+        if method == "initialized":
+            if not self._init_requested or self._initialized or params != {}:
+                return False
+            self._initialized = True
+            return True
+        if not self._initialized:
+            return False
+        if method in {"environment/info", "environment/status"}:
+            return params is None
+        values = object_fields(params)
+        if method == "environmentConfig/read":
+            return exact_fields(
+                values,
+                {
+                    "cwd": self._action.workspace.as_uri(),
+                    "configPaths": [["mcp_servers"]],
+                    "requirementsPaths": [["mcp_servers"]],
+                },
+            )
+        if method == "fs/watchMissing":
+            missing = values.get("missing")
+            if not isinstance(missing, list):
+                return False
+            paths = cast("list[object]", missing)
+            return (
+                values.keys() == {"watchId", "missing", "present"}
+                and rpc_integer(values["watchId"])
+                and values["present"] is None
+                and len(paths) == len(self._watched_paths)
+                and all(
+                    isinstance(path, str) and path in self._watched_paths
+                    for path in paths
+                )
+                and len(frozenset(cast("list[str]", paths))) == len(paths)
+            )
+        path = values.get("path")
+        if not isinstance(path, str) or not exact_fields(
+            values, {"path": path, "sandbox": None}
+        ):
+            return False
+        if method == "fs/getMetadata":
+            return path in self._watched_paths or path == self._marker_uri
+        return method == "fs/readFile" and path == self._marker_uri
+
+    async def _forward(self, frame: dict[str, object], *, effect: bool) -> None:
         data = encoded_message(frame)
-        if self._closed or len(data) > self._max_frame_bytes:
+        if (
+            self._closed
+            or len(data) > self._max_frame_bytes
+            or asyncio.get_running_loop().time() >= self._deadline
+        ):
             raise GuardFailure("executor fixture cannot forward frame")
         self._backend_writer.write(data)
+        if effect:
+            self.forwarded += 1
         await self._backend_writer.drain()
 
     async def _frame(self, ws: web.WebSocketResponse, data: str) -> None:
         frame = decode_object(data.encode())
-        if frame is None or frame.keys() - {
-            "jsonrpc",
-            "method",
-            "params",
-            "id",
-            "trace",
-        }:
+        if frame is None or frame.keys() - {"method", "params", "id"}:
             raise GuardFailure("invalid executor fixture request")
         method = frame.get("method")
         identity = frame.get("id")
         if not isinstance(method, str) or not method:
             raise GuardFailure("invalid executor fixture method")
-        values = object_fields(frame.get("params", {}))
         if method == "initialized":
             if "id" in frame:
                 raise GuardFailure("invalid executor fixture notification")
         else:
-            if not rpc_integer(identity) or cast("int", identity) in self._ids:
+            if (
+                "params" not in frame
+                or not rpc_integer(identity)
+                or cast("int", identity) in self._ids
+            ):
                 raise GuardFailure("invalid or repeated executor fixture identity")
             self._ids.add(cast("int", identity))
-        if method in {"process/start", "fs/writeFile"}:
+        params = frame.get("params", {})
+        effect = method in {"process/start", "fs/writeFile"}
+        if effect:
             self.attempted += 1
             if (
-                self.attempted != 1
-                or not self._matches_effect(method, values)
-                or (method == "fs/writeFile" and "trace" in frame)
+                not self._initialized
+                or self.attempted != 1
+                or not self._matches_effect(method, object_fields(params))
             ):
                 raise GuardFailure("unexpected executor fixture effect")
             if not await self._approved():
-                self.withheld += 1
                 await ws.send_str(
                     encoded_message(
                         {"id": identity, "error": {"code": -32600, "message": REFUSAL}}
                     ).decode()
                 )
+                self.withheld += 1
                 return
-            self.forwarded += 1
-        elif method not in SETUP and (
-            method not in FOLLOW_UP
-            or self.forwarded != 1
-            or self._process_id is None
-            or values.get("processId") != self._process_id
-        ):
-            raise GuardFailure("unsupported executor fixture method")
-        await self._forward(frame)
+        elif method == "process/terminate":
+            if (
+                self.forwarded != 1
+                or self._process_id is None
+                or not exact_fields(params, {"processId": self._process_id})
+            ):
+                raise GuardFailure("unsupported executor fixture termination")
+        elif not self._setup_matches(method, params):
+            raise GuardFailure("unsupported executor fixture setup request")
+        await self._forward(frame, effect=effect)
 
     async def _output(self, ws: web.WebSocketResponse) -> None:
         for _ in range(self._max_messages):
@@ -313,12 +405,16 @@ class ExecutorGuard:
             return web.Response(status=401)
         if self._closed or self._admitted:
             return web.Response(status=409)
+        ws = web.WebSocketResponse(
+            max_msg_size=self._max_frame_bytes, compress=False, timeout=1
+        )
+        if not ws.can_prepare(request).ok:
+            return web.Response(status=400)
         self._admitted = True
-        ws = web.WebSocketResponse(max_msg_size=self._max_frame_bytes, compress=False)
-        self._active = ws
         try:
             async with asyncio.timeout_at(self._deadline):
                 await ws.prepare(request)
+                self._active = ws
                 self._pump = asyncio.create_task(self._output(ws))
                 received = 0
                 async for message in ws:
@@ -333,7 +429,8 @@ class ExecutorGuard:
                     await self._frame(ws, data)
         except (GuardFailure, OSError, ValueError, TimeoutError):
             self.failure = "executor fixture transport failed"
-            await ws.close(code=1011)
+            if ws.prepared:
+                await ws.close(code=1011, drain=False)
         finally:
             if self._pump is not None:
                 self._pump.cancel()
@@ -351,14 +448,55 @@ class ExecutorGuard:
         if not self._active.closed:
             raise GuardFailure("executor fixture connection did not close")
 
-    async def close(self) -> None:
+    def fence(self) -> None:
         self._closed = True
         self._changed.set()
-        if self._active is not None:
-            await self.close_connection()
-        await self._runner.cleanup()
+
+    async def close(self) -> None:
+        if self._settled:
+            return
+        self.fence()
+        try:
+            if self._active is not None:
+                await self.close_connection()
+        finally:
+            await self._runner.cleanup()
         if self._runner.addresses or (self._pump is not None and not self._pump.done()):
             raise GuardFailure("executor fixture did not settle")
+        self._settled = True
+
+
+async def verify_non_upgrade_refused(endpoint: str, token: str) -> None:
+    async with (
+        ClientSession() as client,
+        client.get(
+            endpoint.replace("ws://", "http://", 1),
+            headers={"Authorization": f"Bearer {token}"},
+        ) as response,
+    ):
+        if response.status != 400:
+            raise GuardFailure("unexpected executor fixture HTTP status")
+
+
+async def verify_malformed_header_refused(endpoint: str) -> None:
+    address = urlsplit(endpoint)
+    if address.hostname != "127.0.0.1" or address.port is None:
+        raise GuardFailure("unexpected executor fixture HTTP endpoint")
+    reader, writer = await asyncio.open_connection(address.hostname, address.port)
+    try:
+        writer.write(
+            (
+                f"GET / HTTP/1.1\r\nAuthorization {MALFORMED_HEADER_CANARY}\r\n\r\n"
+            ).encode()
+        )
+        await writer.drain()
+        if not (await reader.readline()).startswith(
+            (b"HTTP/1.0 400 ", b"HTTP/1.1 400 ")
+        ):
+            raise GuardFailure("malformed executor fixture header was accepted")
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
 async def verify_upgrade_refused(endpoint: str, token: str | None, status: int) -> None:
