@@ -110,6 +110,7 @@ from tests.plugins.harness.codex.selected_tls import (
     SelectedTlsError,
     UnknownCaAlert,
     create_selected_tls,
+    start_selected_tls_server,
 )
 
 Case = Literal["allow", "deny", "stall", "interactive", "usage"]
@@ -2656,15 +2657,17 @@ async def drive(
     unknown_ca: UnknownCaAlert | None = None,
 ) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
+
+    def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        fixture.accept(reader, writer, deadline)
+
     async with asyncio.timeout_at(deadline):
-        server = await asyncio.start_server(
-            lambda reader, writer: fixture.accept(reader, writer, deadline),
-            "127.0.0.1",
-            0,
-            limit=16_384,
-            ssl=None if tls is None else tls.context,
-            ssl_handshake_timeout=None if tls is None else CLEANUP_SECONDS,
-        )
+        if tls is None:
+            server = await asyncio.start_server(accept, "127.0.0.1", 0, limit=16_384)
+        else:
+            server = await start_selected_tls_server(
+                tls.context, accept, handshake_timeout=CLEANUP_SECONDS
+            )
     process: asyncio.subprocess.Process | None = None
     executor: asyncio.subprocess.Process | None = None
     executor_url: str | None = None

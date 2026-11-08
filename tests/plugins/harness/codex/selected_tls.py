@@ -1,7 +1,7 @@
 import asyncio
 import ssl
 import subprocess
-from collections.abc import Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,6 +120,31 @@ def create_selected_tls(directory: Path) -> SelectedTls:
     return SelectedTls(context, roots, bundle)
 
 
+class SelectedTlsProtocol(asyncio.StreamReaderProtocol):
+    def __init__(
+        self,
+        context: ssl.SSLContext,
+        accept: Callable[[asyncio.StreamReader, asyncio.StreamWriter], None],
+    ) -> None:
+        super().__init__(asyncio.StreamReader(limit=16_384), client_connected_cb=accept)
+        self.context = context
+
+
+async def start_selected_tls_server(
+    context: ssl.SSLContext,
+    accept: Callable[[asyncio.StreamReader, asyncio.StreamWriter], None],
+    *,
+    handshake_timeout: float,
+) -> asyncio.Server:
+    return await asyncio.get_running_loop().create_server(
+        lambda: SelectedTlsProtocol(context, accept),
+        "127.0.0.1",
+        0,
+        ssl=context,
+        ssl_handshake_timeout=handshake_timeout,
+    )
+
+
 class UnknownCaAlert:
     def __init__(self, context: ssl.SSLContext) -> None:
         self.context = context
@@ -129,13 +154,13 @@ class UnknownCaAlert:
     def observe(
         self, loop: asyncio.AbstractEventLoop, details: dict[str, object]
     ) -> None:
-        transport = details.get("transport")
+        protocol = details.get("protocol")
         error = details.get("exception")
         if not (
             details.get("message")
             == "Error on transport creation for incoming connection"
-            and isinstance(transport, asyncio.BaseTransport)
-            and transport.get_extra_info("sslcontext") is self.context
+            and isinstance(protocol, SelectedTlsProtocol)
+            and protocol.context is self.context
             and isinstance(error, ssl.SSLError)
             and error.reason == "TLSV1_ALERT_UNKNOWN_CA"
         ):
@@ -143,7 +168,7 @@ class UnknownCaAlert:
         self.observed.set()
 
     @contextmanager
-    def capture(self) -> Iterator[None]:
+    def capture(self) -> Generator[None]:
         loop = asyncio.get_running_loop()
         previous_handler = loop.get_exception_handler()
         previous_debug = loop.get_debug()
