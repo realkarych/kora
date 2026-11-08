@@ -3043,7 +3043,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             verify_shell_hook(
                 selected_command(case), selected_binding=case in SELECTED_HOOK_CASES
             )
-        executes = case in SELECTED_AUTH_CASES and case not in {
+        executes = case in SELECTED_AUTH_CASES and case not in SELECTED_REFUSALS | {
             "selected-tool-inventory-disabled",
             "selected-tool-search",
             "selected-deny",
