@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 from sqlalchemy import (
     Boolean,
+    Integer,
     String,
     and_,
     bindparam,
@@ -34,6 +35,12 @@ from kora.db.graph_preparation_v1 import ULID_ALPHABET, ascii_predicate
 from kora.db.graph_publication_digest_v1 import (
     SQLITE_INVALID,
     SQLITE_VALID,
+)
+from kora.db.graph_publication_ordinal_v1 import (
+    ORDINAL_INVALID_INDEX,
+    ORDINAL_VALID_INDEX,
+    SQLITE_ORDINAL_INVALID,
+    SQLITE_ORDINAL_VALID,
 )
 from kora.db.identifiers import IDENTIFIER_LENGTH, is_identifier
 from kora.db.tables import (
@@ -91,6 +98,36 @@ POSTGRESQL_DIGEST_MATCH = (
     .select_from(text("graph_version"))
     .where(DIGEST_MATCH_KEY)
     .limit(2)
+)
+
+
+ORDINAL_GRAPH_KEY = column("graph_id", String()) == bindparam("graph_id")
+ORDINAL_NUMBER = column("number", Integer())
+SQLITE_INVALID_ORDINAL = (
+    select(literal_column("1", Integer()))
+    .select_from(text(f"main.graph_version INDEXED BY {ORDINAL_INVALID_INDEX}"))
+    .where(ORDINAL_GRAPH_KEY, literal_column(SQLITE_ORDINAL_INVALID))
+    .limit(1)
+)
+SQLITE_HIGHEST_ORDINAL = (
+    select(ORDINAL_NUMBER)
+    .select_from(text(f"main.graph_version INDEXED BY {ORDINAL_VALID_INDEX}"))
+    .where(ORDINAL_GRAPH_KEY, literal_column(SQLITE_ORDINAL_VALID))
+    .order_by(ORDINAL_NUMBER.desc())
+    .limit(1)
+)
+SQLITE_ORDINAL_OBSERVATION = select(
+    case(
+        (SQLITE_INVALID_ORDINAL.exists(), literal_column("'refused'", String())),
+        else_=SQLITE_HIGHEST_ORDINAL.scalar_subquery(),
+    )
+)
+POSTGRESQL_ORDINAL_OBSERVATION = text(
+    "SELECT "
+    "(SELECT number FROM graph_version WHERE graph_id = :graph_id "
+    "ORDER BY number ASC LIMIT 1), "
+    "(SELECT number FROM graph_version WHERE graph_id = :graph_id "
+    "ORDER BY number DESC LIMIT 1)"
 )
 
 
@@ -166,6 +203,16 @@ class GraphPublicationDigestUnavailable(LockError):
 class GraphPublicationDigestReadFailed(LockError):
     def __init__(self) -> None:
         super().__init__("the graph deployment digest observation failed")
+
+
+class GraphPublicationOrdinalUnavailable(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph version number observation is unavailable")
+
+
+class GraphPublicationOrdinalReadFailed(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph version number observation failed")
 
 
 def _postgres_lock_contended(dialect: str, error: SQLAlchemyError) -> bool:
@@ -403,6 +450,34 @@ async def _read_graph_publication_digest_match(
     raise_private_metadata_error(GraphPublicationDigestReadFailed())
 
 
+async def _read_graph_publication_ordinal(
+    connection: AsyncConnection, dialect: str, graph_id: str
+) -> int | None:
+    statement = (
+        SQLITE_ORDINAL_OBSERVATION
+        if dialect == SQLITE
+        else POSTGRESQL_ORDINAL_OBSERVATION
+    )
+    try:
+        result = await connection.execute(statement, {"graph_id": graph_id})
+        try:
+            row = result.one()
+        finally:
+            result.close()
+    except (SQLAlchemyError, UnicodeError):
+        pass
+    else:
+        lowest: object = row[0]
+        highest: object = lowest if dialect == SQLITE else row[1]
+        if lowest is None and highest is None:
+            return None
+        if type(lowest) is int and type(highest) is int and 0 < lowest <= highest:
+            return highest
+        del row, lowest, highest
+        raise_private_metadata_error(GraphPublicationOrdinalUnavailable())
+    raise_private_metadata_error(GraphPublicationOrdinalReadFailed())
+
+
 class ScopeKind(enum.IntEnum):
     PREPARATION_CAPACITY = 0
     GLOBAL = 2
@@ -603,12 +678,12 @@ class TransitionLocks:
         self._usable = True
         return graph_id
 
-    async def read_graph_publication_digest_match(
+    def _require_observed_publication_target(
         self,
         connection: AsyncConnection,
         binding: GraphPreparationBinding,
         selected_graph_id: str,
-    ) -> str | None:
+    ) -> None:
         self.require_graph_publication_scope(connection, binding, selected_graph_id)
         if self._observed_graph_target != _GraphPreparationGuard(
             binding, selected_graph_id
@@ -616,6 +691,16 @@ class TransitionLocks:
             raise_private_metadata_error(
                 LockError("the exact graph publication target was not observed")
             )
+
+    async def read_graph_publication_digest_match(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> str | None:
+        self._require_observed_publication_target(
+            connection, binding, selected_graph_id
+        )
         self._usable = False
         version_id = await _read_graph_publication_digest_match(
             connection, self._dialect, selected_graph_id, binding.deployment_digest
@@ -623,6 +708,23 @@ class TransitionLocks:
         self._lease.require_active()
         self._usable = True
         return version_id
+
+    async def read_graph_publication_ordinal(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> int | None:
+        self._require_observed_publication_target(
+            connection, binding, selected_graph_id
+        )
+        self._usable = False
+        number = await _read_graph_publication_ordinal(
+            connection, self._dialect, selected_graph_id
+        )
+        self._lease.require_active()
+        self._usable = True
+        return number
 
     async def acquire_existing_storage_address(
         self, store_id: str, payload_digest: str

@@ -40,6 +40,12 @@ from kora.db.graph_publication_digest_v1 import (
     SQLITE_INVALID,
     SQLITE_VALID,
 )
+from kora.db.graph_publication_ordinal_v1 import (
+    ORDINAL_INVALID_INDEX,
+    ORDINAL_VALID_INDEX,
+    SQLITE_ORDINAL_INVALID,
+    SQLITE_ORDINAL_VALID,
+)
 from kora.db.graph_stage_promotion_custody_v1 import (
     INTENT_TABLE as PROMOTION_INTENT_TABLE,
 )
@@ -222,6 +228,18 @@ Index(
     graph_version.c.graph_id,
     graph_version.c.deployment_digest,
     sqlite_where=literal_column(SQLITE_INVALID),
+).ddl_if(dialect="sqlite")
+
+Index(
+    ORDINAL_VALID_INDEX,
+    graph_version.c.graph_id,
+    graph_version.c.number,
+    sqlite_where=literal_column(SQLITE_ORDINAL_VALID),
+).ddl_if(dialect="sqlite")
+Index(
+    ORDINAL_INVALID_INDEX,
+    graph_version.c.graph_id,
+    sqlite_where=literal_column(SQLITE_ORDINAL_INVALID),
 ).ddl_if(dialect="sqlite")
 
 graph_version_resource_owner: Table = Table(

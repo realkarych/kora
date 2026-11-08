@@ -14,6 +14,10 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 
 from kora.db.connection import MIGRATION_LEASE
 from kora.db.graph_publication_digest_v1 import INVALID_ID_INDEX
+from kora.db.graph_publication_ordinal_v1 import (
+    ORDINAL_INVALID_INDEX,
+    ORDINAL_VALID_INDEX,
+)
 from kora.db.tables import GRAPH_VERSION_SCOPE_INDEX, metadata
 from kora.db.types import POSTGRESQL
 
@@ -109,7 +113,13 @@ def include_schema_object(
     return not (
         dialect == POSTGRESQL
         and type_ == "index"
-        and name in (GRAPH_VERSION_SCOPE_INDEX, INVALID_ID_INDEX)
+        and name
+        in (
+            GRAPH_VERSION_SCOPE_INDEX,
+            INVALID_ID_INDEX,
+            ORDINAL_VALID_INDEX,
+            ORDINAL_INVALID_INDEX,
+        )
         and not reflected
         and compare_to is None
     )
