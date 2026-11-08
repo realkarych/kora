@@ -1249,11 +1249,11 @@ class GatedProcess:
             if self.returncode is None:
                 raise ProcessError(ProcessCondition.START_FAILED)
             return self.returncode
+        if self._stdio is not None and not self._stdio.closed:
+            raise ProcessError(ProcessCondition.UNKNOWN)
         observation = self.observe(deadline_ns)
         if not observation.settled or not observation.capture_eof:
             raise ProcessError(observation.condition)
-        if self._stdio is not None and not self._stdio.closed:
-            raise ProcessError(ProcessCondition.UNKNOWN)
         process = self._process
         anchor = self._anchor
         if process is None or anchor is None:

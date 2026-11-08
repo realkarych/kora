@@ -18,6 +18,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.process_stdio import GatedStdio
 from kora.runner.processes import (
     GatedProcess,
     ProcessCondition,
@@ -97,14 +98,15 @@ async def test_gated_stdio_is_borrowed_once_after_activation(tmp_path: Path) -> 
     clock = SystemClock()
     deadline = clock.monotonic_ns() + WINDOW_NS
     marker = tmp_path / "executed"
-    async with gated(tmp_path, ECHO, deadline, clock) as owner:
+    child = "import os\nprint(os.getpid(), flush=True)\n" + ECHO
+    async with gated(tmp_path, child, deadline, clock) as owner:
         start = asyncio.Event()
 
         async def borrow() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
             await start.wait()
             return owner.borrow_stdio()
 
-        await owner.prepare()
+        registration = await owner.prepare()
         before_activation = marker.exists()
         with pytest.raises(ChannelError) as early:
             owner.borrow_stdio()
@@ -118,15 +120,15 @@ async def test_gated_stdio_is_borrowed_once_after_activation(tmp_path: Path) -> 
         writer.write(b"owned stream\n")
         async with asyncio.timeout(5):
             await writer.drain()
+            responder = await reader.readline()
             echoed = await reader.readline()
             eof = await reader.read(1)
-        await owner.wait_exit(deadline)
-        await owner.drain(deadline)
-        observed = owner.observe(deadline)
         with pytest.raises(ProcessError) as early_release:
             owner.release(deadline)
         before_reap = owner.returncode
         await owner.settle(deadline)
+        await owner.drain(deadline)
+        observed = owner.observe(deadline)
         result = owner.release(deadline)
         with pytest.raises(ChannelError) as fenced:
             owner.borrow_stdio()
@@ -135,6 +137,7 @@ async def test_gated_stdio_is_borrowed_once_after_activation(tmp_path: Path) -> 
         assert early.value.reason is ChannelFailure.CLOSED
         assert isinstance(duplicate, ChannelError)
         assert duplicate.reason is ChannelFailure.BUSY
+        assert responder == f"{registration.process.pid}\n".encode()
         assert echoed == b"owned stream\n"
         assert eof == b""
         assert marker.is_file()
@@ -195,12 +198,18 @@ async def test_gated_stdio_setup_interruption_refuses_delivery(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prepared", [False, True])
 async def test_gated_stdio_failed_acknowledgement_refuses_execution(
     tmp_path: Path,
+    prepared: bool,
 ) -> None:
     clock = SystemClock()
     deadline = clock.monotonic_ns() + WINDOW_NS
     async with gated(tmp_path, MARK, deadline, clock) as owner:
+        if prepared:
+            await owner.prepare()
+            owner.close_gate()
+
         with pytest.raises(ProcessError) as refused:
             await owner.acknowledge()
         await owner.settle(deadline)
@@ -210,6 +219,33 @@ async def test_gated_stdio_failed_acknowledgement_refuses_execution(
         assert refused.value.condition is ProcessCondition.UNKNOWN
         assert status != 0
         assert not (tmp_path / "executed").exists()
+
+
+@pytest.mark.asyncio
+async def test_gated_stdio_settlement_deadline_wins_over_transport_completion() -> None:
+    clock = SetupClock()
+    parent, child = socket.socketpair()
+    stdio = GatedStdio(parent, 131_072)
+    settled_after_cutoff = asyncio.Event()
+    with child:
+        try:
+            await stdio.prepare(clock.monotonic_ns() + WINDOW_NS, clock)
+            cutoff = clock.monotonic_ns() + WINDOW_NS
+
+            def expire() -> None:
+                clock.expire(cutoff)
+                settled_after_cutoff.set()
+
+            clock.on_wait = expire
+
+            with pytest.raises(ChannelError) as expired:
+                await stdio.settle(cutoff, clock)
+        finally:
+            await stdio.settle(clock.monotonic_ns() + WINDOW_NS, clock)
+
+    assert settled_after_cutoff.is_set()
+    assert expired.value.reason is ChannelFailure.DEADLINE
+    assert parent.fileno() == -1
 
 
 @pytest.mark.asyncio

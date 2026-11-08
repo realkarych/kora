@@ -142,7 +142,7 @@ run_variant() {
     image=$(
         probe_context |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
-    )
+    ) || return $?
     case "$image" in
         sha256:*) ;;
         *) return 1 ;;
@@ -152,7 +152,7 @@ run_variant() {
         local_docker 10s create --name "$container" --platform linux/amd64 \
             --pull never --network none --init --cap-drop ALL --security-opt no-new-privileges \
             "$image" "$@"
-    )
+    ) || return $?
     create_pending=no
     timeout -k 2s 75s env -i PATH="$PATH" HOME="$reservation" \
         DOCKER_CONFIG="$reservation" DOCKER_HOST="$endpoint" docker start --attach "$container_id" &
@@ -278,7 +278,9 @@ case "${1:-}" in
         refusal_exit=0
         run_variant selected-gated-stdio --selected-gated-refusal > "$reservation/refused" 2>&1 || refusal_exit=$?
         test "$refusal_exit" = 1
-        printf '%s\n' '{"level": "ERROR", "event": "probe.case_failed", "detail": "selected_gated_start_refused"}' > "$reservation/expected-refusal"
+        printf '%s\n' \
+            '{"level": "INFO", "event": "probe.selected_gated_refused_reaped", "detail": "gate_prepared"}' \
+            '{"level": "ERROR", "event": "probe.case_failed", "detail": "selected_gated_start_refused"}' > "$reservation/expected-refusal"
         cmp -s "$reservation/refused" "$reservation/expected-refusal"
         cat "$reservation/expected-refusal"
         release_container

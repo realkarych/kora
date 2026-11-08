@@ -82,5 +82,7 @@ class GatedStdio:
             self._settlement = asyncio.create_task(self._wait_closed(self._streams[1]))
         if self._settlement is not None:
             await wait_future(self._settlement, deadline_ns, clock)
+        if clock.monotonic_ns() >= deadline_ns:
+            raise ChannelError(ChannelFailure.DEADLINE)
         if not self.closed:
             raise ChannelError(ChannelFailure.CLOSED)

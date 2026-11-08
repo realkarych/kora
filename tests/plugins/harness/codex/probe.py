@@ -2793,6 +2793,7 @@ async def drive(
                 )
     process: asyncio.subprocess.Process | None = None
     gated_app = None
+    gated_executor_identity: int | None = None
     executor: asyncio.subprocess.Process | None = None
     executor_url: str | None = None
     bearer = SYNTHETIC_EXECUTOR_BEARER
@@ -2891,6 +2892,11 @@ async def drive(
                 executor = await launch_executor(
                     inputs.exec_server.argv, inputs.exec_server.cwd, exec_env
                 )
+                if gated_stdio:
+                    require(
+                        executor.returncode is None, "selected_gated_executor_exited"
+                    )
+                    gated_executor_identity = open_child_pidfd(executor.pid)
                 executor_url = await read_executor_url(executor)
                 app_argv = inputs.app_server.argv
                 app_cwd = inputs.app_server.cwd
@@ -2994,7 +3000,11 @@ async def drive(
                 await stdio.observe(workspace, fixture.case, executor_url, bearer)
             if gated_app is not None:
                 assert executor is not None
-                gated_app.verify(executor.pid, SYNTHETIC_BEARER)
+                assert gated_executor_identity is not None
+                require(executor.returncode is None, "selected_gated_executor_exited")
+                gated_app.verify(
+                    executor.pid, gated_executor_identity, SYNTHETIC_BEARER
+                )
                 diagnostic("INFO", "probe.selected_gated_roles_verified", fixture.case)
         require(fixture.case not in STALLED_CASES, "stalled_turn_completed")
     except (TimeoutError, RpcError) as error:
@@ -3024,6 +3034,8 @@ async def drive(
         raise
     finally:
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
+        if gated_executor_identity is not None:
+            os.close(gated_executor_identity)
         if fixture.case in SELECTED_LAUNCH_CASES:
             original_failure = sys.exception() if gated_stdio else None
             native_cleanup = close_selected_launch(
@@ -3642,14 +3654,20 @@ async def run_selected_gated(name: str) -> None:
                 await refuse_setup(
                     CODEX,
                     asyncio.get_running_loop().time() + TURN_SECONDS,
+                    CLEANUP_SECONDS,
                     SYNTHETIC_BEARER,
                     SYNTHETIC_EXECUTOR_BEARER,
                 )
-                raise ProbeFailure("selected_gated_expected_refusal")
+                diagnostic(
+                    "INFO", "probe.selected_gated_refused_reaped", "gate_prepared"
+                )
+                raise ProbeFailure("selected_gated_start_refused")
             case _:
                 raise ProbeFailure("selected_gated_unexpected_case")
-    except (ChannelError, ProcessError):
-        raise ProbeFailure("selected_gated_start_refused") from None
+    except ChannelError as error:
+        raise ProbeFailure(f"selected_gated_channel_{error.reason.value}") from None
+    except ProcessError as error:
+        raise ProbeFailure(f"selected_gated_process_{error.condition.value}") from None
     except GatedObservationError as error:
         raise ProbeFailure(str(error)) from None
 
