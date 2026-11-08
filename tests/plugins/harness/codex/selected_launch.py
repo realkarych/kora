@@ -29,6 +29,9 @@ SelectedHookCase = (
 SelectedSqliteHomeCase = Literal[
     "selected-sqlite-home-default", "selected-sqlite-home-override"
 ]
+SelectedBashStartupCase = Literal[
+    "selected-bash-startup-default", "selected-bash-startup-override"
+]
 SelectedNoiseRegistryCase = Literal[
     "selected-noise-registry-default", "selected-noise-registry-override"
 ]
@@ -42,6 +45,7 @@ SelectedLaunchCase = (
     | SelectedNoiseRegistryCase
     | SelectedHookCase
     | SelectedSqliteHomeCase
+    | SelectedBashStartupCase
     | Literal[
         "selected-command-metadata",
         "selected-allow",
@@ -78,6 +82,9 @@ SELECTED_SQLITE_HOME_CASES: frozenset[SelectedSqliteHomeCase] = frozenset(
     {"selected-sqlite-home-default", "selected-sqlite-home-override"}
 )
 SQLITE_HOME_CANARY = "sqlite-home-canary"
+SELECTED_BASH_STARTUP_CASES: frozenset[SelectedBashStartupCase] = frozenset(
+    {"selected-bash-startup-default", "selected-bash-startup-override"}
+)
 SELECTED_TURN_CASES = frozenset({"selected-turn-complete", "selected-turn-cut"})
 SELECTED_NOISE_REGISTRY_CASES: frozenset[SelectedNoiseRegistryCase] = frozenset(
     {"selected-noise-registry-default", "selected-noise-registry-override"}
@@ -96,6 +103,7 @@ SELECTED_LAUNCH_CASES = frozenset(
         *SELECTED_HOOK_CASES,
         *SELECTED_TURN_CASES,
         *SELECTED_SQLITE_HOME_CASES,
+        *SELECTED_BASH_STARTUP_CASES,
         "selected-command-metadata",
         "selected-allow",
         "selected-deny",
@@ -111,6 +119,7 @@ SELECTED_AUTH_CASES = frozenset(
         *SELECTED_HOOK_CASES,
         *SELECTED_TURN_CASES,
         *SELECTED_SQLITE_HOME_CASES,
+        *SELECTED_BASH_STARTUP_CASES,
         "selected-command-metadata",
         "selected-allow",
         "selected-deny",

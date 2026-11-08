@@ -78,6 +78,7 @@ from tests.plugins.harness.codex.selected_launch import (
     METADATA_MARKER,
     PROJECT_DOC_CANARY,
     SELECTED_AUTH_CASES,
+    SELECTED_BASH_STARTUP_CASES,
     SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
@@ -217,6 +218,9 @@ MISSING_PROVIDER_KEY = "Missing environment variable: `CODEX_API_KEY`."
 CONTROL = Path("/var/lib/kora-hook-probe/control")
 RECEIPTS = CONTROL / "receipts.jsonl"
 MARKER = "kora-probe.marker"
+BASH_STARTUP_SCRIPT = "fixture-startup.sh"
+BASH_STARTUP_MARKER = "kora-probe.startup"
+BASH_STARTUP_TEXT = "shell startup marker"
 COMMAND = f"touch {MARKER}"
 CALL_ID = "kora-hook-probe-call"
 PATCH_MARKER = b"direct patch marker\n"
@@ -1117,6 +1121,7 @@ class ResponsesFixture:
             if (
                 self.case in SELECTED_HOOK_CASES
                 or self.case in SELECTED_SQLITE_HOME_CASES
+                or self.case in SELECTED_BASH_STARTUP_CASES
                 or self.case == "selected-command-metadata"
             ):
                 require(not body.strip(), "selected_fault_unexpected_command_output")
@@ -2670,6 +2675,8 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                     exec_env.update(METADATA_ENVIRONMENT)
                 if fixture.case == "selected-sqlite-home-override":
                     child_env["CODEX_SQLITE_HOME"] = str(root / SQLITE_HOME_CANARY)
+                if fixture.case == "selected-bash-startup-override":
+                    exec_env["BASH_ENV"] = str(workspace / BASH_STARTUP_SCRIPT)
                 if fixture.case in SELECTED_NOISE_REGISTRY_CASES:
                     require(
                         child_env.get("CODEX_EXEC_SERVER_URL") == "none",
@@ -2882,6 +2889,20 @@ def verify_sqlite_home(root: Path, *, override: bool) -> None:
         )
 
 
+def verify_bash_startup(workspace: Path, *, override: bool) -> None:
+    marker = workspace / BASH_STARTUP_MARKER
+    if not override:
+        require(not os.path.lexists(marker), "unexpected_bash_startup_marker")
+        return
+    require(marker.is_file() and not marker.is_symlink(), "bash_startup_marker_missing")
+    expected = f"{BASH_STARTUP_TEXT}\n".encode()
+    with marker.open("rb") as contents:
+        require(
+            contents.read(len(expected) + 1) == expected,
+            "bash_startup_marker_mismatch",
+        )
+
+
 async def run_selected_launch(case: SelectedLaunchCase) -> None:
     if case in SELECTED_AUTH_CASES:
         decision = (
@@ -2889,6 +2910,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             if case == "selected-startup-ready"
             or case in SELECTED_TURN_CASES
             or case in SELECTED_SQLITE_HOME_CASES
+            or case in SELECTED_BASH_STARTUP_CASES
             or case in SELECTED_TOOL_INVENTORY_CASES
             else case
         )
@@ -2901,6 +2923,13 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         workspace.mkdir()
         if case in SELECTED_SQLITE_HOME_CASES:
             (root / SQLITE_HOME_CANARY).mkdir(mode=0o700)
+        if case in SELECTED_BASH_STARTUP_CASES:
+            (workspace / BASH_STARTUP_SCRIPT).write_text(
+                f"if [ -e {MARKER} ] || [ -L {MARKER} ]; then exit 1; fi\n"
+                f"printf '%s\\n' '{BASH_STARTUP_TEXT}'"
+                f" > {BASH_STARTUP_MARKER} || exit 1\n",
+                encoding="utf-8",
+            )
         if case == "selected-startup-ready":
             plant_checkout_canaries(workspace)
         marker = workspace / MARKER
@@ -2961,6 +2990,11 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         if case in SELECTED_SQLITE_HOME_CASES:
             verify_sqlite_home(root, override=case == "selected-sqlite-home-override")
             diagnostic("INFO", "probe.selected_sqlite_home_verified", case)
+        if case in SELECTED_BASH_STARTUP_CASES:
+            verify_bash_startup(
+                workspace, override=case == "selected-bash-startup-override"
+            )
+            diagnostic("INFO", "probe.selected_bash_startup_verified", case)
         if case == "selected-startup-ready":
             require(
                 workspace_remains_untrusted(

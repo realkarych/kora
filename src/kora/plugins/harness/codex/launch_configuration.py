@@ -208,7 +208,7 @@ def build_launch_inputs(
     owned = (
         app_env.keys()
         | exec_env.keys()
-        | {PROVIDER_KEY, "CODEX_SQLITE_HOME"}
+        | {PROVIDER_KEY, "CODEX_SQLITE_HOME", "BASH_ENV"}
         | EXEC_METADATA_ENV_NAMES
         | NOISE_REGISTRY_ENV_NAMES
     )
