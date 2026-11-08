@@ -2,9 +2,7 @@ import asyncio
 from pathlib import Path
 
 from kora.conformance.capture import (
-    CaptureLeftover,
     CaptureOverflow,
-    CaptureTimeout,
     captured,
 )
 from kora.conformance.common import CONFORMANCE_COMPONENT, context_for, utc_now
@@ -76,11 +74,10 @@ def decide_shell_patch(call: HookCall, control: Path, case: str) -> bool | None:
         with (control / SHELL_PATCH_POLICY_RECEIPT).open("xb") as receipt:
             receipt.write(SHELL_PATCH_POLICY_OUTCOMES[case])
     except (
-        CaptureLeftover,
         CaptureOverflow,
-        CaptureTimeout,
         KoraProtocolError,
         OSError,
+        RuntimeError,
         ValueError,
     ):
         return None

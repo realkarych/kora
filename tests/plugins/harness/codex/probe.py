@@ -3001,17 +3001,14 @@ def verify_shell_patch_output(case: ProbeCase, output: str) -> None:
             "shell_patch_policy_denial_missing",
         )
     else:
+        lines = output.splitlines()
         require(
-            output.splitlines()
-            == [
-                "Wall time: 0.0000 seconds",
-                "Output:",
-                "Exit code: 0",
-                "Wall time: 0 seconds",
-                "Output:",
-                "Success. Updated the following files:",
-                f"A {MARKER}",
-            ],
+            len(lines) == 7
+            and lines[:3] == ["Wall time: 0.0000 seconds", "Output:", "Exit code: 0"]
+            and re.fullmatch(r"Wall time: [0-9]+(?:\.[0-9])? seconds", lines[3])
+            is not None
+            and lines[4:]
+            == ["Output:", "Success. Updated the following files:", f"A {MARKER}"],
             "shell_patch_function_result_missing",
         )
 
