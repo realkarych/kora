@@ -5,7 +5,11 @@ import pytest
 from kora.cel_eval.bounds import MAX_BYTES
 from kora.conformance.capture import captured
 from kora.db.connection import Database
-from kora.engine.graph_execution_contract import check_detached_execution_contract
+from kora.engine.graph_execution_contract import (
+    CheckedExecutionContract,
+    check_detached_execution_contract,
+)
+from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.locks import COMPONENT
 from kora.engine.start_parameter_cel import (
     ParameterCelFailure,
@@ -17,7 +21,7 @@ from kora.engine.start_parameter_cut import (
     prepare_manual_start_parameter_cut,
 )
 from kora.ir.json import JsonObject, JsonValue
-from kora.observability import Level, LoggingSettings
+from kora.observability import Level, LoggingSettings, bound_scope
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import FakeClock
 from tests.engine.start_support import KEY, PRIVATE
@@ -128,7 +132,10 @@ async def test_manual_parameter_cel_refuses_values_after_an_admitted_cut(
         "manual-parameter-cel-test",
         FakeClock().now,
     ) as capture:
-        with pytest.raises(ParameterCelRejected, match="^values$") as refusal:
+        with (
+            bound_scope(request_id="manual-check"),
+            pytest.raises(ParameterCelRejected, match="^values$") as refusal,
+        ):
             check(case, cut)
         records = capture.finish()
         raw_output = capture.reader.data
@@ -143,10 +150,10 @@ async def test_manual_parameter_cel_refuses_values_after_an_admitted_cut(
     assert refusal.value.__context__ is None
     assert {"cut", "checked"}.isdisjoint(frames["check_manual_start_parameter_cel"])
     assert [
-        record["outcome"]
+        (record["request_id"], record["outcome"])
         for record in records
         if record["event"] == "engine.start_parameter_cel.checked"
-    ] == ["values"]
+    ] == [("manual-check", "values")]
     for protected in (PRIVATE, KEY, case.contract.scope.version_id):
         assert protected.encode() not in raw_output
     assert database.units_in_flight() == 0
@@ -171,20 +178,47 @@ async def test_manual_parameter_cel_empty_reads_require_no_schema_mapping(
 
 
 @pytest.mark.asyncio
-async def test_manual_parameter_cel_admits_binding_and_work_before_conversion(
+async def test_manual_parameter_cel_binds_scope_and_digest_independently(
     database: Database,
 ) -> None:
     case = await candidate_for(database, {"enabled": True}, parameter_reads=True)
     cut = cut_for(case)
-    raw, saved, refs, owners = complete_inputs(SCOPE)
-    prepared, pin = prepared_case(raw, saved, SCOPE)
-    other = check_detached_execution_contract(
-        transport(prepared, SCOPE), pin, SCOPE, refs, owners, limits=LIMITS
+    same_scope = detached_contract(case.contract.scope, parameter_reads=False)
+    same_digest = detached_contract(SCOPE, parameter_reads=True)
+
+    for other in (same_scope, same_digest):
+        with pytest.raises(ParameterCelRejected, match="^binding$"):
+            check_manual_start_parameter_cel(
+                cut, other, max_ir_bytes=1, max_schema_work=1
+            )
+
+    assert same_scope.scope == case.contract.scope
+    assert same_scope.pin.execution_contract_digest != cut.execution_contract_digest
+    assert same_digest.scope != case.contract.scope
+    assert same_digest.pin.execution_contract_digest == cut.execution_contract_digest
+    assert database.units_in_flight() == 0
+
+
+def detached_contract(
+    scope: GraphResourceScope, *, parameter_reads: bool
+) -> CheckedExecutionContract:
+    raw, saved, refs, owners = complete_inputs(
+        scope, resources=False, parameter_reads=parameter_reads
     )
+    prepared, pin = prepared_case(raw, saved, scope)
+    return check_detached_execution_contract(
+        transport(prepared, scope), pin, scope, refs, owners, limits=LIMITS
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_parameter_cel_admits_work_before_conversion(
+    database: Database,
+) -> None:
+    case = await candidate_for(database, {"enabled": True}, parameter_reads=True)
+    cut = cut_for(case)
     size = len(case.contract.canonical_ir)
 
-    with pytest.raises(ParameterCelRejected, match="^binding$"):
-        check_manual_start_parameter_cel(cut, other, max_ir_bytes=1, max_schema_work=1)
     with pytest.raises(ParameterCelRejected, match="^capacity$"):
         check_manual_start_parameter_cel(
             cut, case.contract, max_ir_bytes=size - 1, max_schema_work=WORK
