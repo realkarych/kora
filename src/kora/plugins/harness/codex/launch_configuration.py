@@ -15,6 +15,14 @@ CODEX_VERSION = "0.166.0"
 MODEL_PROVIDER = "kora_responses"
 PROVIDER_KEY = "CODEX_API_KEY"
 BUILTIN_EXECUTOR = "CODEX_EXEC_SERVER_URL"
+NOISE_REGISTRY_ENV_NAMES = frozenset(
+    {
+        "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL",
+        "CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID",
+        "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+        "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID",
+    }
+)
 EXEC_METADATA_ENV_NAMES = frozenset({"CODEX_THREAD_ID", "CODEX_TOOL_CALL_ID"})
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 PROVIDER_URL = re.compile(
@@ -202,6 +210,7 @@ def build_launch_inputs(
         | exec_env.keys()
         | {PROVIDER_KEY, "CODEX_SQLITE_HOME"}
         | EXEC_METADATA_ENV_NAMES
+        | NOISE_REGISTRY_ENV_NAMES
     )
     if not owned.isdisjoint(workload_names) or not owned.isdisjoint(
         workload_secret_names

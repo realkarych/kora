@@ -61,7 +61,11 @@ def test_codex_recipes_bind_distinct_roles_and_exact_native_controls(
     inputs = construct(
         root,
         workload=("WORKLOAD_VAR", "CODEX_THREAD_ID_ALIAS", "CODEX_SQLITE_HOME_ALIAS"),
-        workload_secrets=("WORK_SECRET", "CODEX_TOOL_CALL_ID_ALIAS"),
+        workload_secrets=(
+            "WORK_SECRET",
+            "CODEX_TOOL_CALL_ID_ALIAS",
+            "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ALIAS",
+        ),
     )
     app_config: object = tomllib.loads(inputs.app_server.config)
     exec_config: object = tomllib.loads(inputs.exec_server.config)
@@ -244,6 +248,10 @@ def test_codex_launch_refuses_raw_executor_bearer(tmp_path: Path) -> None:
         "TMPDIR",
         "SHELL",
         "CODEX_EXEC_SERVER_URL",
+        "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL",
+        "CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID",
+        "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+        "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID",
         "CODEX_API_KEY",
         "CODEX_SQLITE_HOME",
         "CODEX_THREAD_ID",

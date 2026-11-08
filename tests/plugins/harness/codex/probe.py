@@ -670,6 +670,9 @@ class ResponsesFixture:
                         b"Content-Length: 0\r\n\r\n"
                     )
                     await writer.drain()
+                    diagnostic(
+                        "INFO", "probe.selected_noise_registry_request_refused", "403"
+                    )
                     return
                 if self.case == "selected-startup-ready":
                     require(
@@ -1446,7 +1449,7 @@ class Stdio:
         )
         local = await self.call("environment/status", {"environmentId": "local"})
         require(local.get("status") == "unknown", "local_executor_available")
-        alternate = {"environmentId": "remote"}
+        alternate: dict[str, object] = {"environmentId": "remote"}
         try:
             await self.call("environment/info", alternate)
         except RpcError as error:
@@ -2486,6 +2489,11 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                     exec_env.update(METADATA_ENVIRONMENT)
                 if fixture.case == "selected-sqlite-home-override":
                     child_env["CODEX_SQLITE_HOME"] = str(root / SQLITE_HOME_CANARY)
+                if fixture.case in SELECTED_NOISE_REGISTRY_CASES:
+                    require(
+                        child_env.get("CODEX_EXEC_SERVER_URL") == "none",
+                        "selected_default_executor_not_disabled",
+                    )
                 if fixture.case == "selected-noise-registry-override":
                     child_env.update(
                         {
