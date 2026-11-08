@@ -681,6 +681,8 @@ Detached execution preparation retains the original private owner associations i
 
 The detached logical preparation under [#1011](https://github.com/realkarych/kora/issues/1011) derives the exact canonical IR, execution contract and deployment digests before physical file preparation. It runs the same bounded native CEL verification and checks the decoded logical contract, including the declared command manifests. This result carries logical identity only. The complete preparation retains its early physical checks, and publication must independently establish the exact associations with verified files and current authority.
 
+The detached deployment input preparation under [#1018](https://github.com/realkarych/kora/issues/1018) checks the complete supplied file inventory and the complete logical execution contract from the same canonical IR. It admits cumulative work and retention before grouping, retains verified address groups during native CEL work, and returns the checked digest and groups only as one complete private result. A native refusal retains only its existing typed diagnostic for explicit internal access. The original durable preparation, storage selection and qualification, per-call authority and publication remain separate.
+
 ##### Graph-version read admission
 
 The project owner accepted this persisted format on 2026-11-06 under [#844](https://github.com/realkarych/kora/issues/844#issuecomment-6682572078). The record and acquisition invariant are specified here pending implementation and qualification. The physical reference JSON remains in `graph_version.resources`.

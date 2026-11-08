@@ -1,7 +1,7 @@
 from asyncio import CancelledError
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Never
+from typing import Never, Self
 
 from kora.api.graph_cel import GraphCelChecks, GraphCelResult, verify_graph_cel
 from kora.cel.limits import MAX_CODE_POINTS
@@ -16,8 +16,12 @@ from kora.db.graph_value_json import (
 from kora.db.graph_values import DecodedGraphValues, read_graph_values
 from kora.engine.graph_cel_facts import EXECUTION_SEMANTICS, GraphCelFacts
 from kora.engine.graph_command_manifests import (
+    CommandManifestLimits,
+    CommandResourceContent,
+    PreparedCommandStageGroup,
     build_declared_command_manifests,
     check_declared_command_manifests,
+    prepare_graph_command_stage_groups,
 )
 from kora.engine.graph_execution_contract import (
     ExecutionContractReadLimits,
@@ -52,6 +56,7 @@ from kora.engine.graph_version_identity import (
 from kora.ir.diagnostic_collection import MAX_DIAGNOSTIC_BYTES
 from kora.ir.document import GraphDocument
 from kora.ir.json import JsonObject
+from kora.protocols.storage_models import StorageIdentity
 
 SOURCE_COPIES = 4
 SECTION_COPIES = 6
@@ -60,6 +65,7 @@ NATIVE_FACT_COPIES = 3
 PREPARED_OWNER_SLOT = 1
 PATTERN_COPIES = 4
 MAX_PATTERN_PROBE = 10 * MAX_CODE_POINTS + len('"".matches("")')
+DEPLOYMENT_COMPOSITION_OVERHEAD = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +74,14 @@ class ExecutionPreparationLimits:
     rendering_characters: int
     pattern_work: int
     facts_bytes: int
+    max_retained_bytes: int
+    max_work: int
+
+
+@dataclass(frozen=True, slots=True)
+class GraphDeploymentPreparationLimits:
+    execution: ExecutionPreparationLimits
+    contents: CommandManifestLimits
     max_retained_bytes: int
     max_work: int
 
@@ -119,6 +133,79 @@ class PreparedExecutionContract(PreparedLogicalExecutionContract):
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "resources", resources)
         object.__setattr__(self, "owners", owners)
+
+
+class _ProtectedGraphDeploymentPreparation:
+    __slots__ = ()
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        raise AttributeError("graph deployment preparation is immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        raise AttributeError("graph deployment preparation is immutable")
+
+    def __getstate__(self) -> Never:
+        raise TypeError("graph deployment preparation requires explicit access")
+
+
+class PreparedGraphDeploymentInputs(_ProtectedGraphDeploymentPreparation):
+    __slots__ = ("logical", "groups")
+    logical: PreparedLogicalExecutionContract
+    groups: tuple[PreparedCommandStageGroup, ...]
+
+    def __new__(
+        cls,
+        logical: PreparedLogicalExecutionContract,
+        groups: tuple[PreparedCommandStageGroup, ...],
+    ) -> Self:
+        prepared = super().__new__(cls)
+        object.__setattr__(prepared, "logical", logical)
+        object.__setattr__(prepared, "groups", groups)
+        return prepared
+
+
+class GraphDeploymentCelRefusal(_ProtectedGraphDeploymentPreparation):
+    __slots__ = ("result",)
+    result: GraphCelResult
+
+    def __new__(cls, result: GraphCelResult) -> Self:
+        refusal = super().__new__(cls)
+        object.__setattr__(refusal, "result", result)
+        return refusal
+
+
+def _admit_deployment(limits: GraphDeploymentPreparationLimits) -> None:
+    if (
+        type(limits) is not GraphDeploymentPreparationLimits
+        or type(limits.execution) is not ExecutionPreparationLimits
+        or type(limits.contents) is not CommandManifestLimits
+        or any(
+            type(value) is not int or value <= 0
+            for value in (
+                limits.max_retained_bytes,
+                limits.max_work,
+                limits.execution.max_retained_bytes,
+                limits.execution.max_work,
+                limits.contents.ir_bytes,
+                limits.contents.scratch,
+                limits.contents.work,
+            )
+        )
+    ):
+        raise GraphValueRejected(GraphValueFailure.BUDGET)
+    retained = (
+        limits.execution.max_retained_bytes
+        + limits.contents.ir_bytes
+        + limits.contents.scratch
+        + DEPLOYMENT_COMPOSITION_OVERHEAD
+    )
+    work = (
+        limits.execution.max_work
+        + limits.contents.work
+        + DEPLOYMENT_COMPOSITION_OVERHEAD
+    )
+    if retained > limits.max_retained_bytes or work > limits.max_work:
+        raise GraphValueRejected(GraphValueFailure.BUDGET)
 
 
 def _admit(limits: ExecutionPreparationLimits) -> None:
@@ -398,6 +485,37 @@ async def prepare_logical_execution_contract(
     except CancelledError:
         error = CancelledError()
     del ir_text, evaluator
+    raise_safe(error)
+
+
+async def prepare_graph_deployment_inputs(
+    ir_text: str,
+    contents: tuple[CommandResourceContent, ...],
+    evaluator: Evaluator,
+    *,
+    storage_identity: StorageIdentity | None,
+    limits: GraphDeploymentPreparationLimits,
+) -> PreparedGraphDeploymentInputs | GraphDeploymentCelRefusal:
+    groups: tuple[PreparedCommandStageGroup, ...] = ()
+    error: BaseException
+    try:
+        _admit_deployment(limits)
+        groups = prepare_graph_command_stage_groups(
+            ir_text, contents, storage_identity=storage_identity, limits=limits.contents
+        )
+        contents = ()
+        storage_identity = None
+        result = await _prepare_logical(ir_text, evaluator, limits.execution)
+        if isinstance(result, PreparedLogicalExecutionContract):
+            return PreparedGraphDeploymentInputs(result, groups)
+        return GraphDeploymentCelRefusal(result)
+    except GraphValueRejected as rejected:
+        error = GraphValueRejected(rejected.reason)
+    except EvaluatorUnavailable as unavailable:
+        error = EvaluatorUnavailable(unavailable.reason)
+    except CancelledError:
+        error = CancelledError()
+    del ir_text, contents, storage_identity, evaluator, groups
     raise_safe(error)
 
 
