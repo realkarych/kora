@@ -9,7 +9,11 @@ from types import MappingProxyType
 from pydantic import ValidationError
 
 from kora.plugins.runtime.local.bound_checkout import BoundCheckout
-from kora.plugins.runtime.local.bound_gate_fence import BoundGateFence
+from kora.plugins.runtime.local.bound_gate_fence import (
+    BoundGateFence,
+    BoundPhaseFailure,
+    GatePhaseFailure,
+)
 from kora.plugins.runtime.local.bound_role_configuration import BoundRoleConfiguration
 from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
 from kora.plugins.runtime.local.environment import (
@@ -29,7 +33,7 @@ from kora.protocols.time import Clock
 from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.installed_executable import InstalledExecutable
 from kora.runner.process_stdio import StdioStreams
-from kora.runner.processes import GatedProcess, start_gated
+from kora.runner.processes import GatedProcess, ProcessError, start_gated
 
 
 @dataclass(frozen=True, repr=False)
@@ -64,12 +68,13 @@ class BoundNativeGate:
         fence: BoundGateFence,
         clock: Clock,
         cutoff_ns: int,
+        loop: asyncio.AbstractEventLoop,
     ) -> None:
         self._gate = gate
         self._fence = fence
         self._clock = clock
         self._cutoff_ns = cutoff_ns
-        self._loop = asyncio.get_running_loop()
+        self._loop = loop
         self._phase = _GatePhase.ACQUIRED
 
     @property
@@ -86,12 +91,8 @@ class BoundNativeGate:
     def _transition(
         self, expected: _GatePhase, pending: _GatePhase, completed: _GatePhase
     ) -> Generator[None]:
-        try:
-            current = asyncio.get_running_loop()
-        except RuntimeError:
-            current = None
         if (
-            current is not self._loop
+            _current_loop() is not self._loop
             or self._fence.stopped
             or self._gate not in self._fence.gates
         ):
@@ -99,15 +100,25 @@ class BoundNativeGate:
         if self._phase is not expected:
             raise ChannelError(ChannelFailure.BUSY)
         self._phase = pending
+        cause: BoundPhaseFailure = GatePhaseFailure.UNEXPECTED
         try:
             self._require_open()
             yield
             self._require_open()
             self._phase = completed
+        except asyncio.CancelledError:
+            cause = GatePhaseFailure.CANCELLED
+            raise
+        except ChannelError as error:
+            cause = error.reason
+            raise
+        except ProcessError as error:
+            cause = error.condition
+            raise
         finally:
             if self._phase is not completed:
                 self._phase = _GatePhase.FAILED
-                self._fence.stop()
+                self._fence.fail_phase(cause)
 
     async def prepare(self) -> ProcessRegistration:
         with self._transition(
@@ -142,9 +153,11 @@ class BoundNativeLaunch:
         clock: Clock,
         cutoff_ns: int,
     ) -> None:
+        loop = _current_loop()
         captured = dict(roles)
         if (
-            not captured
+            loop is None
+            or not captured
             or captured.keys() != binding.roles
             or type(stdio_limit) is not int
             or stdio_limit < 1
@@ -159,6 +172,7 @@ class BoundNativeLaunch:
         self._cutoff_ns = cutoff_ns
         self._slots = BoundRoleSlots(binding, clock, cutoff_ns)
         self._fence = BoundGateFence(self._slots)
+        self._loop = loop
         inputs: dict[str, _RoleGateInputs] = {}
         placements: set[tuple[int, int]] = set()
         for role, recipe in captured.items():
@@ -198,10 +212,18 @@ class BoundNativeLaunch:
     def close_failed(self) -> bool:
         return self._fence.close_failed
 
+    @property
+    def phase_failure(self) -> BoundPhaseFailure | None:
+        return self._fence.phase_failure
+
     def stop(self) -> None:
+        if _current_loop() is not self._loop:
+            raise ChannelError(ChannelFailure.CLOSED)
         self._fence.stop()
 
     def start(self, role: str) -> BoundNativeGate:
+        if _current_loop() is not self._loop:
+            raise ChannelError(ChannelFailure.CLOSED)
         claim = self._slots.claim(role)
         inputs = self._inputs[role]
 
@@ -226,7 +248,9 @@ class BoundNativeLaunch:
             self._fence.register(gate)
             gate.require_acquired()
             self._slots.require_open()
-            return BoundNativeGate(gate, self._fence, self._clock, self._cutoff_ns)
+            return BoundNativeGate(
+                gate, self._fence, self._clock, self._cutoff_ns, self._loop
+            )
 
         try:
             return self._slots.start(role, claim, acquire, preflight=preflight)
@@ -254,6 +278,13 @@ class BoundNativeLaunch:
         except ValidationError:
             pass
         raise _binding_refused()
+
+
+def _current_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 def _binding_refused() -> KoraProtocolError:

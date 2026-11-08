@@ -24,6 +24,7 @@ from kora.plugins.runtime.local.bound_checkout import (
     BoundCheckoutError,
     CheckoutFailure,
 )
+from kora.plugins.runtime.local.bound_gate_fence import GatePhaseFailure
 from kora.plugins.runtime.local.bound_native_launch import (
     BoundNativeLaunch,
     BoundNativeRole,
@@ -380,11 +381,18 @@ class BoundEnvironmentProbe:
             raise BoundEnvironmentError("selected_bound_phase_control_unavailable")
         if self.case == "phase-failure":
             await refuse_dead_prepare(gates[-1], app, cutoff)
+            expected = ChannelFailure.CLOSED
         elif self.case == "phase-cancellation":
             await cancel_pending_prepare(gates[-1], app, exec_writer, launch.native)
+            expected = GatePhaseFailure.CANCELLED
         else:
             await self.refuse_expired_phase(app, cutoff)
-        if not launch.native.stopped or not exec_writer.is_closing():
+            expected = ChannelFailure.DEADLINE
+        if (
+            not launch.native.stopped
+            or not exec_writer.is_closing()
+            or launch.native.phase_failure is not expected
+        ):
             raise BoundEnvironmentError("selected_bound_phase_writer_not_fenced")
 
     async def refuse_expired_phase(self, app: SelectedGatedApp, cutoff: int) -> None:
@@ -816,16 +824,35 @@ async def cancel_pending_prepare(
     if sys.platform != "linux":
         raise BoundEnvironmentError("selected_bound_phase_requires_linux")
     with gate_pidfd(gate) as descriptor:
-        signal.pidfd_send_signal(descriptor, signal.SIGSTOP)
         try:
-            state = await asyncio.to_thread(
-                os.waitid, os.P_PIDFD, descriptor, os.WSTOPPED | os.WEXITED | os.WNOWAIT
-            )
-            if state is None or state.si_code != os.CLD_STOPPED:
-                raise BoundEnvironmentError("selected_bound_prepare_not_suspended")
+            await suspend_registered_child(descriptor)
             await cancel_admitted_prepare(app, exec_writer, owner)
         finally:
             signal.pidfd_send_signal(descriptor, signal.SIGCONT)
+
+
+async def suspend_registered_child(descriptor: int) -> None:
+    if sys.platform != "linux" or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise BoundEnvironmentError("selected_bound_stop_observation_unavailable")
+    loop = asyncio.get_running_loop()
+    changed = asyncio.Event()
+    loop.add_signal_handler(signal.SIGCHLD, changed.set)
+    try:
+        signal.pidfd_send_signal(descriptor, signal.SIGSTOP)
+        while True:
+            state = os.waitid(
+                os.P_PIDFD,
+                descriptor,
+                os.WSTOPPED | os.WEXITED | os.WNOWAIT | os.WNOHANG,
+            )
+            if state is not None:
+                if state.si_code != os.CLD_STOPPED:
+                    raise BoundEnvironmentError("selected_bound_prepare_not_suspended")
+                return
+            await changed.wait()
+            changed.clear()
+    finally:
+        loop.remove_signal_handler(signal.SIGCHLD)
 
 
 async def cancel_admitted_prepare(

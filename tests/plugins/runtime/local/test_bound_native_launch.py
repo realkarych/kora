@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from collections.abc import Generator, Mapping
@@ -11,6 +12,7 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.bound_checkout import BoundCheckout
 from kora.plugins.runtime.local.bound_native_launch import (
+    BoundNativeGate,
     BoundNativeLaunch,
     BoundNativeRole,
 )
@@ -135,7 +137,8 @@ def check_binding_refusal(error: KoraProtocolError) -> None:
 @pytest.mark.parametrize(
     "change", ["cwd", "assignment", "grants", "executable", "placement"]
 )
-def test_role_capture_refuses_mismatched_trusted_inputs_before_reveal(
+@pytest.mark.asyncio
+async def test_role_capture_refuses_mismatched_trusted_inputs_before_reveal(
     native_inputs: NativeInputs, kora_capture: Capture, change: str
 ) -> None:
     roles = native_inputs.roles.copy()
@@ -177,7 +180,8 @@ def test_role_capture_refuses_mismatched_trusted_inputs_before_reveal(
     assert observed == before
 
 
-def test_materialized_input_validation_returns_fixed_error_and_fences(
+@pytest.mark.asyncio
+async def test_materialized_input_validation_returns_fixed_error_and_fences(
     native_inputs: NativeInputs, kora_capture: Capture
 ) -> None:
     binding = native_inputs.bind(
@@ -227,6 +231,7 @@ async def test_bound_gate_delivers_once_and_refuses_wrong_phases(
         _, writer = handle.borrow_stdio()
         with pytest.raises(ChannelError) as repeated_delivery:
             handle.borrow_stdio()
+        foreign = await asyncio.to_thread(foreign_requests, owner, handle)
         writer_still_open = not writer.is_closing()
         remained_admitted = not owner.stopped
     finally:
@@ -243,9 +248,26 @@ async def test_bound_gate_delivers_once_and_refuses_wrong_phases(
             repeated_delivery,
         )
     )
+    assert foreign == (ChannelFailure.CLOSED,) * 3
+    assert owner.gates == (gate,)
     assert writer_still_open
     assert remained_admitted
     assert handle.closed
+
+
+def foreign_requests(
+    owner: BoundNativeLaunch, handle: BoundNativeGate
+) -> tuple[ChannelFailure, ...]:
+    async def request() -> tuple[ChannelFailure, ...]:
+        with pytest.raises(ChannelError) as start:
+            owner.start("exec")
+        with pytest.raises(ChannelError) as stop:
+            owner.stop()
+        with pytest.raises(ChannelError) as borrow:
+            handle.borrow_stdio()
+        return start.value.reason, stop.value.reason, borrow.value.reason
+
+    return asyncio.run(request())
 
 
 class ExpiryClock(SystemClock):
@@ -276,6 +298,11 @@ async def test_valid_bound_prepare_at_cutoff_fences_its_registered_gate(
         with pytest.raises(ChannelError) as expired:
             await handle.prepare()
         stopped_by_prepare = owner.stopped
+        first_cause = owner.phase_failure
+        owner.stop()
+        with pytest.raises(ChannelError) as later:
+            await handle.prepare()
+        retained_cause = owner.phase_failure
     finally:
         clock.expired_at = None
         owner.stop()
@@ -285,4 +312,6 @@ async def test_valid_bound_prepare_at_cutoff_fences_its_registered_gate(
     assert expired.value.reason is ChannelFailure.DEADLINE
     assert not stopped_by_contender
     assert stopped_by_prepare
+    assert later.value.reason is ChannelFailure.CLOSED
+    assert first_cause is retained_cause is ChannelFailure.DEADLINE
     assert handle.closed
