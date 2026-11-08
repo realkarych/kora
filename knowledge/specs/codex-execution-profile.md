@@ -42,6 +42,14 @@ Under [#781](https://github.com/realkarych/kora/issues/781), the private Codex c
 
 The constructor refuses overlapping lexical placements and collisions on the exact names it assigns or reserves. These include the provider-key name, the unset app-server state-path control `CODEX_SQLITE_HOME`, and the executor-owned command correlation labels `CODEX_THREAD_ID` and `CODEX_TOOL_CALL_ID`. The native executor supplies the correlation values. The constructor reserves the unset Bash startup control `BASH_ENV` because [non-login Bash still sources it](../research/codex-bash-startup-environment-2026-11-08.md). It also reserves the unset Bash trace controls `SHELLOPTS` and `PS4`. The [selected Linux evidence](../research/codex-bash-trace-environment-2026-11-08.md) records inherited trace output and a separate effect from expanding the trace prefix. It reserves the unset model TLS controls `CODEX_CA_CERTIFICATE`, `SSL_CERT_FILE`, and `SSL_CERT_DIR` based on their [observed effect on selected Linux HTTPS trust](../research/codex-model-tls-roots-2026-11-08.md). The constructor also reserves the four unset alternate registry controls `CODEX_EXEC_SERVER_NOISE_REGISTRY_URL`, `CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID`, `CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN`, and `CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID`. These are partial launch definitions. Complete reservations still require the selected declaration evidence. Physical path identity, binary and effective managed-control checks, secret admission, materialization, final environment assembly and process launch remain with the runtime owner. The [combined Linux fixture](../research/codex-launch-construction-2026-11-05.md) consumes these exact definitions and checks the selected command environment and effects with synthetic credentials. It does not activate the production launch or declaration contracts.
 
+The private constructor also reserves the exact uppercase and lowercase
+spellings of `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`. Both
+authored name collections must omit these controls, and the two recipes leave
+them unset. The [selected Linux proxy evidence](../research/codex-model-proxy-2026-11-08.md)
+distinguishes delivery of the provider key to a cleartext proxy from
+routing the TLS connection through a CONNECT tunnel. Runtime ownership of
+admitted routing and egress follows the existing environment contract.
+
 ## Bound native launch
 
 The selected Codex profile uses [bound native start](protocols.md#bound-native-start). Part D of #184 binds the two recipes from #781 to the same attempt and candidate checkout, with separate private role placements. Both roles use the same pinned official executable. The binding fixes each complete argument vector and native configuration. The adapter requests a role and receives the resources the runtime owner binds to that start.

@@ -112,3 +112,12 @@ in private launch preflight. The [dated record](codex-model-tls-roots-2026-11-08
 shows that each independently changes selected app-server trust on
 loopback HTTPS. Complete declarations, installation trust and production
 environment assembly retain their existing acceptance criteria.
+
+## Subsequent selected model proxy reservations
+
+[#1049](https://github.com/realkarych/kora/issues/1049) reserves the exact
+uppercase and lowercase spellings of the four model proxy controls in private
+launch preflight. The [dated record](codex-model-proxy-2026-11-08.md) separates
+cleartext delivery to an alternate listener, TLS routing through CONNECT, and
+explicit bypass. Complete declarations and installation-owned routing retain
+their existing acceptance criteria.
