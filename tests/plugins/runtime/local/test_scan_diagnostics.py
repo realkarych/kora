@@ -19,7 +19,7 @@ from kora.conformance.common import (
 from kora.observability import LoggingSettings
 from kora.plugins.runtime.local.runtime import Sweep, SweepOutcome, SweepRefused
 from kora.protocols.errors import KoraProtocolError
-from kora.runner.identity import ProcessScanFailure
+from kora.runner.identity import NativeIdentityReader, ProcessScanFailure
 from kora.runner.registry import Entry, Starting
 from tests.measurements.test_local_runtime_cost import last_retirement_observation
 from tests.support.local_runners import (
@@ -195,7 +195,10 @@ async def test_ordinary_retirement_note_preserves_refusal_and_live_carrier(
     ):
         ctx = runtime_context(capture)
         runtime, entry, _, spawned = await lingering_start(
-            root, base / "sockets", ctx, sweep_scan_entries=1
+            root,
+            base / "sockets",
+            ctx,
+            scanner=NativeIdentityReader(clock=ctx.clock, max_scan_entries=1),
         )
         states: list[Entry | None] = []
 

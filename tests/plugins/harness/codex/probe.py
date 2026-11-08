@@ -24,6 +24,7 @@ from kora.plugins.harness.codex.app_server_errors import (
     reject_premature_error,
 )
 from kora.plugins.harness.codex.app_server_messages import (
+    CompletedMessage,
     MessagePhase,
     MessageRefused,
     TurnMessages,
@@ -72,21 +73,31 @@ from kora.plugins.harness.codex.selected_startup import (
 )
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
+    METADATA_ENV_CONTROL,
+    METADATA_ENVIRONMENT,
+    METADATA_MARKER,
     PROJECT_DOC_CANARY,
     SELECTED_AUTH_CASES,
     SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
+    SELECTED_HOOK_TIMEOUT_CASES,
     SELECTED_LAUNCH_CASES,
     SELECTED_MODEL,
+    SELECTED_NOISE_REGISTRY_CASES,
     SELECTED_PATCH_CASES,
     SELECTED_REFUSALS,
+    SELECTED_SQLITE_HOME_CASES,
+    SELECTED_TURN_CASES,
+    SQLITE_HOME_CANARY,
     SelectedHookCase,
     SelectedLaunchCase,
+    SelectedNoiseRegistryCase,
     materialize_native_inputs,
     plant_checkout_canaries,
     prepare_native_inputs,
     role_homes,
+    selected_command,
     workspace_remains_untrusted,
 )
 
@@ -126,18 +137,22 @@ ProbeCase = (
 )
 
 PATCH_DENIAL = "kora managed hook probe denied the direct patch"
-SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, str, str]] = {
-    "selected-hook-deny": ("blocked", "feedback", SELECTED_DENIAL),
+SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, tuple[str, str] | None]] = {
+    "selected-hook-deny": ("blocked", ("feedback", SELECTED_DENIAL)),
     "selected-hook-no-reason": (
         "failed",
-        "error",
-        "PreToolUse hook exited with code 2 "
-        "but did not write a blocking reason to stderr",
+        (
+            "error",
+            "PreToolUse hook exited with code 2 "
+            "but did not write a blocking reason to stderr",
+        ),
     ),
-    "selected-hook-exit-one": ("failed", "error", "hook exited with code 1"),
-    "selected-hook-timeout": ("failed", "error", "hook timed out after 5s"),
-    "selected-patch-deny": ("blocked", "feedback", PATCH_DENIAL),
-    "selected-patch-exit-one": ("failed", "error", "hook exited with code 1"),
+    "selected-hook-exit-one": ("failed", ("error", "hook exited with code 1")),
+    "selected-hook-timeout": ("failed", ("error", "hook timed out after 5s")),
+    "selected-patch-allow": ("completed", None),
+    "selected-patch-deny": ("blocked", ("feedback", PATCH_DENIAL)),
+    "selected-patch-exit-one": ("failed", ("error", "hook exited with code 1")),
+    "selected-patch-timeout": ("failed", ("error", "hook timed out after 5s")),
 }
 
 CODEX = "/usr/local/bin/codex"
@@ -152,6 +167,16 @@ OUTPUT_SCHEMA: dict[str, object] = {
 OUTPUT_TEXT = '{"ok":true}'
 INVALID_OUTPUT_TEXT = '{"ok":true,"ok":false}'
 OUTPUT_MESSAGE = "kora-output-message"
+EVENT_CANARY = "kora-event-mask-canary"
+OUTPUT_CANARY = "kora-candidate-content-canary"
+SELECTED_OUTPUT = {"ok": True, "note": f"{EVENT_CANARY} {OUTPUT_CANARY}"}
+SELECTED_OUTPUT_TEXT = json.dumps(SELECTED_OUTPUT, separators=(",", ":"))
+SELECTED_OUTPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}, "note": {"type": "string"}},
+    "required": ["ok", "note"],
+    "additionalProperties": False,
+}
 MESSAGE_TEXT = "kora-private-message-canary: незавершённый 🌲"
 MESSAGE_CONTENT: tuple[tuple[MessagePhase, str], ...] = (
     ("commentary", "kora-private-message-canary: наблюдение 🌲"),
@@ -169,7 +194,14 @@ CLIENT_CASES = frozenset({"client-complete", "client-exit"})
 PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
 HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
 DIRECT_PATCH_CASES = PATCH_CASES | SELECTED_PATCH_CASES
-PATCH_WRITE_CASES = frozenset({"patch-allow", "selected-patch-exit-one"})
+PATCH_WRITE_CASES = frozenset(
+    {
+        "patch-allow",
+        "selected-patch-allow",
+        "selected-patch-exit-one",
+        "selected-patch-timeout",
+    }
+)
 INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
 INTERRUPT_COMMAND = "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
 INTERRUPT_PRIMER_ID = "kora-interrupt-primer"
@@ -390,8 +422,14 @@ def message_response(*, complete: bool) -> bytes:
     ).encode()
 
 
-def output_response(case: ProbeCase, *, complete: bool) -> bytes:
-    text = INVALID_OUTPUT_TEXT if case == "output-invalid" else OUTPUT_TEXT
+def output_response(
+    case: ProbeCase, *, complete: bool, usage: dict[str, object] | None = None
+) -> bytes:
+    text = OUTPUT_TEXT
+    if case in SELECTED_TURN_CASES:
+        text = SELECTED_OUTPUT_TEXT
+    elif case == "output-invalid":
+        text = INVALID_OUTPUT_TEXT
     item: dict[str, object] = {
         "id": OUTPUT_MESSAGE,
         "type": "message",
@@ -399,7 +437,7 @@ def output_response(case: ProbeCase, *, complete: bool) -> bytes:
         "content": [{"type": "output_text", "text": text}],
     }
     if complete:
-        return sse("kora-output-response", item)
+        return sse("kora-output-response", item, usage=usage)
     events: tuple[dict[str, object], ...] = (
         {"type": "response.created", "response": {"id": "kora-output-response"}},
         {"type": "response.output_item.done", "item": item},
@@ -491,15 +529,22 @@ FINAL_ITEM: dict[str, object] = {
     "content": [{"type": "output_text", "text": "Probe turn finished."}],
 }
 FINAL_RESPONSE = sse("kora-probe-response-2", FINAL_ITEM)
+FIRST_RESPONSE_USAGE: dict[str, object] = {
+    "input_tokens": 100,
+    "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
+    "output_tokens": 10,
+    "output_tokens_details": {"reasoning_tokens": 4},
+    "total_tokens": 110,
+}
+SECOND_RESPONSE_USAGE: dict[str, object] = {
+    "input_tokens": 60,
+    "input_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 10},
+    "output_tokens": 20,
+    "output_tokens_details": {"reasoning_tokens": 6},
+    "total_tokens": 80,
+}
 USAGE_TOOL_RESPONSE = command_response(
-    {"cmd": COMMAND, "login": False},
-    usage={
-        "input_tokens": 100,
-        "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
-        "output_tokens": 10,
-        "output_tokens_details": {"reasoning_tokens": 4},
-        "total_tokens": 110,
-    },
+    {"cmd": COMMAND, "login": False}, usage=FIRST_RESPONSE_USAGE
 )
 INTERRUPT_PRIMER_RESPONSE = sse(
     "kora-interrupt-primer-response",
@@ -523,16 +568,18 @@ INTERRUPT_TOOL_RESPONSE = command_response(
 USAGE_FINAL_RESPONSE = sse(
     "kora-probe-response-2",
     FINAL_ITEM,
-    usage={
-        "input_tokens": 60,
-        "input_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 10},
-        "output_tokens": 20,
-        "output_tokens_details": {"reasoning_tokens": 6},
-        "total_tokens": 80,
-    },
+    usage=SECOND_RESPONSE_USAGE,
 )
 USAGE_SOURCE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 EXPECTED_USAGE = (TokenCounts(100, 20, 30, 10, 4), TokenCounts(160, 25, 40, 30, 10))
+
+
+REGISTRY_ID = "kora-probe-registry"
+REGISTRY_BEARER = "synthetic-noise-registry-token"
+NOISE_ACCOUNT = "synthetic-noise-registry-account"
+NOISE_REGISTRY_ROUTE = (
+    f"POST /cloud/environment/{REGISTRY_ID}/connect HTTP/1.1".encode()
+)
 
 
 class ResponsesFixture:
@@ -540,7 +587,9 @@ class ResponsesFixture:
         self.case: ProbeCase = case
         self.one_shot = one_shot
         self.request_limit: int
-        if case in SELECTED_REFUSALS:
+        if case == "selected-noise-registry-override":
+            self.request_limit = 1
+        elif case in SELECTED_REFUSALS:
             self.request_limit = 0
         elif case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
@@ -557,6 +606,7 @@ class ResponsesFixture:
                 3 if case == "interactive" or (one_shot and case == "allow") else 2
             )
         self.request_admitted = asyncio.Event()
+        self.first_usage_emitted = asyncio.Event()
         self.stream_ready = asyncio.Event()
         self.stream_closed = asyncio.Event()
         self.connections: int = 0
@@ -589,9 +639,15 @@ class ResponsesFixture:
             async with asyncio.timeout_at(deadline):
                 raw_headers = await reader.readuntil(b"\r\n\r\n")
                 request_line, *headers = raw_headers[:-4].split(b"\r\n")
+                registry = self.case == "selected-noise-registry-override"
+                expected_route = (
+                    NOISE_REGISTRY_ROUTE if registry else b"POST /v1/responses HTTP/1.1"
+                )
                 require(
-                    request_line == b"POST /v1/responses HTTP/1.1",
-                    "unexpected_responses_route",
+                    request_line == expected_route,
+                    "unexpected_registry_route"
+                    if registry
+                    else "unexpected_responses_route",
                 )
                 fields = self.verify_headers(headers)
                 size = int(fields.get(b"content-length", b"0"))
@@ -602,6 +658,22 @@ class ResponsesFixture:
                         PROJECT_DOC_CANARY not in body, "project_instructions_applied"
                     )
                 request = parse_object(body)
+                if registry:
+                    require(
+                        request.keys() == {"harness_public_key"}
+                        and isinstance(request["harness_public_key"], dict),
+                        "unexpected_registry_connect_body",
+                    )
+                    self.requests += 1
+                    writer.write(
+                        b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n"
+                        b"Content-Length: 0\r\n\r\n"
+                    )
+                    await writer.drain()
+                    diagnostic(
+                        "INFO", "probe.selected_noise_registry_request_refused", "403"
+                    )
+                    return
                 if self.case == "selected-startup-ready":
                     require(
                         request.get("model") == SELECTED_MODEL,
@@ -609,6 +681,11 @@ class ResponsesFixture:
                     )
                 response = self.respond(request)
                 self.request_admitted.set()
+                second_selected = (
+                    self.case in SELECTED_TURN_CASES and self.requests == 2
+                )
+                if second_selected:
+                    await self.first_usage_emitted.wait()
                 if self.case == "client-exit":
                     await asyncio.Future[None]()
                 if self.case in ERROR_CASES:
@@ -629,14 +706,11 @@ class ResponsesFixture:
                     )
                     await writer.drain()
                     return
-                if self.case in {"interrupt-model", "messages-kill", "output-kill"}:
+                if self.case in {"interrupt-model", "messages-kill", "output-kill"} or (
+                    second_selected and self.case == "selected-turn-cut"
+                ):
                     prelude = (
-                        output_response(self.case, complete=False)
-                        if self.case == "output-kill"
-                        else message_response(complete=False)
-                        if self.case == "messages-kill"
-                        else b'data: {"type":"response.created","response":'
-                        b'{"id":"kora-probe-open-response"}}\n\n'
+                        response if second_selected else self.open_stream_prelude()
                     )
                     writer.write(
                         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -674,6 +748,7 @@ class ResponsesFixture:
     def verify_headers(self, headers: list[bytes]) -> dict[bytes, bytes]:
         fields: dict[bytes, bytes] = {}
         authorization_count = 0
+        account_count = 0
         for header in headers:
             key, separator, value = header.partition(b":")
             require(
@@ -683,6 +758,8 @@ class ResponsesFixture:
             name = key.lower()
             if name == b"authorization":
                 authorization_count += 1
+            if name == b"chatgpt-account-id":
+                account_count += 1
             fields[name] = value.strip(b" \t")
         require(
             not {
@@ -695,7 +772,15 @@ class ResponsesFixture:
             & fields.keys(),
             "unexpected_responses_credentials",
         )
-        if self.case == "provider_key_present" or self.case in SELECTED_AUTH_CASES:
+        if self.case == "selected-noise-registry-override":
+            require(
+                authorization_count == 1
+                and fields[b"authorization"] == f"Bearer {REGISTRY_BEARER}".encode()
+                and account_count == 1
+                and fields[b"chatgpt-account-id"] == NOISE_ACCOUNT.encode(),
+                "unexpected_registry_authorization",
+            )
+        elif self.case == "provider_key_present" or self.case in SELECTED_AUTH_CASES:
             require(
                 authorization_count == 1
                 and fields[b"authorization"] == f"Bearer {SYNTHETIC_BEARER}".encode(),
@@ -709,13 +794,19 @@ class ResponsesFixture:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
         require(self.case not in STARTUP_REFUSALS, "startup_unexpected_model_request")
-        if self.case in OUTPUT_CASES:
+        if self.case in OUTPUT_CASES or self.case in SELECTED_TURN_CASES:
             formatting = as_object(as_object(request.get("text")).get("format"))
+            schema = (
+                SELECTED_OUTPUT_SCHEMA
+                if self.case in SELECTED_TURN_CASES
+                else OUTPUT_SCHEMA
+            )
             require(
                 formatting.get("type") == "json_schema"
-                and formatting.get("schema") == OUTPUT_SCHEMA,
+                and formatting.get("schema") == schema,
                 "native_output_schema_mismatch",
             )
+        if self.case in OUTPUT_CASES:
             require(self.requests == 1, "unexpected_output_request")
             return output_response(self.case, complete=True)
         if self.case in MESSAGE_CASES:
@@ -771,7 +862,12 @@ class ResponsesFixture:
                 if self.case == "allow":
                     return stdin_response(1)
             if self.case in SELECTED_LAUNCH_CASES:
-                return command_response({"cmd": SELECTED_COMMAND})
+                usage = (
+                    FIRST_RESPONSE_USAGE if self.case in SELECTED_TURN_CASES else None
+                )
+                return command_response(
+                    {"cmd": selected_command(self.case)}, usage=usage
+                )
             if self.case in SHELL_ARGUMENTS:
                 command = (
                     EXECUTOR_COMMAND if self.case in EXECUTOR_CASES else SHELL_COMMAND
@@ -869,14 +965,34 @@ class ResponsesFixture:
                 bool(separator) and status == ["Process exited with code 0"],
                 "shell_command_failed",
             )
-            if self.case in SELECTED_HOOK_CASES:
+            if (
+                self.case in SELECTED_HOOK_CASES
+                or self.case in SELECTED_SQLITE_HOME_CASES
+                or self.case == "selected-command-metadata"
+            ):
                 require(not body.strip(), "selected_fault_unexpected_command_output")
         else:
             require(
                 (DENIAL in output) == (self.case == "deny"),
                 "unexpected_hook_denial_result",
             )
+        if self.case in SELECTED_TURN_CASES:
+            return output_response(
+                self.case,
+                complete=self.case == "selected-turn-complete",
+                usage=SECOND_RESPONSE_USAGE,
+            )
         return USAGE_FINAL_RESPONSE if self.case == "usage" else FINAL_RESPONSE
+
+    def open_stream_prelude(self) -> bytes:
+        if self.case == "output-kill":
+            return output_response(self.case, complete=False)
+        if self.case == "messages-kill":
+            return message_response(complete=False)
+        return (
+            b'data: {"type":"response.created","response":'
+            b'{"id":"kora-probe-open-response"}}\n\n'
+        )
 
     async def close(self, server: asyncio.Server) -> None:
         server.close()
@@ -956,7 +1072,7 @@ class ToolProbe:
         self, terminal: TurnCompletion, session: AppServerTurnSession | None
     ) -> None:
         expected: tuple[tuple[str, str, str, str | None, int | None], ...]
-        if self.case == "allow":
+        if self.case in ("allow", "selected-command-metadata"):
             expected = (
                 (
                     "commandExecution",
@@ -1074,6 +1190,7 @@ class MessageProbe:
         self.thread_id = thread_id
         self.case = case
         self.messages = TurnMessages(thread_id, max_messages=4, max_text_bytes=4096)
+        self.confirmed_count = 0
         self.acknowledged_turn: str | None = None
         self.delta_turn: str | None = None
         self.delta_seen = asyncio.Event()
@@ -1105,18 +1222,25 @@ class MessageProbe:
             self.delta_turn = cast("str", identity)
             self.delta_seen.set()
         observation = self.messages.accept(notification)
-        if observation is not None:
-            require(self.case != "messages-kill", "partial_message_completed")
-            require(
-                self.messages.count <= len(self.expected), "message_count_unexpected"
-            )
-            phase, text = self.expected[self.messages.count - 1]
-            require(
-                observation.phase == phase and observation.text == text,
-                "message_content_mismatch",
-            )
-            if self.acknowledged_turn is not None:
-                self.messages.for_turn(self.acknowledged_turn)
+        if observation is not None and self.acknowledged_turn is not None:
+            self.messages.for_turn(self.acknowledged_turn)
+
+    def confirmed(self, ordinal: int, observation: CompletedMessage) -> None:
+        require(
+            self.case != "messages-kill"
+            and ordinal == self.confirmed_count + 1
+            and ordinal <= len(self.expected),
+            "message_count_unexpected",
+        )
+        phase, text = self.expected[ordinal - 1]
+        require(
+            observation.thread_id == self.thread_id
+            and observation.turn_id == self.acknowledged_turn
+            and observation.phase == phase
+            and observation.text == text,
+            "message_content_mismatch",
+        )
+        self.confirmed_count = ordinal
 
     def verify(self, terminal: TurnCompletion) -> None:
         require(terminal.status == "completed", "message_turn_not_completed")
@@ -1124,6 +1248,10 @@ class MessageProbe:
         require(
             self.messages.for_turn(terminal.turn_id) is not None,
             "message_completion_missing",
+        )
+        require(self.confirmed_count == len(self.expected), "message_handoff_missing")
+        diagnostic(
+            "INFO", "probe.confirmed_messages_verified", str(self.confirmed_count)
         )
 
     def verify_partial(self) -> None:
@@ -1134,6 +1262,7 @@ class MessageProbe:
         )
         require(
             self.messages.count == 0
+            and self.confirmed_count == 0
             and self.messages.for_turn(cast("str", identity)) is None,
             "partial_message_adopted",
         )
@@ -1158,7 +1287,7 @@ class HookCompletionProbe:
             "selected_hook_completion_identity",
         )
         run = as_object(params.get("run"))
-        status, kind, reason = SELECTED_HOOK_OUTCOMES[self.case]
+        status, entry = SELECTED_HOOK_OUTCOMES[self.case]
         require(
             run.get("eventName") == "preToolUse"
             and run.get("handlerType") == "command"
@@ -1170,15 +1299,13 @@ class HookCompletionProbe:
             "selected_hook_handler_identity",
         )
         require(run.get("status") == status, "selected_hook_completion_status")
-        require(
-            run.get("entries") == [{"kind": kind, "text": reason}],
-            "selected_hook_completion_entry",
-        )
+        entries = [] if entry is None else [{"kind": entry[0], "text": entry[1]}]
+        require(run.get("entries") == entries, "selected_hook_completion_entry")
         self.turn_id = cast("str", turn_id)
 
     def verify(self, turn_id: str) -> None:
         require(self.turn_id == turn_id, "selected_hook_completion_turn")
-        status, _, _ = SELECTED_HOOK_OUTCOMES[self.case]
+        status, _ = SELECTED_HOOK_OUTCOMES[self.case]
         diagnostic("INFO", "probe.selected_hook_completion", f"{self.case}:{status}")
 
 
@@ -1316,6 +1443,28 @@ class Stdio:
             await self.register_executor(executor_url, executor_bearer)
         await self.run_turn(workspace, case, selected_executor=executor_url is not None)
 
+    async def observe_noise_registry(self, case: SelectedNoiseRegistryCase) -> None:
+        await initialize_app_server(
+            self.rpc, self.identity, deadline=self.deadline, experimental_api=True
+        )
+        local = await self.call("environment/status", {"environmentId": "local"})
+        require(local.get("status") == "unknown", "local_executor_available")
+        alternate: dict[str, object] = {"environmentId": "remote"}
+        try:
+            await self.call("environment/info", alternate)
+        except RpcError as error:
+            require(error.reason is RpcFailure.REMOTE_ERROR, "registry_lookup_failed")
+        else:
+            raise ProbeFailure("registry_lookup_unexpectedly_accepted")
+        status = await self.call("environment/status", alternate)
+        expected = (
+            "disconnected" if case == "selected-noise-registry-override" else "unknown"
+        )
+        require(
+            status.get("status") == expected, "unexpected_registry_environment_status"
+        )
+        diagnostic("INFO", "probe.selected_noise_registry_lookup_refused", case)
+
     async def observe_selected(
         self, workspace: Path, case: ProbeCase, endpoint: str, bearer: str
     ) -> None:
@@ -1353,6 +1502,8 @@ class Stdio:
         await self.run_turn(
             workspace, case, selected_executor=True, thread_id=thread_id
         )
+        if case == "selected-command-metadata":
+            verify_command_metadata(workspace, thread_id)
 
     async def register_executor(self, executor_url: str, bearer: str) -> None:
         await self.call(
@@ -1437,7 +1588,8 @@ class Stdio:
         self.outputs = outputs
         tools = (
             ToolProbe(case, thread_id)
-            if case in DIRECT_PATCH_CASES or case in ("allow", "deny", "decoder-refuse")
+            if case in DIRECT_PATCH_CASES
+            or case in ("allow", "deny", "decoder-refuse", "selected-command-metadata")
             else None
         )
         hook = (
@@ -1496,6 +1648,7 @@ class Stdio:
                 observe=observe,
                 on_waiting=self.waiting_terminal.set,
                 on_started=observe_started,
+                on_message=messages.confirmed if messages is not None else None,
                 output_schema=OUTPUT_SCHEMA if outputs is not None else None,
                 usage_observer=(
                     UsageObserver(lambda: USAGE_SOURCE_TIME, usage.confirmed)
@@ -1986,6 +2139,164 @@ async def stop_native_process(process: asyncio.subprocess.Process) -> None:
             require(writer.is_closing(), "native_stdin_not_closed")
 
 
+async def observe_selected_event_turn(
+    fixture: ResponsesFixture,
+    rpc: AppServerRpc,
+    identity: StartupIdentity,
+    expected: SelectedEnvironment,
+    bearer: str,
+    app: asyncio.subprocess.Process,
+    deadline: float,
+) -> None:
+    from itertools import count
+
+    from kora.conformance.harness import ConformanceSink, Trace
+    from kora.ir.json import JsonObject
+    from kora.observability.redaction import MASK, SecretRegistry
+    from kora.plugins.harness.codex.selected_turn import (
+        SelectedTurnInputs,
+        run_selected_turn,
+    )
+    from kora.plugins.harness.codex.usage_events import UsageStamp
+    from kora.protocols.harness import ResultEvent, TurnEvent, UsageEvent
+    from kora.runner.usage import UsageLedger
+
+    message_emitted = asyncio.Event()
+
+    class SelectedSink(ConformanceSink):
+        def emit(self, kind: str, data: JsonObject) -> None:
+            super().emit(kind, data)
+            if kind == "usage":
+                fixture.first_usage_emitted.set()
+            elif kind == "turn":
+                message_emitted.set()
+
+    async def cut_after_message() -> None:
+        await fixture.stream_ready.wait()
+        await message_emitted.wait()
+        require(
+            not fixture.stream_closed.is_set(), "selected_event_stream_closed_early"
+        )
+        signal_native_process(app, signal.SIGKILL)
+
+    cut = fixture.case == "selected-turn-cut"
+    sink = SelectedSink(None, Trace())
+    registry = SecretRegistry()
+    registration = registry.register(EVENT_CANARY)
+    sequence = count(1)
+
+    def next_stamp() -> UsageStamp:
+        ordinal = next(sequence)
+        return UsageStamp(f"selected-usage-{ordinal}", ordinal)
+
+    killer = asyncio.create_task(cut_after_message()) if cut else None
+    result = None
+    try:
+        try:
+            result = await run_selected_turn(
+                rpc,
+                identity,
+                expected,
+                bearer,
+                SelectedTurnInputs(
+                    "Run the probe marker command and return JSON.",
+                    SELECTED_OUTPUT_SCHEMA,
+                    True,
+                    16,
+                    16,
+                ),
+                deadline=deadline,
+                sink=sink,
+                registry=registry,
+                usage_message_id="selected-usage",
+                source_time=lambda: USAGE_SOURCE_TIME,
+                next_usage_stamp=next_stamp,
+            )
+        except RpcError as error:
+            if killer is None or error.reason is not RpcFailure.DISCONNECTED:
+                raise
+            require(killer.done(), "selected_event_app_not_signalled")
+            killer.result()
+            require(
+                await app.wait() == -signal.SIGKILL, "selected_event_app_not_killed"
+            )
+            await fixture.stream_closed.wait()
+            diagnostic("INFO", "probe.selected_event_peer_eof", fixture.case)
+    finally:
+        registration.release()
+        if killer is not None:
+            killer.cancel()
+            await asyncio.gather(killer, return_exceptions=True)
+
+    messages = [event.data for event in sink.events if isinstance(event, TurnEvent)]
+    usage = [event.data for event in sink.events if isinstance(event, UsageEvent)]
+    results = [event.data for event in sink.events if isinstance(event, ResultEvent)]
+    require(
+        len(sink.events) == (2 if cut else 4)
+        and len(messages) == sink.count.events == 1
+        and messages[0].text == SELECTED_OUTPUT_TEXT.replace(EVENT_CANARY, MASK)
+        and not messages[0].truncated,
+        "selected_event_message_mismatch",
+    )
+    expected_counts = ((50, 20, 30, 10, 4), (95, 25, 40, 30, 10))
+    require(
+        tuple(
+            (
+                data.input_tokens,
+                data.cached_input_tokens,
+                data.cache_creation_tokens,
+                data.output_tokens,
+                data.reasoning_tokens,
+            )
+            for data in usage
+        )
+        == (expected_counts[:1] if cut else expected_counts),
+        "selected_event_usage_counts_mismatch",
+    )
+    ledger = UsageLedger()
+    for ordinal, data in enumerate(usage, 1):
+        require(
+            data.observation_id == f"selected-usage-{ordinal}"
+            and data.observation_sequence == ordinal
+            and data.observed_at == USAGE_SOURCE_TIME
+            and data.coverage.completeness == "partial"
+            and data.coverage.attribution_gap
+            and not data.coverage.observation_gap,
+            "selected_event_usage_identity_mismatch",
+        )
+        ledger.observe(data)
+    coverage = ledger.coverage(result_seen=not cut)
+    require(
+        ledger.latest == usage[-1]
+        and ledger.rows() == ()
+        and coverage.completeness == "unavailable"
+        and coverage.attribution_gap,
+        "selected_event_ledger_mismatch",
+    )
+    if cut:
+        require(result is None and not results, "selected_event_cut_result_emitted")
+    else:
+        require(
+            result is not None
+            and results == [result.data]
+            and sink.events[-1].kind == "result"
+            and result.data.subtype == "codex_completed"
+            and not result.data.is_error
+            and result.failure_class is None
+            and result.output_diagnostic is None
+            and result.output is not None
+            and result.output.value == SELECTED_OUTPUT
+            and EVENT_CANARY not in result.data.model_dump_json()
+            and OUTPUT_CANARY not in result.data.model_dump_json(),
+            "selected_event_result_mismatch",
+        )
+    diagnostic(
+        "INFO",
+        "probe.selected_events_verified",
+        f"{fixture.case}:messages={len(messages)},usage={len(usage)},results={len(results)}",
+    )
+
+
 async def signal_after_request(
     process: asyncio.subprocess.Process, fixture: ResponsesFixture, stdio: Stdio
 ) -> None:
@@ -2027,6 +2338,7 @@ async def observe_client_exit(
             require(stdio.messages is not None, "message_observer_missing")
             cast("MessageProbe", stdio.messages).verify_partial()
             await fixture.stream_closed.wait()
+            diagnostic("INFO", "probe.confirmed_messages_verified", "0")
         if fixture.case == "output-kill":
             require(stdio.outputs is not None, "output_observer_missing")
             cast("OutputProbe", stdio.outputs).verify_pending()
@@ -2077,6 +2389,7 @@ def startup_identity(case: ProbeCase, prepared_home: Path) -> StartupIdentity:
 
 async def observe_hook_timeout(
     stdio: Stdio,
+    case: SelectedLaunchCase,
     workspace: Path,
     endpoint: str,
     bearer: str,
@@ -2096,7 +2409,7 @@ async def observe_hook_timeout(
         listener.bind(str(CONTROL / HOOK_TIMEOUT_SOCKET))
         listener.listen(1)
         observation = asyncio.create_task(
-            stdio.observe_selected(workspace, "selected-hook-timeout", endpoint, bearer)
+            stdio.observe_selected(workspace, case, endpoint, bearer)
         )
         try:
             peer, _ = await loop.sock_accept(listener)
@@ -2105,7 +2418,11 @@ async def observe_hook_timeout(
             require(
                 await loop.sock_recv(peer, 1) == b"1", "selected_hook_timeout_ready"
             )
-            pid = verify_shell_hook(SELECTED_COMMAND)
+            pid = (
+                verify_patch_hook()
+                if case in SELECTED_PATCH_CASES
+                else verify_shell_hook(SELECTED_COMMAND)
+            )
             credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             require(
                 len(credentials) == 12
@@ -2168,6 +2485,24 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 )
                 child_env = materialize_native_inputs(inputs.app_server)
                 exec_env = materialize_native_inputs(inputs.exec_server)
+                if fixture.case == "selected-command-metadata":
+                    exec_env.update(METADATA_ENVIRONMENT)
+                if fixture.case == "selected-sqlite-home-override":
+                    child_env["CODEX_SQLITE_HOME"] = str(root / SQLITE_HOME_CANARY)
+                if fixture.case in SELECTED_NOISE_REGISTRY_CASES:
+                    require(
+                        child_env.get("CODEX_EXEC_SERVER_URL") == "none",
+                        "selected_default_executor_not_disabled",
+                    )
+                if fixture.case == "selected-noise-registry-override":
+                    child_env.update(
+                        {
+                            "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL": f"http://127.0.0.1:{port}",
+                            "CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID": REGISTRY_ID,
+                            "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN": REGISTRY_BEARER,
+                            "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID": NOISE_ACCOUNT,
+                        }
+                    )
                 if fixture.case != "selected-key-absent":
                     child_env["CODEX_API_KEY"] = SYNTHETIC_BEARER
                 executor = await launch_executor(
@@ -2209,12 +2544,36 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 await stdio.interrupt_turn(workspace, fixture, process)
             elif fixture.case in {"client-exit", "messages-kill", "output-kill"}:
                 await observe_client_exit(process, fixture, stdio, workspace)
+            elif fixture.case in SELECTED_NOISE_REGISTRY_CASES:
+                await stdio.observe_noise_registry(fixture.case)
+            elif fixture.case in SELECTED_TURN_CASES:
+                assert executor_url is not None
+                await observe_selected_event_turn(
+                    fixture,
+                    rpc,
+                    identity,
+                    SelectedEnvironment(
+                        EXECUTOR_ID,
+                        executor_url,
+                        Path("/bin/bash"),
+                        workspace,
+                        SELECTED_MODEL,
+                    ),
+                    bearer,
+                    process,
+                    deadline,
+                )
             elif fixture.case in SELECTED_LAUNCH_CASES:
                 assert executor_url is not None
-                if fixture.case == "selected-hook-timeout":
+                if fixture.case in SELECTED_HOOK_TIMEOUT_CASES:
                     assert executor is not None
                     await observe_hook_timeout(
-                        stdio, workspace, executor_url, bearer, (process, executor)
+                        stdio,
+                        fixture.case,
+                        workspace,
+                        executor_url,
+                        bearer,
+                        (process, executor),
                     )
                     diagnostic(
                         "INFO",
@@ -2308,9 +2667,49 @@ async def close_selected_launch(
         diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
 
 
+def verify_command_metadata(workspace: Path, thread_id: str) -> None:
+    marker = workspace / METADATA_MARKER
+    expected = f"{thread_id}\n{CALL_ID}\n{METADATA_ENV_CONTROL}\n".encode()
+    require(marker.is_file() and not marker.is_symlink(), "command_metadata_missing")
+    with marker.open("rb") as contents:
+        require(
+            contents.read(len(expected) + 1) == expected,
+            "command_metadata_mismatch",
+        )
+    diagnostic(
+        "INFO", "probe.selected_command_metadata_verified", "selected-command-metadata"
+    )
+
+
+def verify_sqlite_home(root: Path, *, override: bool) -> None:
+    default_home = role_homes(root / "app").codex_home
+    canary_home = root / SQLITE_HOME_CANARY
+    selected, competing = (
+        (canary_home, default_home) if override else (default_home, canary_home)
+    )
+    filename = "state_5.sqlite"
+    database = selected / filename
+    require(
+        database.is_file() and not database.is_symlink(),
+        "selected_sqlite_state_missing",
+    )
+    require(not os.path.lexists(competing / filename), "competing_sqlite_state_exists")
+    signature = b"SQLite format 3\x00"
+    with database.open("rb", buffering=0) as contents:
+        require(
+            contents.read(len(signature)) == signature, "invalid_sqlite_state_header"
+        )
+
+
 async def run_selected_launch(case: SelectedLaunchCase) -> None:
     if case in SELECTED_AUTH_CASES:
-        decision = "selected-allow" if case == "selected-startup-ready" else case
+        decision = (
+            "selected-allow"
+            if case == "selected-startup-ready"
+            or case in SELECTED_TURN_CASES
+            or case in SELECTED_SQLITE_HOME_CASES
+            else case
+        )
         (CONTROL / "decision").write_text(decision, encoding="utf-8")
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
         root = Path(scratch)
@@ -2318,6 +2717,8 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             "workspace :@" if case == "selected-startup-ready" else "workspace"
         )
         workspace.mkdir()
+        if case in SELECTED_SQLITE_HOME_CASES:
+            (root / SQLITE_HOME_CANARY).mkdir(mode=0o700)
         if case == "selected-startup-ready":
             plant_checkout_canaries(workspace)
         marker = workspace / MARKER
@@ -2337,7 +2738,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         elif case in SELECTED_PATCH_CASES:
             verify_patch_hook()
         else:
-            verify_shell_hook(SELECTED_COMMAND)
+            verify_shell_hook(selected_command(case))
         executes = case in SELECTED_AUTH_CASES and case not in {
             "selected-deny",
             "selected-hook-deny",
@@ -2364,6 +2765,9 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             diagnostic(
                 "INFO", "probe.selected_hook_effect_verified", f"{case}:{effect}"
             )
+        if case in SELECTED_SQLITE_HOME_CASES:
+            verify_sqlite_home(root, override=case == "selected-sqlite-home-override")
+            diagnostic("INFO", "probe.selected_sqlite_home_verified", case)
         if case == "selected-startup-ready":
             require(
                 workspace_remains_untrusted(
@@ -2529,9 +2933,9 @@ def verify_hook_invocation() -> None:
         require(invocations.read(2) == b"1", "unexpected_hook_input_invocation_count")
 
 
-def verify_patch_hook() -> None:
+def verify_patch_hook() -> int:
     verify_hook_invocation()
-    hook_pid(PATCH, tool="apply_patch")
+    return hook_pid(PATCH, tool="apply_patch")
 
 
 def verify_patch_marker(marker: Path, *, writes: bool) -> None:

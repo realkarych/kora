@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from kora.conformance.capture import Capture
-from kora.conformance.vcs import Kept, pinned, publish_request, run
+from kora.conformance.vcs import Kept, pinned, run
 from tests.plugins.vcs.git_support import World, git, make_world, write
 
 
@@ -81,7 +81,6 @@ def test_persisted_revision_is_reused_without_a_new_commit(
             first.plan,
             first.sealed,
             checkout.workspace(),
-            publish_request(world.remote_fixture(), checkout),
             pinned(world.binding()),
             checkout.areas,
             (),

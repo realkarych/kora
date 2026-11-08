@@ -15,6 +15,26 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.graph_deployment_stage_v1 import (
+    OCCURRENCE_TABLE,
+    STAGE_TABLE,
+    graph_deployment_stage_elements_v1,
+    graph_deployment_stage_occurrence_elements_v1,
+)
+from kora.db.graph_preparation_capacity_v1 import (
+    TABLE_NAME as PREPARATION_CAPACITY_TABLE,
+)
+from kora.db.graph_preparation_capacity_v1 import graph_preparation_capacity_elements_v1
+from kora.db.graph_preparation_v1 import TABLE_NAME as GRAPH_PREPARATION_TABLE
+from kora.db.graph_preparation_v1 import graph_preparation_elements_v1
+from kora.db.graph_version_resource_owner_v1 import (
+    TABLE_NAME as GRAPH_VERSION_RESOURCE_OWNER_TABLE,
+)
+from kora.db.graph_version_resource_owner_v1 import (
+    graph_version_resource_owner_elements_v1,
+)
+from kora.db.storage_address_fence_v1 import TABLE_NAME as STORAGE_ADDRESS_FENCE_TABLE
+from kora.db.storage_address_fence_v1 import storage_address_fence_elements_v1
 from kora.db.types import (
     DIGEST_LENGTH,
     IDENTIFIER_LENGTH,
@@ -161,6 +181,62 @@ graph_version: Table = Table(
     Column("status", name(), nullable=False),
     *audit_columns(),
     UniqueConstraint("graph_id", "number"),
+)
+
+GRAPH_VERSION_SCOPE_INDEX: str = "ix_graph_version_graph_id_id"
+Index(GRAPH_VERSION_SCOPE_INDEX, graph_version.c.graph_id, graph_version.c.id).ddl_if(
+    dialect="sqlite"
+)
+
+graph_version_resource_owner: Table = Table(
+    GRAPH_VERSION_RESOURCE_OWNER_TABLE,
+    metadata,
+    *graph_version_resource_owner_elements_v1(),
+)
+
+graph_version_read_admission: Table = Table(
+    "graph_version_read_admission",
+    metadata,
+    Column(
+        "graph_version_id",
+        identifier(),
+        ForeignKey("graph_version.id"),
+        primary_key=True,
+    ),
+    Column("format_version", Integer, nullable=False),
+    Column("db_input_bytes", BigInteger, nullable=False),
+    Column("resource_transport_bytes", BigInteger, nullable=False),
+    CheckConstraint("format_version = 1", name="format_version"),
+    CheckConstraint("db_input_bytes > 0", name="db_input_bytes"),
+    CheckConstraint("resource_transport_bytes > 0", name="resource_transport_bytes"),
+    CheckConstraint(
+        "typeof(format_version) = 'integer' AND typeof(db_input_bytes) = 'integer' "
+        "AND typeof(resource_transport_bytes) = 'integer'",
+        name="integer_storage",
+    ).ddl_if(dialect="sqlite"),
+)
+
+graph_deployment_preparation: Table = Table(
+    GRAPH_PREPARATION_TABLE, metadata, *graph_preparation_elements_v1()
+)
+
+graph_deployment_preparation_capacity: Table = Table(
+    PREPARATION_CAPACITY_TABLE, metadata, *graph_preparation_capacity_elements_v1()
+)
+
+storage_address_fence: Table = Table(
+    STORAGE_ADDRESS_FENCE_TABLE,
+    metadata,
+    *storage_address_fence_elements_v1(),
+    sqlite_autoincrement=True,
+)
+
+graph_deployment_stage: Table = Table(
+    STAGE_TABLE, metadata, *graph_deployment_stage_elements_v1()
+)
+
+graph_deployment_stage_occurrence: Table = Table(
+    OCCURRENCE_TABLE, metadata, *graph_deployment_stage_occurrence_elements_v1()
 )
 
 preset: Table = Table(

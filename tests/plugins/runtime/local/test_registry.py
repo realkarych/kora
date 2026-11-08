@@ -406,7 +406,13 @@ async def attempt_ids_map_to_fixed_names(tmp_path: Path, capture: Capture) -> No
     assert len(entries) == 2 * len(attempts)
     assert len(stems) == len(attempts)
     assert all(len(stem) == NAME_LENGTH for stem in stems)
-    assert sorted(os.listdir(root)) == ["boot.lock", "domain.json", "registry"]
+    assert sorted(os.listdir(root)) == [
+        "boot.lock",
+        "domain.json",
+        "registry",
+        "spools",
+    ]
+    assert tuple((root / "spools").iterdir()) == ()
     assert all(head is not None for head in heads)
 
 
@@ -530,7 +536,13 @@ async def concurrent_first_open_shares_domain(tmp_path: Path, capture: Capture) 
 
     assert len(registries) == 4, outcomes
     assert len({registry.execution_domain_id for registry in registries}) == 1
-    assert sorted(os.listdir(root)) == ["boot.lock", "domain.json", "registry"]
+    assert sorted(os.listdir(root)) == [
+        "boot.lock",
+        "domain.json",
+        "registry",
+        "spools",
+    ]
+    assert tuple((root / "spools").iterdir()) == ()
 
 
 async def full_boot_log_is_refused(tmp_path: Path, capture: Capture) -> None:

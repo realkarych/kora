@@ -221,6 +221,8 @@ async def sealed_input(
     ctx: ProtocolContext,
 ) -> tuple[PublishPlan, PublicationInput]:
     plan = await provider.publish_plan(publish_request(remote, checkout), ctx)
+    if plan.repo != remote.repo or plan.branch != remote.publish_branch:
+        fail("the publication plan names the requested repository and branch")
     workspace = checkout.workspace()
     exported = await executor.export(plan, workspace, checkout.areas, ctx)
     sealed = await executor.seal(exported, workspace, checkout.areas, ctx)
@@ -229,7 +231,6 @@ async def sealed_input(
 
 async def prepared_from(
     executor: Executor,
-    remote: VcsRemote,
     binding: VcsBinding,
     checkout: Checkout,
     plan: PublishPlan,
@@ -240,7 +241,6 @@ async def prepared_from(
         plan,
         sealed,
         checkout.workspace(),
-        publish_request(remote, checkout),
         pinned(binding),
         checkout.areas,
         (),
@@ -470,9 +470,7 @@ def test_vcs_sealed_transfer_fixes_inspected_revision(
 
     prepared = attempted(
         lambda: run(
-            prepared_from(
-                bench.executor, remote, kora_vcs_binding, checkout, plan, sealed, ctx
-            )
+            prepared_from(bench.executor, kora_vcs_binding, checkout, plan, sealed, ctx)
         ),
         "the sealed change prepares",
     )
@@ -497,9 +495,7 @@ async def check_vcs_sealed_transfer_fixes_inspected_revision(
     )
     write_candidate(checkout, LATE_FILE, "late\n")
     prepared = await attempted_async(
-        prepared_from(
-            bench.executor, remote, kora_vcs_binding, checkout, plan, sealed, ctx
-        ),
+        prepared_from(bench.executor, kora_vcs_binding, checkout, plan, sealed, ctx),
         "the sealed change prepares",
     )
     verified = await bench.executor.verify_sealed(sealed, checkout.areas)
@@ -530,9 +526,7 @@ def test_vcs_repeated_finalize_returns_one_ref(
         sealed_input(kora_vcs_provider, bench.executor, remote, checkout, ctx)
     )
     prepared = run(
-        prepared_from(
-            bench.executor, remote, kora_vcs_binding, checkout, plan, sealed, ctx
-        )
+        prepared_from(bench.executor, kora_vcs_binding, checkout, plan, sealed, ctx)
     )
 
     first = run(published(bench.executor, prepared, ctx))
@@ -556,7 +550,7 @@ async def check_vcs_repeated_finalize_returns_one_ref(
         kora_vcs_provider, bench.executor, remote, checkout, ctx
     )
     prepared = await prepared_from(
-        bench.executor, remote, kora_vcs_binding, checkout, plan, sealed, ctx
+        bench.executor, kora_vcs_binding, checkout, plan, sealed, ctx
     )
     first = await published(bench.executor, prepared, ctx)
     second = await published(bench.executor, prepared, ctx)
@@ -587,9 +581,7 @@ def test_vcs_head_sha(
         sealed_input(kora_vcs_provider, bench.executor, remote, checkout, ctx)
     )
     prepared = run(
-        prepared_from(
-            bench.executor, remote, kora_vcs_binding, checkout, plan, sealed, ctx
-        )
+        prepared_from(bench.executor, kora_vcs_binding, checkout, plan, sealed, ctx)
     )
     outcome = run(published(bench.executor, prepared, ctx))
     ref = outcome.ref
@@ -617,7 +609,7 @@ async def check_vcs_head_sha(
         kora_vcs_provider, bench.executor, remote, checkout, ctx
     )
     prepared = await prepared_from(
-        bench.executor, remote, kora_vcs_binding, checkout, plan, sealed, ctx
+        bench.executor, kora_vcs_binding, checkout, plan, sealed, ctx
     )
     outcome = await published(bench.executor, prepared, ctx)
     ref = outcome.ref

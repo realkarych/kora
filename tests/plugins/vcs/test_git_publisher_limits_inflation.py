@@ -124,7 +124,6 @@ def test_a_corrupt_inflating_delta_is_refused(
                 plan,
                 sealed,
                 workspace,
-                publish_request(remote, checkout),
                 pinned(world.binding()),
                 checkout.areas,
                 (),

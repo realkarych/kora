@@ -63,7 +63,7 @@ async def open_spawning(
     identities: IdentityReader | None = None,
     new_identifier: Callable[[], str] | None = None,
     home: Callable[[], Path] = Path.home,
-    sweep_scan_entries: int = 65536,
+    scanner: NativeIdentityReader | None = None,
     peers: PeerSource | None = None,
 ) -> LocalRuntime:
     return await LocalRuntime.open(
@@ -74,7 +74,7 @@ async def open_spawning(
         runner=runner,
         socket_directory=sockets,
         home=home,
-        sweep_scan_entries=sweep_scan_entries,
+        scanner=scanner,
         peers=peers,
     )
 
@@ -194,7 +194,7 @@ async def lingering_start(
     sockets: Path,
     ctx: ProtocolContext,
     identities: IdentityReader | None = None,
-    sweep_scan_entries: int = 65536,
+    scanner: NativeIdentityReader | None = None,
 ) -> tuple[LocalRuntime, Starting, tuple[str, ...], int]:
     runtime = await open_spawning(
         root,
@@ -202,7 +202,7 @@ async def lingering_start(
         sockets,
         runner=LINGERING,
         identities=identities,
-        sweep_scan_entries=sweep_scan_entries,
+        scanner=scanner,
     )
     with pytest.raises(KoraProtocolError, match="runner_starting"):
         await runtime.submit(submitted(runtime, "attempt-1"), ctx)

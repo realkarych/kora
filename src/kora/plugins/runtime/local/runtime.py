@@ -4,19 +4,35 @@ import re
 import secrets
 import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Final
+from threading import Event
+from typing import Final, TypeVar
 
 from kora.executor.digests import object_digest
 from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.ir.json import JsonObject
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
-from kora.plugins.runtime.local.channel import workload_digest
+from kora.plugins.runtime.local.channel import (
+    MESSAGE_PROGRESS_NS,
+    SECTION_FRAME_BYTES,
+    checked_output_name,
+    delivery_error,
+    transfer_cutoff,
+    workload_digest,
+    write_transfer_bytes,
+)
 from kora.plugins.runtime.local.configuration import CONFIG_SCHEMA as CONFIG_SCHEMA
 from kora.plugins.runtime.local.configuration import (
     STATE_ROOT_LENGTH as STATE_ROOT_LENGTH,
@@ -30,6 +46,8 @@ from kora.plugins.runtime.local.control import (
     deliver_workload,
     runner_status,
     start_command,
+    transfer_input,
+    transfer_output,
 )
 from kora.plugins.runtime.local.services import (
     SERVICE_REFUSED,
@@ -49,15 +67,27 @@ from kora.plugins.runtime.local.spawn import (
     runner_environment,
     spawn_runner,
 )
+from kora.plugins.runtime.local.spool import (
+    SWEEP,
+    SpoolLease,
+    SpoolOwner,
+    SpoolSweepOutcome,
+    close_spool,
+)
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline, duration_ns
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import TerminationReceipt
 from kora.protocols.identity import Handle, ProcessIdentity
-from kora.protocols.runtime import RuntimeCapabilities, RuntimeStatus, Workload
+from kora.protocols.runtime import (
+    RuntimeCapabilities,
+    RuntimeStatus,
+    TransferItem,
+    Workload,
+)
 from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceTarget
-from kora.runner.channels import ChannelError
+from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
@@ -72,6 +102,7 @@ from kora.runner.identity import (
     NativeIdentityReader,
     ProcessScanFailure,
 )
+from kora.runner.native_io import NativeIOSubmissionUncertain, observed
 from kora.runner.peers import PeerSource, kernel_source
 from kora.runner.processes import ExitAnchor, SignalResult, wait_member_change
 from kora.runner.registry import (
@@ -79,6 +110,7 @@ from kora.runner.registry import (
     RUNTIME_NAME,
     Applied,
     AttemptKey,
+    DomainRecord,
     Entry,
     Fence,
     LockOutcome,
@@ -158,6 +190,56 @@ def rejection(code: str) -> KoraProtocolError:
     return KoraProtocolError(code, REJECTIONS[code], False, {})
 
 
+OUTPUT_ATTEMPTS: Final[int] = 4
+OUTPUT_PULLS: Final[int] = 4
+T = TypeVar("T")
+
+
+class OutputPull:
+    def __init__(self) -> None:
+        self.lease: SpoolLease | None = None
+        self.pending: asyncio.Task[object] | None = None
+        self.uncertain = False
+
+    def dispose(self) -> None:
+        lease = self.lease
+        if lease is not None:
+            lease.close()
+            if lease.closed:
+                self.lease = None
+
+    def descriptor(self) -> int:
+        lease = self.lease
+        if lease is None or lease.closed:
+            raise RuntimeError("missing output spool")
+        return lease.descriptor
+
+    async def run(
+        self,
+        operation: Coroutine[object, object, T],
+        clock: Clock,
+        deadline: int | None = None,
+    ) -> T:
+        task = asyncio.create_task(operation)
+        self.pending = task
+        try:
+            if deadline is not None:
+                await wait_future(task, deadline, clock)
+            return await task
+        finally:
+            try:
+                if not task.done():
+                    task.cancel()
+                    if await observed(task):
+                        raise asyncio.CancelledError
+            finally:
+                if not task.cancelled() and isinstance(
+                    task.exception(), NativeIOSubmissionUncertain
+                ):
+                    self.uncertain = True
+                self.pending = None
+
+
 def default_state_root(
     platform: str, environment: Mapping[str, str], home: Path
 ) -> Path:
@@ -182,11 +264,6 @@ def anchored_root(
         return path, open_local_directory(path)
     except (OSError, FilesystemError, ValueError, RuntimeError):
         return None
-
-
-def release_root(located: tuple[Path, DirectoryAnchor] | None) -> None:
-    if located is not None:
-        located[1].close()
 
 
 def safe_socket_directory(path: Path) -> bool:
@@ -281,12 +358,13 @@ def verified(
     scanner: NativeIdentityReader,
     pid: int,
     argv: tuple[str, ...],
+    deadline_ns: int,
 ) -> ProcessIdentity | None:
     before = identities.read(pid)
     readable(before.state)
     if before.process is None or before.process.dead:
         return None
-    carried = scanner.carries(pid, argv)
+    carried = scanner.carries(pid, argv, deadline_ns)
     if carried is ArgumentMatch.UNKNOWN:
         raise SweepRefused(SweepOutcome.MATCH_UNREADABLE)
     after = identities.read(pid)
@@ -329,6 +407,22 @@ class RunnerLaunch:
         return (*self.command, str(root))
 
 
+def output_deadline_reached(
+    entry: Running, clock: Clock, captured: int | None = None
+) -> bool:
+    if entry.gate_closed:
+        return True
+    deadline = entry.deadline
+    if deadline is None:
+        return False
+    if clock.now() >= deadline.at - deadline.clock_uncertainty:
+        return True
+    if captured is not None and clock.monotonic_ns() >= captured:
+        return True
+    cutoff = transfer_cutoff(clock, deadline)
+    return cutoff is not None and clock.monotonic_ns() >= cutoff
+
+
 class LocalRuntime:
     name: str = RUNTIME_NAME
     config_schema: JsonObject = CONFIG_SCHEMA
@@ -347,6 +441,7 @@ class LocalRuntime:
         identities: IdentityReader,
         scanner: NativeIdentityReader,
         peers: PeerSource,
+        spool: SpoolOwner,
     ) -> None:
         self._configuration: LocalRuntimeConfiguration = configuration
         self.execution_domain_id = registry.execution_domain_id
@@ -359,6 +454,11 @@ class LocalRuntime:
         self._peers = peers
         self._observations: set[asyncio.Task[RuntimeStatus]] = set()
         self._deliveries: set[asyncio.Task[None]] = set()
+        self._spool = spool
+        self._spool_admission = asyncio.Lock()
+        self._spool_allocations = 0
+        self._output_pulls: set[OutputPull] = set()
+        self._expired_outputs: set[AttemptKey] = set()
         self._sweeping = 0
         self._swept = asyncio.Event()
         self._swept.set()
@@ -384,11 +484,38 @@ class LocalRuntime:
         home: Callable[[], Path] = Path.home,
         runner: Sequence[str] | None = None,
         socket_directory: Path | None = None,
-        sweep_scan_entries: int = 65536,
+        scanner: NativeIdentityReader | None = None,
         peers: PeerSource | None = None,
         service_launcher: StepLauncher | None = None,
     ) -> "LocalRuntime":
         executor = TransitionExecutor()
+        located: tuple[Path, DirectoryAnchor] | None = None
+        opened_registry: DirectoryAnchor | None = None
+        spool: SpoolOwner | None = None
+
+        def locate() -> tuple[Path, DirectoryAnchor] | None:
+            nonlocal located
+            located = anchored_root(configuration, environment, home)
+            return located
+
+        def close_root() -> None:
+            nonlocal located
+            if located is not None:
+                owned, located = located, None
+                owned[1].close()
+
+        def close_registry() -> None:
+            nonlocal opened_registry
+            if opened_registry is not None:
+                owned, opened_registry = opened_registry, None
+                owned.close()
+
+        def close_spool_after_join() -> None:
+            nonlocal spool
+            if spool is not None:
+                owned, spool = spool, None
+                owned.close()
+
         try:
             reader = (
                 identities
@@ -426,11 +553,10 @@ class LocalRuntime:
                 report.require_safe(ctx)
                 if socket_directory is None:
                     socket_directory = report.socket_directory
-            scanner = await executor.run(
-                lambda: NativeIdentityReader(
-                    clock=ctx.clock, max_scan_entries=sweep_scan_entries
+            if scanner is None:
+                scanner = await executor.run(
+                    lambda: NativeIdentityReader(clock=ctx.clock)
                 )
-            )
             source = (
                 peers
                 if peers is not None
@@ -448,38 +574,71 @@ class LocalRuntime:
                 identity=identity,
                 clock=ctx.clock,
             )
-            located = await executor.run(
-                lambda: anchored_root(configuration, environment, home), release_root
-            )
-            if located is None:
+            result = await executor.run(locate, after_uncertain_submission=close_root)
+            if result is None:
                 raise rejection("state_root_unsafe")
-            path, root = located
-            try:
-                domain, directory = await executor.locked(
-                    lambda: open_domain(root, lineage, new_identifier, new_identifier),
-                    ctx,
-                    "open",
-                    lambda opened: opened[1].close(),
-                )
-            except BaseException:
-                root.close()
-                raise
+            path, root = result
+
+            def register() -> tuple[DomainRecord, DirectoryAnchor] | LockOutcome:
+                nonlocal opened_registry
+                registered = open_domain(root, lineage, new_identifier, new_identifier)
+                if not isinstance(registered, LockOutcome):
+                    opened_registry = registered[1]
+                return registered
+
+            domain, directory = await executor.locked(
+                register, ctx, "open", after_uncertain_submission=close_registry
+            )
+            started = ctx.clock.monotonic_ns()
+
+            def open_spool() -> SpoolOwner:
+                nonlocal spool
+                try:
+                    spool = SpoolOwner.open(
+                        root, domain.execution_domain_id, identity, reader, ctx.clock
+                    )
+                except (OSError, FilesystemError):
+                    raise refusal("registry_unavailable") from None
+                return spool
+
+            owner = await executor.run(
+                open_spool, after_uncertain_submission=close_spool_after_join
+            )
+            ctx.logger.emit_at(
+                Level.INFO
+                if owner.outcome is SpoolSweepOutcome.COMPLETE
+                else Level.WARNING,
+                SWEEP,
+                outcome=owner.outcome.value,
+                waited_ms=max(0, ctx.clock.monotonic_ns() - started) / 1_000_000,
+            )
+            registry = Registry(directory, domain.execution_domain_id, new_identifier)
+            runtime = cls(
+                configuration,
+                path,
+                root,
+                registry,
+                executor,
+                new_identifier,
+                launch,
+                reader,
+                scanner,
+                source,
+                owner,
+            )
         except BaseException:
-            await executor.close()
+            try:
+                await executor.close()
+            finally:
+                if executor.joined:
+                    try:
+                        await close_spool(spool)
+                    finally:
+                        try:
+                            close_registry()
+                        finally:
+                            close_root()
             raise
-        registry = Registry(directory, domain.execution_domain_id, new_identifier)
-        runtime = cls(
-            configuration,
-            path,
-            root,
-            registry,
-            executor,
-            new_identifier,
-            launch,
-            reader,
-            scanner,
-            source,
-        )
         runtime.service_report = report
         return runtime
 
@@ -601,6 +760,363 @@ class LocalRuntime:
             if error.code == "message_refused":
                 raise refusal("runner_unreachable") from None
             raise
+
+    async def transfer_in(
+        self,
+        handle: Handle,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
+    ) -> None:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        task = asyncio.create_task(self._transfer(key, item, chunks, ctx))
+        self._deliveries.add(task)
+        try:
+            await task
+        finally:
+            self._deliveries.discard(task)
+
+    async def _transfer(
+        self,
+        key: AttemptKey,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
+    ) -> None:
+        clock = ctx.clock
+        deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        entry = await self.entry(key)
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        if entry.gate_closed:
+            raise delivery_error("deadline_expired")
+        cutoff = transfer_cutoff(clock, entry.deadline)
+        if cutoff is not None:
+            deadline = min(deadline, cutoff)
+        if clock.monotonic_ns() >= deadline:
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable")
+        stopped = Event()
+        task = asyncio.create_task(
+            self._spool_and_send(entry, item, chunks, ctx, deadline, stopped)
+        )
+        try:
+            try:
+                await wait_future(task, deadline, clock)
+            finally:
+                stopped.set()
+                task.cancel()
+                if await observed(task):
+                    raise asyncio.CancelledError
+        except (ListenerRefused, ChannelError, OSError, FilesystemError):
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code != "message_refused":
+                raise
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable") from None
+        await self._check_transfer_deadline(key, entry, ctx, cutoff)
+
+    async def _acquire_spool(
+        self, acquire: Callable[[], None], dispose: Callable[[], None]
+    ) -> None:
+        if self._spool_allocations >= self.executor.admitted:
+            raise refusal("registry_busy")
+        self._spool_allocations += 1
+        try:
+            async with self._spool_admission:
+                await self.executor.run(acquire, after_uncertain_submission=dispose)
+        finally:
+            self._spool_allocations -= 1
+
+    def _output_entry(
+        self,
+        key: AttemptKey,
+        clock: Clock,
+        expected: Running | None = None,
+        captured: int | None = None,
+    ) -> Running:
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        entry = self.registry.entry(key)
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        if entry.submitter.process != self._launch.identity:
+            raise delivery_error("execution_unauthorized")
+        if expected is not None and (
+            entry.runner != expected.runner
+            or entry.submitter != expected.submitter
+            or entry.socket_path != expected.socket_path
+        ):
+            raise delivery_error("submitter_superseded")
+        if key in self._expired_outputs or output_deadline_reached(
+            entry, clock, captured
+        ):
+            raise delivery_error("deadline_expired")
+        return entry
+
+    async def _current_output(
+        self,
+        key: AttemptKey,
+        ctx: ProtocolContext,
+        pull: OutputPull,
+        expected: Running | None = None,
+        captured: int | None = None,
+    ) -> Running:
+        try:
+            return await self.executor.run(
+                lambda: self._output_entry(key, ctx.clock, expected, captured),
+                after_uncertain_submission=pull.dispose,
+            )
+        except KoraProtocolError as error:
+            if error.code != "deadline_expired":
+                raise
+            self._expired_outputs.add(key)
+            current = expected
+            if current is None:
+                found = await self.entry(key)
+                if not isinstance(found, Running):
+                    raise
+                current = found
+            await self._settle_output_expiry(key, current, ctx)
+            raise
+
+    async def _settle_output_expiry(
+        self, key: AttemptKey, entry: Running, ctx: ProtocolContext
+    ) -> None:
+        self._expired_outputs.add(key)
+        await self.transition(
+            key,
+            lambda current: takeover_cell(current, entry, entry.submitter, True),
+            ctx,
+            "transfer_out",
+        )
+
+    def transfer_out(
+        self, handle: Handle, name: str, ctx: ProtocolContext
+    ) -> AsyncGenerator[bytes]:
+        return self._transfer_out(handle, checked_output_name(name), ctx)
+
+    async def _transfer_out(
+        self,
+        handle: Handle,
+        name: str,
+        ctx: ProtocolContext,
+    ) -> AsyncGenerator[bytes]:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        if len(self._output_pulls) >= OUTPUT_PULLS:
+            raise delivery_error("workload_busy")
+        deadline = ctx.clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        pull = OutputPull()
+        self._output_pulls.add(pull)
+        try:
+            entry, size, captured = await pull.run(
+                self._fetch_output(key, name, pull, ctx, deadline),
+                ctx.clock,
+                deadline,
+            )
+
+            def read(length: int, offset: int) -> bytes:
+                self._output_entry(key, ctx.clock, entry, captured)
+                try:
+                    chunk = os.pread(pull.descriptor(), length, offset)
+                except OSError:
+                    raise refusal("runner_unreachable") from None
+                self._output_entry(key, ctx.clock, entry, captured)
+                return chunk
+
+            if self._closing is not None:
+                raise refusal("runtime_closed")
+            offset = 0
+            while offset < size:
+                if self._closing is not None:
+                    raise refusal("runtime_closed")
+                try:
+                    chunk = await pull.run(
+                        self.executor.run(
+                            partial(
+                                read,
+                                min(size - offset, SECTION_FRAME_BYTES),
+                                offset,
+                            ),
+                            after_uncertain_submission=pull.dispose,
+                        ),
+                        ctx.clock,
+                    )
+                except KoraProtocolError as error:
+                    if error.code != "deadline_expired":
+                        raise
+                    await self._settle_output_expiry(key, entry, ctx)
+                    raise
+                if self._closing is not None:
+                    raise refusal("runtime_closed")
+                if not chunk:
+                    raise delivery_error("integrity_error")
+                offset += len(chunk)
+                yield chunk
+        except ChannelError:
+            raise refusal("runner_unreachable") from None
+        finally:
+            if self._closing is None and not pull.uncertain:
+                try:
+                    pull.dispose()
+                except OSError:
+                    raise refusal("runner_unreachable") from None
+                if pull.lease is None:
+                    self._output_pulls.discard(pull)
+
+    async def _fetch_output(
+        self,
+        key: AttemptKey,
+        name: str,
+        pull: OutputPull,
+        ctx: ProtocolContext,
+        deadline: int,
+    ) -> tuple[Running, int, int | None]:
+        entry = await self._current_output(key, ctx, pull)
+        captured = transfer_cutoff(ctx.clock, entry.deadline)
+
+        def active() -> None:
+            if self._closing is not None:
+                raise refusal("runtime_closed")
+            if ctx.clock.monotonic_ns() >= deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+
+        def open_spool() -> None:
+            try:
+                pull.lease = self._spool.acquire(active)
+            except (OSError, FilesystemError):
+                raise refusal("runner_unreachable") from None
+
+        async def acquire() -> None:
+            await self._acquire_spool(open_spool, pull.dispose)
+
+        async def check_entry() -> None:
+            await self._current_output(key, ctx, pull, entry, captured)
+
+        for _ in range(OUTPUT_ATTEMPTS):
+            await check_entry()
+            try:
+                active()
+                await acquire()
+                size = await transfer_output(
+                    entry.socket_path,
+                    entry.runner,
+                    entry.submitter.dispatcher_id,
+                    self._peers,
+                    self.executor,
+                    ctx.clock,
+                    self._new_identifier(),
+                    pull.descriptor(),
+                    name,
+                    deadline,
+                    close_spool=pull.dispose,
+                    active=active,
+                )
+                await check_entry()
+                active()
+            except ListenerRefused:
+                raise delivery_error("execution_unauthorized") from None
+            except (ChannelError, OSError):
+                try:
+                    pull.dispose()
+                except OSError:
+                    raise refusal("runner_unreachable") from None
+                if pull.lease is not None:
+                    raise refusal("runner_unreachable") from None
+            else:
+                return entry, size, captured
+        raise refusal("runner_unreachable")
+
+    async def _check_transfer_deadline(
+        self, key: AttemptKey, entry: Running, ctx: ProtocolContext, cutoff: int | None
+    ) -> None:
+        if cutoff is not None and ctx.clock.monotonic_ns() >= cutoff:
+            await self.transition(
+                key,
+                lambda current: takeover_cell(current, entry, entry.submitter, True),
+                ctx,
+                "transfer_in",
+            )
+
+    async def _spool_and_send(
+        self,
+        entry: Running,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
+        deadline: int,
+        stopped: Event,
+    ) -> None:
+        lease: SpoolLease | None = None
+        caller_owned = True
+
+        def dispose() -> None:
+            if lease is not None:
+                lease.close()
+
+        def active() -> None:
+            if stopped.is_set() or self._closing is not None:
+                raise ChannelError(ChannelFailure.CLOSED)
+            if ctx.clock.monotonic_ns() >= deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+
+        def acquire() -> None:
+            nonlocal lease
+            lease = self._spool.acquire(active)
+
+        def write(spool: int, piece: memoryview) -> None:
+            active()
+            write_transfer_bytes(spool, piece)
+
+        try:
+            await self._acquire_spool(acquire, dispose)
+            if lease is None:
+                raise RuntimeError("missing spool descriptor")
+            spool = lease.descriptor
+            total = 0
+            async for chunk in chunks:
+                total += len(chunk)
+                if total > item.size:
+                    raise delivery_error("integrity_error")
+                view = memoryview(chunk)
+                if not view:
+                    active()
+                    await asyncio.sleep(0)
+                    continue
+                for offset in range(0, len(view), SECTION_FRAME_BYTES):
+                    piece = view[offset : offset + SECTION_FRAME_BYTES]
+                    await self.executor.run(
+                        partial(write, spool, piece),
+                        after_uncertain_submission=dispose,
+                    )
+            if total != item.size:
+                raise delivery_error("integrity_error")
+            await transfer_input(
+                entry.socket_path,
+                entry.runner,
+                entry.submitter.dispatcher_id,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+                spool,
+                item,
+                deadline,
+                close_spool=dispose,
+                active=active,
+            )
+        except NativeIOSubmissionUncertain:
+            caller_owned = False
+            raise
+        finally:
+            if caller_owned:
+                dispose()
 
     def checked_digest(self, workload: Workload, ctx: ProtocolContext) -> str:
         if workload.execution_domain_id != self.execution_domain_id:
@@ -926,7 +1442,7 @@ class LocalRuntime:
                 await self.sweeps.run(partial(vanished, identities, pid))
                 continue
             identity = await self.sweeps.run(
-                partial(verified, identities, scanner, pid, argv)
+                partial(verified, identities, scanner, pid, argv, scan_deadline)
             )
             if identity is not None and anchor.readiness.done():
                 await self.sweeps.run(partial(vanished, identities, pid))
@@ -967,6 +1483,9 @@ class LocalRuntime:
                 delivery.cancel()
             for observation in self._observations:
                 observation.cancel()
+            for pull in self._output_pulls:
+                if pull.pending is not None:
+                    pull.pending.cancel()
             self.executor.closed = True
             self.sweeps.closed = True
             self._stopping.set_result(None)
@@ -977,14 +1496,30 @@ class LocalRuntime:
         try:
             observations = tuple(self._observations)
             deliveries = tuple(self._deliveries)
+            outputs = tuple(
+                pull.pending for pull in self._output_pulls if pull.pending is not None
+            )
+            if outputs:
+                await asyncio.gather(*outputs, return_exceptions=True)
             if deliveries:
                 await asyncio.gather(*deliveries, return_exceptions=True)
             if observations:
                 await asyncio.gather(*observations, return_exceptions=True)
             await self.launchers.drain(self._launch.clock)
         finally:
-            await self.executor.close()
-            await self._swept.wait()
-            await self.sweeps.close()
-            self.registry.directory.close()
-            self._root.close()
+            try:
+                await self.executor.close()
+            finally:
+                try:
+                    await self._swept.wait()
+                    await self.sweeps.close()
+                finally:
+                    if self.executor.joined:
+                        try:
+                            await close_spool(self._spool)
+                            self._output_pulls.clear()
+                        finally:
+                            try:
+                                self.registry.directory.close()
+                            finally:
+                                self._root.close()

@@ -1,5 +1,6 @@
 import ctypes
 import json
+import os
 import select
 import subprocess
 import sys
@@ -18,8 +19,13 @@ from tests.plugins.storage.pressure_controller import (
     read_manifest,
     save,
 )
-from tests.plugins.storage.pressure_disk_arbitration import NativeCall, private_text
-from tests.plugins.storage.pressure_images import image_name
+from tests.plugins.storage.pressure_disk_arbitration import (
+    NativeCall,
+    private_text,
+    reported_process,
+)
+from tests.plugins.storage.pressure_holders import Native, process_comm
+from tests.plugins.storage.pressure_images import discover, image_name
 from tests.plugins.storage.pressure_models import (
     ImageStamp,
     NativeOutcome,
@@ -39,6 +45,10 @@ def closed_helper() -> ProcessToken:
     assert len(tokens) == 1
     assert process_token(tokens[0].pid) != tokens[0]
     return tokens[0]
+
+
+def resolved_comm(pid: int) -> str | None:
+    return process_comm(Native(), pid)
 
 
 def request_for(controller: PressureController) -> NativeRequest:
@@ -130,6 +140,46 @@ def test_native_outcome_rejects_ambiguous_completion(
             NativeOutcome.model_validate(fields)
 
         assert not (controller.directory / "native-result.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("result", "dissenter_pid", "dissenter_comm"),
+    [
+        ("success", 4242, None),
+        ("not_requested", 4242, None),
+        ("refused", None, "mds_stores"),
+        ("refused", 0, None),
+        ("refused", -1, None),
+        ("refused", True, None),
+        ("refused", 2147483648, None),
+        ("refused", 4242, "::error::x"),
+        ("refused", 4242, "two words"),
+        ("refused", 4242, "line\n"),
+        ("refused", 4242, "x" * 17),
+    ],
+)
+def test_native_outcome_rejects_inconsistent_dissenter(
+    tmp_path: Path,
+    closed_helper: ProcessToken,
+    result: str,
+    dissenter_pid: object,
+    dissenter_comm: object,
+) -> None:
+    with create(tmp_path / "dissenter") as controller:
+        request = request_for(controller).model_copy(update={"helper": closed_helper})
+        fields = no_request(request).model_dump(mode="json") | {
+            "result": result,
+            "code": {"success": 0, "refused": 49168, "not_requested": None}[result],
+        }
+
+        consistent = NativeOutcome.model_validate(fields)
+        with pytest.raises(ValidationError):
+            NativeOutcome.model_validate(
+                fields
+                | {"dissenter_pid": dissenter_pid, "dissenter_comm": dissenter_comm}
+            )
+
+        assert consistent.dissenter_pid is None
 
 
 @pytest.mark.parametrize(
@@ -284,9 +334,12 @@ def test_completed_result_is_committed_without_fabricating_command_status(
             update={"command": closed_helper, "command_inflight": True}
         )
         controller.persist()
+        retained_record = no_request(request).model_dump(
+            mode="json", exclude={"dissenter_pid", "dissenter_comm"}
+        )
         save(
             controller.directory / "native-result.json",
-            no_request(request).model_dump_json().encode(),
+            json.dumps(retained_record).encode(),
         )
 
         controller.settle_native()
@@ -294,7 +347,11 @@ def test_completed_result_is_committed_without_fabricating_command_status(
         controller.settle_native()
 
         assert saved.native is not None
-        assert saved.native.outcome == no_request(request)
+        retained_outcome = saved.native.outcome
+        assert retained_outcome is not None
+        assert retained_outcome == no_request(request)
+        assert retained_outcome.dissenter_pid is None
+        assert retained_outcome.dissenter_comm is None
         assert saved == controller.manifest
         assert saved.command_exit_status is None
         assert not saved.command_inflight
@@ -317,6 +374,11 @@ def test_native_call_only_publishes_known_closed_outcome(
         call.cf_closed = state != "open_cf"
         call.refused = state == "refused"
         call.code = 49168 if call.refused else 0
+        if call.refused:
+            call.dissenter_pid = closed_helper.pid
+            call.dissenter_comm = (
+                resolved_comm(closed_helper.pid) if sys.platform == "darwin" else None
+            )
 
         outcome = call.outcome()
 
@@ -327,6 +389,106 @@ def test_native_call_only_publishes_known_closed_outcome(
             assert outcome.result == state
             assert outcome.cf_closed
             assert outcome.code == (None if state == "not_requested" else call.code)
+            assert outcome.dissenter_pid == call.dissenter_pid
+            assert outcome.dissenter_comm is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(0, None), (-1, None), (1, 1), (2147483647, 2147483647)],
+)
+def test_reported_process_treats_nonpositive_values_as_absent(
+    value: int, expected: int | None
+) -> None:
+    assert reported_process(value) == expected
+
+
+def open_device(device: str, directory: Path) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        (
+            sys.executable,
+            "-I",
+            "-c",
+            "import os,sys; held=os.open(sys.argv[1],os.O_RDONLY); "
+            "print('ready',flush=True); sys.stdin.buffer.read(1); os.close(held)",
+            device,
+        ),
+        cwd=directory,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def wait_ready(holder: subprocess.Popen[bytes]) -> None:
+    assert holder.stdout is not None
+    assert select.select([holder.stdout], [], [], 10)[0], "holder is not ready"
+    assert holder.stdout.readline(64) == b"ready\n"
+
+
+def close_device(holder: subprocess.Popen[bytes]) -> None:
+    try:
+        holder.communicate(b"c", timeout=10)
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+        holder.wait(timeout=10)
+
+
+def refused_release(
+    controller: PressureController, device: str
+) -> tuple[int, NativeOutcome, dict[str, object], str]:
+    holder = open_device(device, controller.directory)
+    try:
+        wait_ready(holder)
+        with pytest.raises(PressureFailure, match="command_failed") as failure:
+            controller.cleanup()
+        request = controller.manifest.native
+        assert request is not None
+        assert request.outcome is not None
+        note: dict[str, object] = json.loads(failure.value.__notes__[0])
+        return holder.pid, request.outcome, note, request.phase
+    finally:
+        close_device(holder)
+
+
+def test_refused_eject_records_native_dissenter(tmp_path: Path) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    with create(tmp_path / "held-device") as controller:
+        try:
+            controller.acquire("enospc")
+            stamp = controller.manifest.image_stamp
+            assert stamp is not None
+            attachment = discover(controller.directory, stamp)
+            assert attachment is not None
+
+            holder_pid, raw_outcome, raw_note, raw_phase = refused_release(
+                controller, "/dev/r" + attachment.device[5:]
+            )
+            retained = not controller.manifest.resources_closed
+            _, block_outcome, _, block_phase = refused_release(
+                controller, attachment.device
+            )
+            retained_again = not controller.manifest.resources_closed
+        finally:
+            controller.cleanup()
+            controller.finish_report()
+
+        assert raw_phase == block_phase == "eject"
+        assert raw_outcome.result == block_outcome.result == "refused"
+        assert raw_outcome.code == block_outcome.code == 49168
+        assert raw_outcome.dissenter_pid == holder_pid
+        assert raw_outcome.dissenter_comm in {
+            Path(path).name[:15]
+            for path in (sys.executable, os.path.realpath(sys.executable))
+        }
+        assert raw_note["dissenter_pid"] == holder_pid
+        assert raw_note["dissenter_comm"] == raw_outcome.dissenter_comm
+        assert retained
+        assert retained_again
+        assert controller.manifest.resources_closed
 
 
 def test_native_failure_note_is_fixed_and_remains_first_snapshot(
@@ -342,13 +504,25 @@ def test_native_failure_note_is_fixed_and_remains_first_snapshot(
         note = failure.__notes__[0]
         assert len(note.encode()) <= 8192
         assert json.loads(note) == {
-            "native_summary_version": 1,
+            "native_summary_version": 2,
             "phase": "unmount",
             "result": "unknown",
             "recorded_completion_known": False,
             "recorded_cf_closed": "unknown",
             "code": "unknown",
+            "dissenter_pid": "unknown",
+            "dissenter_comm": "unknown",
         }
+
+
+def assert_native_call_refuses_platform(directory: Path) -> None:
+    with create(directory / "platform") as controller:
+        call = NativeCall(request_for(controller))
+
+        with pytest.raises(PressureFailure, match="native_platform"):
+            call.perform()
+
+        assert call.outcome() is None
 
 
 @pytest.mark.parametrize("text", ["private", "x" * 10000, "\U0001f680" * 10000])
@@ -356,13 +530,7 @@ def test_private_cf_text_copy_is_bounded_before_conversion(
     tmp_path: Path, text: str
 ) -> None:
     if sys.platform != "darwin":
-        with create(tmp_path / "platform") as controller:
-            call = NativeCall(request_for(controller))
-
-            with pytest.raises(PressureFailure, match="native_platform"):
-                call.perform()
-
-            assert call.outcome() is None
+        assert_native_call_refuses_platform(tmp_path)
         return
     cf = ctypes.CDLL(
         "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"

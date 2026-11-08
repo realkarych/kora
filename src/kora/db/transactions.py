@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Generator
 from contextlib import contextmanager
+from typing import Never
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncTransaction
 
@@ -9,6 +10,14 @@ WRITER_LEASE: str = "kora_writer_transaction"
 
 class WriterTransactionError(RuntimeError):
     pass
+
+
+def raise_private_metadata_error(error: RuntimeError) -> Never:
+    try:
+        raise error from None
+    finally:
+        error.__cause__ = None
+        error.__context__ = None
 
 
 class WriterTransaction:

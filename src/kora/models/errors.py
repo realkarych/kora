@@ -1,4 +1,5 @@
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Literal, Self
 
 from pydantic import (
@@ -42,6 +43,25 @@ class ApiErrorCode(StrEnum):
     UNAVAILABLE = "API011"
     METHOD_NOT_ALLOWED = "API012"
     METHOD_NOT_IMPLEMENTED = "API013"
+
+
+HTTP_STATUSES = MappingProxyType(
+    {
+        ApiErrorCode.NOT_FOUND: 404,
+        ApiErrorCode.CONFLICT: 409,
+        ApiErrorCode.VALIDATION: 422,
+        ApiErrorCode.IDEMPOTENCY_MISMATCH: 409,
+        ApiErrorCode.FORBIDDEN: 403,
+        ApiErrorCode.APPROVAL_STALE: 409,
+        ApiErrorCode.WEBHOOK_AUTHENTICATION: 401,
+        ApiErrorCode.STALE_GRANT: 409,
+        ApiErrorCode.UNAUTHENTICATED: 401,
+        ApiErrorCode.INTERNAL: 500,
+        ApiErrorCode.UNAVAILABLE: 503,
+        ApiErrorCode.METHOD_NOT_ALLOWED: 405,
+        ApiErrorCode.METHOD_NOT_IMPLEMENTED: 501,
+    }
+)
 
 
 class WireRecord(BaseModel):
@@ -135,6 +155,25 @@ class ValidationResult(ValidationDetails):
         )
 
 
+def require_api_error_fields(code: ApiErrorCode, message: str, retryable: bool) -> None:
+    fixed_messages = {
+        ApiErrorCode.UNAUTHENTICATED: "Authentication is required.",
+        ApiErrorCode.INTERNAL: "Internal operation failure.",
+        ApiErrorCode.UNAVAILABLE: "Required service is unavailable.",
+        ApiErrorCode.METHOD_NOT_ALLOWED: "Request method is not allowed.",
+        ApiErrorCode.METHOD_NOT_IMPLEMENTED: "Request method is not implemented.",
+    }
+    fixed = fixed_messages.get(code)
+    if fixed is not None and message != fixed:
+        raise PydanticCustomError("api_message", "API error message is fixed.")
+    if retryable and code not in (
+        ApiErrorCode.CONFLICT,
+        ApiErrorCode.INTERNAL,
+        ApiErrorCode.UNAVAILABLE,
+    ):
+        raise PydanticCustomError("api_retryable", "API error cannot be retried.")
+
+
 class ApiError(WireRecord):
     code: ApiErrorCode
     message: Text1024
@@ -145,16 +184,7 @@ class ApiError(WireRecord):
 
     @model_validator(mode="after")
     def require_code_contract(self) -> Self:
-        fixed_messages = {
-            ApiErrorCode.UNAUTHENTICATED: "Authentication is required.",
-            ApiErrorCode.INTERNAL: "Internal operation failure.",
-            ApiErrorCode.UNAVAILABLE: "Required service is unavailable.",
-            ApiErrorCode.METHOD_NOT_ALLOWED: "Request method is not allowed.",
-            ApiErrorCode.METHOD_NOT_IMPLEMENTED: "Request method is not implemented.",
-        }
-        fixed = fixed_messages.get(self.code)
-        if fixed is not None and self.message != fixed:
-            raise PydanticCustomError("api_message", "API error message is fixed.")
+        require_api_error_fields(self.code, self.message, self.retryable)
         if isinstance(self.details, ValidationDetails):
             if self.code != ApiErrorCode.VALIDATION:
                 raise PydanticCustomError(
@@ -165,12 +195,6 @@ class ApiError(WireRecord):
                 raise PydanticCustomError(
                     "api_details", "API error details are invalid."
                 )
-        if self.retryable and self.code not in (
-            ApiErrorCode.CONFLICT,
-            ApiErrorCode.INTERNAL,
-            ApiErrorCode.UNAVAILABLE,
-        ):
-            raise PydanticCustomError("api_retryable", "API error cannot be retried.")
         return self
 
 

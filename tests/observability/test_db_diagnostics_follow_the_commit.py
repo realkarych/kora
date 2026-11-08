@@ -1,4 +1,5 @@
 import asyncio
+from traceback import format_exception
 from typing import cast
 
 import pytest
@@ -12,11 +13,27 @@ from kora.db.connection import (
     Dialect,
     Lifecycle,
 )
+from kora.db.graph_preparation_reads import GraphPreparationBinding
 from kora.db.migrations import upgrade_database
+from kora.engine.locks import (
+    GraphPreparationLockFailed,
+    LockError,
+    PreparationCapacityReadFailed,
+    StorageAddressLockFailed,
+    StorageAddressStageReadFailed,
+    TransitionLocks,
+)
 from kora.observability import Level, LoggingSettings
-from tests.db.closing import narrow_database, until
+from tests.db.closing import ConnectionLedger, narrow_database, until
 from tests.db.seed import Seeder, seed_predecessor
+from tests.db.test_graph_preparation_reads import seed_preparation
 from tests.db.test_pricing_migration import retained_index_progress, wait_for_index
+from tests.engine.test_preparation_capacity_lock import (
+    CAPACITY,
+    insert_ledger,
+    read_capacity,
+)
+from tests.engine.test_storage_address_lock import DIGEST, STORE, seed_address
 from tests.observability.conftest import (
     Configure,
     Pipe,
@@ -73,7 +90,7 @@ async def test_a_refused_commit_records_failure_and_never_finished(
     report = await upgrade_database(empty_database_settings)
     finished_output(diagnostics, pipe)
 
-    assert report.steps == 7
+    assert report.steps == 13
     assert db_events(pipe) == [
         "db.transaction.failed",
         "db.migration.started",
@@ -150,6 +167,226 @@ async def test_body_faults_are_recorded_once_and_cancellations_never(
     assert len(records) == 1
     chain = cast(list[dict[str, object]], records[0]["exception"])
     assert chain[0]["type"] == "BodyFault"
+
+
+async def lock_address_in_transaction(
+    database: Database, store: str, digest: str
+) -> None:
+    async with database.transaction() as connection:
+        locks = TransitionLocks(connection)
+        await locks.acquire_scopes(())
+        await locks.acquire_existing_storage_address(store, digest)
+
+
+@pytest.mark.asyncio
+async def test_address_lock_statement_failure_keeps_private_keys_out_of_diagnostics(
+    configure: Configure, pipe: Pipe, database: Database
+) -> None:
+    store = "Private-Physical-Store"
+    digest = "sha256:" + "a" * 64
+    ambient = ValueError(store)
+    async with database.transaction() as connection:
+        await connection.exec_driver_sql(
+            "ALTER TABLE storage_address_fence RENAME COLUMN payload_digest "
+            "TO unavailable_payload_digest"
+        )
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
+
+    try:
+        raise ambient
+    except ValueError:
+        with pytest.raises(
+            StorageAddressLockFailed, match="fence lock failed"
+        ) as refused:
+            await lock_address_in_transaction(database, store, digest)
+    finished_output(diagnostics, pipe)
+    error = refused.value
+    rendered = "".join(format_exception(error))
+    records = pipe.reader.records()
+
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert any(error.__context__ is context for context in (None, ambient))
+    assert db_events(pipe) == ["db.transaction.failed"]
+    for private in (store, digest, "unavailable_payload_digest", "UndefinedColumn"):
+        assert private not in rendered
+        assert private not in repr(records)
+
+
+async def lock_preparation_in_transaction(
+    database: Database, binding: GraphPreparationBinding
+) -> None:
+    async with database.transaction() as connection:
+        locks = TransitionLocks(connection)
+        await locks.acquire_scopes(())
+        await locks.acquire_existing_storage_address(STORE, DIGEST)
+        await locks.acquire_open_graph_preparation(connection, STORE, DIGEST, binding)
+
+
+@pytest.mark.asyncio
+async def test_preparation_guard_sql_failure_keeps_bindings_out_of_diagnostics(
+    configure: Configure, pipe: Pipe, database: Database
+) -> None:
+    await seed_address(database)
+    async with database.transaction() as connection:
+        binding, _ = await seed_preparation(connection, "open", bound=True)
+        await connection.exec_driver_sql(
+            "ALTER TABLE graph_deployment_preparation RENAME COLUMN deployment_digest "
+            "TO unavailable_deployment_digest"
+        )
+    assert binding.initial_graph_id is not None
+    ambient = ValueError(binding.preparation_id)
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
+
+    try:
+        raise ambient
+    except ValueError:
+        with pytest.raises(
+            GraphPreparationLockFailed, match="preparation lock failed"
+        ) as refused:
+            await lock_preparation_in_transaction(database, binding)
+    finished_output(diagnostics, pipe)
+    error = refused.value
+    rendered = "".join(format_exception(error))
+    records = pipe.reader.records()
+
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert any(error.__context__ is context for context in (None, ambient))
+    assert db_events(pipe) == ["db.transaction.failed"]
+    for private in (
+        binding.preparation_id,
+        binding.namespace_id,
+        binding.graph_name,
+        binding.initial_graph_id,
+        binding.deployment_digest,
+        "unavailable_deployment_digest",
+        "UndefinedColumn",
+    ):
+        assert private not in rendered
+        assert private not in repr(records)
+
+
+async def fail_stage_fence_read(
+    database: Database, binding: GraphPreparationBinding
+) -> None:
+    async with database.transaction() as connection:
+        locks = TransitionLocks(connection)
+        await locks.acquire_scopes(())
+        await locks.acquire_existing_storage_address(STORE, DIGEST)
+        await locks.acquire_open_graph_preparation(connection, STORE, DIGEST, binding)
+        await connection.exec_driver_sql(
+            "ALTER TABLE storage_address_fence RENAME COLUMN last_deletion_generation "
+            "TO unavailable_last_deletion_generation"
+        )
+        try:
+            await locks.read_stage_fence_incarnation(connection, STORE, DIGEST, binding)
+        except StorageAddressStageReadFailed:
+            with pytest.raises(LockError, match="cannot be used"):
+                locks.require_existing_storage_address(connection, STORE, DIGEST)
+            raise
+
+
+@pytest.mark.asyncio
+async def test_stage_fence_read_failure_keeps_address_out_of_diagnostics(
+    configure: Configure, pipe: Pipe, database: Database
+) -> None:
+    await seed_address(database)
+    async with database.transaction() as connection:
+        binding, _ = await seed_preparation(connection, "open", bound=False)
+    ledger = ConnectionLedger(database)
+    ambient = ValueError(DIGEST)
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
+
+    try:
+        raise ambient
+    except ValueError:
+        with pytest.raises(
+            StorageAddressStageReadFailed, match="staging check failed"
+        ) as refused:
+            await fail_stage_fence_read(database, binding)
+    async with database.transaction() as connection:
+        locks = TransitionLocks(connection)
+        await locks.acquire_scopes(())
+        await locks.acquire_existing_storage_address(STORE, DIGEST)
+        await locks.acquire_open_graph_preparation(connection, STORE, DIGEST, binding)
+        incarnation = await locks.read_stage_fence_incarnation(
+            connection, STORE, DIGEST, binding
+        )
+    finished_output(diagnostics, pipe)
+    error = refused.value
+    rendered = "".join(format_exception(error))
+    records = pipe.reader.records()
+
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert any(error.__context__ is context for context in (None, ambient))
+    assert db_events(pipe) == ["db.transaction.failed"]
+    assert incarnation == 1
+    assert ledger.outstanding == 0
+    assert database.writer_is_free()
+    assert database.units_in_flight() == 0
+    for private in (
+        STORE,
+        DIGEST,
+        binding.preparation_id,
+        "unavailable_last_deletion_generation",
+        "UndefinedColumn",
+    ):
+        assert private not in rendered
+        assert private not in repr(records)
+
+
+async def fail_capacity_read(database: Database) -> None:
+    async with database.transaction() as connection:
+        locks = TransitionLocks(connection)
+        await locks.acquire_scopes((CAPACITY,))
+        await connection.exec_driver_sql(
+            "ALTER TABLE graph_deployment_preparation_capacity "
+            "RENAME COLUMN occupied TO unavailable_occupied"
+        )
+        try:
+            await locks.read_preparation_capacity(connection)
+        except PreparationCapacityReadFailed:
+            with pytest.raises(LockError, match="cannot be used"):
+                locks.require(None, (CAPACITY,))
+            raise
+
+
+@pytest.mark.asyncio
+async def test_capacity_read_failure_keeps_private_count_out_of_diagnostics(
+    configure: Configure, pipe: Pipe, database: Database
+) -> None:
+    occupied = 418377219
+    await insert_ledger(database, occupied)
+    ledger = ConnectionLedger(database)
+    ambient = ValueError(str(occupied))
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
+
+    try:
+        raise ambient
+    except ValueError:
+        with pytest.raises(
+            PreparationCapacityReadFailed, match="capacity read failed"
+        ) as refused:
+            await fail_capacity_read(database)
+    after = await read_capacity(database)
+    finished_output(diagnostics, pipe)
+    error = refused.value
+    rendered = "".join(format_exception(error))
+    records = pipe.reader.records()
+
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert any(error.__context__ is context for context in (None, ambient))
+    assert db_events(pipe) == ["db.transaction.failed"]
+    assert after == occupied
+    assert database.writer_is_free()
+    assert database.units_in_flight() == 0
+    assert ledger.outstanding == 0
+    for private in (str(occupied), "unavailable_occupied", "UndefinedColumn"):
+        assert private not in rendered
+        assert private not in repr(records)
 
 
 @pytest.mark.asyncio

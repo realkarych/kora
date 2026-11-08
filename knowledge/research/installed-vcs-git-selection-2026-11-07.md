@@ -1,0 +1,16 @@
+# Git selection for installed VCS preparation
+
+Checked on 2026-11-07 for [#887](https://github.com/realkarych/kora/issues/887). This record follows the [first-stage timing record](installed-vcs-git-timing-2026-11-07.md). The macOS 15 / Python 3.11.17 remainder lane of [#930](https://github.com/realkarych/kora/pull/930) retained the first timed instance of the known failure. The earlier [run 42089714439](https://github.com/realkarych/kora/actions/runs/42089714439) had no stage evidence. [Run 42252187432, attempt 1](https://github.com/realkarych/kora/actions/runs/42252187432/artifacts/13522425785) and [run 42318769802](https://github.com/realkarych/kora/actions/runs/42318769802/artifacts/13552526874) showed the same first-step deadline without timing.
+
+| Hosted run | First `init_remote` start / total / gap (ms) | Later `init_remote` start (ms) |
+| --- | --- | --- |
+| [42388182157](https://github.com/realkarych/kora/actions/runs/42388182157/artifacts/13580827348) | `-1 / 5024 / 200` | unavailable after failure |
+| [42386593607](https://github.com/realkarych/kora/actions/runs/42386593607) | `3220 / 3268 / 198` | `207` |
+| [42384275133](https://github.com/realkarych/kora/actions/runs/42384275133) | `2074 / 2091 / 125` | `202` |
+| [42354875790](https://github.com/realkarych/kora/actions/runs/42354875790) | `2249 / 2268 / 197` | `132` |
+
+The successful first commands finished 17–48 ms after the timestamp of the first Git trace event. Their later starts on the same runners were at least ten times faster. The failing command yielded no readable Git event while its heartbeat continued. The invocation completed zero of 13 exercises and returned closed cleanup with zero unresolved resources. Together these observations support a delay before Git's first event. The measurements cannot identify an individual `xcrun` operation or rule out a delay opening the trace file. A missing event alone cannot distinguish those causes. Timing remains diagnostic.
+
+The isolated installed conformance command sets `PATH` to `/bin:/usr/bin`. The fixture formerly searched that path for its seed executable, selecting the Apple `/usr/bin/git` shim. The failing hosted runner used the native `/opt/homebrew/bin/git` in the [checkout job](https://github.com/realkarych/kora/actions/runs/42388182157/job/128450170546). The test already sets the provider's explicit `tool_path` from its outer environment. The preparation fixture now resolves `git` from that validated configuration with the same resolver as the provider. It reuses the selected absolute executable for all seven steps. An empty configured tool directory refuses preparation before starting a Git command.
+
+The configured local tool directories and target are trusted. Seed execution takes place before provider version and Linux `prlimit` validation. The child environment, private repositories, fixed Git arguments, five-second subprocess timeout, parent-owned cleanup and 13 exercises stay in place. The regression for a missing configured executable checks no Git timing, content-free refusal and closed cleanup. The final change's pull request links its hosted first/later timing and complete CI. A successful run checks the configuration path and the conformance result; the measurement does not establish a future failure rate.

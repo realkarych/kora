@@ -278,7 +278,10 @@ class InstalledTooling:
         return [str(self.python), "-I", "-m", "kora", *arguments]
 
     def run(
-        self, *arguments: str, environment: Mapping[str, str] | None = None
+        self,
+        *arguments: str,
+        environment: Mapping[str, str] | None = None,
+        umask: int = -1,
     ) -> ProcessResult:
         completed = subprocess.run(
             self.command(*arguments),
@@ -287,6 +290,7 @@ class InstalledTooling:
             capture_output=True,
             check=False,
             timeout=60,
+            umask=umask,
         )
         return ProcessResult(completed.returncode, completed.stdout, completed.stderr)
 

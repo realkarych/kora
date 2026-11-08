@@ -1,14 +1,15 @@
 import asyncio
 import enum
 import os
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+import sys
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
+from contextlib import asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
 from sqlalchemy import URL, Connection, event, make_url, text
-from sqlalchemy.engine.interfaces import DBAPIConnection, ExceptionContext
+from sqlalchemy.engine.interfaces import DBAPIConnection, DBAPICursor, ExceptionContext
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -33,6 +34,7 @@ ACCEPTED_FORMS: str = (
 MEMORY_DATABASE: str = ":memory:"
 PRIVATE_FILE_MODE: int = 0o600
 SQLITE_BUSY_TIMEOUT_SECONDS: float = 5.0
+SQLITE_SYNCHRONOUS_FULL: int = 2
 SQLITE_READERS: int = 4
 DEFAULT_POOL_SIZE: int = 5
 DEFAULT_MAX_OVERFLOW: int = 5
@@ -63,6 +65,10 @@ class DatabaseConfigurationError(ValueError):
         super().__init__(reason)
         self.variable = DATABASE_URL_VARIABLE
         self.reason = reason
+
+
+class SQLiteSynchronizationError(RuntimeError):
+    pass
 
 
 class Dialect(enum.StrEnum):
@@ -147,10 +153,91 @@ def apply_pragmas(
     return on_connect
 
 
+def verify_full_sync(cursor: DBAPICursor) -> None:
+    cursor.execute("PRAGMA main.synchronous")
+    if cursor.fetchone() != (SQLITE_SYNCHRONOUS_FULL,):
+        raise SQLiteSynchronizationError(
+            "SQLite connection requires FULL synchronization"
+        )
+
+
+def apply_full_sync(cursor: DBAPICursor) -> None:
+    cursor.execute("PRAGMA main.synchronous=FULL")
+    verify_full_sync(cursor)
+
+
+def verify_macos_fullfsync(cursor: DBAPICursor) -> None:
+    cursor.execute("PRAGMA fullfsync")
+    if cursor.fetchone() != (1,):
+        raise SQLiteSynchronizationError("macOS SQLite connection requires fullfsync")
+
+
+def apply_platform_fullfsync(cursor: DBAPICursor) -> None:
+    if sys.platform == "darwin":
+        cursor.execute("PRAGMA fullfsync=ON")
+        verify_macos_fullfsync(cursor)
+
+
+def configure_full_sync_writer(
+    raw_connection: DBAPIConnection, record: ConnectionPoolEntry
+) -> None:
+    with closing(raw_connection.cursor()) as cursor:
+        apply_platform_fullfsync(cursor)
+        cursor.execute("PRAGMA main.journal_mode=WAL")
+        if cursor.fetchone() != ("wal",):
+            raise SQLiteSynchronizationError("SQLite writer requires WAL journal mode")
+        apply_full_sync(cursor)
+        cursor.execute("PRAGMA foreign_keys=ON")
+
+
+def configure_full_sync_reader(
+    raw_connection: DBAPIConnection, record: ConnectionPoolEntry
+) -> None:
+    with closing(raw_connection.cursor()) as cursor:
+        apply_platform_fullfsync(cursor)
+        apply_full_sync(cursor)
+        cursor.execute("PRAGMA main.journal_mode")
+        if cursor.fetchone() != ("wal",):
+            raise SQLiteSynchronizationError("SQLite reader requires WAL journal mode")
+        for pragma in READER_PRAGMAS:
+            cursor.execute(pragma)
+
+
 def begin_immediately(connection: Connection) -> None:
     cursor = connection.connection.cursor()
     cursor.execute(BEGIN_IMMEDIATE)
     cursor.close()
+
+
+@contextmanager
+def guarded_sqlite_writer_cursor(
+    connection: Connection,
+) -> Generator[DBAPICursor, None, None]:
+    raw_connection = connection.connection
+    verified = False
+    try:
+        with closing(raw_connection.cursor()) as cursor:
+            yield cursor
+        verified = True
+    finally:
+        if not verified:
+            raw_connection.rollback()
+
+
+def begin_verified_sqlite_write(connection: Connection) -> None:
+    with guarded_sqlite_writer_cursor(connection) as cursor:
+        cursor.execute(BEGIN_IMMEDIATE)
+        cursor.execute("PRAGMA main.journal_mode")
+        if cursor.fetchone() != ("wal",):
+            raise SQLiteSynchronizationError("SQLite writer requires WAL journal mode")
+        verify_full_sync(cursor)
+        if sys.platform == "darwin":
+            verify_macos_fullfsync(cursor)
+
+
+def verify_macos_sqlite_commit(connection: Connection) -> None:
+    with guarded_sqlite_writer_cursor(connection) as cursor:
+        verify_macos_fullfsync(cursor)
 
 
 def keep_connection_on_cancellation(context: ExceptionContext) -> None:
@@ -158,7 +245,9 @@ def keep_connection_on_cancellation(context: ExceptionContext) -> None:
         context.is_disconnect = False
 
 
-def sqlite_engine(settings: DatabaseSettings, writer: bool) -> AsyncEngine:
+def sqlite_engine(
+    settings: DatabaseSettings, writer: bool, *, require_full_sync: bool = False
+) -> AsyncEngine:
     connect_args = {"timeout": SQLITE_BUSY_TIMEOUT_SECONDS, "isolation_level": None}
     if writer:
         engine = create_async_engine(
@@ -173,10 +262,17 @@ def sqlite_engine(settings: DatabaseSettings, writer: bool) -> AsyncEngine:
             pool_timeout=settings.pool_timeout_seconds,
             connect_args=connect_args,
         )
-    pragmas = WRITER_PRAGMAS if writer else READER_PRAGMAS
-    event.listen(engine.sync_engine, "connect", apply_pragmas(pragmas))
+    if require_full_sync:
+        configure = configure_full_sync_writer if writer else configure_full_sync_reader
+        event.listen(engine.sync_engine, "connect", configure)
+    else:
+        pragmas = WRITER_PRAGMAS if writer else READER_PRAGMAS
+        event.listen(engine.sync_engine, "connect", apply_pragmas(pragmas))
     if writer:
-        event.listen(engine.sync_engine, "begin", begin_immediately)
+        begin = begin_verified_sqlite_write if require_full_sync else begin_immediately
+        event.listen(engine.sync_engine, "begin", begin)
+        if require_full_sync and sys.platform == "darwin":
+            event.listen(engine.sync_engine, "commit", verify_macos_sqlite_commit)
         event.listen(
             engine.sync_engine, "handle_error", keep_connection_on_cancellation
         )
@@ -243,14 +339,22 @@ Unit = Callable[[AsyncConnection], Awaitable[Result]]
 
 
 class Database:
-    def __init__(self, settings: DatabaseSettings) -> None:
+    def __init__(
+        self, settings: DatabaseSettings, *, require_sqlite_full_sync: bool = False
+    ) -> None:
+        if require_sqlite_full_sync and settings.dialect is not Dialect.SQLITE:
+            raise ValueError("the SQLite writer mode requires SQLite")
         self.settings = settings
         self.dialect = settings.dialect
         self._writer_lock = asyncio.Lock()
         if settings.dialect is Dialect.SQLITE:
             create_private_file(settings.sqlite_path)
-            self._writer = sqlite_engine(settings, writer=True)
-            self._reader = sqlite_engine(settings, writer=False)
+            self._writer = sqlite_engine(
+                settings, writer=True, require_full_sync=require_sqlite_full_sync
+            )
+            self._reader = sqlite_engine(
+                settings, writer=False, require_full_sync=require_sqlite_full_sync
+            )
         else:
             self._writer = postgresql_engine(settings)
             self._reader = self._writer

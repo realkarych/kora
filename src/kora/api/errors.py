@@ -9,6 +9,9 @@ from kora.ir.diagnostic_collection import (
     DiagnosticCollectionError,
 )
 from kora.models.errors import (
+    HTTP_STATUSES as HTTP_STATUSES,
+)
+from kora.models.errors import (
     ApiError,
     ApiErrorCode,
     ApiErrorEnvelope,
@@ -19,23 +22,6 @@ from kora.models.errors import (
 )
 from kora.protocols.errors import KoraProtocolError
 
-HTTP_STATUSES = MappingProxyType(
-    {
-        ApiErrorCode.NOT_FOUND: 404,
-        ApiErrorCode.CONFLICT: 409,
-        ApiErrorCode.VALIDATION: 422,
-        ApiErrorCode.IDEMPOTENCY_MISMATCH: 409,
-        ApiErrorCode.FORBIDDEN: 403,
-        ApiErrorCode.APPROVAL_STALE: 409,
-        ApiErrorCode.WEBHOOK_AUTHENTICATION: 401,
-        ApiErrorCode.STALE_GRANT: 409,
-        ApiErrorCode.UNAUTHENTICATED: 401,
-        ApiErrorCode.INTERNAL: 500,
-        ApiErrorCode.UNAVAILABLE: 503,
-        ApiErrorCode.METHOD_NOT_ALLOWED: 405,
-        ApiErrorCode.METHOD_NOT_IMPLEMENTED: 501,
-    }
-)
 MESSAGES = MappingProxyType(
     {
         ApiErrorCode.NOT_FOUND: "Object not found.",

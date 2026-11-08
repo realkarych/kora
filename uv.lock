@@ -1197,7 +1197,11 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "anyio" },
+    { name = "certifi" },
     { name = "fastapi" },
+    { name = "httpcore" },
+    { name = "httpx" },
     { name = "jsonschema" },
     { name = "opentelemetry-api" },
     { name = "pydantic" },
@@ -1233,7 +1237,7 @@ build = [
 ]
 dev = [
     { name = "claude-agent-sdk" },
-    { name = "httpx" },
+    { name = "cryptography" },
     { name = "jsonschema" },
     { name = "pyright" },
     { name = "pytest" },
@@ -1242,6 +1246,7 @@ dev = [
     { name = "ruff" },
     { name = "testcontainers" },
     { name = "types-jsonschema" },
+    { name = "uvicorn" },
 ]
 mutation = [
     { name = "cosmic-ray" },
@@ -1251,10 +1256,14 @@ mutation = [
 requires-dist = [
     { name = "aiosqlite", specifier = "==0.22.1" },
     { name = "alembic", specifier = "==1.20.0" },
+    { name = "anyio", specifier = "==4.15.1" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = "==0.32.0" },
+    { name = "certifi", specifier = "==2026.10.19" },
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = "==0.2.168" },
     { name = "common-expression-language", marker = "extra == 'cel'", specifier = "==0.10.0" },
     { name = "fastapi", specifier = "==0.162.0" },
+    { name = "httpcore", specifier = "==1.0.9" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "jsonschema", specifier = "==4.26.0" },
     { name = "jsonschema", marker = "extra == 'conformance'", specifier = "==4.26.0" },
     { name = "mcp", marker = "extra == 'claude'", specifier = "==2.3.0" },
@@ -1278,7 +1287,7 @@ build = [
 ]
 dev = [
     { name = "claude-agent-sdk", specifier = "==0.2.168" },
-    { name = "httpx", specifier = "==0.28.1" },
+    { name = "cryptography", specifier = "==50.0.2" },
     { name = "jsonschema", specifier = "==4.26.0" },
     { name = "pyright", specifier = "==1.1.414" },
     { name = "pytest", specifier = "==9.1.1" },
@@ -1287,6 +1296,7 @@ dev = [
     { name = "ruff", specifier = "==0.17.1" },
     { name = "testcontainers", specifier = "==4.15.0" },
     { name = "types-jsonschema", specifier = "==4.26.0.20261006" },
+    { name = "uvicorn", specifier = "==0.54.0" },
 ]
 mutation = [{ name = "cosmic-ray", specifier = "==8.7.0" }]
 

@@ -20,8 +20,9 @@ from kora.plugins.vcs.git.plans import (
     PlanSettings,
     checkout_plan,
     is_branch,
+    is_checkout_branch,
+    is_checkout_ref,
     is_commit_message,
-    is_full_ref,
     is_object_id,
     is_publish_branch,
     publish_plan,
@@ -118,8 +119,8 @@ class GitVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
         if isinstance(rev, VcsRef):
             valid = is_object_id(rev.commit) and is_object_id(rev.base_commit)
         else:
-            valid = is_object_id(rev) or is_full_ref(rev)
-        if not valid or not is_branch(request.branch):
+            valid = is_object_id(rev) or is_checkout_ref(rev)
+        if not valid or not is_checkout_branch(request.branch):
             self.refuse(ctx, "vcs_request_invalid")
         plan = checkout_plan(self.settings(remote), rev, request.branch)
         ctx.logger.emit(self.events.planned, kind="checkout")
@@ -135,6 +136,7 @@ class GitVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
             self.refuse(ctx, "vcs_request_invalid")
         plan = publish_plan(
             self.settings(remote),
+            request.repo,
             request.branch,
             request.commit_message,
             ctx.clock.now(),

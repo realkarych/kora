@@ -32,7 +32,13 @@ from kora.protocols.vcs import (
     Vcs,
 )
 from tests.conformance.test_shared_secrets_checks import assert_capture_released
-from tests.plugins.vcs.git_support import REPO, World, configuration, make_world
+from tests.plugins.vcs.git_support import (
+    GONE_REPO,
+    REPO,
+    World,
+    configuration,
+    make_world,
+)
 
 MARKER: str = "vcs-shared-input-marker"
 
@@ -271,4 +277,45 @@ def test_sync_vcs_check_observes_owned_loop_finalization(tmp_path: Path) -> None
 
         assert len(provider.pending) == 2
         assert all(task.done() for task in provider.pending)
+    assert_capture_released(capture)
+
+
+class OtherBranchGit(GitVcs):
+    async def publish_plan(
+        self, request: PublishRequest, ctx: ProtocolContext
+    ) -> PublishPlan:
+        plan = await super().publish_plan(request, ctx)
+        return plan.model_copy(update={"branch": "kora/other/branch"})
+
+
+class OtherRepositoryGit(GitVcs):
+    async def publish_plan(
+        self, request: PublishRequest, ctx: ProtocolContext
+    ) -> PublishPlan:
+        plan = await super().publish_plan(request, ctx)
+        return plan.model_copy(update={"repo": GONE_REPO})
+
+
+@pytest.mark.parametrize("provider_type", [OtherBranchGit, OtherRepositoryGit])
+def test_shared_vcs_check_fails_a_provider_planning_another_destination(
+    tmp_path: Path, provider_type: type[GitVcs]
+) -> None:
+    with captured(
+        CONFORMANCE_COMPONENT, LoggingSettings(), "vcs-destination", utc_now
+    ) as capture:
+        world = make_world(tmp_path, capture, provider_type=provider_type)
+        check = checks.test_vcs_sealed_transfer_fixes_inspected_revision
+
+        with pytest.raises(
+            pytest.fail.Exception,
+            match="the publication plan names the requested repository and branch",
+        ):
+            check(
+                world.provider,
+                world.remote_fixture(),
+                world.bench(),
+                world.context(),
+                world.binding(),
+            )
+
     assert_capture_released(capture)

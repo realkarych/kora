@@ -15,6 +15,7 @@ from kora.plugins.runtime.local.channel import (
     send_message,
     workload_digest,
 )
+from kora.plugins.runtime.local.command import CommandSession
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import (
     COMPONENT,
@@ -94,6 +95,8 @@ async def delivery_server(
     clock: Clock | None = None,
     decoder: Callable[[bytearray], Workload] = decoded_workload,
     identities: IdentityReader | None = None,
+    command: CommandSession | None = None,
+    server_type: type[ControlServer] = ControlServer,
 ) -> AsyncGenerator[DeliveryServer]:
     ctx = runtime_context(capture, clock or SystemClock())
     with short_directory() as base:
@@ -121,7 +124,7 @@ async def delivery_server(
             socket_path=str(sockets / "delivery"),
         )
         await written(runtime, work.attempt_id, entry, ctx)
-        server = ControlServer(
+        server = server_type(
             bound,
             sockets,
             "delivery",
@@ -133,6 +136,7 @@ async def delivery_server(
             own,
             identities or reader,
             decoder=decoder,
+            command=command,
         )
         server.start()
         try:

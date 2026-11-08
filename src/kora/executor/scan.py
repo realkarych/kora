@@ -1,16 +1,24 @@
 import asyncio
 import hashlib
 import re
-from collections.abc import AsyncIterator, Sequence
+import threading
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from typing import Final, Protocol
+from typing import Final, Protocol, TypeVar
 
 from pydantic import ValidationError
 
 from kora.executor import CONTENT_REFUSED
-from kora.executor.digests import inspection_digest, sha256_digest
-from kora.executor.failures import ExecutorError, Phase, fail, invalid, misconfigured
+from kora.executor.digests import DIGEST_PREFIX, inspection_digest
+from kora.executor.failures import (
+    ExecutorError,
+    Phase,
+    fail,
+    invalid,
+    misconfigured,
+    unavailable,
+)
 from kora.executor.guard import PhaseGuard
 from kora.ir.node import ErrorClass
 from kora.ir.scalars import Digest
@@ -33,6 +41,29 @@ KEY_PATTERNS: Final[tuple[bytes, ...]] = (
 )
 PATTERN_SPAN: Final[int] = 160
 OFF_LOOP_BYTES: Final[int] = 65_536
+ResultT = TypeVar("ResultT")
+
+
+async def owned_off_loop(work: Callable[[threading.Event], ResultT]) -> ResultT:
+    cancelled = threading.Event()
+    running = asyncio.get_running_loop().run_in_executor(None, work, cancelled)
+    interrupted = False
+    while not running.done():
+        try:
+            await asyncio.wait({running})
+        except asyncio.CancelledError:
+            interrupted = True
+            cancelled.set()
+    if interrupted:
+        if not running.cancelled():
+            running.exception()
+        raise asyncio.CancelledError
+    return running.result()
+
+
+def stop_if_cancelled(cancelled: threading.Event) -> None:
+    if cancelled.is_set():
+        unavailable("scan_cancelled", Phase.SCAN)
 
 
 @dataclass(frozen=True)
@@ -86,7 +117,7 @@ class Matcher:
     async def hits_off_loop(self, data: bytes) -> bool:
         if len(data) < OFF_LOOP_BYTES:
             return self.hits(data)
-        return await asyncio.to_thread(self.hits, data)
+        return await owned_off_loop(lambda _: self.hits(data))
 
 
 @dataclass
@@ -118,7 +149,18 @@ def leak(logger: ComponentLogger) -> ExecutorError:
     return ExecutorError(ErrorClass.CREDENTIAL_LEAK, "secret_leak", Phase.SCAN)
 
 
-def parsed_records(index: bytes, bounds: ScanBounds) -> list[InspectionContent]:
+def index_digest_of(index: bytes, cancelled: threading.Event) -> str:
+    digest = hashlib.sha256()
+    view = memoryview(index)
+    for start in range(0, len(view), MIB):
+        stop_if_cancelled(cancelled)
+        digest.update(view[start : start + MIB])
+    return DIGEST_PREFIX + digest.hexdigest()
+
+
+def parsed_records(
+    index: bytes, bounds: ScanBounds, cancelled: threading.Event
+) -> list[InspectionContent]:
     lines = index.split(b"\n")
     if lines and lines[-1] == b"":
         lines.pop()
@@ -126,11 +168,21 @@ def parsed_records(index: bytes, bounds: ScanBounds) -> list[InspectionContent]:
         invalid("content_index_oversized", Phase.SCAN)
     records: list[InspectionContent] = []
     for line in lines:
+        stop_if_cancelled(cancelled)
         try:
             records.append(InspectionContent.model_validate_json(line, strict=True))
         except ValidationError:
             invalid("content_index_malformed", Phase.SCAN)
     return records
+
+
+def verified_records(
+    index: bytes, expected: str, bounds: ScanBounds, cancelled: threading.Event
+) -> tuple[str, list[InspectionContent]]:
+    digest = index_digest_of(index, cancelled)
+    if digest != expected:
+        invalid("content_index_digest_mismatch", Phase.SCAN)
+    return digest, parsed_records(index, bounds, cancelled)
 
 
 async def scanned_content(
@@ -171,12 +223,21 @@ async def scan_record(
         invalid("content_digest_mismatch", Phase.SCAN)
 
 
-def check_names(
+def joined_names(records: Sequence[InspectionContent], changed: Sequence[str]) -> bytes:
+    paths = [record.path for record in records if record.path is not None]
+    return "\n".join([*paths, *changed]).encode("utf-8")
+
+
+async def check_names(
     records: Sequence[InspectionContent], changed: Sequence[str], state: ScanState
 ) -> bool:
-    paths = [record.path for record in records if record.path is not None]
-    names = "\n".join([*paths, *changed])
-    return state.matcher.hits(names.encode("utf-8"))
+    names = await owned_off_loop(lambda _: joined_names(records, changed))
+    overlap = state.matcher.overlap
+    for start in range(0, max(1, len(names)), MIB):
+        window = names[max(0, start - overlap) : start + MIB]
+        if await state.matcher.hits_off_loop(window):
+            return True
+    return False
 
 
 async def scan(
@@ -201,17 +262,18 @@ async def scan(
     if manifest.prepared_digest != prepared_digest or manifest.revision != revision:
         invalid("content_index_unbound", Phase.SCAN)
     index = await source.index(manifest.content_index_location, bounds.max_index_bytes)
-    index_digest = sha256_digest(index)
-    if index_digest != manifest.content_index_digest:
-        invalid("content_index_digest_mismatch", Phase.SCAN)
-    records = parsed_records(index, bounds)
+    index_digest, records = await owned_off_loop(
+        lambda cancelled: verified_records(
+            index, manifest.content_index_digest, bounds, cancelled
+        )
+    )
     reachable = await source.reachable(
         revision, base, max(1, deadline_ns - guard.clock.monotonic_ns())
     )
     if frozenset(record.content_location for record in records) != reachable:
         invalid("content_index_incomplete", Phase.SCAN)
     state = ScanState(Matcher(secrets), guard, deadline_ns, bounds)
-    if check_names(records, changed, state):
+    if await check_names(records, changed, state):
         raise leak(logger)
     for record in records:
         await scan_record(source, record, state, logger)

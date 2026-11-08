@@ -1,22 +1,25 @@
 import asyncio
 import os
-import shutil
+import re
 import socket
 import stat
 import subprocess
 import threading
+import time
 from contextlib import ExitStack
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
-from pydantic import StrictBool, StrictInt
+from pydantic import Field, StrictInt
 
 from kora.conformance.bridge import ConstructorArguments, PreparedConformance
 from kora.conformance.vcs import VcsBench, VcsBinding, VcsConformanceInputs, VcsRemote
 from kora.executor.authorization import TrustedBinding
 from kora.executor.entry import Executor
 from kora.executor.launcher import Ending, LaunchSpec, ProcessLauncher, StepOutcome
+from kora.executor.steps import resolve_tool
 from kora.ir.json import JsonObject
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.protocols.boundary import BoundaryModel
@@ -32,7 +35,12 @@ from kora_tooling_fixture.owned_directory import (
 
 PREPARATION_ENTERED: Final[bytes] = b"prepare_entered\n"
 PREPARATION_COMPLETE: Final[bytes] = b"prepare_complete\n"
-MAX_PREPARATION_EVIDENCE: Final[int] = 128
+MAX_PREPARATION_EVIDENCE: Final[int] = 512
+GIT_DEADLINE_SECONDS: Final[int] = 5
+HEARTBEAT_SECONDS: Final[float] = 0.05
+MAX_TIMING_MILLISECONDS: Final[int] = 999_999_999
+MAX_TRACE_PREFIX: Final[int] = 4096
+TRACE_TIME: Final[re.Pattern[bytes]] = re.compile(rb'"time":"([^"]+)"')
 PreparationStep = Literal[
     "init_remote",
     "init_gone",
@@ -49,7 +57,10 @@ class PreparationEvidence(BoundaryModel):
     path: PathText
     device: StrictInt
     inode: StrictInt
-    occupy_remote: StrictBool
+    occupied_repository: Literal["remote", "gone"] | None = None
+    deadline_seconds: Annotated[StrictInt, Field(ge=0, le=GIT_DEADLINE_SECONDS)] = (
+        GIT_DEADLINE_SECONDS
+    )
 
     def append(self, record: bytes, prefix: int) -> bool:
         path = Path(self.path)
@@ -86,9 +97,46 @@ class PreparationEvidence(BoundaryModel):
             return False
 
 
-def git(root: Path, *arguments: str) -> str:
-    executable = shutil.which("git")
-    assert executable is not None
+@dataclass
+class PreparationObservation:
+    evidence: PreparationEvidence
+    written: int
+
+    def append(self, record: bytes) -> None:
+        if self.evidence.append(record, self.written):
+            self.written += len(record)
+
+
+class Heartbeat:
+    def __init__(self) -> None:
+        self.stopping = threading.Event()
+        self.largest_gap = 0.0
+        self.thread = threading.Thread(target=self.beat)
+
+    def beat(self) -> None:
+        stopped = False
+        previous = time.monotonic()
+        while not stopped:
+            stopped = self.stopping.wait(HEARTBEAT_SECONDS)
+            current = time.monotonic()
+            self.largest_gap = max(self.largest_gap, current - previous)
+            previous = current
+
+    def __enter__(self) -> None:
+        self.thread.start()
+
+    def __exit__(self, *_: object) -> None:
+        self.stopping.set()
+        self.thread.join()
+
+
+def git(
+    executable: str,
+    root: Path,
+    *arguments: str,
+    trace: Path | None = None,
+    deadline: int = GIT_DEADLINE_SECONDS,
+) -> str:
     environment = {
         "PATH": os.environ["PATH"],
         "HOME": str(root),
@@ -101,27 +149,79 @@ def git(root: Path, *arguments: str) -> str:
         "GIT_AUTHOR_DATE": "2026-10-20T12:00:00+00:00",
         "GIT_COMMITTER_DATE": "2026-10-20T12:00:00+00:00",
     }
+    if trace is not None:
+        environment["GIT_TRACE2_EVENT"] = str(trace)
     result = subprocess.run(
         [executable, *arguments],
         cwd=root,
         env=environment,
         capture_output=True,
         check=True,
-        timeout=5,
+        timeout=deadline,
+        umask=0o077,
     )
     return result.stdout.decode().strip()
 
 
-def seed_repositories(root: Path, observation: PreparationEvidence | None) -> str:
+def take_trace_time(trace: Path) -> float | None:
+    try:
+        with trace.open("rb") as stream:
+            prefix = stream.read(MAX_TRACE_PREFIX)
+        trace.unlink()
+        found = TRACE_TIME.search(prefix.split(b"\n", 1)[0])
+        if found is None:
+            return None
+        return datetime.fromisoformat(found[1].decode("ascii")).timestamp()
+    except (OSError, ValueError):
+        return None
+
+
+def milliseconds(seconds: float) -> int:
+    return min(max(round(seconds * 1000), 0), MAX_TIMING_MILLISECONDS)
+
+
+def observed_git(
+    executable: str,
+    root: Path,
+    observation: PreparationObservation,
+    step: PreparationStep,
+    arguments: tuple[str, ...],
+) -> str:
+    trace = root / f"git-trace-{step}"
+    heartbeat = Heartbeat()
+    began_at = time.time()
+    began = time.monotonic()
+    try:
+        with heartbeat:
+            return git(
+                executable,
+                root,
+                *arguments,
+                trace=trace,
+                deadline=observation.evidence.deadline_seconds,
+            )
+    finally:
+        total = time.monotonic() - began
+        traced_at = take_trace_time(trace)
+        start = -1 if traced_at is None else milliseconds(traced_at - began_at)
+        observation.append(
+            f"time:{step}:{start}:{milliseconds(total)}"
+            f":{milliseconds(heartbeat.largest_gap)}\n".encode("ascii")
+        )
+
+
+def seed_repositories(
+    executable: str, root: Path, observation: PreparationObservation | None
+) -> str:
     def note_failure(step: PreparationStep, reason: PreparationFailure) -> None:
         if observation is not None:
-            observation.append(
-                f"git_{step}_{reason}\n".encode("ascii"), len(PREPARATION_ENTERED)
-            )
+            observation.append(f"git_{step}_{reason}\n".encode("ascii"))
 
     def prepare_git(step: PreparationStep, *arguments: str) -> str:
         try:
-            return git(root, *arguments)
+            if observation is None:
+                return git(executable, root, *arguments)
+            return observed_git(executable, root, observation, step, arguments)
         except subprocess.TimeoutExpired:
             note_failure(step, "deadline")
             raise
@@ -238,11 +338,12 @@ class Adapter:
             else None
         )
         observation = (
-            evidence
+            PreparationObservation(evidence, len(PREPARATION_ENTERED))
             if evidence is not None and evidence.append(PREPARATION_ENTERED, 0)
             else None
         )
         parsed = configured_paths(config)
+        executable = resolve_tool("git", parsed.tool_path)
         root = Path(parsed.remotes["local"].path).parent
         assert root.parent == Path.cwd()
         assert not root.exists()
@@ -251,9 +352,11 @@ class Adapter:
         self.root = root
         self.identity = directory_identity(anchor.descriptor)
         anchor.close()
-        if evidence is not None and evidence.occupy_remote:
-            (root / "remote.git").touch(mode=0o600, exist_ok=False)
-        revision = seed_repositories(root, observation)
+        if evidence is not None and evidence.occupied_repository is not None:
+            (root / f"{evidence.occupied_repository}.git").touch(
+                mode=0o600, exist_ok=False
+            )
+        revision = seed_repositories(executable, root, observation)
         remote = VcsRemote(
             repo="local",
             revision=revision,
@@ -288,7 +391,7 @@ class Adapter:
             self.effect,
         )
         if observation is not None:
-            observation.append(PREPARATION_COMPLETE, len(PREPARATION_ENTERED))
+            observation.append(PREPARATION_COMPLETE)
         return self
 
     def bind_configuration(self, config: JsonObject) -> ConstructorArguments:

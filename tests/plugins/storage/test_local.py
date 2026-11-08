@@ -6,8 +6,10 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.conformance.storage_support import (
     BytesSource,
+    acknowledge_stage,
     operation,
     seal_bytes,
+    seal_repeated,
     single_part,
     stage_release,
     stage_spec,
@@ -15,8 +17,10 @@ from kora.conformance.storage_support import (
 )
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import StorageLimits
+from kora.protocols.storage_models import StageRef, StorageLimits, StorageOperationRef
+from tests.measurements.storage_lifetime_resources import close_provider
 from tests.plugins.storage.configuration import local_configuration
+from tests.plugins.storage.inspection import InspectedStorage
 
 
 def test_local_storage_stage_receipt_survives_restart_and_retires(
@@ -68,6 +72,138 @@ def test_local_storage_stage_receipt_survives_restart_and_retires(
         assert late_begin.value.code == "storage_issuer_closed"
 
     asyncio.run(scenario())
+
+
+def test_local_storage_64_stage_cohort_retires_at_saturation(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    import asyncio
+
+    root = tmp_path / "store"
+    configuration = LocalStorageConfiguration(
+        root=str(root), limits=StorageLimits(version=1, stage_slots=64)
+    )
+    context = context_for(kora_capture)
+    absent_stage_id = "private-absent-cohort-stage"
+
+    async def scenario() -> None:
+        provider = InspectedStorage(configuration)
+        try:
+            identity = provider.identity()
+            cohort: list[tuple[StageRef, StorageOperationRef]] = []
+            for index in range(63):
+                spec = stage_spec(identity, f"stage-{index}", b"")
+                begin = operation(identity, f"begin-{index}", "begin_stage", spec)
+                stage = await provider.begin_stage(begin, spec, context)
+                cohort.append((stage, begin))
+            high = await seal_repeated(provider, "high-slot", 4, context)
+            private_slot = root / "stages" / "63"
+            high_slot_materialized = bool(tuple(private_slot.iterdir()))
+            absent = stage_spec(identity, absent_stage_id, b"")
+            extra_begin = operation(identity, "absent-begin", "begin_stage", absent)
+            absent_retire = operation(
+                identity, "absent-retire", "retire_stage", absent.stage
+            )
+
+            with pytest.raises(KoraProtocolError) as full:
+                await provider.begin_stage(extra_begin, absent, context)
+            with pytest.raises(KoraProtocolError) as full_retire:
+                await provider.retire_stage(absent_retire, absent.stage, context)
+            acknowledgment = await acknowledge_stage(
+                provider, high.content.stage, high.operations, context
+            )
+            retired_slot_present = private_slot.exists()
+            original_stage = await provider.observe(high.operations[0], context)
+            original_seal = await provider.observe(high.operations[-1], context)
+            wrong = acknowledgment.model_copy(
+                update={"mutation_set_digest": "sha256:" + "0" * 64}
+            )
+            with pytest.raises(KoraProtocolError) as wrong_acknowledgment:
+                await provider.release_stage(wrong, context)
+            charged_slots = provider.resource_counts()["stage_rows"]
+            released = await provider.release_stage(acknowledgment, context)
+            compacted = await provider.observe(high.operations[0], context)
+            with pytest.raises(KoraProtocolError) as old_begin:
+                await provider.begin_stage(extra_begin, absent, context)
+            with pytest.raises(KoraProtocolError) as old_retire:
+                await provider.retire_stage(absent_retire, absent.stage, context)
+
+            assert full.value.code == full_retire.value.code == "storage_capacity"
+            assert wrong_acknowledgment.value.code == "storage_conflict"
+            assert charged_slots == 64
+            assert high_slot_materialized
+            assert not retired_slot_present
+            assert original_stage.result == high.content.stage
+            assert original_seal.result == high.content
+            assert released.state == "released"
+            assert compacted.state == "evidence_unavailable"
+            assert (
+                old_begin.value.code == old_retire.value.code == "storage_issuer_closed"
+            )
+        finally:
+            await close_provider(provider)
+
+        current = InspectedStorage(configuration)
+        try:
+            recovered = await current.retire_stage(absent_retire, absent.stage, context)
+            observed = await current.observe(absent_retire, context)
+            absent_acknowledgment = stage_release(
+                absent.stage,
+                ((absent_retire, recovered),),
+                persisted_outcome_revision="absent-outcome",
+                issuance_closed="absent-issuance-closed",
+            )
+            absent_released = await current.release_stage(
+                absent_acknowledgment, context
+            )
+            cohort_releases: list[str] = []
+            for stage, begin in cohort:
+                settled = await acknowledge_stage(current, stage, (begin,), context)
+                outcome = await current.release_stage(settled, context)
+                cohort_releases.append(outcome.state)
+            counts = current.resource_counts()
+
+            assert current.identity() == identity
+            assert recovered.completed
+            assert observed.state == "settled"
+            assert observed.effects_closed
+            assert observed.result == recovered
+            assert absent_released.state == "released"
+            assert cohort_releases == ["released"] * len(cohort)
+            assert all(count == 0 for count in counts.values())
+            assert tuple((root / "stages").iterdir()) == ()
+        finally:
+            await close_provider(current)
+
+        reopened = InspectedStorage(configuration)
+        try:
+            inventory = await reopened.scan("stages", None, 128, context)
+
+            assert reopened.identity() == identity
+            assert inventory.entries == ()
+            assert inventory.next_cursor is None
+        finally:
+            await close_provider(reopened)
+
+    asyncio.run(scenario())
+    records = kora_capture.finish()
+
+    refusals = [
+        (record["operation"], record["reason"])
+        for record in records
+        if record["event"] == "storage.local.refused"
+    ]
+    assert refusals == [
+        ("begin_stage", "storage_capacity"),
+        ("retire_stage", "storage_capacity"),
+        ("release_stage", "storage_conflict"),
+        ("begin_stage", "storage_issuer_closed"),
+        ("retire_stage", "storage_issuer_closed"),
+    ]
+    rendered = str(records)
+    assert str(root) not in rendered
+    assert absent_stage_id not in rendered
+    assert "sha256:" not in rendered
 
 
 @pytest.mark.parametrize("cancellations", [1, 2])

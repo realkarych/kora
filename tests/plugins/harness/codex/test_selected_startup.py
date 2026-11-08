@@ -38,6 +38,21 @@ class Exchange:
     result: object
 
 
+INITIALIZE = Exchange(
+    "initialize",
+    {
+        "clientInfo": {"name": "kora-test", "version": "1"},
+        "capabilities": {"experimentalApi": True},
+    },
+    {
+        "userAgent": "kora-test/0.166.0 (fixture)",
+        "platformFamily": "unix",
+        "platformOs": "linux",
+        "codexHome": "/fixture/codex",
+    },
+)
+
+
 def thread_fields() -> dict[str, object]:
     cwd = str(SELECTED.workspace)
     return {
@@ -111,28 +126,7 @@ def frame(value: dict[str, object]) -> bytes:
 
 
 async def initialize(connection: Wire) -> None:
-    request = await connection.peer_reader.readline()
-    assert json.loads(request) == {
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "clientInfo": {"name": "kora-test", "version": "1"},
-            "capabilities": {"experimentalApi": True},
-        },
-    }
-    await connection.send(
-        frame(
-            {
-                "id": 1,
-                "result": {
-                    "userAgent": "kora-test/0.166.0 (fixture)",
-                    "platformFamily": "unix",
-                    "platformOs": "linux",
-                    "codexHome": "/fixture/codex",
-                },
-            }
-        )
-    )
+    await answer(connection, 1, INITIALIZE)
     assert json.loads(await connection.peer_reader.readline()) == {
         "method": "initialized"
     }

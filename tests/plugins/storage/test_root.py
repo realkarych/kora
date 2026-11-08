@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import os
 from pathlib import Path
@@ -5,8 +6,11 @@ from pathlib import Path
 import pytest
 
 from kora.plugins.storage.files import RootAnchor, RootManifest
+from kora.plugins.storage.local import LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import StorageIdentity, StorageLimits
+from tests.measurements.storage_lifetime_resources import close_provider
+from tests.plugins.storage.inspection import InspectedStorage
 
 
 def descriptors_inside(store: Path) -> frozenset[tuple[int, int, int]]:
@@ -65,15 +69,48 @@ def test_local_storage_refuses_copied_identity_and_overlapping_domains(
     assert overlapping_domain.value.code == "storage_identity"
 
 
-def test_local_storage_root_configuration_is_immutable(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stage_slots", [8, 32])
+def test_local_storage_root_configuration_is_immutable(
+    tmp_path: Path, stage_slots: int
+) -> None:
     configured = tmp_path / "store"
-    with RootAnchor.open(configured, StorageLimits(version=1)):
-        pass
+    original_limits = StorageLimits(version=1, stage_slots=stage_slots)
+    manifest_path = configured / "manifest.json"
+    configuration = LocalStorageConfiguration(
+        root=str(configured), limits=original_limits
+    )
+    changed_configuration = LocalStorageConfiguration(
+        root=str(configured), limits=StorageLimits(version=1, stage_slots=64)
+    )
 
-    with pytest.raises(KoraProtocolError) as changed_limits:
-        RootAnchor.open(configured, StorageLimits(version=1, stage_slots=9))
+    async def scenario() -> None:
+        original = InspectedStorage(configuration)
+        try:
+            identity = original.identity()
+            manifest = manifest_path.read_bytes()
+            manifest_inode = manifest_path.stat().st_ino
+        finally:
+            await close_provider(original)
 
-    assert changed_limits.value.code == "storage_identity"
+        with pytest.raises(KoraProtocolError) as changed_limits:
+            await close_provider(InspectedStorage(changed_configuration))
+        reopened = InspectedStorage(configuration)
+        try:
+            reopened_identity = reopened.identity()
+            reopened_manifest = manifest_path.read_bytes()
+            reopened_inode = manifest_path.stat().st_ino
+        finally:
+            await close_provider(reopened)
+
+        saved = RootManifest.model_validate_json(manifest)
+        assert saved.control_initialized
+        assert saved.limits == original_limits
+        assert changed_limits.value.code == "storage_identity"
+        assert reopened_identity == identity
+        assert reopened_manifest == manifest
+        assert reopened_inode == manifest_inode
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

@@ -7,6 +7,16 @@ This follows the [selected profile](../specs/codex-execution-profile.md)
 and [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md)
 and [ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md).
 
+The [matched release comparison](codex-managed-hook-release-comparison-2026-11-08.md)
+records the same Linux Bash and direct patch effects for the selected
+0.166.0 control and official 0.167.0 trial.
+
+The [selected direct patch timeout probe](codex-selected-patch-hook-timeout-2026-11-08.md)
+found the exact workspace marker after a turn that reported a five-second
+managed hook timeout on official 0.166.0. The same patch succeeded with a
+completed hook and left no file after explicit denial. Both timeout helpers in the Bash
+and patch modes exited while the native roles were still live.
+
 ## What is established
 
 The [native evidence](codex-managed-hook-failures-2026-11-06.md) verifies

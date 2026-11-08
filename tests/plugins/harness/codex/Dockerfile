@@ -47,3 +47,7 @@ FROM probe AS patch-hook
 USER root
 RUN sed -i 's/matcher = "\^Bash\$"/matcher = "^apply_patch$"/' /etc/codex/requirements.toml && grep -Fxq 'matcher = "^apply_patch$"' /etc/codex/requirements.toml
 USER 65532:65532
+
+FROM shell-controls AS selected-turn
+COPY linux-packages /usr/local/lib/python3.11/site-packages/
+COPY kora /usr/local/lib/python3.11/site-packages/kora/

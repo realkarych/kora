@@ -735,9 +735,15 @@ class TransitionExecutor(NativeExecutor):
         self,
         function: Callable[[], Result],
         on_cancel: Callable[[Result], None] | None = None,
+        *,
+        after_uncertain_submission: Callable[[], None] | None = None,
     ) -> Result:
         try:
-            return await super().run(function, on_cancel)
+            return await super().run(
+                function,
+                on_cancel,
+                after_uncertain_submission=after_uncertain_submission,
+            )
         except NativeIOClosed:
             raise refusal("runtime_closed") from None
         except NativeIOBusy:
@@ -749,11 +755,17 @@ class TransitionExecutor(NativeExecutor):
         ctx: ProtocolContext,
         operation: str,
         on_cancel: Callable[[Result], None] | None = None,
+        *,
+        after_uncertain_submission: Callable[[], None] | None = None,
     ) -> Result:
         started = ctx.clock.monotonic_ns()
         deadline = started + LOCK_DEADLINE_NS
         while True:
-            outcome = await self.run(attempt, lambda value: release(value, on_cancel))
+            outcome = await self.run(
+                attempt,
+                lambda value: release(value, on_cancel),
+                after_uncertain_submission=after_uncertain_submission,
+            )
             if not isinstance(outcome, LockOutcome):
                 return outcome
             now = ctx.clock.monotonic_ns()

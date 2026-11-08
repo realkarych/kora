@@ -79,6 +79,7 @@ async def initialize_app_server(
     deadline: float,
     experimental_api: bool = False,
     observe: Callable[[Notification], bool | None] | None = None,
+    before_write: Callable[[], None] | None = None,
 ) -> str:
     params: dict[str, object] = {
         "clientInfo": {
@@ -93,7 +94,8 @@ async def initialize_app_server(
         params,
         deadline=deadline,
         observe=observe if observe is not None else lambda _notice: None,
+        before_write=before_write,
     )
     verify_startup(response, expected)
-    await rpc.notify("initialized", deadline=deadline)
+    await rpc.notify("initialized", deadline=deadline, before_write=before_write)
     return expected.version

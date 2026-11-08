@@ -217,7 +217,7 @@ def test_storage_operation_digest_has_a_fixed_canonical_preimage() -> None:
         ("private_bytes", 1048575),
         ("private_bytes", 17179869185),
         ("stage_slots", 0),
-        ("stage_slots", 33),
+        ("stage_slots", 65),
         ("deletion_slots", 33),
         ("data_work_slots", 9),
         ("reader_slots", 17),
@@ -230,6 +230,15 @@ def test_storage_limits_refuse_unsupported_settings(field: str, value: object) -
 
     with pytest.raises(ValidationError):
         StorageLimits.model_validate({**document, field: value})
+
+
+def test_storage_stage_slots_support_a_full_cohort_with_the_same_default() -> None:
+    default = StorageLimits(version=1)
+
+    expanded = StorageLimits(version=1, stage_slots=64)
+
+    assert default.stage_slots == 8
+    assert expanded.stage_slots == 64
 
 
 def test_storage_complete_page_envelope_is_bounded() -> None:

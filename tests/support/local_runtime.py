@@ -7,6 +7,8 @@ import sys
 import threading
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Final
 
@@ -17,11 +19,13 @@ from kora.conformance.common import CONFORMANCE_COMPONENT
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
-from kora.protocols.deadlines import ExecutionDeadline
+from kora.protocols.deadlines import ClockSample, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.identity import (
+    SCAN_NS,
+    ArgumentMatch,
     GroupObservation,
     IdentityObservation,
     IdentityReader,
@@ -153,6 +157,72 @@ def gated_steering(entered: threading.Event, release: threading.Event) -> Steeri
         entered.set()
         assert release.wait(READY_DEADLINE_SECONDS)
         return observation
+
+    return steer
+
+
+MatchSteering = Callable[[ArgumentMatch, int], ArgumentMatch]
+
+
+class SteeredMatchReader:
+    def __init__(self) -> None:
+        self.native = NativeIdentityReader()
+        self.steered: dict[int, MatchSteering] = {}
+        self.reads: dict[int, int] = {}
+
+    def __call__(self, pid: int, expected: tuple[bytes, ...]) -> ArgumentMatch:
+        match = self.native.carries(pid, tuple(os.fsdecode(item) for item in expected))
+        steering = self.steered.get(pid)
+        if steering is None:
+            return match
+        self.reads[pid] = self.reads.get(pid, 0) + 1
+        return steering(match, self.reads[pid])
+
+
+@dataclass
+class NudgedClock(Clock):
+    base: SystemClock = field(default_factory=SystemClock)
+    offset_ns: int = 0
+
+    def now(self) -> datetime:
+        return self.base.now()
+
+    def monotonic_ns(self) -> int:
+        return self.base.monotonic_ns() + self.offset_ns
+
+    def sample(self) -> ClockSample:
+        return ClockSample(wall=self.now(), monotonic_ns=self.monotonic_ns())
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        await self.base.sleep_until(deadline_ns - self.offset_ns)
+
+
+def alternately_unknown(match: ArgumentMatch, count: int) -> ArgumentMatch:
+    return ArgumentMatch.UNKNOWN if count % 2 else match
+
+
+def never_settling(clock: NudgedClock, native_reads: int = 0) -> MatchSteering:
+    def steer(match: ArgumentMatch, count: int) -> ArgumentMatch:
+        if count <= native_reads:
+            return match
+        if count > native_reads + 1:
+            clock.offset_ns += SCAN_NS
+        return ArgumentMatch.UNKNOWN
+
+    return steer
+
+
+def gated_reread(
+    entered: threading.Event, release: threading.Event, native_reads: int = 0
+) -> MatchSteering:
+    def steer(match: ArgumentMatch, count: int) -> ArgumentMatch:
+        if count <= native_reads:
+            return match
+        if count == native_reads + 1:
+            return ArgumentMatch.UNKNOWN
+        entered.set()
+        assert release.wait(READY_DEADLINE_SECONDS)
+        return match
 
     return steer
 

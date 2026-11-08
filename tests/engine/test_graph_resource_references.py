@@ -18,6 +18,7 @@ from kora.engine.graph_command_manifests import (
 from kora.engine.graph_resource_references import (
     GraphResourceOwner,
     GraphResourceReferenceLimits,
+    GraphResourceReferences,
     GraphResourceScope,
     build_graph_resource_references,
     check_graph_resource_references,
@@ -155,6 +156,33 @@ def test_physical_references_build_sparse_exact_occurrences() -> None:
     assert built.text == checked.text == canonical(expected)
 
 
+def test_prepared_resource_owners_follow_canonical_path_and_file_order() -> None:
+    config = authored_manifest([resource("é.sh"), resource("z.sh")])
+    text = canonical(command_document(config, config))
+    repeated = content(incarnation=MARKER)
+    distinct = content(store="second-store", incarnation="second-incarnation")
+    root_first = GraphResourceOwner(SCOPE, ROOT, "z.sh", repeated)
+    root_second = GraphResourceOwner(SCOPE, ROOT, "é.sh", distinct)
+    body_first = GraphResourceOwner(SCOPE, BODY, "z.sh", distinct)
+    body_second = GraphResourceOwner(SCOPE, BODY, "é.sh", repeated)
+    expected = (root_first, root_second, body_first, body_second)
+    supplied = tuple(reversed(expected))
+
+    built = build_graph_resource_references(text, SCOPE, supplied, limits=LIMITS)
+    saved = ObjectReader(built.text).object()
+    checked = check_graph_resource_references(
+        text, declared(text), saved, SCOPE, supplied, limits=LIMITS
+    )
+
+    assert all(
+        actual is original
+        for actual, original in zip(built.owners, expected, strict=True)
+    )
+    assert checked.text == built.text
+    assert physical_file(saved, command=0, file=0)["name"] == "z.sh"
+    assert physical_file(saved, command=1, file=1)["name"] == "é.sh"
+
+
 def test_physical_references_require_explicit_empty_inventory() -> None:
     text = canonical(command_document({}))
     logical = declared(text)
@@ -168,6 +196,7 @@ def test_physical_references_require_explicit_empty_inventory() -> None:
         check_graph_resource_references(text, logical, {}, SCOPE, (), limits=LIMITS)
 
     assert built.text == verified.text == canonical(empty)
+    assert built.owners == ()
     assert_refused(historical.value, GraphValueFailure.INVALID)
 
 
@@ -339,6 +368,48 @@ def test_physical_references_admit_exact_and_one_short_capacity(
     assert_refused(refusal.value, GraphValueFailure.BUDGET)
 
 
+@pytest.mark.parametrize(
+    ("dimension", "previous_build", "reader_exact"),
+    [("scratch", 35_559, 35_559), ("work", 52_717, 54_603)],
+)
+def test_prepared_owner_retention_fits_exact_limit_with_unchanged_reader(
+    dimension: Literal["scratch", "work"], previous_build: int, reader_exact: int
+) -> None:
+    text, logical, owners = single_inputs()
+    prepared_exact = previous_build + 16_579
+    exact = replace(LIMITS, **{dimension: prepared_exact})
+    short = replace(exact, **{dimension: prepared_exact - 1})
+    reader_limits = replace(LIMITS, **{dimension: reader_exact})
+
+    built = build_graph_resource_references(text, SCOPE, owners, limits=exact)
+    with pytest.raises(GraphValueRejected) as refused:
+        build_graph_resource_references(text, SCOPE, owners, limits=short)
+    checked = check_graph_resource_references(
+        text,
+        logical,
+        ObjectReader(built.text).object(),
+        SCOPE,
+        owners,
+        limits=reader_limits,
+    )
+
+    frames = {
+        frame.f_code.co_name: frame.f_locals
+        for frame, _ in walk_tb(refused.value.__traceback__)
+    }
+
+    assert built.owners == owners
+    assert type(checked) is GraphResourceReferences
+    assert checked.text == built.text
+    assert_refused(refused.value, GraphValueFailure.BUDGET)
+    assert "_references_result" not in frames
+    assert set(frames["build_graph_resource_references"]) == {
+        "limits",
+        "result",
+        "reason",
+    }
+
+
 def test_physical_references_charge_saved_comparison_and_repeated_occurrences() -> None:
     text, logical, owners = single_inputs()
     tight = tight_limits(text, owners, "work")
@@ -347,10 +418,11 @@ def test_physical_references_charge_saved_comparison_and_repeated_occurrences() 
     config = authored_manifest([resource("é.sh")])
     repeated = canonical(command_document(config, config))
     shared = (*owners, GraphResourceOwner(SCOPE, BODY, "é.sh", owners[0].reference))
+    comparison_limits = replace(LIMITS, work=52_717)
 
     with pytest.raises(GraphValueRejected) as comparison:
         check_graph_resource_references(
-            text, logical, saved, SCOPE, owners, limits=tight
+            text, logical, saved, SCOPE, owners, limits=comparison_limits
         )
     with pytest.raises(GraphValueRejected) as duplicate_cost:
         build_graph_resource_references(repeated, SCOPE, shared, limits=tight)

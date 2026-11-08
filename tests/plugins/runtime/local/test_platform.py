@@ -14,7 +14,14 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.runner.filesystem import DirectoryAnchor, rename_no_replace
-from kora.runner.identity import ArgumentMatch, IdentityState, NativeIdentityReader
+from kora.runner.identity import (
+    SCAN_NS,
+    ArgumentMatch,
+    IdentityState,
+    NativeIdentityReader,
+    ProcessScanFailure,
+)
+from tests.plugins.runtime.local.frames_support import StepClock, TickingClock
 from tests.plugins.runtime.local.peer_legs import (
     kernel_peer_selection,
     peer_clock_window,
@@ -33,6 +40,8 @@ from tests.support.local_runtime import (
 
 __all__ = ["kora_capture"]
 
+REAL_EXITS = 100
+REAL_EXIT_STEP_NS = 1_000_000
 EXEC_AFTER_MARK = """
 import fcntl, os, sys
 descriptor = int(sys.argv[1])
@@ -43,6 +52,9 @@ FORKED_READ = """
 import os, sys, time
 from kora.runner.identity import NativeIdentityReader, ProcessScanFailure
 reader = NativeIdentityReader()
+def refused(pid, expected):
+    raise AssertionError("a forked reader reads no argv")
+guarded = NativeIdentityReader(match_reader=refused)
 child = os.fork()
 if child == 0:
     sys.stdout.write(reader.read(os.getpid()).state.value + "\\n")
@@ -52,6 +64,8 @@ if child == 0:
     sys.stdout.write(result.value + "\\n")
     legacy = reader.processes_carrying(tuple(sys.orig_argv), deadline)
     sys.stdout.write(str(legacy is None) + "\\n")
+    late = guarded.carries(os.getpid(), tuple(sys.orig_argv), deadline)
+    sys.stdout.write(late.value + "\\n")
     sys.stdout.flush()
     os._exit(0)
 os.waitpid(child, 0)
@@ -119,6 +133,7 @@ async def forked_reader_is_unknown(tmp_path: Path, capture: Capture) -> None:
         "unknown",
         "reader_process_changed",
         "True",
+        "unknown",
         "present",
     ]
 
@@ -190,6 +205,97 @@ async def other_uid_member(tmp_path: Path, capture: Capture) -> None:
     else:
         assert observed.state is IdentityState.UNKNOWN
         assert members == [("unknown", "")]
+
+
+def scripted(
+    results: list[ArgumentMatch], after: Callable[[int], None] | None = None
+) -> tuple[Callable[[int, tuple[bytes, ...]], ArgumentMatch], list[int]]:
+    reads: list[int] = []
+
+    def read(pid: int, expected: tuple[bytes, ...]) -> ArgumentMatch:
+        reads.append(pid)
+        if after is not None:
+            after(len(reads))
+        return results[min(len(reads), len(results)) - 1]
+
+    return read, reads
+
+
+async def unknown_argv_settles_within_the_deadline(
+    tmp_path: Path, capture: Capture
+) -> None:
+    unknown = ArgumentMatch.UNKNOWN
+    pid = os.getpid()
+    for label, results, expected, count in (
+        ("to equal", [unknown, ArgumentMatch.EQUAL], ArgumentMatch.EQUAL, 2),
+        ("to absent", [unknown, ArgumentMatch.ABSENT], ArgumentMatch.ABSENT, 2),
+        (
+            "to different",
+            [unknown, ArgumentMatch.DIFFERENT],
+            ArgumentMatch.DIFFERENT,
+            2,
+        ),
+    ):
+        clock = TickingClock(step_ns=SCAN_NS // 10)
+        read, reads = scripted(results)
+        reader = NativeIdentityReader(clock=clock, match_reader=read)
+        settled = reader.carries(pid, ("x",), clock.monotonic_ns() + SCAN_NS)
+        assert (label, settled, len(reads)) == (label, expected, count)
+
+
+async def expired_deadline_still_reads_once(tmp_path: Path, capture: Capture) -> None:
+    pid = os.getpid()
+    for first in (ArgumentMatch.EQUAL, ArgumentMatch.UNKNOWN):
+        clock = TickingClock(step_ns=SCAN_NS // 10)
+        read, reads = scripted([first])
+        reader = NativeIdentityReader(clock=clock, match_reader=read)
+        assert reader.carries(pid, ("x",), clock.monotonic_ns() - 1) is first
+        assert len(reads) == 1
+
+
+async def unencodable_vector_reads_nothing(tmp_path: Path, capture: Capture) -> None:
+    clock = TickingClock(step_ns=SCAN_NS // 10)
+    read, reads = scripted([ArgumentMatch.EQUAL])
+    reader = NativeIdentityReader(clock=clock, match_reader=read)
+    deadline = clock.monotonic_ns() + SCAN_NS
+    assert reader.carries(os.getpid(), ("\ud800",), deadline) is ArgumentMatch.UNKNOWN
+    assert reads == []
+
+
+def budget_spent_on_second_read(clock: StepClock) -> Callable[[int], None]:
+    def spend(count: int) -> None:
+        if count == 2:
+            clock.advance(SCAN_NS)
+
+    return spend
+
+
+async def unknown_at_the_deadline_ends_the_scan(
+    tmp_path: Path, capture: Capture
+) -> None:
+    unknown = ArgumentMatch.UNKNOWN
+    different = ArgumentMatch.DIFFERENT
+    for label, results, expected in (
+        ("still unknown", [unknown], ProcessScanFailure.OWNER_OR_ARGV_UNKNOWN),
+        ("settled late", [unknown, different], ProcessScanFailure.SCAN_DEADLINE),
+    ):
+        clock = StepClock()
+        read, reads = scripted(results, budget_spent_on_second_read(clock))
+        reader = NativeIdentityReader(clock=clock, match_reader=read)
+        result = reader.scan_processes_carrying(("x",), clock.monotonic_ns() + SCAN_NS)
+        assert (label, result, len(reads)) == (label, expected, 2)
+        assert reads[0] == reads[1]
+
+
+async def far_deadline_is_capped_by_the_scan_bound(
+    tmp_path: Path, capture: Capture
+) -> None:
+    clock = TickingClock(step_ns=SCAN_NS // 10)
+    read, reads = scripted([ArgumentMatch.UNKNOWN])
+    reader = NativeIdentityReader(clock=clock, match_reader=read)
+    far = clock.monotonic_ns() + 100 * SCAN_NS
+    assert reader.carries(os.getpid(), ("x",), far) is ArgumentMatch.UNKNOWN
+    assert len(reads) == 10
 
 
 async def own_vector_is_not_swept(tmp_path: Path, capture: Capture) -> None:
@@ -264,6 +370,15 @@ async def child_namespace_member(tmp_path: Path, capture: Capture) -> None:
 
 
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
+    "unknown_argv_settles_within_the_deadline": (
+        unknown_argv_settles_within_the_deadline
+    ),
+    "expired_deadline_still_reads_once": expired_deadline_still_reads_once,
+    "unencodable_vector_reads_nothing": unencodable_vector_reads_nothing,
+    "unknown_at_the_deadline_ends_the_scan": unknown_at_the_deadline_ends_the_scan,
+    "far_deadline_is_capped_by_the_scan_bound": (
+        far_deadline_is_capped_by_the_scan_bound
+    ),
     "kernel_peer_selection": kernel_peer_selection,
     "peer_clock_window": peer_clock_window,
     "peer_exit_during_attestation": peer_exit_during_attestation,
@@ -283,6 +398,34 @@ PREPARED_LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
         else {}
     ),
 }
+
+
+def test_carries_settles_across_real_exits(
+    record_testsuite_property: Callable[[str, object], None],
+) -> None:
+    clock = TickingClock(step_ns=REAL_EXIT_STEP_NS)
+    reader = NativeIdentityReader(clock=clock)
+    vector = ("/bin/sleep", "60")
+    deadline = time.monotonic() + READY_DEADLINE_SECONDS
+    slowest_ns = 0
+    for _ in range(REAL_EXITS):
+        with subprocess.Popen(vector) as process:
+            try:
+                while reader.carries(process.pid, vector) is not ArgumentMatch.EQUAL:
+                    assert time.monotonic() < deadline
+            finally:
+                process.kill()
+            while True:
+                started_ns = time.monotonic_ns()
+                match = reader.carries(
+                    process.pid, vector, clock.monotonic_ns() + SCAN_NS
+                )
+                slowest_ns = max(slowest_ns, time.monotonic_ns() - started_ns)
+                assert match is not ArgumentMatch.UNKNOWN
+                if match is not ArgumentMatch.EQUAL:
+                    break
+                assert time.monotonic() < deadline
+    record_testsuite_property("slowest_settle_ns", slowest_ns)
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,12 @@ from kora.plugins.harness.codex.launch_configuration import (
     build_launch_inputs,
 )
 
-SelectedPatchCase = Literal["selected-patch-deny", "selected-patch-exit-one"]
+SelectedPatchCase = Literal[
+    "selected-patch-allow",
+    "selected-patch-deny",
+    "selected-patch-exit-one",
+    "selected-patch-timeout",
+]
 SelectedHookCase = (
     Literal[
         "selected-hook-deny",
@@ -21,19 +26,35 @@ SelectedHookCase = (
     ]
     | SelectedPatchCase
 )
+SelectedSqliteHomeCase = Literal[
+    "selected-sqlite-home-default", "selected-sqlite-home-override"
+]
+SelectedNoiseRegistryCase = Literal[
+    "selected-noise-registry-default", "selected-noise-registry-override"
+]
 SelectedLaunchCase = (
-    SelectedHookCase
+    SelectedNoiseRegistryCase
+    | SelectedHookCase
+    | SelectedSqliteHomeCase
     | Literal[
+        "selected-command-metadata",
         "selected-allow",
         "selected-deny",
         "selected-key-absent",
         "selected-startup-ready",
         "selected-startup-bearer",
         "selected-startup-bash",
+        "selected-turn-complete",
+        "selected-turn-cut",
     ]
 )
 SELECTED_PATCH_CASES: frozenset[SelectedPatchCase] = frozenset(
-    {"selected-patch-deny", "selected-patch-exit-one"}
+    {
+        "selected-patch-allow",
+        "selected-patch-deny",
+        "selected-patch-exit-one",
+        "selected-patch-timeout",
+    }
 )
 SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
     {
@@ -44,9 +65,24 @@ SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
         "selected-hook-timeout",
     }
 )
+SELECTED_HOOK_TIMEOUT_CASES: frozenset[SelectedHookCase] = frozenset(
+    {"selected-hook-timeout", "selected-patch-timeout"}
+)
+SELECTED_SQLITE_HOME_CASES: frozenset[SelectedSqliteHomeCase] = frozenset(
+    {"selected-sqlite-home-default", "selected-sqlite-home-override"}
+)
+SQLITE_HOME_CANARY = "sqlite-home-canary"
+SELECTED_TURN_CASES = frozenset({"selected-turn-complete", "selected-turn-cut"})
+SELECTED_NOISE_REGISTRY_CASES: frozenset[SelectedNoiseRegistryCase] = frozenset(
+    {"selected-noise-registry-default", "selected-noise-registry-override"}
+)
 SELECTED_LAUNCH_CASES = frozenset(
     {
+        *SELECTED_NOISE_REGISTRY_CASES,
         *SELECTED_HOOK_CASES,
+        *SELECTED_TURN_CASES,
+        *SELECTED_SQLITE_HOME_CASES,
+        "selected-command-metadata",
         "selected-allow",
         "selected-deny",
         "selected-key-absent",
@@ -56,10 +92,23 @@ SELECTED_LAUNCH_CASES = frozenset(
     }
 )
 SELECTED_AUTH_CASES = frozenset(
-    {*SELECTED_HOOK_CASES, "selected-allow", "selected-deny", "selected-startup-ready"}
+    {
+        *SELECTED_HOOK_CASES,
+        *SELECTED_TURN_CASES,
+        *SELECTED_SQLITE_HOME_CASES,
+        "selected-command-metadata",
+        "selected-allow",
+        "selected-deny",
+        "selected-startup-ready",
+    }
 )
 SELECTED_REFUSALS = frozenset(
-    {"selected-key-absent", "selected-startup-bearer", "selected-startup-bash"}
+    {
+        *SELECTED_NOISE_REGISTRY_CASES,
+        "selected-key-absent",
+        "selected-startup-bearer",
+        "selected-startup-bash",
+    }
 )
 SELECTED_MODEL = "gpt-5.5"
 PROJECT_MODEL_CANARY = "kora-checkout-model-canary"
@@ -71,6 +120,23 @@ SELECTED_COMMAND = (
     'test -n "${BASH_VERSION-}" && ! shopt -q login_shell && '
     """printf '%s\\n' "$(readlink -f -- "$0")" "$HOME" > kora-probe.marker"""
 )
+
+METADATA_MARKER = "kora-probe.metadata"
+METADATA_ENV_CONTROL = "kora-executor-env-control"
+METADATA_ENVIRONMENT = {
+    "CODEX_THREAD_ID": "kora-stale-thread",
+    "CODEX_TOOL_CALL_ID": "kora-stale-call",
+    "KORA_PROBE_ENV_CONTROL": METADATA_ENV_CONTROL,
+}
+METADATA_COMMAND = (
+    SELECTED_COMMAND + " && printf '%s\\n' "
+    '"${CODEX_THREAD_ID-}" "${CODEX_TOOL_CALL_ID-}" "${KORA_PROBE_ENV_CONTROL-}" '
+    f"> {METADATA_MARKER}"
+)
+
+
+def selected_command(case: str) -> str:
+    return METADATA_COMMAND if case == "selected-command-metadata" else SELECTED_COMMAND
 
 
 def role_homes(root: Path) -> NativeHomes:

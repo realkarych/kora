@@ -1,4 +1,5 @@
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -132,6 +133,7 @@ async def prepare_selected_thread(
     bearer: str,
     *,
     deadline: float,
+    before_write: Callable[[], None] | None = None,
 ) -> str:
     if identity.version != CODEX_VERSION:
         raise SelectedStartupError(SelectedStartupFailure.INVALID_EXPECTATION)
@@ -140,7 +142,11 @@ async def prepare_selected_thread(
 
     async def call(method: str, params: dict[str, object]) -> object:
         return await rpc.call(
-            method, params, deadline=deadline, observe=reject_premature_completion
+            method,
+            params,
+            deadline=deadline,
+            observe=reject_premature_completion,
+            before_write=before_write,
         )
 
     await initialize_app_server(
@@ -149,6 +155,7 @@ async def prepare_selected_thread(
         deadline=deadline,
         experimental_api=True,
         observe=reject_premature_completion,
+        before_write=before_write,
     )
     local = fields(await call("environment/status", {"environmentId": "local"}))
     if local.get("status") != "unknown":

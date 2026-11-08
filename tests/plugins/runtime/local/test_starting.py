@@ -6,17 +6,24 @@ import shutil
 import signal
 import sys
 import threading
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
+from typing import TypeVar
 
 import pytest
 from pydantic import TypeAdapter
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
-from kora.plugins.runtime.local.runtime import STOP_MATCHES, SweepRefused
+from kora.plugins.runtime.local.runtime import (
+    STOP_MATCHES,
+    LocalRuntime,
+    SweepRefused,
+)
 from kora.plugins.runtime.local.spawn import (
     Launcher,
     Launchers,
@@ -27,12 +34,20 @@ from kora.plugins.runtime.local.spawn import (
     spawn_runner,
 )
 from kora.plugins.runtime.local.supervisor import EXIT_FAILED, EXIT_REFUSED
+from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.evidence import EvidenceScope
-from kora.runner.identity import IdentityObservation, IdentityState
+from kora.runner.identity import (
+    SCAN_NS,
+    ArgumentMatch,
+    IdentityObservation,
+    IdentityState,
+    NativeIdentityReader,
+)
 from kora.runner.processes import ExitAnchor
 from kora.runner.registry import Fence, Retired, Running, Starting
 from tests.plugins.runtime.local.frames_support import StepClock
+from tests.support.local_peers import until
 from tests.support.local_runners import (
     EXITING,
     NEVER_READY,
@@ -54,8 +69,15 @@ from tests.support.local_runners import (
 from tests.support.local_runners import runner_argv as runner_vector
 from tests.support.local_runtime import (
     PATH_MARKER,
+    READY_DEADLINE_SECONDS,
+    MatchSteering,
+    NudgedClock,
     SteeredIdentityReader,
+    SteeredMatchReader,
+    Steering,
+    alternately_unknown,
     frozen,
+    never_settling,
     open_descriptors,
     prepared,
     private_directory,
@@ -70,6 +92,7 @@ from tests.support.retirement_evidence import retirement_failure_note
 
 __all__ = ["kora_capture"]
 
+Steer = TypeVar("Steer")
 NONCE = "a" * 32
 FENCE_ID = "retirement-fence"
 SECOND_NS = 1_000_000_000
@@ -260,14 +283,18 @@ async def running_runner_is_not_retired_yet(
     assert spawn_outcomes(capture) == ["ready"]
 
 
+def retire_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        record for record in records if record.get("event") == "runtime.local.retire"
+    ]
+
+
 def sweep_records(capture: Capture, *secrets: str) -> list[tuple[str, int, int]]:
     records = capture.finish()
     for record in records:
         text = json.dumps(record)
         assert not any(secret in text for secret in secrets)
-    swept = [
-        record for record in records if record.get("event") == "runtime.local.retire"
-    ]
+    swept = retire_records(records)
     for record in swept:
         expected = "INFO" if record.get("outcome") == "tombstoned" else "WARNING"
         assert record.get("level") == expected
@@ -413,22 +440,24 @@ async def test_ready_exit_watch_requires_fresh_disappearance(
     assert zombie_children() == zombies
 
 
-async def unreadable_match_is_unconfirmed(
-    root: Path, sockets: Path, capture: Capture
+async def assert_refused_then_recovered(
+    runtime: LocalRuntime,
+    entry: Starting,
+    spawned: int,
+    ctx: ProtocolContext,
+    root: Path,
+    capture: Capture,
+    steered: dict[int, Steer],
+    steering: Steer,
 ) -> None:
-    ctx = runtime_context(capture)
-    reader = SteeredIdentityReader()
-    runtime, entry, _, spawned = await lingering_start(
-        root, sockets, ctx, identities=reader
-    )
     try:
-        reader.steered[spawned] = unreadable
+        steered[spawned] = steering
         refused = await protocol_error(
             runtime.retire("attempt-1", timedelta(seconds=10), ctx)
         )
         fenced = await recorded(runtime, "attempt-1")
         alive = not exited_within(spawned, 0)
-        reader.steered.clear()
+        steered.clear()
         receipt = await runtime.retire("attempt-1", timedelta(seconds=10), ctx)
     finally:
         await runtime.close()
@@ -446,6 +475,169 @@ async def unreadable_match_is_unconfirmed(
         ("match_unreadable", 1, 0),
         ("tombstoned", 1, 1),
     ]
+
+
+async def unreadable_match_is_unconfirmed(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    reader = SteeredIdentityReader()
+    runtime, entry, _, spawned = await lingering_start(
+        root, sockets, ctx, identities=reader
+    )
+    await assert_refused_then_recovered(
+        runtime, entry, spawned, ctx, root, capture, reader.steered, unreadable
+    )
+
+
+async def persistent_unreadable_match_is_unconfirmed(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    clock = NudgedClock()
+    ctx = runtime_context(capture, clock)
+    matches = SteeredMatchReader()
+    runtime, entry, _, spawned = await lingering_start(
+        root,
+        sockets,
+        ctx,
+        scanner=NativeIdentityReader(clock=clock, match_reader=matches),
+    )
+    await assert_refused_then_recovered(
+        runtime,
+        entry,
+        spawned,
+        ctx,
+        root,
+        capture,
+        matches.steered,
+        never_settling(clock, native_reads=1),
+    )
+    assert matches.reads[spawned] == 3
+
+
+async def persistent_unreadable_bystander_refuses_and_keeps_fence(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    clock = NudgedClock()
+    ctx = runtime_context(capture, clock)
+    matches = SteeredMatchReader()
+    runtime, entry, argv, spawned = await lingering_start(
+        root,
+        sockets,
+        ctx,
+        scanner=NativeIdentityReader(clock=clock, match_reader=matches),
+    )
+    try:
+        with carriers(decoys(argv)[0]) as (bystander,):
+            matches.steered[bystander.pid] = never_settling(clock)
+            refused = await protocol_error(
+                runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+            )
+            reads = matches.reads[bystander.pid]
+        fenced = await recorded(runtime, "attempt-1")
+    finally:
+        await runtime.close()
+    assert (refused.code, refused.retryable, refused.details) == (
+        "runner_stop_unconfirmed",
+        True,
+        {},
+    )
+    assert reads == 2
+    assert isinstance(fenced, Starting)
+    assert fenced.fence is not None
+    assert not exited_within(spawned, 0)
+    assert sweep_records(capture, entry.nonce, str(root)) == [
+        ("listing_incomplete", 0, 0)
+    ]
+    swept = retire_records(capture.finish())
+    assert swept[0]["scan_failure"] == "owner_or_argv_unknown"
+
+
+async def queued_sweep_behind_held_reread(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    clock = NudgedClock()
+    ctx = runtime_context(capture, clock)
+    matches = SteeredMatchReader()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def expire_when_released(match: ArgumentMatch, count: int) -> ArgumentMatch:
+        if count == 1:
+            return ArgumentMatch.UNKNOWN
+        entered.set()
+        assert release.wait(READY_DEADLINE_SECONDS)
+        clock.offset_ns += SCAN_NS
+        return ArgumentMatch.UNKNOWN
+
+    runtime, entry, argv, spawned = await lingering_start(
+        root,
+        sockets,
+        ctx,
+        scanner=NativeIdentityReader(clock=clock, match_reader=matches),
+    )
+    attempts = [f"attempt-{index}" for index in range(1, 6)]
+    for attempt in attempts[1:]:
+        await written(runtime, attempt, starting_entry(sockets, "b" * 32), ctx)
+    grace = timedelta(seconds=10)
+    try:
+        with carriers(decoys(argv)[0]) as (bystander,):
+            matches.steered[bystander.pid] = expire_when_released
+            retiring = [
+                asyncio.ensure_future(
+                    protocol_error(runtime.retire(attempt, grace, ctx))
+                )
+                for attempt in attempts[:4]
+            ]
+            assert await asyncio.to_thread(entered.wait, READY_DEADLINE_SECONDS)
+            await until(lambda: len(runtime.sweeps.jobs) == 4)
+            fifth = await protocol_error(runtime.retire(attempts[4], grace, ctx))
+            release.set()
+            refused = await asyncio.gather(*retiring)
+    finally:
+        release.set()
+        await runtime.close()
+    assert fifth.code == "registry_busy"
+    assert {error.code for error in refused} == {"runner_stop_unconfirmed"}
+    assert not exited_within(spawned, 0)
+    assert runtime.sweeps.jobs == set()
+    assert (
+        sweep_records(capture, entry.nonce, str(root))
+        == [("listing_incomplete", 0, 0)] * 4
+    )
+    swept = retire_records(capture.finish())
+    assert Counter(record["scan_failure"] for record in swept) == {
+        "owner_or_argv_unknown": 1,
+        "pid_listing_incomplete": 3,
+    }
+
+
+async def transient_unreadable_reads_do_not_refuse(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    matches = SteeredMatchReader()
+    runtime, entry, argv, spawned = await lingering_start(
+        root,
+        sockets,
+        ctx,
+        scanner=NativeIdentityReader(clock=ctx.clock, match_reader=matches),
+    )
+    try:
+        with carriers(*decoys(argv)) as others:
+            for pid in (spawned, *(other.pid for other in others)):
+                matches.steered[pid] = alternately_unknown
+            receipt = await runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+            survivors = [other.poll() for other in others]
+            decoy_reads = [matches.reads[other.pid] for other in others]
+    finally:
+        await runtime.close()
+    assert receipt.scope is EvidenceScope.NO_RUNNER_STARTED
+    assert exited_within(spawned, 10)
+    assert matches.reads[spawned] == 4
+    assert survivors == [None, None, None, None]
+    assert min(decoy_reads) >= 2
+    assert sweep_records(capture, entry.nonce, str(root)) == [("tombstoned", 1, 1)]
 
 
 async def live_match_at_the_grace_is_unconfirmed(
@@ -476,23 +668,46 @@ async def live_match_at_the_grace_is_unconfirmed(
     ]
 
 
-async def changed_identity_is_not_signalled(
-    root: Path, sockets: Path, capture: Capture
+async def assert_not_signalled(
+    root: Path,
+    sockets: Path,
+    capture: Capture,
+    identity: Steering | None,
+    match: MatchSteering | None,
 ) -> None:
     ctx = runtime_context(capture)
     reader = SteeredIdentityReader()
+    matches = SteeredMatchReader()
     runtime, entry, _, spawned = await lingering_start(
-        root, sockets, ctx, identities=reader
+        root,
+        sockets,
+        ctx,
+        identities=reader,
+        scanner=NativeIdentityReader(clock=ctx.clock, match_reader=matches),
     )
     try:
-        reader.steered[spawned] = restarted
+        if identity is not None:
+            reader.steered[spawned] = identity
+        if match is not None:
+            matches.steered[spawned] = match
         receipt = await runtime.retire("attempt-1", timedelta(seconds=10), ctx)
         alive = not exited_within(spawned, 0)
     finally:
         await runtime.close()
     assert receipt.scope is EvidenceScope.NO_RUNNER_STARTED
     assert alive
+    if match is not None:
+        assert matches.reads[spawned] == 3
     assert sweep_records(capture, entry.nonce, str(root)) == [("tombstoned", 1, 0)]
+
+
+def unknown_at_pinning(settled: ArgumentMatch | None) -> MatchSteering:
+    def steer(match: ArgumentMatch, count: int) -> ArgumentMatch:
+        if count == 2:
+            return ArgumentMatch.UNKNOWN
+        return match if settled is None or count == 1 else settled
+
+    return steer
 
 
 async def incomplete_listing_is_unconfirmed(
@@ -500,7 +715,10 @@ async def incomplete_listing_is_unconfirmed(
 ) -> None:
     ctx = runtime_context(capture)
     runtime, entry, _, spawned = await lingering_start(
-        root, sockets, ctx, sweep_scan_entries=1
+        root,
+        sockets,
+        ctx,
+        scanner=NativeIdentityReader(clock=ctx.clock, max_scan_entries=1),
     )
     try:
         refused = await protocol_error(
@@ -525,11 +743,7 @@ async def incomplete_listing_is_unconfirmed(
         ("listing_incomplete", 0, 0),
         ("tombstoned", 1, 1),
     ]
-    swept = [
-        record
-        for record in capture.finish()
-        if record.get("event") == "runtime.local.retire"
-    ]
+    swept = retire_records(capture.finish())
     assert swept[0]["scan_failure"] == "pid_listing_incomplete"
     assert "scan_failure" not in swept[1]
 
@@ -595,7 +809,27 @@ LEGS: dict[str, Callable[[Path, Path, Capture], Awaitable[None]]] = {
     ),
     "unreadable_match_is_unconfirmed": unreadable_match_is_unconfirmed,
     "live_match_at_the_grace_is_unconfirmed": live_match_at_the_grace_is_unconfirmed,
-    "changed_identity_is_not_signalled": changed_identity_is_not_signalled,
+    "changed_identity_is_not_signalled": partial(
+        assert_not_signalled, identity=restarted, match=None
+    ),
+    "dying_match_is_dropped": partial(
+        assert_not_signalled,
+        identity=None,
+        match=unknown_at_pinning(ArgumentMatch.ABSENT),
+    ),
+    "identity_change_during_reread_is_not_signalled": partial(
+        assert_not_signalled, identity=restarted, match=unknown_at_pinning(None)
+    ),
+    "persistent_unreadable_match_is_unconfirmed": (
+        persistent_unreadable_match_is_unconfirmed
+    ),
+    "persistent_unreadable_bystander_refuses_and_keeps_fence": (
+        persistent_unreadable_bystander_refuses_and_keeps_fence
+    ),
+    "queued_sweep_behind_held_reread": queued_sweep_behind_held_reread,
+    "transient_unreadable_reads_do_not_refuse": (
+        transient_unreadable_reads_do_not_refuse
+    ),
     "incomplete_listing_is_unconfirmed": incomplete_listing_is_unconfirmed,
     "too_many_matches_are_unconfirmed": too_many_matches_are_unconfirmed,
 }

@@ -3,7 +3,9 @@ import os
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,7 @@ from kora.plugins.runtime.local.supervisor import EXIT_REFUSED
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.time import SystemClock
+from kora.runner.identity import NativeIdentityReader
 from kora.runner.registry import (
     LOCK_DEADLINE_NS,
     LOCK_RETRY_NS,
@@ -71,7 +74,9 @@ from tests.support.local_runtime import (
     ConstructedIdentityReader,
     GatedIdentifiers,
     SteeredIdentityReader,
+    SteeredMatchReader,
     fill_boot_log,
+    gated_reread,
     gated_steering,
     open_descriptors,
     open_runtime,
@@ -513,26 +518,55 @@ async def unconfirmed_retire_is_released(root: Path, capture: Capture) -> None:
     assert_no_runner(root)
 
 
-async def cancelled_retire_is_released(root: Path, capture: Capture) -> None:
+@dataclass
+class HeldSweep:
+    reader: SteeredIdentityReader = field(default_factory=SteeredIdentityReader)
+    matches: SteeredMatchReader = field(default_factory=SteeredMatchReader)
+    entered: threading.Event = field(default_factory=threading.Event)
+    release: threading.Event = field(default_factory=threading.Event)
+
+    def at_identity_read(self, pid: int) -> None:
+        self.reader.steered[pid] = gated_steering(self.entered, self.release)
+
+    def at_scan_reread(self, pid: int) -> None:
+        self.matches.steered[pid] = gated_reread(self.entered, self.release)
+
+    def at_pinning_reread(self, pid: int) -> None:
+        self.matches.steered[pid] = gated_reread(
+            self.entered, self.release, native_reads=1
+        )
+
+    def cleared(self) -> None:
+        self.reader.steered.clear()
+        self.matches.steered.clear()
+
+
+async def cancelled_retire_is_released(
+    root: Path,
+    capture: Capture,
+    hold: Callable[[HeldSweep, int], None] = HeldSweep.at_identity_read,
+) -> None:
     ctx = runtime_context(capture)
-    reader = SteeredIdentityReader()
-    entered = threading.Event()
-    release = threading.Event()
+    held = HeldSweep()
     with short_directory() as base:
         runtime, _, _, spawned = await lingering_start(
-            root, base / "sockets", ctx, reader
+            root,
+            base / "sockets",
+            ctx,
+            held.reader,
+            NativeIdentityReader(clock=ctx.clock, match_reader=held.matches),
         )
         try:
-            reader.steered[spawned] = gated_steering(entered, release)
+            hold(held, spawned)
             retiring = asyncio.ensure_future(runtime.retire("attempt-1", GRACE, ctx))
-            assert await asyncio.to_thread(entered.wait, READY_DEADLINE_SECONDS)
+            assert await asyncio.to_thread(held.entered.wait, READY_DEADLINE_SECONDS)
             retiring.cancel()
-            release.set()
+            held.release.set()
             outcomes = await asyncio.gather(retiring, return_exceptions=True)
-            reader.steered.clear()
+            held.cleared()
             receipt = await runtime.retire("attempt-1", GRACE, ctx)
         finally:
-            release.set()
+            held.release.set()
             await runtime.close()
     assert isinstance(outcomes[0], asyncio.CancelledError)
     assert receipt.retirement_id
@@ -540,28 +574,34 @@ async def cancelled_retire_is_released(root: Path, capture: Capture) -> None:
     assert runner_pids(root) == ()
 
 
-async def close_during_sweep_is_released(root: Path, capture: Capture) -> None:
+async def close_during_sweep_is_released(
+    root: Path,
+    capture: Capture,
+    hold: Callable[[HeldSweep, int], None] = HeldSweep.at_identity_read,
+) -> None:
     ctx = runtime_context(capture)
-    reader = SteeredIdentityReader()
-    entered = threading.Event()
-    release = threading.Event()
+    held = HeldSweep()
     with short_directory() as base:
         runtime, _, _, spawned = await lingering_start(
-            root, base / "sockets", ctx, reader
+            root,
+            base / "sockets",
+            ctx,
+            held.reader,
+            NativeIdentityReader(clock=ctx.clock, match_reader=held.matches),
         )
         try:
-            reader.steered[spawned] = gated_steering(entered, release)
+            hold(held, spawned)
             retiring = asyncio.ensure_future(
                 protocol_error(runtime.retire("attempt-1", GRACE, ctx))
             )
-            assert await asyncio.to_thread(entered.wait, READY_DEADLINE_SECONDS)
+            assert await asyncio.to_thread(held.entered.wait, READY_DEADLINE_SECONDS)
             closing = asyncio.ensure_future(runtime.close())
-            release.set()
+            held.release.set()
             refused = await retiring
             await closing
             untouched = not exited_within(spawned, 0)
         finally:
-            release.set()
+            held.release.set()
             await runtime.close()
     assert refused.code == "runtime_closed"
     assert untouched
@@ -570,6 +610,18 @@ async def close_during_sweep_is_released(root: Path, capture: Capture) -> None:
 
 
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
+    "cancelled_retire_during_scan_reread_is_released": partial(
+        cancelled_retire_is_released, hold=HeldSweep.at_scan_reread
+    ),
+    "cancelled_retire_during_pinning_reread_is_released": partial(
+        cancelled_retire_is_released, hold=HeldSweep.at_pinning_reread
+    ),
+    "close_during_scan_reread_is_released": partial(
+        close_during_sweep_is_released, hold=HeldSweep.at_scan_reread
+    ),
+    "close_during_pinning_reread_is_released": partial(
+        close_during_sweep_is_released, hold=HeldSweep.at_pinning_reread
+    ),
     "cancelled_supervisor_releases_resources": cancelled_supervisor_releases_resources,
     "cancelled_runtime_close_drains_attestation": (
         cancelled_runtime_close_drains_attestation
