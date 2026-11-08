@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import hashlib
 import json
 import pickle
@@ -49,7 +50,10 @@ from kora.engine.graph_execution_contract import (
     MEMBERS,
     check_detached_execution_contract,
 )
-from kora.engine.graph_projection_paths import build_graph_cel_projection_paths
+from kora.engine.graph_projection_paths import (
+    ParameterProjectionPaths,
+    build_graph_cel_projection_paths,
+)
 from kora.engine.graph_resource_references import GraphResourceOwner
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.ir.config import COMMAND_RESOURCE_MAX_BYTES
@@ -551,6 +555,46 @@ def logical_before_comparison(ir_text: str) -> CommandManifestLimits:
     return replace(limits, work=high)
 
 
+def check_released_paths_on_manifest_refusal(*, logical: bool = False) -> None:
+    ir_text, owners = source()
+    manifest = logical_before_comparison(ir_text)
+    if logical:
+        manifest = replace(manifest, work=manifest.work - 1)
+    reader = replace(
+        READ_LIMITS, resources=replace(READ_LIMITS.resources, logical=manifest)
+    )
+    limits = replace(LIMITS, reader=reader)
+    existing = tuple(
+        item for item in gc.get_objects() if type(item) is ParameterProjectionPaths
+    )
+    collecting = gc.isenabled()
+
+    with borrowed() as (runner, evaluator):
+        gc.disable()
+        try:
+            if logical:
+                operation = prepare_logical_execution_contract(
+                    ir_text, evaluator, limits=limits
+                )
+            else:
+                operation = prepare_execution_contract(
+                    ir_text, SCOPE, owners, evaluator, limits=limits
+                )
+            with pytest.raises(GraphValueRejected) as refused:
+                runner.run(operation)
+            retained = any(
+                type(item) is ParameterProjectionPaths
+                and all(item is not prior for prior in existing)
+                for item in gc.get_objects()
+            )
+        finally:
+            if collecting:
+                gc.enable()
+
+    assert_refused(refused.value, GraphValueFailure.BUDGET)
+    assert not retained
+
+
 def check_logical_refusals() -> None:
     ir_text, _ = source()
     invalid_ir, _ = source(invalid_pattern=True)
@@ -977,6 +1021,10 @@ def run(scenario: str) -> None:
         "cancellation": check_cancellation,
         "logical_roundtrip": check_logical_roundtrip,
         "logical_refusals": check_logical_refusals,
+        "path_refusal": check_released_paths_on_manifest_refusal,
+        "path_build_refusal": lambda: check_released_paths_on_manifest_refusal(
+            logical=True
+        ),
         "logical_cancellation": lambda: check_cancellation(logical=True),
         "deployment_roundtrip": check_deployment_roundtrip,
         "deployment_refusals": check_deployment_refusals,
@@ -1009,6 +1057,8 @@ def run(scenario: str) -> None:
             ["complete"] * 3 + ["capacity_exhausted"] + ["complete"] * 2,
             5,
         ),
+        ("path_refusal", ["complete"], 1),
+        ("path_build_refusal", ["complete"], 1),
         ("logical_cancellation", ["complete"], 1),
         ("deployment_roundtrip", ["complete"] * 4, 4),
         ("deployment_refusals", ["complete", "capacity_exhausted"], 1),

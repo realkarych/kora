@@ -318,9 +318,9 @@ def _contract(
         "retry_policies": ObjectReader(retry).object(),
         "cel_expressions": ObjectReader(facts.text).object(),
     }
-    paths = build_graph_cel_projection_paths(ir_text, contract, limits=projection)
+    paths = build_graph_cel_projection_paths(ir_text, contract, limits=projection).text
     logical = build_declared_command_manifests(ir_text, limits=reader.resources.logical)
-    contract["cel_projection_paths"] = ObjectReader(paths.text).object()
+    contract["cel_projection_paths"] = ObjectReader(paths).object()
     contract["command_resources"] = ObjectReader(logical.text).object()
     return contract
 
@@ -358,7 +358,7 @@ def _draft(
 ) -> PreparedExecutionContract:
     prepared, saved = _checked_pair(ir_text, facts, limits)
     values = prepared.values
-    resources = check_execution_contract_members(
+    resources, _ = check_execution_contract_members(
         values.ir,
         saved.execution_contract,
         ObjectReader(physical.text).object(),

@@ -34,15 +34,44 @@ ENTRY_MEMBERS = frozenset({"path", "paths"})
 SET_MEMBERS = frozenset({"whole", "presence"})
 
 
-class GraphCelProjectionPaths:
-    __slots__ = ("_text",)
+class ParameterProjectionPaths:
+    __slots__ = ("whole", "presence")
+    whole: tuple[str, ...]
+    presence: tuple[str, ...]
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, whole: tuple[str, ...], presence: tuple[str, ...]) -> None:
+        if hasattr(self, "whole"):
+            del self, whole, presence
+            raise AttributeError("parameter projection paths are immutable")
+        object.__setattr__(self, "whole", whole)
+        object.__setattr__(self, "presence", presence)
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        del self, value
+        raise AttributeError("parameter projection paths are immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        del self
+        raise AttributeError("parameter projection paths are immutable")
+
+    def __getstate__(self) -> Never:
+        raise TypeError("parameter projection paths require explicit access")
+
+
+class GraphCelProjectionPaths:
+    __slots__ = ("_text", "_parameters")
+
+    def __init__(self, text: str, parameters: ParameterProjectionPaths) -> None:
         self._text: str = text
+        self._parameters: ParameterProjectionPaths = parameters
 
     @property
     def text(self) -> str:
         return self._text
+
+    @property
+    def parameters(self) -> ParameterProjectionPaths:
+        return self._parameters
 
     def __getstate__(self) -> Never:
         raise TypeError("graph CEL projection paths require explicit access")
@@ -214,7 +243,10 @@ def checked_projection_paths(
         admission.tick(len(saved) + len(expected))
         if saved != expected:
             raise GraphValueRejected(GraphValueFailure.INVALID)
-    return GraphCelProjectionPaths(expected)
+    return GraphCelProjectionPaths(
+        expected,
+        ParameterProjectionPaths(paths.parameters.whole, paths.parameters.presence),
+    )
 
 
 def projection_paths_result(
