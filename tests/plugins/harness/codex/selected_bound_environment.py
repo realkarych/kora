@@ -1,3 +1,4 @@
+import socket
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -49,15 +50,18 @@ class BoundEnvironmentProbe:
     attempt_scope: SecretScope
     app_scope: SecretScope
     starts: int = field(default=0, init=False)
+    unix_sockets: int = field(default=0, init=False)
     refused: bool = field(default=False, init=False)
     settled: bool = field(default=False, init=False)
 
     def install_witness(self) -> None:
-        sys.addaudithook(self.observe_subprocess)
+        sys.addaudithook(self.observe_acquisition)
 
-    def observe_subprocess(self, event: str, args: tuple[object, ...]) -> None:
+    def observe_acquisition(self, event: str, args: tuple[object, ...]) -> None:
         if event == "subprocess.Popen":
             self.starts += 1
+        elif event == "socket.__new__" and len(args) == 4 and args[1] == socket.AF_UNIX:
+            self.unix_sockets += 1
 
     def prepare(
         self,

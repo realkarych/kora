@@ -6,14 +6,16 @@ import platform
 import re
 import secrets
 import select
+import shutil
 import signal
 import socket
 import subprocess
 import sys
-from contextlib import ExitStack
+from collections.abc import Generator
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 from typing import TYPE_CHECKING, Literal, cast
 
 from kora.plugins.harness.codex.app_server_errors import (
@@ -3274,6 +3276,30 @@ def verify_shell_patch_policy(case: SelectedLaunchCase) -> None:
     diagnostic("INFO", "probe.shell_patch_policy_verified", expected.decode().strip())
 
 
+@contextmanager
+def selected_launch_workspace(bound: "BoundEnvironmentProbe | None") -> Generator[Path]:
+    if bound is None:
+        with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+            yield Path(scratch)
+        return
+    root = Path(mkdtemp(prefix="kora-codex-", dir="/tmp"))
+    try:
+        yield root
+    finally:
+        original_failure = sys.exception()
+        if bound.settled:
+            try:
+                shutil.rmtree(root)
+            except OSError:
+                if original_failure is None:
+                    raise ProbeFailure(
+                        "selected_bound_workspace_cleanup_failed"
+                    ) from None
+                diagnostic(
+                    "ERROR", "probe.selected_bound_workspace_cleanup_failed", bound.case
+                )
+
+
 async def run_selected_launch(
     case: SelectedLaunchCase,
     proxy_case: SelectedProxyCase | None = None,
@@ -3294,8 +3320,7 @@ async def run_selected_launch(
             else case
         )
         (CONTROL / "decision").write_text(decision, encoding="utf-8")
-    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
-        root = Path(scratch)
+    with selected_launch_workspace(bound) as root:
         workspace = root / (
             "workspace :@" if case == "selected-startup-ready" else "workspace"
         )
@@ -3341,7 +3366,11 @@ async def run_selected_launch(
         if bound is not None and bound.refused:
             require(
                 bound.settled
-                and bound.starts == fixture.connections == fixture.requests == 0
+                and bound.unix_sockets
+                == bound.starts
+                == fixture.connections
+                == fixture.requests
+                == 0
                 and fixture.failure is None
                 and not any(
                     os.path.lexists(path)
@@ -3352,7 +3381,10 @@ async def run_selected_launch(
             diagnostic("INFO", "probe.selected_bound_no_acquisition", bound.case)
             raise ProbeFailure("selected_bound_environment_refused")
         if bound is not None:
-            require(bound.settled and bound.starts == 2, "selected_bound_owner_witness")
+            require(
+                bound.settled and bound.starts == 2 and bound.unix_sockets == 8,
+                "selected_bound_owner_witness",
+            )
         require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
         require(
             fixture.connections == fixture.requests == fixture.request_limit,
