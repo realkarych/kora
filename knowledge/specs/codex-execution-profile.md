@@ -89,6 +89,24 @@ An official native blocking facility or a separately qualified runtime guard may
 
 Until qualification, complete `policy_coverage` remains unavailable for the affected selected profile under the [selected validation facts](validation-facts.md#10-native-codex-declarations). A missing guarantee is not a known-empty declaration. Existing validation and refusal semantics, independent reservation facts, and the runtime owner's deadline, first cause and actual closure remain unchanged.
 
+## Private gated app-server stdio
+
+Under [#1052](https://github.com/realkarych/kora/issues/1052), the runner's
+private gated process path can attach one owned duplex socket to native
+app-server stdin and stdout. The existing gate prepares the transport before
+activation. After acknowledgement, the owner permits one synchronous borrow
+before the inherited cutoff and stop fence. The owner aborts the transport on
+stop and confirms descriptor closure before consuming the direct child's
+exit. Preparation failure and cancellation retain the same owner through
+cleanup. The default gate and installed lifetime wire schema retain their
+existing stdin, stdout and capture behavior.
+
+The [selected Linux fixture](../research/codex-gated-stdio-2026-11-08.md)
+exercises this path with the pinned official binary and the existing selected
+exec-server. The private stream prerequisite leaves bound slot admission,
+production grant delivery, the harness host and Policy activation with
+their existing owners.
+
 ## Resource owner and stopping
 
 One invocation's existing runtime/runner owner retains both native roles and every acquired stream, reader/writer/control task, listener, active connection/session, process/output/filesystem handle, native filesystem helper, HTTP request/body stream, descendant and per-attempt tree. Internal state requires explicit finite admission/retention and actual settlement; two top-level processes do not bound this state by themselves.
