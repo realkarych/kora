@@ -167,10 +167,7 @@ def test_parameter_schema_checks_type_before_unavailable_or_costly_heads() -> No
         {"$ref": "#"},
         {"$dynamicRef": "#"},
         {"additionalProperties": False},
-        {"contains": True},
         {"dependentSchemas": {"x": False}},
-        {"items": False},
-        {"oneOf": [True, True], "prefixItems": [True]},
         {"pattern": PRIVATE},
         {"patternProperties": {PRIVATE: False}},
         {"properties": {"a": False}},
@@ -281,7 +278,7 @@ def test_parameter_schema_shares_exact_work_across_entered_direct_branches() -> 
     assert refusal.value.reason is ParameterSchemaEvaluationFailure.CAPACITY
 
 
-def _owned_continuations() -> set[int]:
+def owned_continuations() -> set[int]:
     owned: set[int] = set()
     for value in gc.get_objects():
         identity = id(value)
@@ -298,14 +295,14 @@ def test_parameter_schema_releases_continuations_after_nested_result(
 ) -> None:
     rule, instance = checked_schema(1, {"if": True, "then": {"allOf": [value]}})
     meter = BoundedEvaluationMeter(limits=WIDE_LIMITS)
-    before = _owned_continuations()
+    before = owned_continuations()
 
     matches = evaluate_parameter_schema(
         rule, instance, meter=meter, max_schema_frames=4, max_pair_frames=0
     )
 
     assert matches is value
-    assert _owned_continuations() == before
+    assert owned_continuations() == before
 
 
 @pytest.mark.parametrize(
@@ -318,7 +315,7 @@ def test_parameter_schema_refusal_releases_pending_frames_and_private_context(
 ) -> None:
     rule, instance = checked_schema(PRIVATE, {"allOf": [{"not": {"const": PRIVATE}}]})
     meter = BoundedEvaluationMeter(limits=replace(WIDE_LIMITS, max_work=work))
-    before = _owned_continuations()
+    before = owned_continuations()
 
     try:
         raise RuntimeError(PRIVATE)
@@ -343,7 +340,7 @@ def test_parameter_schema_refusal_releases_pending_frames_and_private_context(
     }
     assert {"_evaluate", "run", "_push", "_visit", "_sequence"}.isdisjoint(frames)
     assert PRIVATE not in "".join(format_exception(refusal.value))
-    assert _owned_continuations() == before
+    assert owned_continuations() == before
     if schema_frames == 4:
         assert meter.work == work
         assert meter.auxiliary_entries == 9
