@@ -598,6 +598,14 @@ SEARCH_RESPONSE = sse(
         "arguments": {"query": "spawn agent", "limit": 8},
     },
 )
+EXPECTED_SELECTED_SEARCH_INVENTORY = (
+    ("", "namespace", "multi_agent_v1"),
+    ("multi_agent_v1", "function", "close_agent"),
+    ("multi_agent_v1", "function", "resume_agent"),
+    ("multi_agent_v1", "function", "send_input"),
+    ("multi_agent_v1", "function", "spawn_agent"),
+    ("multi_agent_v1", "function", "wait_agent"),
+)
 
 
 def verify_selected_tool_search(request: dict[str, object]) -> None:
@@ -617,7 +625,12 @@ def verify_selected_tool_search(request: dict[str, object]) -> None:
         as_object(tool)
         for tool in as_list(outputs[0].get("tools"), "missing_selected_search_tools")
     ]
-    diagnostic("INFO", "probe.selected_tool_search", json.dumps(tool_inventory(tools)))
+    inventory = tool_inventory(tools)
+    require(
+        inventory == EXPECTED_SELECTED_SEARCH_INVENTORY,
+        "selected_tool_search_inventory_drift",
+    )
+    diagnostic("INFO", "probe.selected_tool_search", json.dumps(inventory))
 
 
 DISABLED_PLAN_RESPONSE = sse(
@@ -1740,6 +1753,11 @@ class Stdio:
             if case == "selected-tool-inventory-disabled":
                 require(
                     notification.method != "turn/plan/updated", "disabled_plan_executed"
+                )
+            if case == "selected-tool-search":
+                require(
+                    notification.method != "hook/completed",
+                    "selected_tool_search_reported_hook",
                 )
             if usage is not None:
                 usage.observe(notification)
