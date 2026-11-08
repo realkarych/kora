@@ -4,7 +4,7 @@ import signal
 import socket
 import sys
 from collections.abc import AsyncGenerator, Callable
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Literal, cast
 
@@ -12,6 +12,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.plugins.runtime.local.bound_checkout import BoundCheckout
 from kora.plugins.runtime.local.bound_gate_fence import BoundGateFence
 from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
 from kora.plugins.runtime.local.environment import (
@@ -27,6 +28,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.process_stdio import GatedStdio
 from kora.runner.processes import (
     GatedProcess,
@@ -59,10 +61,14 @@ def launch(script: str, stdout: ProcessOutput | None = None) -> ProcessLaunch:
 
 @asynccontextmanager
 async def gated(
-    directory: Path, script: str, deadline: int, clock: SystemClock
+    directory: Path | DirectoryAnchor, script: str, deadline: int, clock: SystemClock
 ) -> AsyncGenerator[GatedProcess]:
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
+    with ExitStack() as owned:
+        if isinstance(directory, Path):
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            owned.callback(os.close, descriptor)
+        else:
+            descriptor = directory.descriptor
         owner = start_gated(
             launch(script),
             new_operation_id(),
@@ -71,8 +77,6 @@ async def gated(
             clock,
             stdio_limit=131_072,
         )
-    finally:
-        os.close(descriptor)
     try:
         yield owner
     finally:
@@ -102,6 +106,37 @@ class SetupClock(SystemClock):
         if on_wait is not None:
             on_wait()
         await super().sleep_until(deadline_ns)
+
+
+@pytest.mark.asyncio
+async def test_bound_checkout_descriptor_reaches_real_gate_after_path_move(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path.resolve() / "workspace"
+    moved = workspace.with_name("moved")
+    workspace.mkdir(mode=0o700)
+    clock = SystemClock()
+    cutoff = clock.monotonic_ns() + WINDOW_NS
+    checkout = BoundCheckout.capture(workspace)
+    try:
+        checkout.verify(workspace, cutoff, clock)
+        workspace.rename(moved)
+        workspace.mkdir(mode=0o700)
+
+        async with gated(checkout.anchor, MARK, cutoff, clock) as owner:
+            await owner.prepare()
+            await owner.acknowledge()
+            await owner.settle(cutoff)
+            await owner.drain(cutoff)
+            result = owner.release(cutoff)
+    finally:
+        checkout.close()
+
+    assert result == 0
+    assert owner.closed
+    assert checkout.anchor.closed
+    assert (moved / "executed").is_file()
+    assert not (workspace / "executed").exists()
 
 
 @pytest.mark.asyncio

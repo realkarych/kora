@@ -226,3 +226,44 @@ def test_failed_acquisition_keeps_slot_consumed_and_fences_other_roles(
 
     assert_slot_refusal(replay.value)
     assert_slot_refusal(other_role.value)
+
+
+def test_admitted_preflight_rechecks_cutoff_before_reveal(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = StepClock()
+    slots = BoundRoleSlots(binding_for(tmp_path, kora_capture), clock, ORIGIN_NS + 10)
+    app = slots.claim("app")
+    kora_capture.scope.release()
+
+    with pytest.raises(KoraProtocolError) as expired:
+        slots.start(
+            "app", app, unexpected_acquisition, preflight=lambda: clock.advance(10)
+        )
+
+    assert_slot_refusal(expired.value)
+    assert slots.stopped
+
+
+def test_foreign_claim_cannot_run_preflight_or_stop_the_owner(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    binding = binding_for(tmp_path, kora_capture)
+    clock = StepClock()
+    slots = BoundRoleSlots(binding, clock, ORIGIN_NS + 10)
+    foreign = BoundRoleSlots(binding, clock, ORIGIN_NS + 10)
+    app = slots.claim("app")
+    invalid = foreign.claim("app")
+
+    def unexpected_preflight() -> NoReturn:
+        raise AssertionError("an invalid claim reached preflight")
+
+    with pytest.raises(KoraProtocolError) as refused:
+        slots.start(
+            "app", invalid, unexpected_acquisition, preflight=unexpected_preflight
+        )
+    key = slots.start("app", app, lambda environment: environment["CODEX_API_KEY"])
+
+    assert_slot_refusal(refused.value)
+    assert not slots.stopped
+    assert key == "synthetic-key"

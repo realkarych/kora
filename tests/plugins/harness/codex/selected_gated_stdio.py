@@ -4,7 +4,7 @@ import select
 import signal
 import sys
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,6 +18,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.installed_executable import InstalledExecutable
 from kora.runner.process_stdio import StdioStreams
 from kora.runner.processes import (
@@ -189,7 +190,7 @@ class SelectedGatedApp:
     def __init__(
         self,
         argv: tuple[str, ...],
-        cwd: Path,
+        cwd: Path | DirectoryAnchor,
         environment: dict[str, str],
         clock: SystemClock,
         cutoff_ns: int,
@@ -198,8 +199,12 @@ class SelectedGatedApp:
         register: Callable[[GatedProcess], None] | None = None,
     ) -> None:
         self._clock = clock
-        descriptor = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
+        with ExitStack() as owned:
+            if isinstance(cwd, Path):
+                descriptor = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                owned.callback(os.close, descriptor)
+            else:
+                descriptor = cwd.descriptor
             self._owner = start_gated(
                 native_launch(argv, environment),
                 new_operation_id(),
@@ -210,8 +215,6 @@ class SelectedGatedApp:
             )
             if register is not None:
                 register(self._owner)
-        finally:
-            os.close(descriptor)
         self._pid: int | None = None
         self._gate_targets: dict[int, str] = {}
         self._endpoint: Descriptor | None = None
@@ -302,6 +305,19 @@ class SelectedGatedApp:
                 or native_environment(self._pid) != expected.union((b"",))
             ):
                 raise GatedObservationError("selected_bound_role_identity")
+
+    def verify_checkout(self, checkout: DirectoryAnchor) -> None:
+        assert self._pid is not None
+        try:
+            with live_pid(self._pid):
+                entry = os.stat(f"/proc/{self._pid}/cwd")
+                identity = checkout.identity
+                if (entry.st_dev, entry.st_ino) != (identity.device, identity.inode):
+                    raise GatedObservationError("selected_bound_checkout_mismatch")
+        except OSError:
+            raise GatedObservationError(
+                "selected_bound_checkout_observation_failed"
+            ) from None
 
     def verify_executable(
         self, executable: InstalledExecutable, argv: tuple[str, ...]

@@ -15,6 +15,11 @@ from kora.plugins.harness.codex.launch_configuration import (
     LaunchConfigurationError,
     LaunchConfigurationFailure,
 )
+from kora.plugins.runtime.local.bound_checkout import (
+    BoundCheckout,
+    BoundCheckoutError,
+    CheckoutFailure,
+)
 from kora.plugins.runtime.local.bound_gate_fence import BoundGateFence
 from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
 from kora.plugins.runtime.local.environment import (
@@ -56,6 +61,8 @@ BoundCase = Literal[
     "before-delivery",
     "executable-pin",
     "executable-path",
+    "checkout-before-exec",
+    "checkout-before-app",
 ]
 BoundRole = Literal["app", "exec"]
 SLOT_REFUSALS = frozenset({"duplicate", "stopped"})
@@ -64,6 +71,12 @@ INSTALLATION_REFUSALS: Mapping[str, ExecutableFailure] = MappingProxyType(
     {
         "executable-pin": ExecutableFailure.DIGEST,
         "executable-path": ExecutableFailure.PROTECTION,
+    }
+)
+CHECKOUT_REFUSALS: Mapping[str, BoundRole] = MappingProxyType(
+    {
+        "checkout-before-exec": "exec",
+        "checkout-before-app": "app",
     }
 )
 SELECTED_EXECUTABLE_PIN = ExecutablePin(
@@ -86,6 +99,7 @@ class BoundLaunch:
     slots: BoundRoleSlots
     fence: BoundGateFence
     executable: InstalledExecutable
+    checkout: BoundCheckout
     clock: SystemClock
     cutoff_ns: int
     expected_app: dict[str, str]
@@ -95,10 +109,17 @@ class BoundLaunch:
         recipe = self.inputs.app_server if role == "app" else self.inputs.exec_server
         argv = (str(self.executable.path), *recipe.argv[1:])
 
+        def preflight() -> None:
+            try:
+                self.checkout.verify(recipe.cwd, self.cutoff_ns, self.clock)
+            except BoundCheckoutError:
+                self.fence.stop()
+                raise
+
         def acquire(environment: dict[str, str]) -> SelectedGatedApp:
             return SelectedGatedApp(
                 argv,
-                recipe.cwd,
+                self.checkout.anchor,
                 environment,
                 self.clock,
                 self.cutoff_ns,
@@ -106,7 +127,9 @@ class BoundLaunch:
                 register=self.fence.register,
             )
 
-        return self.slots.start(role, self.slots.claim(role), acquire)
+        return self.slots.start(
+            role, self.slots.claim(role), acquire, preflight=preflight
+        )
 
     async def close(
         self,
@@ -137,6 +160,7 @@ class BoundLaunch:
                 wrapper.verify_closed()
         if self.fence.close_failed:
             raise BoundEnvironmentError("selected_bound_gate_close_failed")
+        self.checkout.close()
 
 
 async def refuse_fenced_app(
@@ -184,6 +208,7 @@ class BoundEnvironmentProbe:
     starts: int = field(default=0, init=False)
     unix_sockets: int = field(default=0, init=False)
     cwd_opens: int = field(default=0, init=False)
+    original_checkout: Path | None = field(default=None, init=False)
     _cwd: str | None = field(default=None, init=False)
     settled: bool = field(default=False, init=False)
 
@@ -209,8 +234,17 @@ class BoundEnvironmentProbe:
     ) -> SelectedGatedApp | None:
         if self.case == "partial" and role == "app":
             self.app_scope.release()
+        checkout_refusal = CHECKOUT_REFUSALS.get(self.case) == role
+        if checkout_refusal:
+            self.replace_checkout(launch.checkout)
         try:
-            return launch.start(role, frame_limit)
+            started = launch.start(role, frame_limit)
+            if checkout_refusal:
+                raise BoundEnvironmentError("selected_bound_checkout_not_refused")
+            return started
+        except BoundCheckoutError as error:
+            if not checkout_refusal or error.reason is not CheckoutFailure.IDENTITY:
+                raise BoundEnvironmentError("selected_bound_checkout_failed") from None
         except KoraProtocolError as error:
             if (
                 self.case not in SLOT_REFUSALS
@@ -229,6 +263,27 @@ class BoundEnvironmentProbe:
                     "selected_bound_secret_reveal_refused"
                 ) from None
         return None
+
+    def replace_checkout(self, checkout: BoundCheckout) -> None:
+        workspace = checkout.path
+        original = workspace.with_name("original-checkout")
+        try:
+            workspace.rename(original)
+            workspace.mkdir(mode=0o700)
+            original_entry = original.stat()
+            replacement = workspace.stat()
+        except OSError:
+            raise BoundEnvironmentError(
+                "selected_bound_checkout_control_failed"
+            ) from None
+        selected = checkout.anchor.identity
+        expected = (selected.device, selected.inode)
+        if (original_entry.st_dev, original_entry.st_ino) != expected or (
+            replacement.st_dev,
+            replacement.st_ino,
+        ) == expected:
+            raise BoundEnvironmentError("selected_bound_checkout_control_identity")
+        self.original_checkout = original
 
     def verify_executable(
         self, binary: Path, cutoff_ns: int, clock: SystemClock
@@ -276,9 +331,13 @@ class BoundEnvironmentProbe:
         )
         attempt_token = self.attempt_scope.admit(ATTEMPT_CANARY)
         grant = self.app_scope.admit(key)
-        if self.case in INSTALLATION_REFUSALS:
+        if self.case in INSTALLATION_REFUSALS or self.case == "checkout-before-exec":
             self.attempt_scope.release()
-        if self.case in ENVIRONMENT_REFUSALS or self.case in INSTALLATION_REFUSALS:
+        if (
+            self.case in ENVIRONMENT_REFUSALS
+            or self.case in INSTALLATION_REFUSALS
+            or self.case in CHECKOUT_REFUSALS
+        ):
             self.app_scope.release()
         try:
             inputs = prepare_native_inputs(
@@ -355,11 +414,18 @@ class BoundEnvironmentProbe:
             TEXT_NAME: TEXT_VALUE,
             WORKLOAD_HANDLE_NAME: WORKLOAD_HANDLE_VALUE,
         }
+        try:
+            checkout = BoundCheckout.capture(workspace)
+        except BoundCheckoutError:
+            raise BoundEnvironmentError(
+                "selected_bound_checkout_capture_failed"
+            ) from None
         return BoundLaunch(
             inputs,
             slots,
             BoundGateFence(slots),
             executable,
+            checkout,
             clock,
             cutoff_ns,
             {**common, **inputs.app_server.environment, PROVIDER_KEY: key},

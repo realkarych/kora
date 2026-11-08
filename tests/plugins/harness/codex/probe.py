@@ -2863,6 +2863,8 @@ async def drive(
                 child_env = dict(inputs.app_server.environment)
                 gated_executor = bound.start_role(bound_launch, "exec", MAX_FRAME_BYTES)
                 if gated_executor is None:
+                    if bound.original_checkout is not None:
+                        raise BoundProbeRefusal("selected_bound_checkout_refused")
                     raise BoundProbeRefusal("selected_bound_slot_refused")
                 exec_reader, bound_exec_writer = await gated_executor.prepare()
                 line = await exec_reader.readline()
@@ -2964,6 +2966,8 @@ async def drive(
                 assert bound is not None
                 gated_app = bound.start_role(bound_launch, "app", MAX_FRAME_BYTES)
                 if gated_app is None:
+                    if bound.original_checkout is not None:
+                        raise BoundProbeRefusal("selected_bound_checkout_refused")
                     raise BoundProbeRefusal(
                         "selected_bound_app_materialization_refused"
                     )
@@ -3094,6 +3098,11 @@ async def drive(
                 )
                 diagnostic(
                     "INFO", "probe.selected_bound_executable_verified", fixture.case
+                )
+                gated_app.verify_checkout(bound_launch.checkout.anchor)
+                gated_executor.verify_checkout(bound_launch.checkout.anchor)
+                diagnostic(
+                    "INFO", "probe.selected_bound_checkout_verified", fixture.case
                 )
                 diagnostic("INFO", "probe.selected_bound_roles_verified", fixture.case)
             elif gated_app is not None:
@@ -3389,7 +3398,7 @@ async def run_selected_launch(
         workspace = root / (
             "workspace :@" if case == "selected-startup-ready" else "workspace"
         )
-        workspace.mkdir()
+        workspace.mkdir(mode=0o700 if bound is not None else 0o777)
         if case in SHELL_PATCH_POLICY_OUTCOMES:
             with (CONTROL / SHELL_PATCH_WORKSPACE).open("xb") as binding:
                 binding.write(os.fsencode(workspace))
@@ -3437,16 +3446,19 @@ async def run_selected_launch(
         if bound_refusal is not None:
             assert bound is not None
             fenced = bound.case in {"before-activation", "before-delivery"}
-            expected_roles = 2 if fenced else int(bound.case == "partial")
+            expected_roles = (
+                2 if fenced else int(bound.case in {"partial", "checkout-before-app"})
+            )
+            markers = (marker, RECEIPTS, CONTROL / "invocations")
+            if bound.original_checkout is not None:
+                markers += (bound.original_checkout / MARKER,)
             require(
                 bound.unix_sockets == expected_roles * 4
-                and bound.cwd_opens == bound.starts == expected_roles
+                and bound.cwd_opens == 0
+                and bound.starts == expected_roles
                 and fixture.connections == fixture.requests == 0
                 and fixture.failure is None
-                and not any(
-                    os.path.lexists(path)
-                    for path in (marker, RECEIPTS, CONTROL / "invocations")
-                ),
+                and not any(os.path.lexists(path) for path in markers),
                 "selected_bound_refusal_had_effect",
             )
             if expected_roles == 0:
@@ -3458,7 +3470,8 @@ async def run_selected_launch(
             require(
                 bound.case == "ready"
                 and bound.settled
-                and bound.cwd_opens == bound.starts == 2
+                and bound.cwd_opens == 0
+                and bound.starts == 2
                 and bound.unix_sockets == 8,
                 "selected_bound_owner_witness",
             )
@@ -3883,6 +3896,8 @@ async def run_selected_bound(name: str) -> None:
         "before-delivery",
         "executable-pin",
         "executable-path",
+        "checkout-before-exec",
+        "checkout-before-app",
     ):
         raise ProbeFailure("selected_bound_unexpected_case")
     diagnostics = configure_process(

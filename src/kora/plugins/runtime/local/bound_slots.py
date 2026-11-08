@@ -43,7 +43,12 @@ class BoundRoleSlots:
         return claim
 
     def start(
-        self, role: str, claim: RoleClaim, acquire: Callable[[dict[str, str]], T]
+        self,
+        role: str,
+        claim: RoleClaim,
+        acquire: Callable[[dict[str, str]], T],
+        *,
+        preflight: Callable[[], None] | None = None,
     ) -> T:
         self._require_open()
         issued = self._claims.get(role)
@@ -52,6 +57,9 @@ class BoundRoleSlots:
         self._claims[role] = None
         started = False
         try:
+            if preflight is not None:
+                preflight()
+                self._require_open()
             environment = self._binding.materialize(role)
             self._require_open()
             resource = acquire(environment)
