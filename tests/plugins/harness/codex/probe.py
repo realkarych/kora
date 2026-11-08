@@ -1447,19 +1447,19 @@ class Stdio:
         local = await self.call("environment/status", {"environmentId": "local"})
         require(local.get("status") == "unknown", "local_executor_available")
         alternate = {"environmentId": "remote"}
-        status = await self.call("environment/status", alternate)
-        expected = (
-            "pending" if case == "selected-noise-registry-override" else "unknown"
-        )
-        require(
-            status.get("status") == expected, "unexpected_registry_environment_status"
-        )
         try:
             await self.call("environment/info", alternate)
         except RpcError as error:
             require(error.reason is RpcFailure.REMOTE_ERROR, "registry_lookup_failed")
         else:
             raise ProbeFailure("registry_lookup_unexpectedly_accepted")
+        status = await self.call("environment/status", alternate)
+        expected = (
+            "disconnected" if case == "selected-noise-registry-override" else "unknown"
+        )
+        require(
+            status.get("status") == expected, "unexpected_registry_environment_status"
+        )
         diagnostic("INFO", "probe.selected_noise_registry_lookup_refused", case)
 
     async def observe_selected(
