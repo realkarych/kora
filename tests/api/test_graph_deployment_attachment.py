@@ -131,7 +131,7 @@ def exact_attachment_limits(
     fixed = (
         36
         + len(prepared.groups) * (4 * (256 + 71) + 16)
-        + len(owners) * (4 + 8 * MAX_STORAGE_METADATA)
+        + len(owners) * (4 + 8 * MAX_STORAGE_METADATA + 12)
     )
     return replace(
         ATTACH_LIMITS,

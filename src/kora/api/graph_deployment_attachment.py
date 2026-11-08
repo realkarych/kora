@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TypeGuard
+from typing import NamedTuple, TypeGuard
 
 from pydantic import ValidationError
 
@@ -10,6 +10,7 @@ from kora.api.graph_execution_preparation import (
 )
 from kora.cel_eval.errors import raise_safe
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
+from kora.db.identifiers import is_identifier
 from kora.db.types import DIGEST_LENGTH
 from kora.engine.graph_command_manifests import (
     MAX_CONTENT_BYTES,
@@ -41,7 +42,36 @@ ATTACHMENT_SLOTS = 36
 REFERENCE_SNAPSHOT_UNITS = 8 * MAX_STORAGE_METADATA
 GROUP_DESCRIPTOR_UNITS = 4 * (IDENTIFIER_WIDTH + STORAGE_DIGEST_WIDTH) + 16
 ORDINAL_UNITS = 4
+OWNER_ROW_UNITS = 12
+OWNER_BIND_ROW_UNITS = 12
+PRESENT = "present"
 _ATTACHMENT_ISSUER = object()
+
+
+class _OwnerRow(NamedTuple):
+    ordinal: int
+    subgraph_name: str | None
+    node_name: str
+    file_name: str
+    store_id: str
+    payload_digest: str
+    object_incarnation: str
+    total_size: int
+
+
+def _owner_row(ordinal: int, owner: GraphResourceOwner) -> _OwnerRow:
+    reference = owner.reference
+    path = owner.path
+    return _OwnerRow(
+        ordinal,
+        path[2] if len(path) == 5 else None,
+        path[-1],
+        owner.name,
+        reference.address.storage_identity.store_id,
+        reference.address.payload_digest,
+        reference.object_incarnation,
+        reference.total_size,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,9 +83,10 @@ class GraphDeploymentAttachmentLimits:
 
 
 class AttachedGraphDeployment(PreparedExecutionContract):
-    __slots__ = ("_issuer", "scope_ids")
+    __slots__ = ("_issuer", "scope_ids", "_owner_rows")
     _issuer: object
     scope_ids: tuple[str, str, str]
+    _owner_rows: tuple[_OwnerRow, ...]
 
     def __init__(
         self,
@@ -75,10 +106,70 @@ class AttachedGraphDeployment(PreparedExecutionContract):
             GraphResourceReferences(physical.text),
             physical.owners,
         )
+        object.__setattr__(
+            self,
+            "_owner_rows",
+            tuple(
+                _owner_row(ordinal, owner)
+                for ordinal, owner in enumerate(physical.owners)
+            ),
+        )
         object.__setattr__(self, "_issuer", issuer)
         object.__setattr__(
             self, "scope_ids", (scope.namespace_id, scope.graph_id, scope.version_id)
         )
+
+    def _owner_parameters(
+        self, target: tuple[str, str, str], max_bind_units: int
+    ) -> list[dict[str, str | int | None]]:
+        if (
+            type(target) is not tuple
+            or len(target) != 3
+            or any(
+                type(value) is not str or not is_identifier(value) for value in target
+            )
+            or target != self.scope_ids
+        ):
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        if type(max_bind_units) is not int or max_bind_units <= 0:
+            raise GraphValueRejected(GraphValueFailure.BUDGET)
+        version_id = target[2]
+        rows = self._owner_rows
+        row_fixed = OWNER_BIND_ROW_UNITS + 16 + 4 * (len(version_id) + len(PRESENT))
+        required = (
+            1
+            + len(rows) * row_fixed
+            + sum(4 * len(value) for row in rows for value in row if type(value) is str)
+        )
+        if required > max_bind_units:
+            raise GraphValueRejected(GraphValueFailure.BUDGET)
+        return [
+            {
+                "graph_version_id": version_id,
+                "ordinal": row.ordinal,
+                "subgraph_name": row.subgraph_name,
+                "node_name": row.node_name,
+                "file_name": row.file_name,
+                "store_id": row.store_id,
+                "payload_digest": row.payload_digest,
+                "object_incarnation": row.object_incarnation,
+                "total_size": row.total_size,
+                "payload_state": PRESENT,
+            }
+            for row in rows
+        ]
+
+    def owner_parameters(
+        self, target: tuple[str, str, str], *, max_bind_units: int
+    ) -> list[dict[str, str | int | None]]:
+        try:
+            if not is_checked_graph_attachment(self):
+                raise GraphValueRejected(GraphValueFailure.INVALID)
+            return self._owner_parameters(target, max_bind_units)
+        except GraphValueRejected as rejected:
+            reason = rejected.reason
+        del self, target, max_bind_units
+        raise_safe(GraphValueRejected(reason))
 
 
 def is_checked_graph_attachment(
@@ -246,7 +337,7 @@ def _admit_attachment(
     overhead = (
         ATTACHMENT_SLOTS
         + len(prepared.groups) * GROUP_DESCRIPTOR_UNITS
-        + count * (ORDINAL_UNITS + REFERENCE_SNAPSHOT_UNITS)
+        + count * (ORDINAL_UNITS + REFERENCE_SNAPSHOT_UNITS + OWNER_ROW_UNITS)
     )
     if overhead + resources.work + logical.work > limits.max_work:
         raise GraphValueRejected(GraphValueFailure.BUDGET)
