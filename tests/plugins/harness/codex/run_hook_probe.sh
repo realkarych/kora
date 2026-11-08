@@ -292,16 +292,25 @@ case "${1:-}" in
             release_container
         done
         if [ "$refusal_reason" = selected_bound_slot_refused ]; then
-            refusal_exit=0
-            run_variant selected-gated-bound --selected-bound-partial > "$reservation/refused" 2>&1 || refusal_exit=$?
-            test "$refusal_exit" = 1
-            printf '%s\n' \
-                '{"level": "INFO", "event": "probe.selected_bound_executor_ready", "detail": "selected-startup-ready"}' \
-                '{"level": "INFO", "event": "probe.selected_bound_executor_closed", "detail": "partial"}' \
-                '{"level": "ERROR", "event": "probe.case_failed", "detail": "selected_bound_app_materialization_refused"}' > "$reservation/expected-refusal"
-            cmp -s "$reservation/refused" "$reservation/expected-refusal"
-            cat "$reservation/expected-refusal"
-            release_container
+            for refusal in partial acquisition; do
+                refusal_exit=0
+                run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+                test "$refusal_exit" = 1
+                printf '%s\n' '{"level": "INFO", "event": "probe.selected_bound_executor_ready", "detail": "selected-startup-ready"}' > "$reservation/expected-refusal"
+                if [ "$refusal" = partial ]; then
+                    printf '%s\n' '{"level": "INFO", "event": "probe.selected_bound_live_contenders_refused", "detail": "partial"}' >> "$reservation/expected-refusal"
+                    app_failure=selected_bound_app_materialization_refused
+                else
+                    app_failure=selected_bound_app_acquisition_refused
+                fi
+                printf '{"level": "INFO", "event": "probe.selected_bound_earlier_writer_fenced", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+                printf '{"level": "INFO", "event": "probe.selected_bound_executor_closed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+                printf '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+                printf '{"level": "ERROR", "event": "probe.case_failed", "detail": "%s"}\n' "$app_failure" >> "$reservation/expected-refusal"
+                cmp -s "$reservation/refused" "$reservation/expected-refusal"
+                cat "$reservation/expected-refusal"
+                release_container
+            done
         fi
         ;;
     --check-selected-bound-fence)

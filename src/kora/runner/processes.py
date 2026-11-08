@@ -850,12 +850,19 @@ class GatedProcess:
                 self._close_gate_after_failure()
             raise
 
-    async def _prepare(self) -> ProcessRegistration:
+    def require_acquired(self) -> None:
+        self._acquired()
+
+    def _acquired(self) -> tuple[ProcessRegistration, BoundedChannel]:
         registration = self._registered()
         anchor = self._anchor
         channel = self._channel
         if anchor is None or anchor.unknown or channel is None or self._closing:
             raise ProcessError(ProcessCondition.UNKNOWN)
+        return registration, channel
+
+    async def _prepare(self) -> ProcessRegistration:
+        registration, channel = self._acquired()
         if self._prepared:
             return registration
         if self._stdio is not None:

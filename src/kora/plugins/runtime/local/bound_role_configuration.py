@@ -63,6 +63,10 @@ class BoundRoleConfiguration:
         self._close_failed = False
 
     @property
+    def directories(self) -> RoleDirectories:
+        return self._directories
+
+    @property
     def placement_identities(self) -> tuple[tuple[int, int], ...]:
         return tuple(
             (placement.anchor.identity.device, placement.anchor.identity.inode)

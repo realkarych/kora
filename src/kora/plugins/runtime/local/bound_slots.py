@@ -30,12 +30,12 @@ class BoundRoleSlots:
     def stop(self) -> None:
         self._stopped = True
 
-    def _require_open(self) -> None:
+    def require_open(self) -> None:
         if self._stopped or self._clock.monotonic_ns() >= self._cutoff_ns:
             raise _slot_refused()
 
     def claim(self, role: str) -> RoleClaim:
-        self._require_open()
+        self.require_open()
         if role not in self._roles or role in self._claims:
             raise _slot_refused()
         claim = RoleClaim()
@@ -50,7 +50,7 @@ class BoundRoleSlots:
         *,
         preflight: Callable[[], None] | None = None,
     ) -> T:
-        self._require_open()
+        self.require_open()
         issued = self._claims.get(role)
         if issued is None or issued is not claim:
             raise _slot_refused()
@@ -59,9 +59,9 @@ class BoundRoleSlots:
         try:
             if preflight is not None:
                 preflight()
-                self._require_open()
+                self.require_open()
             environment = self._binding.materialize(role)
-            self._require_open()
+            self.require_open()
             resource = acquire(environment)
             started = True
             return resource

@@ -4,7 +4,7 @@ import select
 import signal
 import sys
 from collections.abc import Callable, Generator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -187,39 +187,38 @@ async def close_gated(
 
 
 class SelectedGatedApp:
-    def __init__(
-        self,
-        argv: tuple[str, ...],
-        cwd: Path | DirectoryAnchor,
-        environment: dict[str, str],
-        clock: SystemClock,
-        cutoff_ns: int,
-        frame_limit: int,
-        *,
-        register: Callable[[GatedProcess], None] | None = None,
-    ) -> None:
+    def __init__(self, owner: GatedProcess, clock: SystemClock) -> None:
+        self._owner = owner
         self._clock = clock
-        with ExitStack() as owned:
-            if isinstance(cwd, Path):
-                descriptor = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-                owned.callback(os.close, descriptor)
-            else:
-                descriptor = cwd.descriptor
-            self._owner = start_gated(
-                native_launch(argv, environment),
-                new_operation_id(),
-                descriptor,
-                cutoff_ns,
-                self._clock,
-                stdio_limit=frame_limit,
-            )
-            if register is not None:
-                register(self._owner)
         self._pid: int | None = None
         self._gate_targets: dict[int, str] = {}
         self._endpoint: Descriptor | None = None
         self._peer: str | None = None
         self._child: str | None = None
+
+    @classmethod
+    def launch(
+        cls,
+        argv: tuple[str, ...],
+        cwd: Path,
+        environment: dict[str, str],
+        clock: SystemClock,
+        cutoff_ns: int,
+        frame_limit: int,
+    ) -> "SelectedGatedApp":
+        descriptor = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            owner = start_gated(
+                native_launch(argv, environment),
+                new_operation_id(),
+                descriptor,
+                cutoff_ns,
+                clock,
+                stdio_limit=frame_limit,
+            )
+        finally:
+            os.close(descriptor)
+        return cls(owner, clock)
 
     async def prepare(
         self, boundary: Callable[[GateBoundary], None] | None = None

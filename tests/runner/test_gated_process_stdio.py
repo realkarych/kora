@@ -419,6 +419,8 @@ async def test_gated_stdio_partial_start_closes_descriptors() -> None:
     owner = start_gated(
         launch(MARK), new_operation_id(), -1, deadline, clock, stdio_limit=131_072
     )
+    with pytest.raises(ProcessError) as unacquired:
+        owner.require_acquired()
     with pytest.raises(ProcessError) as refused:
         await owner.prepare()
     with pytest.raises(ProcessError) as conflicting_capture:
@@ -431,6 +433,7 @@ async def test_gated_stdio_partial_start_closes_descriptors() -> None:
             stdio_limit=131_072,
         )
 
+    assert unacquired.value.condition is ProcessCondition.START_FAILED
     assert refused.value.condition is ProcessCondition.START_FAILED
     assert conflicting_capture.value.condition is ProcessCondition.START_FAILED
     assert owner.closed

@@ -2865,6 +2865,7 @@ async def drive(
                     bearer,
                     SYNTHETIC_BEARER,
                     deadline,
+                    MAX_FRAME_BYTES,
                 )
                 if bound_launch is None:
                     if bound.case == "bash-pin":
@@ -2878,7 +2879,7 @@ async def drive(
                     raise BoundProbeRefusal("selected_bound_environment_refused")
                 inputs = bound_launch.inputs
                 child_env = dict(inputs.app_server.environment)
-                gated_executor = bound.start_role(bound_launch, "exec", MAX_FRAME_BYTES)
+                gated_executor = bound.start_role(bound_launch, "exec")
                 if gated_executor is None:
                     if bound.configuration_refused is not None:
                         raise BoundProbeRefusal(bound.configuration_refused.value)
@@ -2987,8 +2988,31 @@ async def drive(
             )
             if bound_launch is not None:
                 assert bound is not None
-                gated_app = bound.start_role(bound_launch, "app", MAX_FRAME_BYTES)
+                if bound.case == "partial":
+                    assert bound_exec_writer is not None
+                    bound.verify_live_contenders(bound_launch, bound_exec_writer)
+                    diagnostic(
+                        "INFO",
+                        "probe.selected_bound_live_contenders_refused",
+                        bound.case,
+                    )
+                gated_app = bound.start_role(bound_launch, "app")
                 if gated_app is None:
+                    if bound.case in ("partial", "acquisition"):
+                        require(
+                            bound_exec_writer is not None
+                            and bound_exec_writer.is_closing(),
+                            "selected_bound_earlier_writer_not_fenced",
+                        )
+                        diagnostic(
+                            "INFO",
+                            "probe.selected_bound_earlier_writer_fenced",
+                            bound.case,
+                        )
+                    if bound.case == "acquisition":
+                        raise BoundProbeRefusal(
+                            "selected_bound_app_acquisition_refused"
+                        )
                     if bound.configuration_refused is not None:
                         require(
                             bound_exec_writer is not None
@@ -3022,7 +3046,7 @@ async def drive(
                 )
 
                 clock = SystemClock()
-                gated_app = SelectedGatedApp(
+                gated_app = SelectedGatedApp.launch(
                     app_argv,
                     app_cwd,
                     child_env,
@@ -3188,7 +3212,7 @@ async def drive(
         raise
     finally:
         if bound_launch is not None:
-            bound_launch.fence.stop()
+            bound_launch.native.stop()
         if bash_witness is not None:
             bash_witness.stop()
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
@@ -3226,7 +3250,7 @@ async def drive(
                 )
 
                 try:
-                    bound.close_configurations()
+                    bound.close_inputs()
                 except BoundEnvironmentError as error:
                     outcomes.append(error)
             outcomes.extend(
@@ -3428,7 +3452,7 @@ def selected_launch_workspace(bound: "BoundEnvironmentProbe | None") -> Generato
         if bound.settled:
             try:
                 bound.remove_workspace(root)
-                if bound.configuration_case:
+                if bound.workspace_evidence:
                     diagnostic(
                         "INFO", "probe.selected_bound_workspace_removed", bound.case
                     )
@@ -3519,9 +3543,10 @@ async def run_selected_launch(
                 if fenced
                 else int(
                     bound.late_configuration_case
-                    or bound.case in {"partial", "checkout-before-app"}
+                    or bound.case in {"partial", "acquisition", "checkout-before-app"}
                 )
             )
+            expected_attempts = expected_roles + int(bound.case == "acquisition")
             markers = (
                 marker,
                 RECEIPTS,
@@ -3531,9 +3556,9 @@ async def run_selected_launch(
             if bound.original_checkout is not None:
                 markers += (bound.original_checkout / MARKER,)
             require(
-                bound.unix_sockets == expected_roles * 4
+                bound.unix_sockets == expected_attempts * 4
                 and bound.cwd_opens == 0
-                and bound.starts == expected_roles
+                and bound.starts == expected_attempts
                 and fixture.connections == fixture.requests == 0
                 and fixture.failure is None
                 and not any(os.path.lexists(path) for path in markers),
@@ -3984,6 +4009,7 @@ async def run_selected_bound(name: str) -> None:
         "duplicate",
         "stopped",
         "partial",
+        "acquisition",
         "before-activation",
         "before-delivery",
         "executable-pin",

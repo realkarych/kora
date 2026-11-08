@@ -21,10 +21,15 @@ class CandidateRoleEnvironment:
 @dataclass(frozen=True, repr=False)
 class BoundCandidateEnvironments:
     _roles: Mapping[str, EnvironmentAssignments]
+    _cwd: Path
+    _recipes: Mapping[str, CandidateRoleEnvironment]
 
     @property
     def roles(self) -> frozenset[str]:
         return frozenset(self._roles)
+
+    def matches(self, role: str, cwd: Path, recipe: CandidateRoleEnvironment) -> bool:
+        return self._cwd == cwd and self._recipes.get(role) == recipe
 
     def materialize(self, role: str) -> dict[str, str]:
         entries = self._roles.get(role)
@@ -140,4 +145,10 @@ def bind_candidate_environments(
         )
         for role, adapter, grants in recipes
     }
-    return BoundCandidateEnvironments(MappingProxyType(captured))
+    admitted_recipes = MappingProxyType(
+        {
+            role: CandidateRoleEnvironment(MappingProxyType(adapter), grants)
+            for role, adapter, grants in recipes
+        }
+    )
+    return BoundCandidateEnvironments(MappingProxyType(captured), cwd, admitted_recipes)

@@ -78,7 +78,7 @@ def test_configuration_workspace_refuses_to_remove_replacement(tmp_path: Path) -
     )
     baseline = set(os.listdir("/dev/fd"))
     bound.prepare_configurations(root, inputs, ORIGIN_NS + 100, StepClock())
-    bound.close_configurations()
+    bound.close_inputs()
     root.rename(moved)
     root.mkdir(mode=0o700)
 
