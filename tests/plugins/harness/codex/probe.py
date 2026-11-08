@@ -84,6 +84,7 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_HOOK_TIMEOUT_CASES,
     SELECTED_LAUNCH_CASES,
     SELECTED_MODEL,
+    SELECTED_NOISE_REGISTRY_CASES,
     SELECTED_PATCH_CASES,
     SELECTED_REFUSALS,
     SELECTED_SQLITE_HOME_CASES,
@@ -91,6 +92,7 @@ from tests.plugins.harness.codex.selected_launch import (
     SQLITE_HOME_CANARY,
     SelectedHookCase,
     SelectedLaunchCase,
+    SelectedNoiseRegistryCase,
     materialize_native_inputs,
     plant_checkout_canaries,
     prepare_native_inputs,
@@ -572,12 +574,22 @@ USAGE_SOURCE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 EXPECTED_USAGE = (TokenCounts(100, 20, 30, 10, 4), TokenCounts(160, 25, 40, 30, 10))
 
 
+REGISTRY_ID = "kora-probe-registry"
+REGISTRY_BEARER = "synthetic-noise-registry-token"
+NOISE_ACCOUNT = "synthetic-noise-registry-account"
+NOISE_REGISTRY_ROUTE = (
+    f"POST /cloud/environment/{REGISTRY_ID}/connect HTTP/1.1".encode()
+)
+
+
 class ResponsesFixture:
     def __init__(self, case: ProbeCase, one_shot: bool) -> None:
         self.case: ProbeCase = case
         self.one_shot = one_shot
         self.request_limit: int
-        if case in SELECTED_REFUSALS:
+        if case == "selected-noise-registry-override":
+            self.request_limit = 1
+        elif case in SELECTED_REFUSALS:
             self.request_limit = 0
         elif case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
@@ -627,9 +639,15 @@ class ResponsesFixture:
             async with asyncio.timeout_at(deadline):
                 raw_headers = await reader.readuntil(b"\r\n\r\n")
                 request_line, *headers = raw_headers[:-4].split(b"\r\n")
+                registry = self.case == "selected-noise-registry-override"
+                expected_route = (
+                    NOISE_REGISTRY_ROUTE if registry else b"POST /v1/responses HTTP/1.1"
+                )
                 require(
-                    request_line == b"POST /v1/responses HTTP/1.1",
-                    "unexpected_responses_route",
+                    request_line == expected_route,
+                    "unexpected_registry_route"
+                    if registry
+                    else "unexpected_responses_route",
                 )
                 fields = self.verify_headers(headers)
                 size = int(fields.get(b"content-length", b"0"))
@@ -640,6 +658,19 @@ class ResponsesFixture:
                         PROJECT_DOC_CANARY not in body, "project_instructions_applied"
                     )
                 request = parse_object(body)
+                if registry:
+                    require(
+                        request.keys() == {"harness_public_key"}
+                        and isinstance(request["harness_public_key"], dict),
+                        "unexpected_registry_connect_body",
+                    )
+                    self.requests += 1
+                    writer.write(
+                        b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n"
+                        b"Content-Length: 0\r\n\r\n"
+                    )
+                    await writer.drain()
+                    return
                 if self.case == "selected-startup-ready":
                     require(
                         request.get("model") == SELECTED_MODEL,
@@ -714,6 +745,7 @@ class ResponsesFixture:
     def verify_headers(self, headers: list[bytes]) -> dict[bytes, bytes]:
         fields: dict[bytes, bytes] = {}
         authorization_count = 0
+        account_count = 0
         for header in headers:
             key, separator, value = header.partition(b":")
             require(
@@ -723,6 +755,8 @@ class ResponsesFixture:
             name = key.lower()
             if name == b"authorization":
                 authorization_count += 1
+            if name == b"chatgpt-account-id":
+                account_count += 1
             fields[name] = value.strip(b" \t")
         require(
             not {
@@ -735,7 +769,15 @@ class ResponsesFixture:
             & fields.keys(),
             "unexpected_responses_credentials",
         )
-        if self.case == "provider_key_present" or self.case in SELECTED_AUTH_CASES:
+        if self.case == "selected-noise-registry-override":
+            require(
+                authorization_count == 1
+                and fields[b"authorization"] == f"Bearer {REGISTRY_BEARER}".encode()
+                and account_count == 1
+                and fields[b"chatgpt-account-id"] == NOISE_ACCOUNT.encode(),
+                "unexpected_registry_authorization",
+            )
+        elif self.case == "provider_key_present" or self.case in SELECTED_AUTH_CASES:
             require(
                 authorization_count == 1
                 and fields[b"authorization"] == f"Bearer {SYNTHETIC_BEARER}".encode(),
@@ -1397,6 +1439,28 @@ class Stdio:
         if executor_url is not None:
             await self.register_executor(executor_url, executor_bearer)
         await self.run_turn(workspace, case, selected_executor=executor_url is not None)
+
+    async def observe_noise_registry(self, case: SelectedNoiseRegistryCase) -> None:
+        await initialize_app_server(
+            self.rpc, self.identity, deadline=self.deadline, experimental_api=True
+        )
+        local = await self.call("environment/status", {"environmentId": "local"})
+        require(local.get("status") == "unknown", "local_executor_available")
+        alternate = {"environmentId": "remote"}
+        status = await self.call("environment/status", alternate)
+        expected = (
+            "pending" if case == "selected-noise-registry-override" else "unknown"
+        )
+        require(
+            status.get("status") == expected, "unexpected_registry_environment_status"
+        )
+        try:
+            await self.call("environment/info", alternate)
+        except RpcError as error:
+            require(error.reason is RpcFailure.REMOTE_ERROR, "registry_lookup_failed")
+        else:
+            raise ProbeFailure("registry_lookup_unexpectedly_accepted")
+        diagnostic("INFO", "probe.selected_noise_registry_lookup_refused", case)
 
     async def observe_selected(
         self, workspace: Path, case: ProbeCase, endpoint: str, bearer: str
@@ -2422,6 +2486,15 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                     exec_env.update(METADATA_ENVIRONMENT)
                 if fixture.case == "selected-sqlite-home-override":
                     child_env["CODEX_SQLITE_HOME"] = str(root / SQLITE_HOME_CANARY)
+                if fixture.case == "selected-noise-registry-override":
+                    child_env.update(
+                        {
+                            "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL": f"http://127.0.0.1:{port}",
+                            "CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID": REGISTRY_ID,
+                            "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN": REGISTRY_BEARER,
+                            "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID": NOISE_ACCOUNT,
+                        }
+                    )
                 if fixture.case != "selected-key-absent":
                     child_env["CODEX_API_KEY"] = SYNTHETIC_BEARER
                 executor = await launch_executor(
@@ -2463,6 +2536,8 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 await stdio.interrupt_turn(workspace, fixture, process)
             elif fixture.case in {"client-exit", "messages-kill", "output-kill"}:
                 await observe_client_exit(process, fixture, stdio, workspace)
+            elif fixture.case in SELECTED_NOISE_REGISTRY_CASES:
+                await stdio.observe_noise_registry(fixture.case)
             elif fixture.case in SELECTED_TURN_CASES:
                 assert executor_url is not None
                 await observe_selected_event_turn(

@@ -29,8 +29,12 @@ SelectedHookCase = (
 SelectedSqliteHomeCase = Literal[
     "selected-sqlite-home-default", "selected-sqlite-home-override"
 ]
+SelectedNoiseRegistryCase = Literal[
+    "selected-noise-registry-default", "selected-noise-registry-override"
+]
 SelectedLaunchCase = (
-    SelectedHookCase
+    SelectedNoiseRegistryCase
+    | SelectedHookCase
     | SelectedSqliteHomeCase
     | Literal[
         "selected-command-metadata",
@@ -69,8 +73,12 @@ SELECTED_SQLITE_HOME_CASES: frozenset[SelectedSqliteHomeCase] = frozenset(
 )
 SQLITE_HOME_CANARY = "sqlite-home-canary"
 SELECTED_TURN_CASES = frozenset({"selected-turn-complete", "selected-turn-cut"})
+SELECTED_NOISE_REGISTRY_CASES: frozenset[SelectedNoiseRegistryCase] = frozenset(
+    {"selected-noise-registry-default", "selected-noise-registry-override"}
+)
 SELECTED_LAUNCH_CASES = frozenset(
     {
+        *SELECTED_NOISE_REGISTRY_CASES,
         *SELECTED_HOOK_CASES,
         *SELECTED_TURN_CASES,
         *SELECTED_SQLITE_HOME_CASES,
@@ -95,7 +103,12 @@ SELECTED_AUTH_CASES = frozenset(
     }
 )
 SELECTED_REFUSALS = frozenset(
-    {"selected-key-absent", "selected-startup-bearer", "selected-startup-bash"}
+    {
+        *SELECTED_NOISE_REGISTRY_CASES,
+        "selected-key-absent",
+        "selected-startup-bearer",
+        "selected-startup-bash",
+    }
 )
 SELECTED_MODEL = "gpt-5.5"
 PROJECT_MODEL_CANARY = "kora-checkout-model-canary"
