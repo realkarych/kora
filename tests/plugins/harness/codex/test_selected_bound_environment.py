@@ -7,13 +7,13 @@ from typing import NoReturn
 import pytest
 
 from kora.protocols.secret_value import SecretScope
-from kora.protocols.time import SystemClock
 from tests.plugins.harness.codex.probe import ProbeFailure, selected_launch_workspace
 from tests.plugins.harness.codex.selected_bound_environment import (
     BoundEnvironmentError,
     BoundEnvironmentProbe,
 )
 from tests.plugins.harness.codex.selected_launch import prepare_native_inputs
+from tests.plugins.runtime.local.frames_support import ORIGIN_NS, StepClock
 
 
 def fail_with_native_state(root: Path) -> NoReturn:
@@ -77,10 +77,7 @@ def test_configuration_workspace_refuses_to_remove_replacement(tmp_path: Path) -
         "configuration-ready", SecretScope(None), SecretScope(None), SecretScope(None)
     )
     baseline = set(os.listdir("/dev/fd"))
-    clock = SystemClock()
-    bound.prepare_configurations(
-        root, inputs, clock.monotonic_ns() + 2_000_000_000, clock
-    )
+    bound.prepare_configurations(root, inputs, ORIGIN_NS + 100, StepClock())
     bound.close_configurations()
     root.rename(moved)
     root.mkdir(mode=0o700)

@@ -36,7 +36,7 @@ from kora.plugins.runtime.local.environment import (
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope, SecretValue
-from kora.protocols.time import SystemClock
+from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.installed_executable import (
     ExecutableFailure,
@@ -610,7 +610,7 @@ class BoundEnvironmentProbe:
         )
 
     def prepare_configurations(
-        self, root: Path, inputs: CodexLaunchInputs, cutoff_ns: int, clock: SystemClock
+        self, root: Path, inputs: CodexLaunchInputs, cutoff_ns: int, clock: Clock
     ) -> None:
         recipes: tuple[tuple[BoundRole, NativeProcessInputs], ...] = (
             ("app", inputs.app_server),
