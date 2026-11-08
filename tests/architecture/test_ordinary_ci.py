@@ -334,7 +334,10 @@ def test_shards_partition_every_inventory_group() -> None:
 def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
     tmp_path: Path, system: str, lane: str
 ) -> None:
-    opening = ordinary_shell().partition("esac\n")[0] + "esac\n"
+    launch_prefix, launch, _ = ordinary_shell().partition(
+        "\n  uv run --no-sync python -m tests.support.ordinary_pytest -v "
+    )
+    assert launch
     source = str(steps(table(workflow_jobs()["scaffold-tests"]))["tests"]["run"])
     before_collection = source.partition("KORA_CHECKOUT_REVISION=")[0]
     environment = {
@@ -351,7 +354,7 @@ def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
             "-o",
             "pipefail",
             "-c",
-            opening + 'printf "%s\n" "${names[@]}"\n',
+            launch_prefix + '\n  printf "%s\n" "$name"\ndone\n',
         ],
         cwd=tmp_path,
         env=environment,
