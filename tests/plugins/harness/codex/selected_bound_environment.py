@@ -64,10 +64,10 @@ BoundCase = Literal[
     "path",
     "grant",
     "reserved",
-    "duplicate",
     "stopped",
     "partial",
     "acquisition",
+    "handoff-expiry",
     "before-activation",
     "before-delivery",
     "executable-pin",
@@ -82,7 +82,6 @@ BoundCase = Literal[
     "configuration-app-placement",
 ]
 BoundRole = Literal["app", "exec"]
-SLOT_REFUSALS = frozenset({"duplicate", "stopped"})
 ENVIRONMENT_REFUSALS = frozenset({"path", "grant", "reserved"})
 INSTALLATION_REFUSALS: Mapping[str, ExecutableFailure] = MappingProxyType(
     {
@@ -123,6 +122,16 @@ class BoundEnvironmentError(ValueError):
     pass
 
 
+class SpawnClock(SystemClock):
+    def __init__(self) -> None:
+        self.observed_cutoff: int | None = None
+
+    def monotonic_ns(self) -> int:
+        if self.observed_cutoff is not None:
+            return self.observed_cutoff
+        return super().monotonic_ns()
+
+
 @dataclass(frozen=True, repr=False)
 class BoundLaunch:
     inputs: CodexLaunchInputs
@@ -161,7 +170,7 @@ class BoundLaunch:
         for wrapper in wrappers:
             if wrapper is not None:
                 wrapper.verify_closed()
-        if self.native.close_failed:
+        if self.native.close_failed or any(not gate.closed for gate in gates):
             raise BoundEnvironmentError("selected_bound_gate_close_failed")
 
 
@@ -214,6 +223,8 @@ class BoundEnvironmentProbe:
     original_checkout: Path | None = field(default=None, init=False)
     bash_path: Path | None = field(default=None, init=False)
     _cwd: str | None = field(default=None, init=False)
+    _clock: SpawnClock = field(default_factory=SpawnClock, init=False)
+    _cutoff_ns: int | None = field(default=None, init=False)
     settled: bool = field(default=False, init=False)
     configuration_refused: RoleConfigurationFailure | None = field(
         default=None, init=False
@@ -226,8 +237,10 @@ class BoundEnvironmentProbe:
 
     @property
     def workspace_evidence(self) -> bool:
-        return self.case in {"configuration-ready", "partial", "acquisition"} or (
-            self.case in CONFIGURATION_REFUSALS
+        return (
+            self.case
+            in {"configuration-ready", "partial", "acquisition", "handoff-expiry"}
+            or self.case in CONFIGURATION_REFUSALS
         )
 
     @property
@@ -240,6 +253,8 @@ class BoundEnvironmentProbe:
     def observe_acquisition(self, event: str, args: tuple[object, ...]) -> None:
         if event == "subprocess.Popen":
             self.starts += 1
+            if self.case == "handoff-expiry" and self.starts == 2:
+                self._clock.observed_cutoff = self._cutoff_ns
         elif event == "socket.__new__" and len(args) == 4 and args[1] == socket.AF_UNIX:
             self.unix_sockets += 1
         elif (
@@ -284,10 +299,11 @@ class BoundEnvironmentProbe:
         if expected_configuration is not None:
             self.change_configuration(launch, role)
         acquisition_control = self.case == "acquisition" and role == "app"
+        expiry_control = self.case == "handoff-expiry" and role == "app"
         try:
             with prohibit_spawn() if acquisition_control else nullcontext():
                 gate = launch.native.start(role)
-            if acquisition_control:
+            if acquisition_control or expiry_control:
                 raise BoundEnvironmentError("selected_bound_expected_spawn_refusal")
             started = SelectedGatedApp(gate, launch.clock)
             if expected_configuration is not None:
@@ -299,27 +315,32 @@ class BoundEnvironmentProbe:
             if not checkout_refusal or error.reason is not CheckoutFailure.IDENTITY:
                 raise BoundEnvironmentError("selected_bound_checkout_failed") from None
         except BoundRoleConfigurationError as error:
-            if (
-                error.reason is not expected_configuration
-                or not launch.native.slots.stopped
-            ):
+            if error.reason is not expected_configuration or not launch.native.stopped:
                 raise BoundEnvironmentError(
                     "selected_bound_configuration_failed"
                 ) from None
             self.configuration_refused = error.reason
         except KoraProtocolError as error:
-            if (
-                self.case not in SLOT_REFUSALS
-                or role != "exec"
-                or not slot_refusal(error)
-            ):
+            if expiry_control:
+                gates = launch.native.gates
+                if (
+                    not slot_refusal(error)
+                    or self._clock.observed_cutoff is None
+                    or not launch.native.stopped
+                    or len(gates) != 2
+                    or any(gate.registration is None for gate in gates)
+                ):
+                    raise BoundEnvironmentError(
+                        "selected_bound_handoff_expiry_failed"
+                    ) from None
+            elif self.case != "stopped" or role != "exec" or not slot_refusal(error):
                 raise BoundEnvironmentError("selected_bound_slot_failed") from None
         except ProcessError as error:
             gates = launch.native.gates
             if (
                 not acquisition_control
                 or error.condition is not ProcessCondition.START_FAILED
-                or not launch.native.slots.stopped
+                or not launch.native.stopped
                 or len(gates) != 2
                 or gates[0].registration is None
                 or gates[1].registration is not None
@@ -333,6 +354,8 @@ class BoundEnvironmentProbe:
                 raise BoundEnvironmentError(
                     "selected_bound_secret_reveal_refused"
                 ) from None
+        finally:
+            self._clock.observed_cutoff = None
         return None
 
     def change_configuration(self, launch: BoundLaunch, role: BoundRole) -> None:
@@ -499,8 +522,9 @@ class BoundEnvironmentProbe:
         if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (65_532,) * 4:
             raise BoundEnvironmentError("selected_bound_unexpected_identity")
         self._cwd = str(workspace)
-        clock = SystemClock()
+        clock = self._clock
         cutoff_ns = runner_deadline(deadline, clock)
+        self._cutoff_ns = cutoff_ns
         if self.case == "executable-path":
             binary = replaceable_executable(binary, workspace)
         workload: Mapping[str, str] = MappingProxyType({TEXT_NAME: TEXT_VALUE})
@@ -624,11 +648,8 @@ class BoundEnvironmentProbe:
             raise BoundEnvironmentError(
                 "selected_bound_native_binding_failed"
             ) from None
-        if self.case == "duplicate":
-            native.slots.claim("exec")
-        elif self.case == "stopped":
+        if self.case == "stopped":
             native.stop()
-        if self.case in SLOT_REFUSALS:
             self.attempt_scope.release()
         return BoundLaunch(
             inputs,

@@ -63,18 +63,18 @@ class BoundNativeLaunch:
         ):
             raise _binding_refused()
         self._checkout = checkout
-        self._executable = str(executable.path)
+        self._executable = executable
         self._directory_id = directory_id
         self._domain = domain
         self._stdio_limit = stdio_limit
         self._clock = clock
         self._cutoff_ns = cutoff_ns
-        self.slots = BoundRoleSlots(binding, clock, cutoff_ns)
-        self._fence = BoundGateFence(self.slots)
+        self._slots = BoundRoleSlots(binding, clock, cutoff_ns)
+        self._fence = BoundGateFence(self._slots)
         inputs: dict[str, _RoleGateInputs] = {}
         placements: set[tuple[int, int]] = set()
         for role, recipe in captured.items():
-            self.slots.require_open()
+            self._slots.require_open()
             configuration = recipe.configuration
             identities = frozenset(configuration.placement_identities)
             argv = tuple(recipe.argv)
@@ -83,7 +83,7 @@ class BoundNativeLaunch:
             if (
                 recipe.cwd != checkout.path
                 or not argv
-                or argv[0] != self._executable
+                or argv[0] != str(executable.path)
                 or not binding.matches(role, recipe.cwd, recipe.environment)
                 or adapter.get("HOME") != str(directories.home)
                 or adapter.get("CODEX_HOME") != str(directories.codex_home)
@@ -95,8 +95,12 @@ class BoundNativeLaunch:
             self._process_launch(argv, {})
             placements.update(identities)
             inputs[role] = _RoleGateInputs(argv, configuration)
-        self.slots.require_open()
+        self._slots.require_open()
         self._inputs = MappingProxyType(inputs)
+
+    @property
+    def stopped(self) -> bool:
+        return self._slots.stopped
 
     @property
     def gates(self) -> tuple[GatedProcess, ...]:
@@ -110,7 +114,7 @@ class BoundNativeLaunch:
         self._fence.stop()
 
     def start(self, role: str) -> GatedProcess:
-        claim = self.slots.claim(role)
+        claim = self._slots.claim(role)
         inputs = self._inputs[role]
 
         def preflight() -> None:
@@ -122,7 +126,7 @@ class BoundNativeLaunch:
         def acquire(environment: dict[str, str]) -> GatedProcess:
             launch = self._process_launch(inputs.argv, environment)
             operation_id = new_operation_id()
-            self.slots.require_open()
+            self._slots.require_open()
             gate = start_gated(
                 launch,
                 operation_id,
@@ -133,13 +137,13 @@ class BoundNativeLaunch:
             )
             self._fence.register(gate)
             gate.require_acquired()
-            self.slots.require_open()
+            self._slots.require_open()
             return gate
 
         try:
-            return self.slots.start(role, claim, acquire, preflight=preflight)
+            return self._slots.start(role, claim, acquire, preflight=preflight)
         finally:
-            if self.slots.stopped:
+            if self._slots.stopped:
                 self.stop()
 
     def _process_launch(
@@ -147,7 +151,7 @@ class BoundNativeLaunch:
     ) -> ProcessLaunch:
         try:
             return ProcessLaunch(
-                executable=self._executable,
+                executable=str(self._executable.path),
                 argv=argv,
                 environment=tuple(
                     EnvironmentVariable(name=name, value=value)

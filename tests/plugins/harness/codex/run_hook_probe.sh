@@ -275,7 +275,7 @@ case "${1:-}" in
         run_variant selected-gated-bound --selected-bound-ready
         release_container
         if [ "$1" = --check-selected-bound-slots ]; then
-            set -- duplicate stopped
+            set -- stopped
             refusal_reason=selected_bound_slot_refused
         else
             set -- path grant reserved
@@ -292,7 +292,7 @@ case "${1:-}" in
             release_container
         done
         if [ "$refusal_reason" = selected_bound_slot_refused ]; then
-            for refusal in partial acquisition; do
+            for refusal in partial acquisition handoff-expiry; do
                 refusal_exit=0
                 run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
                 test "$refusal_exit" = 1
@@ -300,8 +300,10 @@ case "${1:-}" in
                 if [ "$refusal" = partial ]; then
                     printf '%s\n' '{"level": "INFO", "event": "probe.selected_bound_live_contenders_refused", "detail": "partial"}' >> "$reservation/expected-refusal"
                     app_failure=selected_bound_app_materialization_refused
-                else
+                elif [ "$refusal" = acquisition ]; then
                     app_failure=selected_bound_app_acquisition_refused
+                else
+                    app_failure=selected_bound_app_handoff_expired
                 fi
                 printf '{"level": "INFO", "event": "probe.selected_bound_earlier_writer_fenced", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
                 printf '{"level": "INFO", "event": "probe.selected_bound_executor_closed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"

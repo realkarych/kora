@@ -2998,7 +2998,7 @@ async def drive(
                     )
                 gated_app = bound.start_role(bound_launch, "app")
                 if gated_app is None:
-                    if bound.case in ("partial", "acquisition"):
+                    if bound.case in ("partial", "acquisition", "handoff-expiry"):
                         require(
                             bound_exec_writer is not None
                             and bound_exec_writer.is_closing(),
@@ -3543,10 +3543,18 @@ async def run_selected_launch(
                 if fenced
                 else int(
                     bound.late_configuration_case
-                    or bound.case in {"partial", "acquisition", "checkout-before-app"}
+                    or bound.case
+                    in {
+                        "partial",
+                        "acquisition",
+                        "handoff-expiry",
+                        "checkout-before-app",
+                    }
                 )
             )
-            expected_attempts = expected_roles + int(bound.case == "acquisition")
+            expected_attempts = expected_roles + int(
+                bound.case in {"acquisition", "handoff-expiry"}
+            )
             markers = (
                 marker,
                 RECEIPTS,
@@ -4006,10 +4014,10 @@ async def run_selected_bound(name: str) -> None:
         "path",
         "grant",
         "reserved",
-        "duplicate",
         "stopped",
         "partial",
         "acquisition",
+        "handoff-expiry",
         "before-activation",
         "before-delivery",
         "executable-pin",
