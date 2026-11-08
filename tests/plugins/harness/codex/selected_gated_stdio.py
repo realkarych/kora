@@ -3,7 +3,7 @@ import os
 import select
 import signal
 import sys
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from itertools import islice
 from pathlib import Path
@@ -222,6 +222,7 @@ async def refuse_setup(
     cleanup_seconds: int,
     provider_key: str,
     bearer: str,
+    report_cleanup_failure: Callable[[], None],
 ) -> None:
     clock = SystemClock()
     with TemporaryDirectory(prefix="kora-codex-gated-", dir="/tmp") as workspace:
@@ -256,5 +257,11 @@ async def refuse_setup(
                 raise
             raise GatedObservationError("selected_gated_expected_refusal")
         finally:
+            original_failure = sys.exception()
             cutoff = clock.monotonic_ns() + cleanup_seconds * 1_000_000_000
-            await close_gated(owner, cutoff, clock)
+            try:
+                await close_gated(owner, cutoff, clock)
+            except (ChannelError, ProcessError, OSError):
+                if original_failure is None:
+                    raise
+                report_cleanup_failure()

@@ -3657,6 +3657,9 @@ async def run_selected_gated(name: str) -> None:
                     CLEANUP_SECONDS,
                     SYNTHETIC_BEARER,
                     SYNTHETIC_EXECUTOR_BEARER,
+                    lambda: diagnostic(
+                        "ERROR", "probe.selected_gated_cleanup_failed", "gate_refusal"
+                    ),
                 )
                 diagnostic(
                     "INFO", "probe.selected_gated_refused_reaped", "gate_prepared"
