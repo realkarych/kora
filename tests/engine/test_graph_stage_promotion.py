@@ -3,10 +3,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from traceback import format_exception, walk_tb
+from typing import cast
 
 import pytest
 import pytest_asyncio
 from fastapi.encoders import jsonable_encoder
+from sqlalchemy import select
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for, kora_capture
@@ -29,8 +31,17 @@ from kora.db.tables import (
     graph_deployment_stage_occurrence,
     storage_address_fence,
 )
+from kora.db.tables import (
+    graph_deployment_stage_promotion_intent as intent_table,
+)
+from kora.db.tables import (
+    graph_deployment_stage_promotion_settlement as settlement_table,
+)
 from kora.engine.graph_stage_promotion import (
     GraphStagePromotionRejected,
+    PreparedGraphStagePromotionIntent,
+    PreparedGraphStagePromotionSettlement,
+    prepare_graph_stage_promotion_intent,
     verify_graph_stage_promotion,
 )
 from kora.protocols.common import ProtocolContext
@@ -341,6 +352,7 @@ async def test_stage_promotion_refuses_substitution_and_invalid_evidence(
             )
         }
     )
+    no_effect_bytes = settled_no_effect.canonical_bytes()
     refusals = (
         (GENERATION, request, evidence.sibling_settled.canonical_bytes()),
         (
@@ -363,7 +375,7 @@ async def test_stage_promotion_refuses_substitution_and_invalid_evidence(
                 update={"effects_closed": False}
             ).canonical_bytes(),
         ),
-        (GENERATION, request, settled_no_effect.canonical_bytes()),
+        (GENERATION, request, no_effect_bytes),
         (
             GENERATION,
             request,
@@ -455,6 +467,11 @@ async def test_stage_promotion_refuses_substitution_and_invalid_evidence(
         with pytest.raises(GraphStagePromotionRejected) as refused:
             verify_graph_stage_promotion(original, generation, intent, receipt)
         failures.append(refused.value)
+        if receipt != no_effect_bytes:
+            with pytest.raises(GraphStagePromotionRejected):
+                prepare_graph_stage_promotion_intent(
+                    original, generation, intent
+                ).prepare_settlement(receipt)
 
     assert checked.reference == evidence.original_result.content
     assert len(failures) == len(refusals)
@@ -475,3 +492,206 @@ async def test_stage_promotion_refuses_substitution_and_invalid_evidence(
         }
         assert frames["verify_graph_stage_promotion"] == {}
         assert "_verify" not in frames
+
+
+@pytest.mark.asyncio
+async def test_prepared_custody_round_trips_real_provider_results(
+    database: Database,
+    real_promotions: tuple[GraphStage, GraphStage, PromotionEvidence],
+) -> None:
+    original, sibling, evidence = real_promotions
+    cases = (
+        (
+            original,
+            evidence.original,
+            evidence.original_settled,
+            evidence.original_result,
+        ),
+        (sibling, evidence.sibling, evidence.sibling_settled, evidence.sibling_result),
+    )
+    ledger = ConnectionLedger(database)
+    before = ledger.checkouts
+
+    prepared = [
+        prepare_graph_stage_promotion_intent(
+            stage, GENERATION, request.canonical_bytes()
+        )
+        for stage, request, _, _ in cases
+    ]
+    settled = [
+        intent.prepare_settlement(observation.canonical_bytes())
+        for intent, (_, _, observation, _) in zip(prepared, cases, strict=True)
+    ]
+    distinct_intent = prepare_graph_stage_promotion_intent(
+        original, GENERATION, evidence.original.canonical_bytes()
+    )
+    changed_request = prepared[0].values()
+    changed_request["stage_id"] = sibling.stage_id
+    changed_request["request_bytes"] = b"{}"
+    changed_result = settled[0].values()
+    changed_result["observation_bytes"] = b"{}"
+    exposed = settled[0].promotion
+    assert exposed is not None
+    exposed_stage = exposed.stage
+    exposed_stage.__init__(
+        sibling.stage_id,
+        exposed_stage.namespace_id,
+        exposed_stage.preparation_id,
+        exposed_stage.store_id,
+        exposed_stage.payload_digest,
+        exposed_stage.fence_incarnation,
+        exposed_stage.total_size,
+    )
+    after_preparation = ledger.checkouts
+    async with database.transaction() as writer:
+        for intent, settlement in zip(prepared, settled, strict=True):
+            await writer.execute(intent_table.insert().values(**intent.values()))
+            await writer.execute(
+                settlement_table.insert().values(**settlement.values())
+            )
+    async with database.read_snapshot() as reader:
+        intents = {
+            row["stage_id"]: dict(row)
+            for row in (await reader.execute(select(intent_table))).mappings()
+        }
+        settlements = {
+            row["stage_id"]: dict(row)
+            for row in (await reader.execute(select(settlement_table))).mappings()
+        }
+
+    assert after_preparation == before
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert database.writer_is_free()
+    assert not settled[0].belongs_to(distinct_intent)
+    for (stage, request, observation, result), intent, settlement in zip(
+        cases, prepared, settled, strict=True
+    ):
+        assert intents[stage.stage_id] == {
+            "stage_id": stage.stage_id,
+            "store_id": stage.store_id,
+            "payload_digest": stage.payload_digest,
+            "fence_incarnation": stage.fence_incarnation,
+            "operation_id": request.operation.operation_id,
+            "request_digest": request.operation.request_digest,
+            "content_generation": GENERATION,
+            "request_bytes": request.canonical_bytes(),
+        }
+        assert settlements[stage.stage_id] == {
+            "stage_id": stage.stage_id,
+            "observation_bytes": observation.canonical_bytes(),
+        }
+        assert settlement.belongs_to(intent)
+        assert settlement.outcome_digest == result.metadata_digest()
+        promotion = settlement.promotion
+        assert promotion is not None
+        assert promotion.stage == stage
+        assert promotion.operation == request.operation
+        assert promotion.reference == result.content
+        assert promotion.created_object is result.created_object
+        assert stage.stage_id not in repr(intent) + repr(settlement)
+    assert evidence.original_result.created_object is False
+    assert evidence.sibling_result.created_object is True
+
+
+@pytest.mark.asyncio
+async def test_prepared_custody_accepts_closed_no_effect_without_content(
+    real_promotions: tuple[GraphStage, GraphStage, PromotionEvidence],
+) -> None:
+    original, _, evidence = real_promotions
+    intent = prepare_graph_stage_promotion_intent(
+        original, GENERATION, evidence.original.canonical_bytes()
+    )
+    failure = NoEffectFailure(
+        version=1, operation=evidence.original.operation, code="storage_issuer_closed"
+    )
+    observation = MutationObservation(
+        version=1,
+        operation=evidence.original.operation,
+        state="settled",
+        result=failure,
+        effects_closed=True,
+    )
+    encoded = observation.canonical_bytes()
+
+    settlement = intent.prepare_settlement(encoded)
+
+    assert settlement.belongs_to(intent)
+    assert settlement.promotion is None
+    assert settlement.values() == {
+        "stage_id": original.stage_id,
+        "observation_bytes": encoded,
+    }
+    assert settlement.outcome_digest == failure.metadata_digest()
+    assert settlement.outcome_digest != observation.metadata_digest()
+
+
+@pytest.mark.asyncio
+async def test_prepared_custody_refuses_unissued_or_noncanonical_inputs_privately(
+    real_promotions: tuple[GraphStage, GraphStage, PromotionEvidence],
+) -> None:
+    original, _, evidence = real_promotions
+    request_bytes = evidence.original.canonical_bytes()
+    observation_bytes = evidence.original_settled.canonical_bytes()
+    intent = prepare_graph_stage_promotion_intent(original, GENERATION, request_bytes)
+    unissued_intent = object.__new__(PreparedGraphStagePromotionIntent)
+    unissued_settlement = object.__new__(PreparedGraphStagePromotionSettlement)
+    prefix = b'{"version":1,'
+    invalid_requests = (
+        b"",
+        cast("bytes", bytearray(request_bytes)),
+        request_bytes + b" ",
+        request_bytes.ljust(MAX_STORAGE_METADATA + 1),
+        prefix + request_bytes[1:],
+    )
+    invalid_observations = (
+        b"",
+        cast("bytes", bytearray(observation_bytes)),
+        observation_bytes + b" ",
+        observation_bytes.ljust(MAX_STORAGE_METADATA + 1),
+        prefix + observation_bytes[1:],
+    )
+
+    for bad in invalid_requests:
+        with pytest.raises(GraphStagePromotionRejected):
+            prepare_graph_stage_promotion_intent(original, GENERATION, bad)
+    for bad in invalid_observations:
+        with pytest.raises(GraphStagePromotionRejected):
+            intent.prepare_settlement(bad)
+    with pytest.raises(TypeError, match="requires prepared evidence"):
+        PreparedGraphStagePromotionIntent(
+            object(), original, GENERATION, evidence.original, request_bytes
+        )
+    with pytest.raises(TypeError, match="requires prepared evidence"):
+        PreparedGraphStagePromotionSettlement(
+            object(), intent, observation_bytes, None, PRIVATE_MARKER
+        )
+    with pytest.raises(TypeError, match="requires explicit access"):
+        pickle.dumps(intent)
+    with pytest.raises(TypeError, match="requires explicit access"):
+        pickle.dumps(intent.prepare_settlement(observation_bytes))
+    with pytest.raises(GraphStagePromotionRejected) as rejected_unissued:
+        unissued_intent.prepare_settlement(observation_bytes)
+    try:
+        raise RuntimeError(PRIVATE_MARKER)
+    except RuntimeError:
+        with pytest.raises(GraphStagePromotionRejected) as rejected_intent:
+            prepare_graph_stage_promotion_intent(
+                original, GENERATION, b'{"invalid":"' + PRIVATE_MARKER.encode() + b'"}'
+            )
+        with pytest.raises(GraphStagePromotionRejected) as rejected_settlement:
+            intent.prepare_settlement(b'{"invalid":"' + PRIVATE_MARKER.encode() + b'"}')
+
+    assert not unissued_settlement.belongs_to(intent)
+    for error, function in (
+        (rejected_intent.value, "prepare_graph_stage_promotion_intent"),
+        (rejected_settlement.value, "prepare_settlement"),
+        (rejected_unissued.value, "prepare_settlement"),
+    ):
+        assert error.__cause__ is error.__context__ is None
+        assert PRIVATE_MARKER not in "".join(format_exception(error))
+        private = next(
+            frame.f_locals
+            for frame, _ in walk_tb(error.__traceback__)
+            if frame.f_code.co_name == function
+        )
+        assert private == {}
