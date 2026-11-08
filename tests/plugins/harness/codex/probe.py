@@ -3013,6 +3013,8 @@ async def drive(
                         raise BoundProbeRefusal(
                             "selected_bound_app_acquisition_refused"
                         )
+                    if bound.case == "handoff-expiry":
+                        raise BoundProbeRefusal("selected_bound_app_handoff_expired")
                     if bound.configuration_refused is not None:
                         require(
                             bound_exec_writer is not None
