@@ -21,11 +21,6 @@ from kora.observability import current_diagnostics
 CREDENTIAL: re.Pattern[str] = re.compile(r"[A-Za-z0-9._~+/-]+=*", re.ASCII)
 DEFAULT_NAMESPACE: str = "default"
 DEFAULT_POLICY: JsonObject = {"concurrency": {"max_pending_runs": 1000}}
-REGISTRY_LOCKS: tuple[str, ...] = (
-    "LOCK TABLE namespace IN SHARE ROW EXCLUSIVE MODE",
-    "LOCK TABLE api_token IN SHARE ROW EXCLUSIVE MODE",
-    "LOCK TABLE bootstrap_initialization IN SHARE ROW EXCLUSIVE MODE",
-)
 Clock = Callable[[], datetime]
 Randomness = Callable[[int], bytes]
 CredentialSource = Callable[[], str]
@@ -228,8 +223,11 @@ async def marker_loaded(connection: AsyncConnection) -> bool:
 async def lock_registry(connection: AsyncConnection, dialect: Dialect) -> None:
     if dialect is not Dialect.POSTGRESQL:
         return
-    for statement in REGISTRY_LOCKS:
-        await connection.execute(text(statement))
+    await connection.execute(text("LOCK TABLE namespace IN SHARE ROW EXCLUSIVE MODE"))
+    await connection.execute(text("LOCK TABLE api_token IN SHARE ROW EXCLUSIVE MODE"))
+    await connection.execute(
+        text("LOCK TABLE bootstrap_initialization IN SHARE ROW EXCLUSIVE MODE")
+    )
 
 
 async def registry_occupied(connection: AsyncConnection) -> bool:
