@@ -182,11 +182,9 @@ class SelectedProxy:
                 async with asyncio.TaskGroup() as tasks:
                     tasks.create_task(copy_tunnel(reader, upstream))
                     tasks.create_task(copy_tunnel(upstream_reader, writer))
-            except* OSError:
-                if not self._closing:
+            except* (OSError, SelectedProxyError) as errors:
+                if not self._closing or errors.subgroup(SelectedProxyError) is not None:
                     raise SelectedProxyError("selected_proxy_tunnel_failed") from None
-            except* SelectedProxyError:
-                raise SelectedProxyError("selected_proxy_tunnel_failed") from None
         finally:
             if port is not None:
                 self._tunnel_ports.discard(port)

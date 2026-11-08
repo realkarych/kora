@@ -8,6 +8,7 @@ from typing import cast
 
 MAX_CONNECTIONS = 16
 STREAM_LIMIT = 16_384
+TLS_HANDSHAKE_SECONDS = 5
 StreamHandler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
 
 
@@ -127,7 +128,11 @@ class OwnedLoopback:
                 stream_protocol,
                 incoming,
                 ssl=self._tls,
-                ssl_handshake_timeout=remaining if self._tls is not None else None,
+                ssl_handshake_timeout=(
+                    min(remaining, TLS_HANDSHAKE_SECONDS)
+                    if self._tls is not None
+                    else None
+                ),
             )
             connection.transport = transport
             if self._closing:
