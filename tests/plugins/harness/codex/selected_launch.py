@@ -26,9 +26,14 @@ SelectedHookCase = (
     ]
     | SelectedPatchCase
 )
+SelectedSqliteHomeCase = Literal[
+    "selected-sqlite-home-default", "selected-sqlite-home-override"
+]
 SelectedLaunchCase = (
     SelectedHookCase
+    | SelectedSqliteHomeCase
     | Literal[
+        "selected-command-metadata",
         "selected-allow",
         "selected-deny",
         "selected-key-absent",
@@ -59,11 +64,17 @@ SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
 SELECTED_HOOK_TIMEOUT_CASES: frozenset[SelectedHookCase] = frozenset(
     {"selected-hook-timeout", "selected-patch-timeout"}
 )
+SELECTED_SQLITE_HOME_CASES: frozenset[SelectedSqliteHomeCase] = frozenset(
+    {"selected-sqlite-home-default", "selected-sqlite-home-override"}
+)
+SQLITE_HOME_CANARY = "sqlite-home-canary"
 SELECTED_TURN_CASES = frozenset({"selected-turn-complete", "selected-turn-cut"})
 SELECTED_LAUNCH_CASES = frozenset(
     {
         *SELECTED_HOOK_CASES,
         *SELECTED_TURN_CASES,
+        *SELECTED_SQLITE_HOME_CASES,
+        "selected-command-metadata",
         "selected-allow",
         "selected-deny",
         "selected-key-absent",
@@ -76,6 +87,8 @@ SELECTED_AUTH_CASES = frozenset(
     {
         *SELECTED_HOOK_CASES,
         *SELECTED_TURN_CASES,
+        *SELECTED_SQLITE_HOME_CASES,
+        "selected-command-metadata",
         "selected-allow",
         "selected-deny",
         "selected-startup-ready",
@@ -94,6 +107,23 @@ SELECTED_COMMAND = (
     'test -n "${BASH_VERSION-}" && ! shopt -q login_shell && '
     """printf '%s\\n' "$(readlink -f -- "$0")" "$HOME" > kora-probe.marker"""
 )
+
+METADATA_MARKER = "kora-probe.metadata"
+METADATA_ENV_CONTROL = "kora-executor-env-control"
+METADATA_ENVIRONMENT = {
+    "CODEX_THREAD_ID": "kora-stale-thread",
+    "CODEX_TOOL_CALL_ID": "kora-stale-call",
+    "KORA_PROBE_ENV_CONTROL": METADATA_ENV_CONTROL,
+}
+METADATA_COMMAND = (
+    SELECTED_COMMAND + " && printf '%s\\n' "
+    '"${CODEX_THREAD_ID-}" "${CODEX_TOOL_CALL_ID-}" "${KORA_PROBE_ENV_CONTROL-}" '
+    f"> {METADATA_MARKER}"
+)
+
+
+def selected_command(case: str) -> str:
+    return METADATA_COMMAND if case == "selected-command-metadata" else SELECTED_COMMAND
 
 
 def role_homes(root: Path) -> NativeHomes:

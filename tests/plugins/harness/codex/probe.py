@@ -73,6 +73,9 @@ from kora.plugins.harness.codex.selected_startup import (
 )
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
+    METADATA_ENV_CONTROL,
+    METADATA_ENVIRONMENT,
+    METADATA_MARKER,
     PROJECT_DOC_CANARY,
     SELECTED_AUTH_CASES,
     SELECTED_COMMAND,
@@ -83,13 +86,16 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_MODEL,
     SELECTED_PATCH_CASES,
     SELECTED_REFUSALS,
+    SELECTED_SQLITE_HOME_CASES,
     SELECTED_TURN_CASES,
+    SQLITE_HOME_CANARY,
     SelectedHookCase,
     SelectedLaunchCase,
     materialize_native_inputs,
     plant_checkout_canaries,
     prepare_native_inputs,
     role_homes,
+    selected_command,
     workspace_remains_untrusted,
 )
 
@@ -814,7 +820,9 @@ class ResponsesFixture:
                 usage = (
                     FIRST_RESPONSE_USAGE if self.case in SELECTED_TURN_CASES else None
                 )
-                return command_response({"cmd": SELECTED_COMMAND}, usage=usage)
+                return command_response(
+                    {"cmd": selected_command(self.case)}, usage=usage
+                )
             if self.case in SHELL_ARGUMENTS:
                 command = (
                     EXECUTOR_COMMAND if self.case in EXECUTOR_CASES else SHELL_COMMAND
@@ -912,7 +920,11 @@ class ResponsesFixture:
                 bool(separator) and status == ["Process exited with code 0"],
                 "shell_command_failed",
             )
-            if self.case in SELECTED_HOOK_CASES:
+            if (
+                self.case in SELECTED_HOOK_CASES
+                or self.case in SELECTED_SQLITE_HOME_CASES
+                or self.case == "selected-command-metadata"
+            ):
                 require(not body.strip(), "selected_fault_unexpected_command_output")
         else:
             require(
@@ -1015,7 +1027,7 @@ class ToolProbe:
         self, terminal: TurnCompletion, session: AppServerTurnSession | None
     ) -> None:
         expected: tuple[tuple[str, str, str, str | None, int | None], ...]
-        if self.case == "allow":
+        if self.case in ("allow", "selected-command-metadata"):
             expected = (
                 (
                     "commandExecution",
@@ -1423,6 +1435,8 @@ class Stdio:
         await self.run_turn(
             workspace, case, selected_executor=True, thread_id=thread_id
         )
+        if case == "selected-command-metadata":
+            verify_command_metadata(workspace, thread_id)
 
     async def register_executor(self, executor_url: str, bearer: str) -> None:
         await self.call(
@@ -1507,7 +1521,8 @@ class Stdio:
         self.outputs = outputs
         tools = (
             ToolProbe(case, thread_id)
-            if case in DIRECT_PATCH_CASES or case in ("allow", "deny", "decoder-refuse")
+            if case in DIRECT_PATCH_CASES
+            or case in ("allow", "deny", "decoder-refuse", "selected-command-metadata")
             else None
         )
         hook = (
@@ -2403,6 +2418,10 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 )
                 child_env = materialize_native_inputs(inputs.app_server)
                 exec_env = materialize_native_inputs(inputs.exec_server)
+                if fixture.case == "selected-command-metadata":
+                    exec_env.update(METADATA_ENVIRONMENT)
+                if fixture.case == "selected-sqlite-home-override":
+                    child_env["CODEX_SQLITE_HOME"] = str(root / SQLITE_HOME_CANARY)
                 if fixture.case != "selected-key-absent":
                     child_env["CODEX_API_KEY"] = SYNTHETIC_BEARER
                 executor = await launch_executor(
@@ -2565,11 +2584,47 @@ async def close_selected_launch(
         diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
 
 
+def verify_command_metadata(workspace: Path, thread_id: str) -> None:
+    marker = workspace / METADATA_MARKER
+    expected = f"{thread_id}\n{CALL_ID}\n{METADATA_ENV_CONTROL}\n".encode()
+    require(marker.is_file() and not marker.is_symlink(), "command_metadata_missing")
+    with marker.open("rb") as contents:
+        require(
+            contents.read(len(expected) + 1) == expected,
+            "command_metadata_mismatch",
+        )
+    diagnostic(
+        "INFO", "probe.selected_command_metadata_verified", "selected-command-metadata"
+    )
+
+
+def verify_sqlite_home(root: Path, *, override: bool) -> None:
+    default_home = role_homes(root / "app").codex_home
+    canary_home = root / SQLITE_HOME_CANARY
+    selected, competing = (
+        (canary_home, default_home) if override else (default_home, canary_home)
+    )
+    filename = "state_5.sqlite"
+    database = selected / filename
+    require(
+        database.is_file() and not database.is_symlink(),
+        "selected_sqlite_state_missing",
+    )
+    require(not os.path.lexists(competing / filename), "competing_sqlite_state_exists")
+    signature = b"SQLite format 3\x00"
+    with database.open("rb", buffering=0) as contents:
+        require(
+            contents.read(len(signature)) == signature, "invalid_sqlite_state_header"
+        )
+
+
 async def run_selected_launch(case: SelectedLaunchCase) -> None:
     if case in SELECTED_AUTH_CASES:
         decision = (
             "selected-allow"
-            if case == "selected-startup-ready" or case in SELECTED_TURN_CASES
+            if case == "selected-startup-ready"
+            or case in SELECTED_TURN_CASES
+            or case in SELECTED_SQLITE_HOME_CASES
             else case
         )
         (CONTROL / "decision").write_text(decision, encoding="utf-8")
@@ -2579,6 +2634,8 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             "workspace :@" if case == "selected-startup-ready" else "workspace"
         )
         workspace.mkdir()
+        if case in SELECTED_SQLITE_HOME_CASES:
+            (root / SQLITE_HOME_CANARY).mkdir(mode=0o700)
         if case == "selected-startup-ready":
             plant_checkout_canaries(workspace)
         marker = workspace / MARKER
@@ -2598,7 +2655,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         elif case in SELECTED_PATCH_CASES:
             verify_patch_hook()
         else:
-            verify_shell_hook(SELECTED_COMMAND)
+            verify_shell_hook(selected_command(case))
         executes = case in SELECTED_AUTH_CASES and case not in {
             "selected-deny",
             "selected-hook-deny",
@@ -2625,6 +2682,9 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             diagnostic(
                 "INFO", "probe.selected_hook_effect_verified", f"{case}:{effect}"
             )
+        if case in SELECTED_SQLITE_HOME_CASES:
+            verify_sqlite_home(root, override=case == "selected-sqlite-home-override")
+            diagnostic("INFO", "probe.selected_sqlite_home_verified", case)
         if case == "selected-startup-ready":
             require(
                 workspace_remains_untrusted(

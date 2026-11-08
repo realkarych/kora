@@ -2,9 +2,9 @@ from collections.abc import Sequence
 
 from alembic import op
 
-from kora.db.bootstrap_initialization_v1 import (
+from kora.db.graph_version_resource_owner_v1 import (
     TABLE_NAME,
-    bootstrap_initialization_elements_v1,
+    graph_version_resource_owner_elements_v1,
 )
 
 revision: str = "0013"
@@ -15,10 +15,11 @@ depends_on: Sequence[str] | None = None
 
 def upgrade() -> None:
     dialect = op.get_bind().dialect.name
-    op.create_table(TABLE_NAME, *bootstrap_initialization_elements_v1(dialect))
+    op.create_table(TABLE_NAME, *graph_version_resource_owner_elements_v1(dialect))
 
 
 def downgrade() -> None:
     raise RuntimeError(
-        "bootstrap initialization cannot be downgraded; restore a compatible backup"
+        "graph version resource owner history cannot be downgraded; "
+        "restore a compatible backup"
     )

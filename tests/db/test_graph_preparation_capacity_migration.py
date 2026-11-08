@@ -3,9 +3,13 @@ from alembic import command
 from sqlalchemy import Connection, Table, inspect, select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from kora.db.connection import MIGRATION_LEASE, Database, DatabaseSettings, Dialect
-from kora.db.migrations import MigrationReport, current_revision
-from kora.db.migrations.environment import alembic_config, pending_steps
+from kora.db.connection import Database, DatabaseSettings, Dialect
+from kora.db.migrations import current_revision
+from kora.db.migrations.environment import (
+    alembic_config,
+    bound_lock_waits,
+    pending_steps,
+)
 from kora.db.tables import (
     graph,
     graph_deployment_preparation,
@@ -29,18 +33,6 @@ from tests.db.test_graph_read_admission import executed_queries
 
 PREDECESSOR: str = "0011"
 REVISION: str = "0012"
-
-
-def upgrade_revision(connection: Connection, revision: str) -> MigrationReport:
-    config = alembic_config(connection)
-    started = current_revision(connection)
-    steps = pending_steps(config, started, revision)
-    if connection.info.get(MIGRATION_LEASE):
-        connection.commit()
-    command.upgrade(config, revision)
-    return MigrationReport(connection.dialect.name, started, revision, steps)
-
-
 INSERT_PREFIX: str = "INSERT INTO graph_deployment_preparation_capacity "
 RETAINED_RELATIONS: tuple[Table, ...] = (
     graph,
@@ -181,6 +173,18 @@ async def populate_predecessor(database: Database) -> None:
         )
 
 
+def upgrade_capacity_revision(
+    connection: Connection,
+) -> tuple[str | None, str | None, int]:
+    bound_lock_waits(connection)
+    config = alembic_config(connection)
+    previous = current_revision(connection)
+    steps = pending_steps(config, previous, REVISION)
+    connection.commit()
+    command.upgrade(config, REVISION)
+    return previous, current_revision(connection), steps
+
+
 @pytest.mark.asyncio
 async def test_capacity_migration_preserves_populated_history_and_creates_no_witness(
     empty_database_settings: DatabaseSettings,
@@ -192,13 +196,9 @@ async def test_capacity_migration_preserves_populated_history_and_creates_no_wit
 
         async with database.migration_connection() as connection:
             with executed_queries(connection) as observed:
-                report = await connection.run_sync(
-                    lambda sync: upgrade_revision(sync, REVISION)
-                )
+                report = await connection.run_sync(upgrade_capacity_revision)
         async with database.migration_connection() as connection:
-            repeated = await connection.run_sync(
-                lambda sync: upgrade_revision(sync, REVISION)
-            )
+            repeated = await connection.run_sync(upgrade_capacity_revision)
         with pytest.raises(RuntimeError, match="capacity cannot be downgraded"):
             async with database.migration_connection() as connection:
                 await connection.run_sync(
@@ -213,12 +213,12 @@ async def test_capacity_migration_preserves_populated_history_and_creates_no_wit
     finally:
         await database.close()
 
-    assert (report.from_revision, report.to_revision, report.steps) == (
+    assert report == (
         PREDECESSOR,
         REVISION,
         1,
     )
-    assert (repeated.from_revision, repeated.to_revision, repeated.steps) == (
+    assert repeated == (
         REVISION,
         REVISION,
         0,

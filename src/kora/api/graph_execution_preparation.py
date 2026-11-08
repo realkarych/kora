@@ -32,6 +32,7 @@ from kora.engine.graph_resource_references import (
     GraphResourceOwner,
     GraphResourceReferences,
     GraphResourceScope,
+    PreparedGraphResourceReferences,
     build_graph_resource_references,
 )
 from kora.engine.graph_retry_policies import build_graph_retry_policies
@@ -49,6 +50,7 @@ SOURCE_COPIES = 4
 SECTION_COPIES = 6
 NATIVE_TYPED_COPIES = 2
 NATIVE_FACT_COPIES = 3
+PREPARED_OWNER_SLOT = 1
 PATTERN_COPIES = 4
 MAX_PATTERN_PROBE = 10 * MAX_CODE_POINTS + len('"".matches("")')
 
@@ -64,12 +66,20 @@ class ExecutionPreparationLimits:
 
 
 class PreparedExecutionContract:
-    __slots__ = ("scope", "canonical_ir", "canonical_contract", "digests", "resources")
+    __slots__ = (
+        "scope",
+        "canonical_ir",
+        "canonical_contract",
+        "digests",
+        "resources",
+        "owners",
+    )
     scope: GraphResourceScope
     canonical_ir: str
     canonical_contract: str
     digests: GraphVersionDigests
     resources: GraphResourceReferences
+    owners: tuple[GraphResourceOwner, ...]
 
     def __init__(
         self,
@@ -78,12 +88,14 @@ class PreparedExecutionContract:
         canonical_contract: str,
         digests: GraphVersionDigests,
         resources: GraphResourceReferences,
+        owners: tuple[GraphResourceOwner, ...],
     ) -> None:
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "canonical_ir", canonical_ir)
         object.__setattr__(self, "canonical_contract", canonical_contract)
         object.__setattr__(self, "digests", digests)
         object.__setattr__(self, "resources", resources)
+        object.__setattr__(self, "owners", owners)
 
     def __setattr__(self, name: str, value: object) -> Never:
         raise AttributeError("prepared execution contract is immutable")
@@ -149,6 +161,7 @@ def _admit(limits: ExecutionPreparationLimits) -> None:
         + output_preparation
         + construction_copies
         + native_retained
+        + PREPARED_OWNER_SLOT
     )
     scalar_work = 4 * (sections * sections + pair * pair)
     native_work = (
@@ -164,6 +177,7 @@ def _admit(limits: ExecutionPreparationLimits) -> None:
         + construction_copies
         + scalar_work
         + native_work
+        + PREPARED_OWNER_SLOT
     )
     if retained > limits.max_retained_bytes or work > limits.max_work:
         raise GraphValueRejected(GraphValueFailure.BUDGET)
@@ -213,7 +227,7 @@ def _contract(
 def _draft(
     ir_text: str,
     facts: GraphCelFacts,
-    physical: GraphResourceReferences,
+    physical: PreparedGraphResourceReferences,
     scope: GraphResourceScope,
     owners: tuple[GraphResourceOwner, ...],
     limits: ExecutionPreparationLimits,
@@ -244,7 +258,12 @@ def _draft(
         reader,
     )
     return PreparedExecutionContract(
-        scope, values.ir, values.execution_contract, prepared.digests, resources
+        scope,
+        values.ir,
+        values.execution_contract,
+        prepared.digests,
+        resources,
+        physical.owners,
     )
 
 

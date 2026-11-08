@@ -55,27 +55,49 @@ from tests.cel_eval.pattern_validation_scenarios import (
 )
 from tests.cel_eval.test_cel_evaluation import clock
 from tests.engine.graph_output_cases import child
+from tests.engine.test_graph_command_manifests import authored_manifest, resource
 from tests.engine.test_graph_execution_contract import LIMITS as READ_LIMITS
 from tests.engine.test_graph_execution_contract import complete_inputs
 from tests.engine.test_graph_resource_references import SCOPE, assert_refused, content
 
 MARKER = "private-preparation-837"
+OWNER_MARKER = "second-object"
 LIMITS = ExecutionPreparationLimits(
     READ_LIMITS, 100_000, 100_000, 100_000, 200_000_000, 400_000_000_000_000
 )
 TIGHT_PROJECTION = replace(READ_LIMITS.projection, section_bytes=650)
 DIMENSIONS: tuple[tuple[Literal["max_retained_bytes", "max_work"], int], ...] = (
-    ("max_retained_bytes", 156_349_496),
-    ("max_work", 346_560_682_373_458),
+    ("max_retained_bytes", 156_349_497),
+    ("max_work", 346_560_682_373_459),
 )
 
 
 def source(
-    *, invalid_pattern: bool = False
+    *, invalid_pattern: bool = False, ordered: bool = False
 ) -> tuple[str, tuple[GraphResourceOwner, ...]]:
     raw, _, _, owners = complete_inputs(SCOPE, long_integer=True)
     raw["x-signed-zero"] = -0.0
     graph = child(raw, "graph")
+    root = owners[0]
+    if ordered:
+        child(graph, "nodes", "producer", "config").update(
+            authored_manifest([resource("é.sh"), resource("z.sh")])
+        )
+        owners = (
+            GraphResourceOwner(
+                SCOPE,
+                root.path,
+                "é.sh",
+                content(store="second-store", incarnation=OWNER_MARKER),
+            ),
+            GraphResourceOwner(SCOPE, root.path, "z.sh", content(incarnation=MARKER)),
+        )
+    else:
+        owners = (
+            GraphResourceOwner(
+                SCOPE, root.path, root.name, content(incarnation=OWNER_MARKER)
+            ),
+        )
     child(graph, "params")["required"] = ["enabled"]
     pattern = ("(?ii)" if invalid_pattern else "^") + MARKER
     child(graph, "nodes", "approval", "config")["approve_when"] = (
@@ -132,16 +154,20 @@ def assert_protected(error: BaseException) -> None:
     assert error.__context__ is None
     assert error.__cause__ is None
     assert MARKER not in repr(error)
+    assert OWNER_MARKER not in repr(error)
 
 
 def check_roundtrip() -> None:
-    ir_text, owners = source()
+    ir_text, owners = source(ordered=True)
     original = owners[0]
     substitute = GraphResourceOwner(
         original.scope,
         original.path,
         original.name,
-        content(incarnation="other-instance"),
+        content(
+            store=original.reference.address.storage_identity.store_id,
+            incarnation="other-instance",
+        ),
     )
 
     with borrowed() as (runner, evaluator):
@@ -172,7 +198,7 @@ def check_roundtrip() -> None:
     )
     with pytest.raises(GraphValueRejected) as wrong_incarnation:
         check_detached_execution_contract(
-            acquired, pin, SCOPE, physical, (substitute,), limits=READ_LIMITS
+            acquired, pin, SCOPE, physical, (substitute, owners[1]), limits=READ_LIMITS
         )
     with pytest.raises(AttributeError, match="immutable"):
         draft.canonical_ir = MARKER
@@ -187,6 +213,19 @@ def check_roundtrip() -> None:
     assert draft.canonical_ir == checked.canonical_ir == ir_text
     assert checked.canonical_contract == draft.canonical_contract
     assert checked.resources.text == draft.resources.text
+    assert draft.owners == tuple(reversed(owners))
+    assert digest(draft.resources.text) == (
+        "2f921df41b098f5b25fdf21d2111dc72600b6099efdb22f3027c9d41d489a055"
+    )
+    assert draft.digests.ir_digest == (
+        "6534672a556ec7f25abb64cd89236ff67ee710636144de4055f2f1e90fe1c44f"
+    )
+    assert draft.digests.execution_contract_digest == (
+        "4a82670802109990959313ee8149e69f5eca4c2e5814fa6132dac91ed6a51801"
+    )
+    assert draft.digests.deployment_digest == (
+        "55b8235631ae365a9d40e63aa2f45bb0a5ea839a261e7e1d4dc4cd0c8ea635b9"
+    )
     assert '"x-signed-zero":-0.0' in draft.canonical_ir
     assert draft.digests.ir_digest == digest(ir_text)
     assert draft.digests.execution_contract_digest == digest(draft.canonical_contract)
@@ -206,6 +245,7 @@ def check_roundtrip() -> None:
         for output in outputs
     )
     assert MARKER not in repr(draft)
+    assert OWNER_MARKER not in repr(draft)
     assert MARKER not in repr(encoder.value)
     assert_refused(wrong_incarnation.value, GraphValueFailure.INVALID)
 
@@ -398,6 +438,7 @@ def check_cancellation() -> None:
 
     assert isinstance(reused, PreparedExecutionContract)
     assert reused.canonical_ir == ir_text
+    assert reused.owners == owners
 
 
 def run(scenario: str) -> None:
@@ -444,6 +485,7 @@ def test_graph_execution_preparation_uses_real_bounded_native_verification(
     assert result.code == 0, result.stderr
     assert result.stdout == ""
     assert MARKER not in result.stderr
+    assert OWNER_MARKER not in result.stderr
     assert "Function 'matches' error:" not in result.stderr
     records: list[dict[str, object]] = [
         json.loads(line) for line in result.stderr.splitlines()
