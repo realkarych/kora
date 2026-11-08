@@ -2755,6 +2755,7 @@ async def drive(
     tls: SelectedTls | None = None,
     unknown_ca: UnknownCaAlert | None = None,
     proxy_case: SelectedProxyCase | None = None,
+    gated_stdio: bool = False,
 ) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
     proxy: SelectedProxy | None = None
@@ -2791,6 +2792,7 @@ async def drive(
                     tls.context, accept, handshake_timeout=CLEANUP_SECONDS
                 )
     process: asyncio.subprocess.Process | None = None
+    gated_app = None
     executor: asyncio.subprocess.Process | None = None
     executor_url: str | None = None
     bearer = SYNTHETIC_EXECUTOR_BEARER
@@ -2900,21 +2902,33 @@ async def drive(
                 app_argv = (CODEX, *args)
                 app_cwd = workspace
             identity = startup_identity(fixture.case, Path(child_env["CODEX_HOME"]))
-            process = await asyncio.create_subprocess_exec(
-                *app_argv,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                limit=MAX_FRAME_BYTES,
-                start_new_session=True,
-                cwd=app_cwd,
-                env=child_env,
-            )
-            assert process.stdin is not None
-            assert process.stdout is not None
+            if gated_stdio:
+                from tests.plugins.harness.codex.selected_gated_stdio import (
+                    SelectedGatedApp,
+                )
+
+                gated_app = SelectedGatedApp(
+                    app_argv, app_cwd, child_env, deadline, MAX_FRAME_BYTES
+                )
+                reader, writer = await gated_app.prepare()
+                diagnostic("INFO", "probe.selected_gated_stdio_bound", fixture.case)
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *app_argv,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    limit=MAX_FRAME_BYTES,
+                    start_new_session=True,
+                    cwd=app_cwd,
+                    env=child_env,
+                )
+                assert process.stdin is not None
+                assert process.stdout is not None
+                reader, writer = process.stdout, process.stdin
             rpc = AppServerRpc(
-                process.stdout,
-                process.stdin,
+                reader,
+                writer,
                 clock=asyncio.get_running_loop().time,
                 next_request_id=lambda: secrets.randbits(63),
                 max_frame_bytes=MAX_FRAME_BYTES,
@@ -2922,12 +2936,15 @@ async def drive(
             )
             stdio = Stdio(rpc, deadline, identity)
             if fixture.case in INTERRUPT_CASES:
+                assert process is not None
                 await stdio.interrupt_turn(workspace, fixture, process)
             elif fixture.case in {"client-exit", "messages-kill", "output-kill"}:
+                assert process is not None
                 await observe_client_exit(process, fixture, stdio, workspace)
             elif fixture.case in SELECTED_NOISE_REGISTRY_CASES:
                 await stdio.observe_noise_registry(fixture.case)
             elif fixture.case in SELECTED_TURN_CASES:
+                assert process is not None
                 assert executor_url is not None
                 await observe_selected_event_turn(
                     fixture,
@@ -2954,6 +2971,7 @@ async def drive(
                         )
                     )
                 elif fixture.case in SELECTED_HOOK_TIMEOUT_CASES:
+                    assert process is not None
                     assert executor is not None
                     await observe_hook_timeout(
                         stdio,
@@ -2974,6 +2992,10 @@ async def drive(
                     )
             else:
                 await stdio.observe(workspace, fixture.case, executor_url, bearer)
+            if gated_app is not None:
+                assert executor is not None
+                gated_app.verify(executor.pid, SYNTHETIC_BEARER)
+                diagnostic("INFO", "probe.selected_gated_roles_verified", fixture.case)
         require(fixture.case not in STALLED_CASES, "stalled_turn_completed")
     except (TimeoutError, RpcError) as error:
         if isinstance(error, RpcError) and error.reason is not RpcFailure.DEADLINE:
@@ -3003,6 +3025,7 @@ async def drive(
     finally:
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
         if fixture.case in SELECTED_LAUNCH_CASES:
+            original_failure = sys.exception() if gated_stdio else None
             native_cleanup = close_selected_launch(
                 fixture, server, process, executor, cleanup_deadline
             )
@@ -3011,10 +3034,21 @@ async def drive(
                 selected_cleanup.append(model.close(cleanup_deadline))
             if proxy is not None:
                 selected_cleanup.append(proxy.close(cleanup_deadline))
+            if gated_app is not None:
+                selected_cleanup.append(gated_app.close(cleanup_deadline))
             outcomes = await asyncio.gather(*selected_cleanup, return_exceptions=True)
+            cleanup_failed = False
             for outcome in outcomes:
                 if isinstance(outcome, BaseException):
+                    if original_failure is not None:
+                        cleanup_failed = True
+                        continue
                     raise outcome
+            if cleanup_failed:
+                diagnostic("ERROR", "probe.selected_gated_cleanup_failed", fixture.case)
+            elif gated_app is not None and executor is not None:
+                diagnostic("INFO", "probe.selected_gated_stdio_closed", fixture.case)
+                diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
         elif process is not None and (
             fixture.case in PROVIDER_CASES or fixture.case in STARTUP_REFUSALS
         ):
@@ -3171,7 +3205,10 @@ def verify_shell_patch_policy(case: SelectedLaunchCase) -> None:
 
 
 async def run_selected_launch(
-    case: SelectedLaunchCase, proxy_case: SelectedProxyCase | None = None
+    case: SelectedLaunchCase,
+    proxy_case: SelectedProxyCase | None = None,
+    *,
+    gated_stdio: bool = False,
 ) -> None:
     if case in SELECTED_AUTH_CASES or case in SELECTED_HOOK_INVENTORY_REFUSALS:
         decision = (
@@ -3221,7 +3258,14 @@ async def run_selected_launch(
             unknown_ca.verify()
             diagnostic("INFO", "probe.selected_tls_unknown_ca_verified", case)
         else:
-            await drive(fixture, root, workspace, tls=tls, proxy_case=proxy_case)
+            await drive(
+                fixture,
+                root,
+                workspace,
+                tls=tls,
+                proxy_case=proxy_case,
+                gated_stdio=gated_stdio,
+            )
         require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
         require(
             fixture.connections == fixture.requests == fixture.request_limit,
@@ -3574,6 +3618,42 @@ async def run_shell_case(case: ShellCase | ExecutorCase) -> None:
     diagnostic("INFO", "probe.case_verified", case)
 
 
+async def run_selected_gated(name: str) -> None:
+    from kora.runner.channels import ChannelError
+    from kora.runner.processes import ProcessError
+    from tests.plugins.harness.codex.selected_gated_stdio import (
+        GatedObservationError,
+        refuse_setup,
+    )
+
+    try:
+        match name:
+            case "ready":
+                await run_selected_launch("selected-startup-ready", gated_stdio=True)
+            case "missing":
+                await run_selected_launch(
+                    "selected-startup-hook-missing", gated_stdio=True
+                )
+            case "matcher":
+                await run_selected_launch(
+                    "selected-startup-hook-matcher", gated_stdio=True
+                )
+            case "refusal":
+                await refuse_setup(
+                    CODEX,
+                    asyncio.get_running_loop().time() + TURN_SECONDS,
+                    SYNTHETIC_BEARER,
+                    SYNTHETIC_EXECUTOR_BEARER,
+                )
+                raise ProbeFailure("selected_gated_expected_refusal")
+            case _:
+                raise ProbeFailure("selected_gated_unexpected_case")
+    except (ChannelError, ProcessError):
+        raise ProbeFailure("selected_gated_start_refused") from None
+    except GatedObservationError as error:
+        raise ProbeFailure(str(error)) from None
+
+
 async def run() -> None:
     require(
         sys.platform == "linux" and platform.machine() == "x86_64",
@@ -3622,6 +3702,8 @@ async def run() -> None:
         await run_hook_input_case("decoder-refuse")
     elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
         await run_shell_case(SHELL_FLAGS[sys.argv[1]])
+    elif len(sys.argv) == 2 and sys.argv[1].startswith("--selected-gated-"):
+        await run_selected_gated(sys.argv[1].removeprefix("--selected-gated-"))
     elif len(sys.argv) == 2 and sys.argv[1].startswith("--selected-proxy-"):
         name = sys.argv[1].removeprefix("--selected-proxy-")
         proxy_case = SELECTED_PROXY_CASES.get(name)

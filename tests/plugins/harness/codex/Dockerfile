@@ -68,3 +68,12 @@ USER root
 RUN sed -i 's/^matcher = "\.\*"/matcher = "^Unrelated$"/' /etc/codex/requirements.toml && \
     grep -Fxq 'matcher = "^Unrelated$"' /etc/codex/requirements.toml
 USER 65532:65532
+
+FROM selected-turn AS selected-gated-stdio
+COPY selected_gated_stdio.py /usr/local/lib/python3.11/site-packages/tests/plugins/harness/codex/
+
+FROM selected-gated-stdio AS selected-gated-missing
+COPY --from=missing-managed-hook /etc/codex/requirements.toml /etc/codex/requirements.toml
+
+FROM selected-gated-stdio AS selected-gated-matcher
+COPY --from=wrong-managed-matcher /etc/codex/requirements.toml /etc/codex/requirements.toml

@@ -47,6 +47,7 @@ from kora.runner.identity import (
 from kora.runner.identity import (
     complete_identity as complete_identity,
 )
+from kora.runner.process_stdio import GatedStdio, StdioStreams
 
 
 class ProcessCondition(StrEnum):
@@ -659,6 +660,7 @@ class GatedProcess:
         max_members: int = 65536,
         child_probe: DirectChildProbe | None = None,
         child_watch: Callable[[int], ChildWatch] | None = None,
+        stdio_limit: int | None = None,
     ) -> None:
         self._launch = launch
         self._operation_id = operation_id
@@ -676,6 +678,7 @@ class GatedProcess:
         self._anchor: ExitAnchor | None = None
         self._watches = MemberWatches(clock, identities, max_members)
         self._channel: BoundedChannel | None = None
+        self._stdio: GatedStdio | None = None
         self._captures: list[CaptureDrain] = []
         self._registration: ProcessRegistration | None = None
         self._start_failed = False
@@ -683,7 +686,7 @@ class GatedProcess:
         self._activated = False
         self._closing = False
         self._released = False
-        self._start(cwd_descriptor)
+        self._start(cwd_descriptor, stdio_limit)
 
     @property
     def registration(self) -> ProcessRegistration | None:
@@ -726,7 +729,7 @@ class GatedProcess:
         owned.callback(os.close, descriptor)
         return descriptor
 
-    def _start(self, cwd_descriptor: int) -> None:
+    def _start(self, cwd_descriptor: int, stdio_limit: int | None) -> None:
         asyncio.get_running_loop()
         gate_deadline = time.monotonic_ns() + max(
             0, self._deadline - self._clock.monotonic_ns()
@@ -738,9 +741,20 @@ class GatedProcess:
                 self._channel = BoundedChannel(parent, self._clock)
                 child_descriptors.callback(child.close)
                 parent.sendall(header)
+                input_descriptor = subprocess.DEVNULL
+                stdio_child: socket.socket | None = None
+                if stdio_limit is not None:
+                    stdio_parent, stdio_child = socket.socketpair()
+                    child_descriptors.callback(stdio_child.close)
+                    self._stdio = GatedStdio(stdio_parent, stdio_limit)
+                    input_descriptor = stdio_child.fileno()
                 directory = os.dup(cwd_descriptor)
                 child_descriptors.callback(os.close, directory)
-                output = self._output_descriptor(self._launch.stdout, child_descriptors)
+                output = (
+                    input_descriptor
+                    if self._stdio is not None
+                    else self._output_descriptor(self._launch.stdout, child_descriptors)
+                )
                 errors = self._output_descriptor(self._launch.stderr, child_descriptors)
                 self._process = subprocess.Popen(
                     [
@@ -749,7 +763,7 @@ class GatedProcess:
                         "-m",
                         "kora.runner.gate",
                     ],
-                    stdin=subprocess.DEVNULL,
+                    stdin=input_descriptor,
                     shell=False,
                     stdout=output,
                     stderr=errors,
@@ -764,6 +778,8 @@ class GatedProcess:
                     ),
                     start_new_session=self._launch.domain is ProcessDomain.DETACHED,
                 )
+                if stdio_child is not None:
+                    stdio_child.close()
                 self._anchor = ExitAnchor(self._process.pid)
                 observed = self._identities.read(self._process.pid)
                 process = observed.process
@@ -809,6 +825,14 @@ class GatedProcess:
         return registration
 
     async def prepare(self) -> ProcessRegistration:
+        try:
+            return await self._prepare()
+        except (ProcessError, ChannelError, asyncio.CancelledError, ValueError):
+            if self._stdio is not None:
+                self.close_gate()
+            raise
+
+    async def _prepare(self) -> ProcessRegistration:
         registration = self._registered()
         anchor = self._anchor
         channel = self._channel
@@ -816,6 +840,8 @@ class GatedProcess:
             raise ProcessError(ProcessCondition.UNKNOWN)
         if self._prepared:
             return registration
+        if self._stdio is not None:
+            await self._stdio.prepare(self._deadline, self._clock)
         metadata, payload = ExecutionConfig.from_launch(self._launch).encode()
         await channel.write_frame(metadata, self._deadline)
         await channel.write_record(payload, self._deadline)
@@ -829,6 +855,14 @@ class GatedProcess:
         return registration
 
     async def acknowledge(self) -> None:
+        try:
+            await self._acknowledge()
+        except (ProcessError, ChannelError, asyncio.CancelledError):
+            if self._stdio is not None:
+                self.close_gate()
+            raise
+
+    async def _acknowledge(self) -> None:
         if self._closing or not self._prepared:
             raise ProcessError(ProcessCondition.UNKNOWN)
         if self._activated:
@@ -843,10 +877,20 @@ class GatedProcess:
         self._activated = True
         channel.close()
 
+    def borrow_stdio(self) -> StdioStreams:
+        stdio = self._stdio
+        if stdio is None or not self._activated or self._closing:
+            raise ChannelError(ChannelFailure.CLOSED)
+        if self._clock.monotonic_ns() >= self._deadline:
+            raise ChannelError(ChannelFailure.DEADLINE)
+        return stdio.borrow()
+
     def close_gate(self) -> None:
         self._closing = True
         if self._channel is not None:
             self._channel.close()
+        if self._stdio is not None:
+            self._stdio.close()
 
     def _matches(self, process: ProcessSnapshot) -> bool:
         registration = self._registration
@@ -1008,8 +1052,10 @@ class GatedProcess:
         await self.wait_exit(deadline_ns)
         if self._child_probe is None:
             await self._settle_domain(deadline_ns)
-            return
-        await self._settle_reapable(deadline_ns)
+        else:
+            await self._settle_reapable(deadline_ns)
+        if self._stdio is not None:
+            await self._stdio.settle(deadline_ns, self._clock)
 
     async def _settle_domain(self, deadline_ns: int) -> None:
         while True:
@@ -1206,6 +1252,8 @@ class GatedProcess:
         observation = self.observe(deadline_ns)
         if not observation.settled or not observation.capture_eof:
             raise ProcessError(observation.condition)
+        if self._stdio is not None and not self._stdio.closed:
+            raise ProcessError(ProcessCondition.UNKNOWN)
         process = self._process
         anchor = self._anchor
         if process is None or anchor is None:
@@ -1237,6 +1285,7 @@ def start_gated(
     child_probe: DirectChildProbe | None = None,
     child_watch: Callable[[int], ChildWatch] | None = None,
     native_reap_wait: bool = True,
+    stdio_limit: int | None = None,
 ) -> GatedProcess:
     validated_operation = TypeAdapter(OperationId).validate_python(operation_id)
     if (
@@ -1245,6 +1294,10 @@ def start_gated(
         or acquisition_deadline_ns < 0
     ):
         raise ValueError("acquisition deadline is a nonnegative integer instant")
+    if stdio_limit is not None and (
+        type(stdio_limit) is not int or stdio_limit < 1 or launch.stdout is not None
+    ):
+        raise ProcessError(ProcessCondition.START_FAILED)
     if native_reap_wait and child_probe is None and child_watch is None:
         child_probe, child_watch = native_direct_child_wait()
     owner = GatedProcess(
@@ -1257,5 +1310,6 @@ def start_gated(
         max_members=max_members,
         child_probe=child_probe,
         child_watch=child_watch,
+        stdio_limit=stdio_limit,
     )
     return owner

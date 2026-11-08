@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
         exit 2
         ;;
 esac
@@ -121,13 +121,18 @@ probe_context() {
     set -- -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py owned_loopback.py selected_launch.py selected_proxy.py selected_tls.py \
         -C "$rpc_dir" app_server_rpc.py app_server_startup.py app_server_turn.py app_server_session.py app_server_tools.py app_server_usage.py app_server_errors.py app_server_messages.py pre_tool_use.py launch_configuration.py selected_startup.py
     case "$variant" in
-        selected-turn|selected-shell-patch-policy)
+        selected-turn|selected-shell-patch-policy|selected-gated-*)
             set -- "$@" -C "$reservation/source/src" kora -C "$reservation" linux-packages
             ;;
     esac
     if [ "$variant" = selected-shell-patch-policy ]; then
         set -- "$@" -C "$probe_dir" selected_shell_patch.py
     fi
+    case "$variant" in
+        selected-gated-*)
+            set -- "$@" -C "$probe_dir" selected_gated_stdio.py
+            ;;
+    esac
     env -i PATH="$PATH" tar -cf - "$@"
 }
 
@@ -260,6 +265,22 @@ case "${1:-}" in
         run_variant missing-managed-hook --selected-startup-hook-missing
         release_container
         run_variant wrong-managed-matcher --selected-startup-hook-matcher
+        release_container
+        ;;
+    --check-selected-gated-stdio)
+        prepare_locked_probe
+        run_variant selected-gated-stdio --selected-gated-ready
+        release_container
+        run_variant selected-gated-missing --selected-gated-missing
+        release_container
+        run_variant selected-gated-matcher --selected-gated-matcher
+        release_container
+        refusal_exit=0
+        run_variant selected-gated-stdio --selected-gated-refusal > "$reservation/refused" 2>&1 || refusal_exit=$?
+        test "$refusal_exit" = 1
+        printf '%s\n' '{"level": "ERROR", "event": "probe.case_failed", "detail": "selected_gated_start_refused"}' > "$reservation/expected-refusal"
+        cmp -s "$reservation/refused" "$reservation/expected-refusal"
+        cat "$reservation/expected-refusal"
         release_container
         ;;
     --check-selected-hook-failures)
