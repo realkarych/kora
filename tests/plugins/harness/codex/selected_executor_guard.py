@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal, cast
+from typing import Literal
 
 from kora.plugins.harness.codex.app_server_rpc import AppServerRpc, RpcError
 from kora.plugins.harness.codex.app_server_turn import (
@@ -36,7 +36,6 @@ from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
     SELECTED_HOOK_CASES,
     SELECTED_MODEL,
-    SelectedHookCase,
     SelectedLaunchCase,
     materialize_native_inputs,
     prepare_native_inputs,
@@ -61,7 +60,7 @@ class Scenario:
     @property
     def hook_outcome(self) -> HookOutcome:
         if self.case in SELECTED_HOOK_CASES:
-            return probe.SELECTED_HOOK_OUTCOMES[cast("SelectedHookCase", self.case)]
+            return probe.SELECTED_HOOK_OUTCOMES[self.case]
         return "completed", None
 
     @property
