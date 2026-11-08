@@ -78,6 +78,7 @@ fi
 printf '%s  %s\n' "$digest" "$staging/$archive" | "${checksum[@]}" -c -
 tar -xzf "$staging/$archive" -C "$staging"
 extracted="$staging/${archive%.tar.gz}"
-test "$("$extracted/bin/node" --version)" = "v$version"
+actual_version=$("$extracted/bin/node" --version)
+test "$actual_version" = "v$version"
 mv -- "$extracted" "$destination"
 : > "$complete"

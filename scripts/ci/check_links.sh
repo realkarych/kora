@@ -33,6 +33,16 @@ link_report_has_positive_total() {
   ' "$1"
 }
 
+print_lychee_output() {
+  local stop_token status=0
+  stop_token=$(od -An -v -N32 -tx1 /dev/urandom | tr -d '[:space:]')
+  [[ $stop_token =~ ^[0-9a-f]{64}$ ]]
+  printf '::stop-commands::%s\n' "$stop_token"
+  cat -- "$@" || status=$?
+  printf '\n::%s::\n' "$stop_token"
+  return "$status"
+}
+
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   staging=$(mktemp -d "${RUNNER_TEMP:?}/.kora-links.XXXXXXXX")
   trap 'rm -rf -- "$staging"' EXIT
@@ -56,16 +66,20 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   tar -xOzf "$archive" -- lychee-x86_64-unknown-linux-gnu/lychee > "$binary"
   printf '%s  %s\n' 87e6e75195df5753f08c53b5c0a13694b8328edd8df009914ae9e29b5000162d "$binary" | sha256sum -c -
   chmod u+x "$binary"
-  test "$("$binary" --version)" = 'lychee 0.24.2'
+  actual_version=$("$binary" --version)
+  test "$actual_version" = 'lychee 0.24.2'
 
   report="$staging/lychee.md"
+  checker_log="$staging/checker.log"
   checker_exit=0
-  "$binary" --mode task --format markdown --output "$report" --config lychee.toml -- "${link_paths[@]}" || checker_exit=$?
+  "$binary" --mode task --format markdown --output "$report" --config lychee.toml -- "${link_paths[@]}" \
+    > "$checker_log" 2>&1 || checker_exit=$?
   if [[ ! -f $report ]]; then
+    print_lychee_output "$checker_log"
     printf 'Lychee did not produce its Markdown report\n' >&2
     exit 1
   fi
-  sed 's/^/Lychee: /' "$report"
+  print_lychee_output "$checker_log" "$report"
   printf '\n[Full Github Actions output](https://github.com/%s/actions/runs/%s?check_suite_focus=true)\n' \
     "${GITHUB_REPOSITORY:?}" "${GITHUB_RUN_ID:?}" >> "$report"
   mv -f -- "$report" "$RUNNER_TEMP/lychee.md"

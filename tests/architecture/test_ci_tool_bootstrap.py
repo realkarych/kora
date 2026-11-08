@@ -1,5 +1,6 @@
 import os
 import platform
+import re
 import subprocess
 from pathlib import Path
 
@@ -12,7 +13,9 @@ NODE_SETUP = ROOT / "scripts/ci/setup_scaffold_node.sh"
 LINK_CHECK = ROOT / "scripts/ci/check_links.sh"
 
 
-@pytest.mark.parametrize("cache_state", ["directory", "marker", "symlink", "binary"])
+@pytest.mark.parametrize(
+    "cache_state", ["directory", "marker", "destination_symlink", "binary_symlink"]
+)
 def test_scaffold_node_refuses_partial_or_symlink_cache(
     tmp_path: Path, cache_state: str
 ) -> None:
@@ -27,14 +30,18 @@ def test_scaffold_node_refuses_partial_or_symlink_cache(
     if architecture is not None:
         destination = version_root / architecture
         marker = version_root / f"{architecture}.complete"
-        if cache_state in {"directory", "binary"}:
+        if cache_state in {"directory", "binary_symlink"}:
             (destination / "bin").mkdir(parents=True)
-        if cache_state in {"marker", "symlink", "binary"}:
+        if cache_state != "directory":
             marker.touch()
-        if cache_state == "symlink":
-            destination.symlink_to(tmp_path / "missing", target_is_directory=True)
-        if cache_state == "binary":
-            (destination / "bin/node").symlink_to(NODE_SETUP)
+        if cache_state == "destination_symlink":
+            target = tmp_path / "real directory"
+            (target / "bin").mkdir(parents=True)
+            binary = target / "bin/node"
+            binary.touch(mode=0o700)
+            destination.symlink_to(target, target_is_directory=True)
+        if cache_state == "binary_symlink":
+            (destination / "bin/node").symlink_to(Path("/bin/bash").resolve())
     before = sorted(cache_root.rglob("*"))
 
     result = subprocess.run(
@@ -137,6 +144,39 @@ def test_link_report_requires_one_positive_total(
     )
 
     assert (result.returncode == 0) is accepted
+
+
+def test_link_console_suspends_workflow_commands_during_checker_output(
+    tmp_path: Path,
+) -> None:
+    checker_log = tmp_path / "checker.log"
+    checker_log.write_bytes(b"::error::untrusted\r::warning::untrusted\n")
+    report = tmp_path / "lychee.md"
+    report.write_bytes(b"## proof##[warning]untrusted.md")
+    command = 'source "$1"; print_lychee_output "$2" "$3"'
+
+    result = subprocess.run(
+        (
+            "/bin/bash",
+            "-c",
+            command,
+            "bash",
+            str(LINK_CHECK),
+            str(checker_log),
+            str(report),
+        ),
+        capture_output=True,
+        check=True,
+        timeout=5,
+    )
+
+    assert re.fullmatch(
+        rb"::stop-commands::([0-9a-f]{64})\n"
+        rb"::error::untrusted\r::warning::untrusted\n"
+        rb"## proof##\[warning\]untrusted\.md\n::\1::\n",
+        result.stdout,
+    )
+    assert result.stderr == b""
 
 
 def test_ci_bootstrap_keeps_checkout_and_pinned_action_authority() -> None:
