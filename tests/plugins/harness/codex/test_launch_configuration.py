@@ -270,6 +270,8 @@ def test_codex_launch_refuses_raw_executor_bearer(tmp_path: Path) -> None:
         "BASH_ENV",
         "SHELLOPTS",
         "PS4",
+        "LD_PRELOAD",
+        "LD_AUDIT",
         "CODEX_CA_CERTIFICATE",
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
