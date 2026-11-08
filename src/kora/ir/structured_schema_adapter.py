@@ -6,8 +6,24 @@ from typing import Literal, Never, Protocol, cast
 
 from jsonschema import Draft202012Validator, validators
 
-from kora.ir.structured_schema_assertions import type_matches
+from kora.ir.structured_schema_assertions import (
+    const_matches,
+    enum_matches,
+    exclusive_maximum_matches,
+    exclusive_minimum_matches,
+    max_items_matches,
+    max_length_matches,
+    max_properties_matches,
+    maximum_matches,
+    min_items_matches,
+    min_length_matches,
+    min_properties_matches,
+    minimum_matches,
+    multiple_of_matches,
+    type_matches,
+)
 from kora.ir.structured_schema_cursors import (
+    ArenaCursor,
     NativeCursor,
     NativeObjectIndex,
     arena_cursor,
@@ -127,6 +143,7 @@ class _Engine(Protocol):
 _Handler = Callable[
     [_Engine, _BoundKeyword, NativeCursor, dict[str, _BoundKeyword]], None
 ]
+_Assertion = Callable[[NativeCursor, ArenaCursor, EvaluationMeter], bool]
 
 
 class _EngineFactory(Protocol):
@@ -362,27 +379,35 @@ def _mismatch(meter: EvaluationMeter) -> Never:
     raise _Mismatch from None
 
 
-def _type(
-    _engine: _Engine,
-    argument: _BoundKeyword,
-    instance: NativeCursor,
-    _schema: dict[str, _BoundKeyword],
-) -> None:
-    frame = argument.frame
-    context = frame.context
-    meter = context.meter
-    meter.reserve()
-    prepared = context.prepared
-    meter.reserve()
-    arena = cast("tuple[SchemaNode, ...]", object.__getattribute__(prepared, "_arena"))
-    meter.reserve()
-    node = argument.node
-    original = arena_cursor(arena, node, meter)
-    matched = type_matches(instance, original, meter)
-    meter.reserve()
-    if not matched:
-        _mismatch(meter)
-    _finish(frame, meter)
+def _assertion_handler(assertion: _Assertion) -> _Handler:
+    def handle(
+        _engine: _Engine,
+        argument: _BoundKeyword,
+        instance: NativeCursor,
+        _schema: dict[str, _BoundKeyword],
+    ) -> None:
+        frame = argument.frame
+        context = frame.context
+        meter = context.meter
+        meter.reserve()
+        prepared = context.prepared
+        meter.reserve()
+        arena = cast(
+            "tuple[SchemaNode, ...]", object.__getattribute__(prepared, "_arena")
+        )
+        meter.reserve()
+        node = argument.node
+        original = arena_cursor(arena, node, meter)
+        matched = assertion(instance, original, meter)
+        meter.reserve()
+        if not matched:
+            _mismatch(meter)
+        _finish(frame, meter)
+
+    return handle
+
+
+_type: _Handler = _assertion_handler(type_matches)
 
 
 def _reference(
@@ -540,27 +565,27 @@ _HANDLERS: dict[str, _Handler] = {
     "additionalProperties": _unavailable,
     "allOf": _unavailable,
     "anyOf": _unavailable,
-    "const": _unavailable,
+    "const": _assertion_handler(const_matches),
     "contains": _unavailable,
     "dependentRequired": _unavailable,
     "dependentSchemas": _unavailable,
     "else": _noop,
-    "enum": _unavailable,
-    "exclusiveMaximum": _unavailable,
-    "exclusiveMinimum": _unavailable,
+    "enum": _assertion_handler(enum_matches),
+    "exclusiveMaximum": _assertion_handler(exclusive_maximum_matches),
+    "exclusiveMinimum": _assertion_handler(exclusive_minimum_matches),
     "if": _unavailable,
     "items": _unavailable,
     "maxContains": _noop,
-    "maxItems": _unavailable,
-    "maxLength": _unavailable,
-    "maxProperties": _unavailable,
-    "maximum": _unavailable,
+    "maxItems": _assertion_handler(max_items_matches),
+    "maxLength": _assertion_handler(max_length_matches),
+    "maxProperties": _assertion_handler(max_properties_matches),
+    "maximum": _assertion_handler(maximum_matches),
     "minContains": _noop,
-    "minItems": _unavailable,
-    "minLength": _unavailable,
-    "minProperties": _unavailable,
-    "minimum": _unavailable,
-    "multipleOf": _unavailable,
+    "minItems": _assertion_handler(min_items_matches),
+    "minLength": _assertion_handler(min_length_matches),
+    "minProperties": _assertion_handler(min_properties_matches),
+    "minimum": _assertion_handler(minimum_matches),
+    "multipleOf": _assertion_handler(multiple_of_matches),
     "not": _unavailable,
     "oneOf": _unavailable,
     "prefixItems": _unavailable,

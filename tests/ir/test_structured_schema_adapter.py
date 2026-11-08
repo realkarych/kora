@@ -7,7 +7,12 @@ from typing import Literal, Protocol, cast
 import pytest
 from jsonschema import Draft202012Validator
 
-from kora.ir import CustomTypeContract, structured_schema_adapter, validate_type_schemas
+from kora.ir import (
+    CustomTypeContract,
+    structured_schema_adapter,
+    structured_schema_equality,
+    validate_type_schemas,
+)
 from kora.ir.json import JsonObject
 from kora.ir.structured_output import StructuredOutput, checked_value
 from kora.ir.structured_schema_adapter import decide_prepared_schema
@@ -46,24 +51,11 @@ GUARDS: dict[str, object] = {
     "additionalProperties": False,
     "allOf": [True],
     "anyOf": [True],
-    "const": None,
     "contains": True,
     "dependentRequired": {"x": ["y"]},
     "dependentSchemas": {"x": True},
-    "enum": [None],
-    "exclusiveMaximum": 0,
-    "exclusiveMinimum": 0,
     "if": True,
     "items": True,
-    "maxItems": 0,
-    "maxLength": 0,
-    "maxProperties": 0,
-    "maximum": 0,
-    "minItems": 0,
-    "minLength": 0,
-    "minProperties": 0,
-    "minimum": 0,
-    "multipleOf": 1,
     "not": False,
     "oneOf": [True],
     "prefixItems": [True],
@@ -71,6 +63,21 @@ GUARDS: dict[str, object] = {
     "propertyNames": True,
     "required": ["x"],
     "uniqueItems": True,
+}
+PRIMITIVE_VECTORS: dict[str, tuple[object, object, object]] = {
+    "const": ({"n": [1.0]}, {"n": [1]}, {"n": [True]}),
+    "enum": ([False, {"n": 1.0}], {"n": 1}, {"n": True}),
+    "exclusiveMaximum": (0.3, 0.2, 0.3),
+    "exclusiveMinimum": (0.2, 0.3, 0.2),
+    "maxItems": (1, [0], [0, 1]),
+    "maxLength": (1, "😀", "e\u0301"),
+    "maxProperties": (1, {"a": 1}, {"a": 1, "b": 2}),
+    "maximum": (0, -0.0, 0.1),
+    "minItems": (2, [None, False], [None]),
+    "minLength": (2, "e\u0301", "😀"),
+    "minProperties": (2, {"a": 1, "b": 2}, {"a": 1}),
+    "minimum": (1e23, 10**23, int(1e23)),
+    "multipleOf": (0.1, 0.3, 0.31),
 }
 
 
@@ -185,8 +192,8 @@ def test_adapter_real_engine_matches_complete_decision_ledgers(
         ({"type": "null"}, None, "work", 10261, (10261, 0, 95)),
         ({"type": "boolean"}, None, "work", 10341, (10340, 0, 97)),
         ({"type": "boolean"}, None, "entries", 97, (10340, 0, 97)),
-        ({"minimum": 0}, None, "work", 10392, (10392, 0, 96)),
-        ({"minimum": 0}, None, "entries", 96, (10392, 0, 96)),
+        ({"contains": True}, None, "work", 10427, (10427, 0, 96)),
+        ({"contains": True}, None, "entries", 96, (10427, 0, 96)),
         ({"type": "null"}, None, "work", 10286, (10267, 0, 96)),
         ({"type": "null"}, None, "work", 10287, (10287, 0, 96)),
         ({}, None, "work", 7004, (7003, 0, 91)),
@@ -241,6 +248,72 @@ def test_adapter_initial_ticket_precedes_real_first_handler_entry(
     del codes, rejected
 
 
+@pytest.mark.parametrize("keyword", PRIMITIVE_VECTORS)
+def test_adapter_dispatches_bounded_primitive_assertions(keyword: str) -> None:
+    argument, accepted, rejected = PRIMITIVE_VECTORS[keyword]
+    holder, position = admitted({keyword: argument})
+
+    matching = decide(holder, position, accepted, EvaluationMeter())
+    mismatching = decide(holder, position, rejected, EvaluationMeter())
+
+    assert matching is True
+    assert mismatching is False
+
+
+@pytest.mark.parametrize(
+    "keyword", tuple(key for key in PRIMITIVE_VECTORS if key not in ("const", "enum"))
+)
+def test_adapter_primitive_assertions_preserve_inapplicable_kinds(keyword: str) -> None:
+    argument, _, _ = PRIMITIVE_VECTORS[keyword]
+    holder, position = admitted({keyword: argument})
+
+    result = decide(holder, position, None, EvaluationMeter())
+
+    assert result is True
+
+
+@pytest.mark.parametrize(
+    ("schema", "paid", "short_entry_paid"),
+    [
+        ({"minimum": 0}, (10411, 0, 97), (10395, 0, 96)),
+        ({"enum": [None, False]}, (10378, 0, 101), (10331, 0, 99)),
+        ({"enum": [False, None]}, (10432, 0, 105), (10385, 0, 103)),
+    ],
+)
+@pytest.mark.parametrize("dimension", ["work", "entries"])
+def test_adapter_primitive_leaf_uses_shared_meter(
+    schema: object,
+    paid: tuple[int, int, int],
+    short_entry_paid: tuple[int, int, int],
+    dimension: Literal["work", "entries"],
+) -> None:
+    holder, position = admitted(schema)
+    capacity = paid[0 if dimension == "work" else 2]
+    exact = remaining_meter(dimension, capacity)
+    short = remaining_meter(dimension, capacity - 1)
+    exact_before, short_before = counters(exact), counters(short)
+
+    result = decide(holder, position, None, exact)
+    with pytest.raises(EvaluationRefused) as exhausted:
+        decide(holder, position, None, short)
+
+    assert result is True
+    assert exhausted.value.reason == "evaluation_exhausted"
+    assert exhausted.value.__cause__ is None
+    assert exhausted.value.__context__ is None
+    assert (
+        tuple(
+            after - before
+            for after, before in zip(counters(exact), exact_before, strict=True)
+        )
+        == paid
+    )
+    assert tuple(
+        after - before
+        for after, before in zip(counters(short), short_before, strict=True)
+    ) == ((paid[0] - 1, paid[1], paid[2]) if dimension == "work" else short_entry_paid)
+
+
 @pytest.mark.parametrize("keyword", GUARDS)
 def test_adapter_all_unfinished_slots_raise_fresh_fixed_internal_errors(
     keyword: str,
@@ -255,7 +328,7 @@ def test_adapter_all_unfinished_slots_raise_fresh_fixed_internal_errors(
     with pytest.raises(error_type) as second:
         decide(holder, position, None, EvaluationMeter())
 
-    assert len(GUARDS) == 28
+    assert len(GUARDS) == 15
     assert first.value is not second.value
     assert first.value.args == second.value.args == ()
     assert str(first.value) == "schema adapter handler unavailable"
@@ -265,7 +338,7 @@ def test_adapter_all_unfinished_slots_raise_fresh_fixed_internal_errors(
 
 
 def test_adapter_availability_error_uses_its_exact_allocation_ticket() -> None:
-    holder, position = admitted({"minimum": 0})
+    holder, position = admitted({"contains": True})
     meter = EvaluationMeter()
     error_type = cast(
         "type[RuntimeError]", vars(structured_schema_adapter)["_UnavailableHandler"]
@@ -274,7 +347,7 @@ def test_adapter_availability_error_uses_its_exact_allocation_ticket() -> None:
     with pytest.raises(error_type):
         decide(holder, position, None, meter)
 
-    assert counters(meter) == (10393, 0, 97)
+    assert counters(meter) == (10428, 0, 97)
 
 
 @pytest.mark.parametrize(
@@ -356,13 +429,19 @@ def test_adapter_both_reference_occurrences_and_sibling_type_remain_active() -> 
 
 def test_adapter_canonical_reference_order_stops_before_unvisited_guard() -> None:
     holder, position = admitted(
-        {"$defs": {"t": False}, "minimum": 0, "$ref": "#/$defs/t"}
+        {"$defs": {"t": {"minLength": 2}}, "contains": True, "$ref": "#/$defs/t"}
     )
     meter = EvaluationMeter()
+    error_type = cast(
+        "type[RuntimeError]", vars(structured_schema_adapter)["_UnavailableHandler"]
+    )
 
-    result = decide(holder, position, None, meter)
+    result = decide(holder, position, "😀", meter)
+    with pytest.raises(error_type) as later:
+        decide(holder, position, "ab", EvaluationMeter())
 
     assert result is False
+    assert str(later.value) == "schema adapter handler unavailable"
 
 
 def test_adapter_dynamic_reference_precedes_ref_with_a_different_original_target() -> (
@@ -370,7 +449,7 @@ def test_adapter_dynamic_reference_precedes_ref_with_a_different_original_target
 ):
     holder, position = admitted(
         {
-            "$defs": {"deny": False, "guard": {"minimum": 0}},
+            "$defs": {"deny": False, "guard": {"contains": True}},
             "$ref": "#/$defs/guard",
             "$dynamicRef": "#/$defs/deny",
         }
@@ -386,7 +465,7 @@ def test_adapter_views_exclude_registry_authority() -> None:
     document = document_for(
         {
             "$id": "https://private-schema.invalid/root",
-            "$defs": {"t": {"minimum": 0}},
+            "$defs": {"t": {"contains": True}},
             "$ref": "#/$defs/t",
             "private-annotation": {"$ref": "https://private-schema.invalid/lookup"},
         }
@@ -425,7 +504,7 @@ def test_adapter_views_exclude_registry_authority() -> None:
     resolvers = [object.__getattribute__(engine, "_resolver") for engine in engines]
 
     assert len(engines) == 2
-    assert set(registered) == set(GUARDS) | {
+    assert set(registered) == set(GUARDS) | set(PRIMITIVE_VECTORS) | {
         "type",
         "$ref",
         "$dynamicRef",
@@ -434,7 +513,7 @@ def test_adapter_views_exclude_registry_authority() -> None:
         "minContains",
         "maxContains",
     }
-    assert {tuple(schema) for schema in schemas} == {("$ref",), ("minimum",)}
+    assert {tuple(schema) for schema in schemas} == {("$ref",), ("contains",)}
     assert len(contexts) == 1
     assert object.__getattribute__(contexts[0], "status") == "closed"
     assert all(type(resolver) is resolver_type for resolver in resolvers)
@@ -538,6 +617,7 @@ def tracked_adapter_owners() -> set[int]:
         ArenaCursor,
         NativeObjectIndex,
         DecimalNumber,
+        vars(structured_schema_equality)["_PairFrame"],
         *(
             vars(structured_schema_adapter)[name]
             for name in (
@@ -564,12 +644,19 @@ def tracked_adapter_owners() -> set[int]:
     }
 
 
-Outcome = Literal["true", "false", "refusal", "unavailable", "unexpected"]
+Outcome = Literal[
+    "true", "false", "refusal", "recursive_refusal", "unavailable", "unexpected"
+]
 
 
 def owned_call(outcome: Outcome) -> bool:
+    if outcome == "recursive_refusal":
+        holder, position = admitted(
+            {"enum": [[None], [False]], "title": "private-schema-canary"}
+        )
+        return decide(holder, position, [None], remaining_meter("entries", 103))
     schema: dict[str, object] = (
-        {"minimum": 0} if outcome == "unavailable" else {"type": "integer"}
+        {"contains": True} if outcome == "unavailable" else {"type": "integer"}
     )
     schema["title"] = "private-schema-canary"
     holder, position = admitted(schema)
@@ -600,13 +687,15 @@ def test_adapter_completed_calls_release_all_owned_records(outcome: Outcome) -> 
     assert after == before
 
 
-@pytest.mark.parametrize("outcome", ["refusal", "unavailable", "unexpected"])
+@pytest.mark.parametrize(
+    "outcome", ["refusal", "recursive_refusal", "unavailable", "unexpected"]
+)
 def test_adapter_disposed_tracebacks_release_error_and_operation_records(
     outcome: Outcome,
 ) -> None:
     error_type = (
         EvaluationRefused
-        if outcome == "refusal"
+        if outcome in ("refusal", "recursive_refusal")
         else (
             IndexError
             if outcome == "unexpected"
