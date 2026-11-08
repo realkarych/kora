@@ -1,4 +1,5 @@
 import asyncio
+import socket
 import ssl
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -101,8 +102,14 @@ async def test_selected_proxy_refuses_and_settles_interrupted_tunnel() -> None:
 
 
 @pytest.mark.asyncio
-async def test_owned_loopback_settles_socket_before_tls_handshake() -> None:
-    deadline = asyncio.get_running_loop().time() + 5
+@pytest.mark.parametrize(
+    "prefix", [b"", b"\x16\x03\x03\x00\x10\x01"], ids=["idle", "partial-record"]
+)
+async def test_owned_loopback_settles_socket_before_tls_handshake(
+    prefix: bytes,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5
     called = asyncio.Event()
 
     async def receive(
@@ -110,21 +117,27 @@ async def test_owned_loopback_settles_socket_before_tls_handshake() -> None:
     ) -> None:
         called.set()
 
-    async with asyncio.timeout_at(deadline), AsyncExitStack() as resources:
-        server = OwnedLoopback(
-            receive, deadline, ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        )
-
-        try:
-            reader, writer = await resources.enter_async_context(
-                connect_loopback(server.port)
+    async with asyncio.timeout_at(deadline):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as peer:
+            peer.setblocking(False)
+            server = OwnedLoopback(
+                receive, deadline, ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             )
-            writer.write(b"\x16\x03\x03\x00\x10\x01")
-            await writer.drain()
-            await server.transport_started.wait()
-        finally:
-            await server.close(deadline)
-        received = await reader.read()
 
-        assert received == b""
+            try:
+                await loop.sock_connect(peer, ("127.0.0.1", server.port))
+                await loop.sock_sendall(peer, prefix)
+                await server.transport_started.wait()
+            finally:
+                await server.close(deadline)
+            received: bytes | ConnectionResetError
+            try:
+                received = await loop.sock_recv(peer, 1)
+            except ConnectionResetError as error:
+                received = error
+
+        assert received == b"" or (
+            bool(prefix) and isinstance(received, ConnectionResetError)
+        )
+        assert server.settled_connection_count == 1
         assert not called.is_set()

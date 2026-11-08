@@ -81,6 +81,17 @@ class OwnedLoopback:
             self._listener.close()
             raise LoopbackError("probe_loopback_listen_failed") from None
 
+    @property
+    def settled_connection_count(self) -> int | None:
+        if not self._closing or self._listener.fileno() != -1:
+            return None
+        if any(
+            not task.done() or connection.socket.fileno() != -1
+            for task, connection in self._connections.items()
+        ):
+            return None
+        return len(self._connections)
+
     def _fence(self) -> None:
         if self._closing:
             return
