@@ -129,11 +129,11 @@ def test_publication_bind_values_admit_exact_bytes_and_protect_private_state(
         prepare_graph_publication_binds(
             cast(AttachedGraphDeployment, generic), limits=exact
         )
-    with pytest.raises(AttributeError, match="immutable"):
+    with pytest.raises(AttributeError, match="immutable") as assignment:
         prepared.ir_json = PRIVATE_WIRE
-    with pytest.raises(AttributeError, match="immutable"):
-        delattr(prepared, "execution_json")
-    with pytest.raises(TypeError, match="explicit access"):
+    with pytest.raises(AttributeError, match="immutable") as deletion:
+        delattr(prepared, PRIVATE_WIRE)
+    with pytest.raises(TypeError, match="explicit access") as serialization:
         pickle.dumps(prepared)
     with pytest.raises(ValueError, match="not iterable") as encoded:
         jsonable_encoder(prepared)
@@ -154,6 +154,17 @@ def test_publication_bind_values_admit_exact_bytes_and_protect_private_state(
     assert prepared.parameters()["publication_ir_json"] is prepared.ir_json
     assert PRIVATE_WIRE not in repr(prepared)
     assert PRIVATE_WIRE not in repr(encoded.value)
+    for error, operation in (
+        (assignment.value, "__setattr__"),
+        (deletion.value, "__delattr__"),
+        (serialization.value, "__getstate__"),
+    ):
+        frames = [
+            frame.f_locals
+            for frame, _ in walk_tb(error.__traceback__)
+            if frame.f_code.co_name == operation
+        ]
+        assert frames == [{}]
 
 
 @pytest.mark.asyncio

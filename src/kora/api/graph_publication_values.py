@@ -61,12 +61,15 @@ class PreparedGraphPublicationBinds:
         return prepared
 
     def __setattr__(self, name: str, value: object) -> Never:
+        del self, name, value
         raise AttributeError("graph publication binds are immutable")
 
     def __delattr__(self, name: str) -> Never:
+        del self, name
         raise AttributeError("graph publication binds are immutable")
 
     def __getstate__(self) -> Never:
+        del self
         raise TypeError("graph publication binds require explicit access")
 
     def parameters(self) -> dict[str, str]:
