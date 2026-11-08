@@ -515,7 +515,7 @@ async def prepare_graph_deployment_inputs(
         error = EvaluatorUnavailable(unavailable.reason)
     except CancelledError:
         error = CancelledError()
-    del ir_text, contents, storage_identity, evaluator, groups
+    del ir_text, contents, storage_identity, evaluator, groups, limits
     raise_safe(error)
 
 

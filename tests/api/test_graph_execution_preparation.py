@@ -178,7 +178,8 @@ def assert_protected(
         frame.f_code.co_name: frame.f_locals
         for frame, _ in walk_tb(error.__traceback__)
     }
-    assert set(frames[boundary]) == {"limits", "error"}
+    allowed = {"error"} if boundary == DEPLOYMENT_ENTRY else {"limits", "error"}
+    assert set(frames[boundary]) == allowed
     assert (
         not {"_prepare", "_draft", "_prepare_logical", "_checked_pair"} & frames.keys()
     )
@@ -788,13 +789,17 @@ def check_deployment_refusals() -> None:
     oversized = CommandResourceContent(
         first.path, first.name, b"?" * (COMMAND_RESOURCE_MAX_BYTES + 1)
     )
-    invalid_limits = (
+    short_aggregate = (
         replace(
             DEPLOYMENT_LIMITS,
             max_retained_bytes=DEPLOYMENT_LIMITS.max_retained_bytes - 1,
         ),
         replace(DEPLOYMENT_LIMITS, max_work=DEPLOYMENT_LIMITS.max_work - 1),
+    )
+    invalid_limits = (
+        *short_aggregate,
         replace(DEPLOYMENT_LIMITS, max_work=True),
+        replace(DEPLOYMENT_LIMITS, max_work=cast(int, cast(object, PRIVATE_STORE))),
         replace(DEPLOYMENT_LIMITS, contents=replace(GROUP_LIMITS, work=1)),
         replace(DEPLOYMENT_LIMITS, contents=replace(GROUP_LIMITS, scratch=1)),
     )
@@ -805,6 +810,16 @@ def check_deployment_refusals() -> None:
             [
                 (ir_text, files, DEPLOYMENT_STORE, limits, GraphValueFailure.BUDGET)
                 for limits in invalid_limits
+            ]
+            + [
+                (
+                    ir_text,
+                    (*files[:-1], bad_bytes),
+                    DEPLOYMENT_STORE,
+                    limits,
+                    GraphValueFailure.BUDGET,
+                )
+                for limits in short_aggregate
             ]
             + [
                 (
