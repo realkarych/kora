@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Never, Self
 
-from sqlalchemy import Text, bindparam
+from sqlalchemy import BigInteger, LargeBinary, Select, Text, bindparam, func, select
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql.elements import ColumnElement
@@ -12,6 +12,7 @@ from kora.api.graph_deployment_attachment import (
 )
 from kora.cel_eval.errors import raise_safe
 from kora.db.connection import Dialect
+from kora.db.graph_resource_transport import graph_resource_binary_projection
 from kora.db.graph_value_json import (
     GraphValueFailure,
     GraphValueRejected,
@@ -100,6 +101,47 @@ def graph_publication_bind_expressions(
         "execution_contract": _bound_value(CONTRACT_PARAMETER, dialect),
         "resources": _bound_value(RESOURCE_PARAMETER, dialect),
     }
+
+
+def graph_publication_measurement_statement(
+    dialect: Dialect,
+) -> Select[int, int, int, int]:
+    values = graph_publication_bind_expressions(dialect)
+    ir = values["ir"]
+    execution = values["execution_contract"]
+    resources = values["resources"]
+    transport = graph_resource_binary_projection(dialect, resources)
+    if dialect is Dialect.POSTGRESQL:
+        return select(
+            func.pg_column_size(ir, type_=BigInteger()).label("ir_native_bytes"),
+            func.pg_column_size(execution, type_=BigInteger()).label(
+                "execution_native_bytes"
+            ),
+            func.pg_column_size(resources, type_=BigInteger()).label(
+                "resources_native_bytes"
+            ),
+            func.octet_length(transport, type_=BigInteger()).label(
+                "resource_transport_bytes"
+            ),
+        )
+    sizes = select(
+        func.length(sql_cast(ir, LargeBinary()), type_=BigInteger()).label(
+            "ir_native_bytes"
+        ),
+        func.length(sql_cast(execution, LargeBinary()), type_=BigInteger()).label(
+            "execution_native_bytes"
+        ),
+        func.length(transport, type_=BigInteger()).label("resources_native_bytes"),
+    ).subquery()
+    ir_width: ColumnElement[int] = sizes.c.ir_native_bytes
+    execution_width: ColumnElement[int] = sizes.c.execution_native_bytes
+    resource_width: ColumnElement[int] = sizes.c.resources_native_bytes
+    return select(
+        ir_width,
+        execution_width,
+        resource_width,
+        resource_width.label("resource_transport_bytes"),
+    )
 
 
 def _prepare_binds(
