@@ -8,6 +8,7 @@ import pytest
 from fastapi.encoders import jsonable_encoder
 
 from kora.api.graph_deployment_attachment import (
+    AttachedGraphDeployment,
     GraphDeploymentAttachmentLimits,
     attach_graph_deployment_references,
 )
@@ -28,7 +29,11 @@ from kora.engine.graph_command_manifests import (
     CommandResourceContent,
     PreparedCommandStageGroup,
 )
-from kora.engine.graph_resource_references import GraphResourceOwner, GraphResourceScope
+from kora.engine.graph_resource_references import (
+    GraphResourceOwner,
+    GraphResourceScope,
+    PreparedGraphResourceReferences,
+)
 from kora.protocols.storage_models import MAX_STORAGE_METADATA, ContentRef
 from tests.api.test_graph_execution_preparation import (
     DEPLOYMENT_LIMITS,
@@ -224,11 +229,21 @@ def test_attachment_preserves_exact_pair_and_detaches_nested_reference_aliases()
     )
     owners[2].__init__(scope, ROOT_PATH, "substituted.sh", owners[0].reference)
     scope.__init__("changed-namespace", "changed-graph", "changed-version")
+    with pytest.raises(TypeError, match="requires the checked producer"):
+        AttachedGraphDeployment(
+            object(),
+            prior_scope,
+            prepared.logical,
+            PreparedGraphResourceReferences(expected_text, finished.owners),
+        )
+    with pytest.raises(AttributeError, match="immutable"):
+        finished.resources.__init__(MARKER)
     with pytest.raises(TypeError, match="explicit access"):
         pickle.dumps(finished)
     with pytest.raises(ValueError, match="not iterable") as encoder:
         jsonable_encoder(finished)
 
+    assert type(finished) is AttachedGraphDeployment
     assert finished.scope == prior_scope
     assert finished.scope is not scope
     assert finished.canonical_ir is prepared.logical.canonical_ir

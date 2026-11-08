@@ -78,6 +78,8 @@ class GraphResourceReferences(_ProtectedGraphResources):
     _text: str
 
     def __init__(self, text: str) -> None:
+        if hasattr(self, "_text"):
+            raise AttributeError("graph resource references are immutable")
         object.__setattr__(self, "_text", text)
 
     @property

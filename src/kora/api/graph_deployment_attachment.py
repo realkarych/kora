@@ -21,6 +21,7 @@ from kora.engine.graph_resource_references import (
     GraphResourceReferenceLimits,
     GraphResourceReferences,
     GraphResourceScope,
+    PreparedGraphResourceReferences,
     build_graph_resource_references,
 )
 from kora.engine.graph_version_identity import GraphVersionDigests
@@ -39,6 +40,7 @@ ATTACHMENT_SLOTS = 32
 REFERENCE_SNAPSHOT_UNITS = 8 * MAX_STORAGE_METADATA
 GROUP_DESCRIPTOR_UNITS = 4 * (IDENTIFIER_WIDTH + STORAGE_DIGEST_WIDTH) + 16
 ORDINAL_UNITS = 4
+_ATTACHMENT_ISSUER = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,29 @@ class GraphDeploymentAttachmentLimits:
     physical_input_bytes: int
     max_retained_bytes: int
     max_work: int
+
+
+class AttachedGraphDeployment(PreparedExecutionContract):
+    __slots__ = ()
+
+    def __init__(
+        self,
+        issuer: object,
+        scope: GraphResourceScope,
+        logical: PreparedLogicalExecutionContract,
+        physical: PreparedGraphResourceReferences,
+    ) -> None:
+        if issuer is not _ATTACHMENT_ISSUER:
+            del issuer, scope, logical, physical
+            raise TypeError("graph deployment attachment requires the checked producer")
+        super().__init__(
+            scope,
+            logical.canonical_ir,
+            logical.canonical_contract,
+            logical.digests,
+            GraphResourceReferences(physical.text),
+            physical.owners,
+        )
 
 
 def _bounded_text(value: object, maximum: int) -> str:
@@ -246,7 +271,7 @@ def _attach(
     scope: GraphResourceScope,
     owners: tuple[GraphResourceOwner, ...],
     limits: GraphDeploymentAttachmentLimits,
-) -> PreparedExecutionContract:
+) -> AttachedGraphDeployment:
     _admit_attachment(prepared, owners, limits)
     target = _snapshot_scope(scope)
     detached = tuple(_snapshot_owner(owner) for owner in owners)
@@ -259,14 +284,7 @@ def _attach(
         max_output_bytes=limits.physical_input_bytes,
     )
     _require_group_references(prepared.groups, physical.owners)
-    return PreparedExecutionContract(
-        target,
-        logical.canonical_ir,
-        logical.canonical_contract,
-        logical.digests,
-        GraphResourceReferences(physical.text),
-        physical.owners,
-    )
+    return AttachedGraphDeployment(_ATTACHMENT_ISSUER, target, logical, physical)
 
 
 def attach_graph_deployment_references(
@@ -275,7 +293,7 @@ def attach_graph_deployment_references(
     owners: tuple[GraphResourceOwner, ...],
     *,
     limits: GraphDeploymentAttachmentLimits,
-) -> PreparedExecutionContract:
+) -> AttachedGraphDeployment:
     try:
         return _attach(prepared, scope, owners, limits)
     except GraphValueRejected as rejected:
