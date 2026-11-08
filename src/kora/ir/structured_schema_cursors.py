@@ -32,6 +32,16 @@ class ArenaCursor:
 Cursor = NativeCursor | ArenaCursor
 
 
+def valid_arena_cursor(cursor: ArenaCursor) -> bool:
+    return (
+        type(cursor) is ArenaCursor
+        and type(cursor.nodes) is tuple
+        and type(cursor.node) is int
+        and 0 <= cursor.node < len(cursor.nodes)
+        and type(cursor.nodes[cursor.node]) is SchemaNode
+    )
+
+
 def native_cursor(value: object, meter: BoundedEvaluationMeter) -> NativeCursor:
     meter.reserve(2, entries=1)
     return NativeCursor(value)

@@ -18,11 +18,10 @@ from kora.ir.structured_schema_collection_predicates import (
     check_required_properties,
     check_unique_items,
 )
-from kora.ir.structured_schema_cursors import ArenaCursor
+from kora.ir.structured_schema_cursors import ArenaCursor, valid_arena_cursor
 from kora.ir.structured_schema_equality import compare_json_cursors
 from kora.ir.structured_schema_evaluation_policy import EvaluationRefused
 from kora.ir.structured_schema_evaluation_work import BoundedEvaluationMeter
-from kora.ir.structured_schema_input import SchemaNode
 
 
 class ParameterArenaPredicate(StrEnum):
@@ -67,16 +66,6 @@ class ParameterArenaRejected(ValueError):
         super().__init__(reason.value)
 
 
-def _valid_cursor_shape(cursor: ArenaCursor) -> bool:
-    return (
-        type(cursor) is ArenaCursor
-        and type(cursor.nodes) is tuple
-        and type(cursor.node) is int
-        and 0 <= cursor.node < len(cursor.nodes)
-        and type(cursor.nodes[cursor.node]) is SchemaNode
-    )
-
-
 def _check(
     predicate: ParameterArenaPredicate,
     instance: ArenaCursor,
@@ -91,8 +80,8 @@ def _check(
         type(predicate) is not ParameterArenaPredicate
         or type(max_pair_frames) is not int
         or not 0 <= max_pair_frames <= sys.maxsize
-        or not _valid_cursor_shape(instance)
-        or not _valid_cursor_shape(operand)
+        or not valid_arena_cursor(instance)
+        or not valid_arena_cursor(operand)
     ):
         raise ParameterArenaRejected(ParameterArenaFailure.INVALID)
     match predicate:
