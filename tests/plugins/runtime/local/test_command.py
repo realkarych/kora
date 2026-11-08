@@ -1662,16 +1662,18 @@ async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
         clock,
         kora_capture.diagnostics.logger(COMPONENT),
     )
-    script = "\n".join(
-        (
-            "from pathlib import Path",
-            "Path('a').mkdir()",
-            "Path('a/payload').write_bytes(b'payload')",
-            "Path('z').touch()",
+    script_lines: tuple[str, ...] = (
+        "from pathlib import Path",
+        "Path('a').mkdir()",
+        "Path('a/payload').write_bytes(b'payload')",
+        "Path('z').touch()",
+    )
+    if case == "disk-full":
+        script_lines += (
             "for index in range(128):",
             "    Path(f'n{index:04}' + 'x' * 145).touch()",
         )
-    )
+    script = "\n".join(script_lines)
     submitter = Submitter(dispatcher_id="test", process=identity_of(os.getpid()))
     async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
         workload = command_workload(
