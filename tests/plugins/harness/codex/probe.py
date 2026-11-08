@@ -2808,6 +2808,8 @@ async def drive(
     gated_app = None
     gated_executor = None
     bound_launch = None
+    bound_exec_writer: asyncio.StreamWriter | None = None
+    natural_app_refusal = False
     gated_executor_identity: int | None = None
     executor: asyncio.subprocess.Process | None = None
     executor_url: str | None = None
@@ -2856,7 +2858,7 @@ async def drive(
                 gated_executor = bound.start_role(bound_launch, "exec", MAX_FRAME_BYTES)
                 if gated_executor is None:
                     raise BoundProbeRefusal("selected_bound_slot_refused")
-                exec_reader, _ = await gated_executor.prepare()
+                exec_reader, bound_exec_writer = await gated_executor.prepare()
                 line = await exec_reader.readline()
                 match = EXECUTOR_LISTEN_URL.fullmatch(line)
                 require(
@@ -2959,6 +2961,17 @@ async def drive(
                     raise BoundProbeRefusal(
                         "selected_bound_app_materialization_refused"
                     )
+                if bound.case in ("before-activation", "before-delivery"):
+                    from tests.plugins.harness.codex.selected_bound_environment import (
+                        refuse_fenced_app,
+                    )
+
+                    assert bound_exec_writer is not None
+                    await refuse_fenced_app(
+                        bound_launch, gated_app, bound_exec_writer, bound.case
+                    )
+                    natural_app_refusal = bound.case == "before-activation"
+                    raise BoundProbeRefusal("selected_bound_fence_refused")
                 reader, writer = await gated_app.prepare()
                 diagnostic("INFO", "probe.selected_gated_stdio_bound", fixture.case)
             elif gated_stdio:
@@ -3116,11 +3129,23 @@ async def drive(
                 selected_cleanup.append(model.close(cleanup_deadline))
             if proxy is not None:
                 selected_cleanup.append(proxy.close(cleanup_deadline))
-            if gated_app is not None:
+            if gated_app is not None and bound_launch is None:
                 selected_cleanup.append(gated_app.close(cleanup_deadline))
-            if gated_executor is not None:
-                selected_cleanup.append(gated_executor.close(cleanup_deadline))
-            outcomes = await asyncio.gather(*selected_cleanup, return_exceptions=True)
+            outcomes: list[None | BaseException] = []
+            if bound_launch is not None:
+                outcomes.extend(
+                    await asyncio.gather(
+                        bound_launch.close(
+                            cleanup_deadline,
+                            (gated_app, gated_executor),
+                            natural_app_refusal=natural_app_refusal,
+                        ),
+                        return_exceptions=True,
+                    )
+                )
+            outcomes.extend(
+                await asyncio.gather(*selected_cleanup, return_exceptions=True)
+            )
             cleanup_failed = False
             for outcome in outcomes:
                 if isinstance(outcome, BaseException):
@@ -3394,7 +3419,8 @@ async def run_selected_launch(
                 bound_refusal = error
         if bound_refusal is not None:
             assert bound is not None
-            expected_roles = int(bound.case == "partial")
+            fenced = bound.case in {"before-activation", "before-delivery"}
+            expected_roles = 2 if fenced else int(bound.case == "partial")
             require(
                 bound.unix_sockets == expected_roles * 4
                 and bound.cwd_opens == bound.starts == expected_roles
@@ -3408,6 +3434,8 @@ async def run_selected_launch(
             )
             if expected_roles == 0:
                 diagnostic("INFO", "probe.selected_bound_no_acquisition", bound.case)
+            if fenced:
+                diagnostic("INFO", "probe.selected_bound_fence_verified", bound.case)
             raise bound_refusal
         if bound is not None:
             require(
@@ -3834,6 +3862,8 @@ async def run_selected_bound(name: str) -> None:
         "duplicate",
         "stopped",
         "partial",
+        "before-activation",
+        "before-delivery",
     ):
         raise ProbeFailure("selected_bound_unexpected_case")
     diagnostics = configure_process(

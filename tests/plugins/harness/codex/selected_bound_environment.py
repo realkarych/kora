@@ -1,3 +1,4 @@
+import asyncio
 import os
 import socket
 import sys
@@ -13,6 +14,7 @@ from kora.plugins.harness.codex.launch_configuration import (
     LaunchConfigurationError,
     LaunchConfigurationFailure,
 )
+from kora.plugins.runtime.local.bound_gate_fence import BoundGateFence
 from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
 from kora.plugins.runtime.local.environment import (
     CandidateRoleEnvironment,
@@ -21,8 +23,12 @@ from kora.plugins.runtime.local.environment import (
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope, SecretValue
 from kora.protocols.time import SystemClock
+from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.processes import ProcessCondition, ProcessError
 from tests.plugins.harness.codex.selected_gated_stdio import (
+    GateBoundary,
     SelectedGatedApp,
+    close_gated,
     runner_deadline,
 )
 from tests.plugins.harness.codex.selected_launch import (
@@ -31,7 +37,15 @@ from tests.plugins.harness.codex.selected_launch import (
 )
 
 BoundCase = Literal[
-    "ready", "path", "grant", "reserved", "duplicate", "stopped", "partial"
+    "ready",
+    "path",
+    "grant",
+    "reserved",
+    "duplicate",
+    "stopped",
+    "partial",
+    "before-activation",
+    "before-delivery",
 ]
 BoundRole = Literal["app", "exec"]
 SLOT_REFUSALS = frozenset({"duplicate", "stopped"})
@@ -51,6 +65,7 @@ class BoundEnvironmentError(ValueError):
 class BoundLaunch:
     inputs: CodexLaunchInputs
     slots: BoundRoleSlots
+    fence: BoundGateFence
     clock: SystemClock
     cutoff_ns: int
     expected_app: dict[str, str]
@@ -67,9 +82,78 @@ class BoundLaunch:
                 self.clock,
                 self.cutoff_ns,
                 frame_limit,
+                register=self.fence.register,
             )
 
         return self.slots.start(role, self.slots.claim(role), acquire)
+
+    async def close(
+        self,
+        deadline: float,
+        wrappers: tuple[SelectedGatedApp | None, ...],
+        *,
+        natural_app_refusal: bool,
+    ) -> None:
+        cutoff = runner_deadline(deadline, self.clock)
+        self.fence.stop()
+        gates = self.fence.gates
+        natural_gate = gates[-1] if natural_app_refusal and len(gates) == 2 else None
+        outcomes = await asyncio.gather(
+            *(
+                close_gated(gate, cutoff, self.clock, natural=gate is natural_gate)
+                for gate in gates
+            ),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        if natural_app_refusal and (
+            natural_gate is None or natural_gate.returncode != 72
+        ):
+            raise BoundEnvironmentError("selected_bound_expected_natural_gate_exit")
+        for wrapper in wrappers:
+            if wrapper is not None:
+                wrapper.verify_closed()
+        if self.fence.close_failed:
+            raise BoundEnvironmentError("selected_bound_gate_close_failed")
+
+
+async def refuse_fenced_app(
+    launch: BoundLaunch,
+    app: SelectedGatedApp,
+    exec_writer: asyncio.StreamWriter,
+    boundary: GateBoundary,
+) -> None:
+    reached = False
+
+    def stop_at(stage: GateBoundary) -> None:
+        nonlocal reached
+        if stage == boundary:
+            launch.fence.stop()
+            if not exec_writer.is_closing():
+                raise BoundEnvironmentError("selected_bound_exec_writer_not_fenced")
+            reached = True
+
+    try:
+        await app.prepare(stop_at)
+    except ProcessError as error:
+        if (
+            reached
+            and boundary == "before-activation"
+            and error.condition is ProcessCondition.UNKNOWN
+        ):
+            return
+        raise
+    except ChannelError as error:
+        if (
+            reached
+            and boundary == "before-delivery"
+            and error.reason is ChannelFailure.CLOSED
+        ):
+            return
+        raise
+    raise BoundEnvironmentError("selected_bound_expected_fence_refusal")
 
 
 @dataclass(repr=False)
@@ -219,6 +303,7 @@ class BoundEnvironmentProbe:
         return BoundLaunch(
             inputs,
             slots,
+            BoundGateFence(slots),
             clock,
             cutoff_ns,
             {**common, **inputs.app_server.environment, PROVIDER_KEY: key},

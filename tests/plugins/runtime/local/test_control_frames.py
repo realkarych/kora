@@ -1,6 +1,8 @@
 import asyncio
+import errno
 import hashlib
 import json
+import os
 import socket
 import struct
 
@@ -77,6 +79,40 @@ class Loose(BoundaryModel):
 
 def far_deadline() -> int:
     return SystemClock().monotonic_ns() + 10 * FRAME_PROGRESS_NS
+
+
+async def test_control_close_revokes_a_suspended_write_before_socket_disposal() -> None:
+    first, second = socket.socketpair()
+    with first, second:
+        clock = StepClock()
+        channel = BoundedChannel(first, clock)
+        first.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        for _ in range(128):
+            try:
+                first.send(bytes(4096))
+            except BlockingIOError:
+                break
+        else:
+            raise AssertionError("the test socket did not reach backpressure")
+
+        async with asyncio.timeout(5):
+            writer = asyncio.create_task(
+                channel.write_frame(
+                    b"activate", clock.monotonic_ns() + FRAME_PROGRESS_NS
+                )
+            )
+            await clock.waiting.wait()
+            os.close(first.fileno())
+            with pytest.raises(OSError, match=rf"^\[Errno {errno.EBADF}\]"):
+                channel.close()
+            unconfirmed = not channel.closed
+            with pytest.raises(ChannelError) as refused:
+                await writer
+
+        assert unconfirmed
+        assert refused.value.reason is ChannelFailure.CLOSED
+        assert channel.closed
+        assert first.fileno() == -1
 
 
 async def test_typed_frame_is_read_within_its_reservation() -> None:

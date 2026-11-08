@@ -23,6 +23,10 @@ class BoundRoleSlots:
         self._claims: dict[str, RoleClaim | None] = {}
         self._stopped = False
 
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
     def stop(self) -> None:
         self._stopped = True
 

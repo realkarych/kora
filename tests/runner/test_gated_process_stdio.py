@@ -10,6 +10,15 @@ from typing import Literal, cast
 
 import pytest
 
+from kora.conformance.capture import Capture
+from kora.conformance.common import kora_capture
+from kora.plugins.runtime.local.bound_gate_fence import BoundGateFence
+from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
+from kora.plugins.runtime.local.environment import (
+    CandidateRoleEnvironment,
+    bind_candidate_environments,
+)
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.lifetime import (
     ProcessDomain,
     ProcessLaunch,
@@ -25,6 +34,8 @@ from kora.runner.processes import (
     ProcessError,
     start_gated,
 )
+
+__all__ = ["kora_capture"]
 
 WINDOW_NS = 5_000_000_000
 MARK = "open('executed', 'w').close()"
@@ -219,6 +230,52 @@ async def test_gated_stdio_failed_acknowledgement_refuses_execution(
         assert refused.value.condition is ProcessCondition.UNKNOWN
         assert status != 0
         assert not (tmp_path / "executed").exists()
+
+
+@pytest.mark.asyncio
+async def test_one_bound_stop_fences_both_prepared_gates(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    app_dir, exec_dir = tmp_path / "app", tmp_path / "exec"
+    app_dir.mkdir()
+    exec_dir.mkdir()
+    clock = SystemClock()
+    cutoff = clock.monotonic_ns() + WINDOW_NS
+    binding = bind_candidate_environments(
+        cwd=tmp_path,
+        attempt_token=kora_capture.scope.admit("synthetic-attempt"),
+        workload={},
+        secrets={},
+        harness_credentials={},
+        roles={role: CandidateRoleEnvironment({}, ()) for role in ("app", "exec")},
+    )
+    slots = BoundRoleSlots(binding, clock, cutoff)
+    fence = BoundGateFence(slots)
+    async with (
+        gated(exec_dir, MARK, cutoff, clock) as executor,
+        gated(app_dir, MARK, cutoff, clock) as app,
+    ):
+        for owner in (executor, app):
+            fence.register(owner)
+            await owner.prepare()
+
+        fence.stop()
+        with pytest.raises(KoraProtocolError):
+            slots.claim("app")
+        for owner in fence.gates:
+            with pytest.raises(ProcessError) as refused:
+                await owner.acknowledge()
+            assert refused.value.condition is ProcessCondition.UNKNOWN
+        for owner in fence.gates:
+            await owner.settle(cutoff)
+            await owner.drain(cutoff)
+            owner.release(cutoff)
+
+        assert fence.gates == (executor, app)
+        assert all(owner.closed and owner.returncode == 72 for owner in fence.gates)
+        assert not fence.close_failed
+        assert not (exec_dir / "executed").exists()
+        assert not (app_dir / "executed").exists()
 
 
 @pytest.mark.asyncio

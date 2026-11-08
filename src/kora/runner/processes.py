@@ -686,6 +686,7 @@ class GatedProcess:
         self._activated = False
         self._closing = False
         self._released = False
+        self._gate_close_failed = False
         self._start(cwd_descriptor, stdio_limit)
 
     @property
@@ -699,6 +700,10 @@ class GatedProcess:
     @property
     def closed(self) -> bool:
         return self._released
+
+    @property
+    def gate_close_failed(self) -> bool:
+        return self._gate_close_failed
 
     @property
     def capture_bytes(self) -> int:
@@ -828,8 +833,7 @@ class GatedProcess:
         try:
             return await self._prepare()
         except (ProcessError, ChannelError, asyncio.CancelledError, ValueError):
-            if self._stdio is not None:
-                self.close_gate()
+            self._close_stdio_gate_after_failure()
             raise
 
     async def _prepare(self) -> ProcessRegistration:
@@ -858,8 +862,7 @@ class GatedProcess:
         try:
             await self._acknowledge()
         except (ProcessError, ChannelError, asyncio.CancelledError):
-            if self._stdio is not None:
-                self.close_gate()
+            self._close_stdio_gate_after_failure()
             raise
 
     async def _acknowledge(self) -> None:
@@ -887,10 +890,24 @@ class GatedProcess:
 
     def close_gate(self) -> None:
         self._closing = True
-        if self._channel is not None:
-            self._channel.close()
+        first: OSError | None = None
+        for resource in (self._channel, self._stdio):
+            if resource is not None:
+                try:
+                    resource.close()
+                except OSError as error:
+                    if first is None:
+                        first = error
+        if first is not None:
+            self._gate_close_failed = True
+            raise first
+
+    def _close_stdio_gate_after_failure(self) -> None:
         if self._stdio is not None:
-            self._stdio.close()
+            try:
+                self.close_gate()
+            except OSError:
+                return
 
     def _matches(self, process: ProcessSnapshot) -> bool:
         registration = self._registration

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from kora.protocols.lifetime import (
     EnvironmentVariable,
@@ -28,6 +28,7 @@ from kora.runner.processes import (
 
 MAX_DESCRIPTORS = 256
 MAX_ENVIRONMENT = 65_536
+GateBoundary = Literal["before-activation", "before-delivery"]
 
 
 class GatedObservationError(ValueError):
@@ -121,19 +122,24 @@ def runner_deadline(deadline: float, clock: SystemClock) -> int:
     return origin + max(0, int(remaining * 1_000_000_000))
 
 
-async def close_gated(owner: GatedProcess, cutoff: int, clock: SystemClock) -> None:
+async def close_gated(
+    owner: GatedProcess, cutoff: int, clock: SystemClock, *, natural: bool = False
+) -> None:
     if owner.closed:
         return
     owner.close_gate()
-    owner.signal(signal.SIGTERM, cutoff)
-    term = min(cutoff, clock.monotonic_ns() + 2_000_000_000)
-    try:
-        await owner.settle(term)
-    except ChannelError as error:
-        if error.reason is not ChannelFailure.DEADLINE:
-            raise
-        owner.signal(signal.SIGKILL, cutoff)
+    if natural:
         await owner.settle(cutoff)
+    else:
+        owner.signal(signal.SIGTERM, cutoff)
+        term = min(cutoff, clock.monotonic_ns() + 2_000_000_000)
+        try:
+            await owner.settle(term)
+        except ChannelError as error:
+            if error.reason is not ChannelFailure.DEADLINE:
+                raise
+            owner.signal(signal.SIGKILL, cutoff)
+            await owner.settle(cutoff)
     await owner.drain(cutoff)
     owner.release(cutoff)
 
@@ -147,6 +153,8 @@ class SelectedGatedApp:
         clock: SystemClock,
         cutoff_ns: int,
         frame_limit: int,
+        *,
+        register: Callable[[GatedProcess], None] | None = None,
     ) -> None:
         self._clock = clock
         descriptor = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -159,6 +167,8 @@ class SelectedGatedApp:
                 self._clock,
                 stdio_limit=frame_limit,
             )
+            if register is not None:
+                register(self._owner)
         finally:
             os.close(descriptor)
         self._pid: int | None = None
@@ -167,7 +177,9 @@ class SelectedGatedApp:
         self._peer: str | None = None
         self._child: str | None = None
 
-    async def prepare(self) -> StdioStreams:
+    async def prepare(
+        self, boundary: Callable[[GateBoundary], None] | None = None
+    ) -> StdioStreams:
         registration = await self._owner.prepare()
         self._pid = registration.process.pid
         with live_pid(self._pid):
@@ -180,7 +192,11 @@ class SelectedGatedApp:
             or sum(value == child for value in self._gate_targets.values()) != 2
         ):
             raise GatedObservationError("selected_gated_unexpected_child_stdio")
+        if boundary is not None:
+            boundary("before-activation")
         await self._owner.acknowledge()
+        if boundary is not None:
+            boundary("before-delivery")
         streams = self._owner.borrow_stdio()
         endpoint = cast(Descriptor, streams[1].get_extra_info("socket"))
         peer = f"socket:[{os.fstat(endpoint.fileno()).st_ino}]"
@@ -250,6 +266,11 @@ class SelectedGatedApp:
         await close_gated(
             self._owner, runner_deadline(deadline, self._clock), self._clock
         )
+        self.verify_closed()
+
+    def verify_closed(self) -> None:
+        if not self._owner.closed:
+            raise GatedObservationError("selected_gated_child_not_reaped")
         if self._endpoint is not None and self._endpoint.fileno() != -1:
             raise GatedObservationError("selected_gated_parent_endpoint_open")
 

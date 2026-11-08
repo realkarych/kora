@@ -88,6 +88,7 @@ class BoundedChannel:
         self._clock = clock
         self._reading = False
         self._writing = False
+        self._revoked = False
         self._closed = False
         self._reader: DescriptorReadiness | None = None
         self._writer: DescriptorReadiness | None = None
@@ -97,6 +98,7 @@ class BoundedChannel:
         return self._closed
 
     def close(self) -> None:
+        self._revoked = True
         if not self._closed:
             if self._reader is not None:
                 self._reader.close()
@@ -128,10 +130,10 @@ class BoundedChannel:
             raise ChannelError(ChannelFailure.BUSY)
         self._reading = True
         try:
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
             await self._wait(None, writing=False)
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
         except (ChannelError, asyncio.CancelledError):
             self.close()
@@ -142,7 +144,7 @@ class BoundedChannel:
     async def _read_exact(self, size: int, deadline_ns: int) -> bytes:
         result = bytearray()
         while len(result) < size:
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)
@@ -161,7 +163,7 @@ class BoundedChannel:
     async def _read_into(self, target: memoryview, deadline_ns: int) -> None:
         offset = 0
         while offset < len(target):
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)
@@ -232,7 +234,7 @@ class BoundedChannel:
         self._reading = True
         try:
             while True:
-                if self._closed:
+                if self._revoked:
                     raise ChannelError(ChannelFailure.CLOSED)
                 if self._clock.monotonic_ns() >= deadline_ns:
                     raise ChannelError(ChannelFailure.DEADLINE)
@@ -251,7 +253,7 @@ class BoundedChannel:
     async def _write(self, value: bytes | memoryview, deadline_ns: int) -> None:
         remaining = memoryview(value)
         while remaining:
-            if self._closed:
+            if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)

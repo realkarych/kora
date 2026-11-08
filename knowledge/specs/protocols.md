@@ -1135,6 +1135,8 @@ The project owner approved this optional provider-facing extension under [#826](
 
 [#1095](https://github.com/realkarych/kora/issues/1095) adds the private initial acquisition prerequisite. The selected fixture uses one owner for the finite role set from its environment binding. The owner consumes a claim from that exact owner and role before materializing the role environment. It checks the same monotonic cutoff before disclosure and immediately before synchronous resource acquisition. A failed handoff consumes the claim and fences further admission. The fixture registers each acquired gate before awaiting readiness and settles the earlier role if the later role fails during materialization.
 
+[#1099](https://github.com/realkarych/kora/issues/1099) connects the private stop to the exact acquired gates. The stop latches before closing their channels and stdio. Control-channel I/O is revoked before descriptor disposal, and a failed close leaves physical settlement to the current owner. The selected fixture checks stop after gate readiness and before activation, and separately after frame handoff and before stream delivery. Both checks retain the same cutoff, resource ownership and settlement path.
+
 [Part D of #184](https://github.com/realkarych/kora/issues/184#issuecomment-6680494511) owns implementation of this launch boundary. [The harness host](https://github.com/realkarych/kora/issues/199) passes the selected context and owns the adapter and Policy handoff. The [Codex execution profile](codex-execution-profile.md#bound-native-launch) defines its two slots and native conformance. The context extension is a specification pending implementation and qualification.
 
 ## 4. VCS (FR-5.2)
