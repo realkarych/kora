@@ -304,7 +304,12 @@ def feed(events: ClaudeEvents, message: Message) -> None:
         feed_user(events, message)
         return
     if isinstance(message, ResultMessage):
-        events.drop("result")
+        events.observe_result(
+            message.subtype,
+            message.is_error,
+            message.terminal_reason,
+            cast("object", message.model_usage),
+        )
         return
     if isinstance(message, StreamEvent):
         feed_stream(events, message)

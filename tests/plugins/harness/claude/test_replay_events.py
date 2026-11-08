@@ -21,6 +21,7 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
     MAX_TEXT_BYTES,
+    ResultEvent,
     SessionStartedEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -36,6 +37,9 @@ RECORDING: Path = (
 )
 USAGE_RECORDING: Path = (
     Path(__file__).resolve().parent / "recordings" / "constructed-usage-2.1.301.ndjson"
+)
+RESULT_RECORDING: Path = (
+    Path(__file__).resolve().parent / "recordings" / "constructed-result-2.1.301.ndjson"
 )
 WHEN = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
 PROMPT = "replay the turn"
@@ -164,6 +168,7 @@ async def test_claude_replay_projects_a_tool_turn(
         "turn",
         "tool_call",
         "tool_result",
+        "result",
     ]
     started = sink.events[0]
     turn = sink.events[1]
@@ -188,6 +193,11 @@ async def test_claude_replay_projects_a_tool_turn(
     assert result.data.tool_use_id == "toolu-write-1"
     assert result.data.content == "wrote"
     assert result.data.is_error is False
+    ended = sink.events[4]
+    assert isinstance(ended, ResultEvent)
+    assert ended.data.subtype == "success"
+    assert ended.data.is_error is False
+    assert ended.data.terminal_reason is None
     refuse_content(
         rendered_events(sink),
         HIDDEN,
@@ -313,6 +323,7 @@ async def test_claude_replay_projects_partial_usage(
         "session_started",
         "turn",
         "usage",
+        "result",
     ]
     turn = sink.events[1]
     usage = sink.events[2]
@@ -341,6 +352,11 @@ async def test_claude_replay_projects_partial_usage(
     assert usage.data.observed_at == WHEN
     assert usage.data.coverage.completeness == "partial"
     assert usage.data.coverage.attribution_gap is False
+    ended = sink.events[3]
+    assert isinstance(ended, ResultEvent)
+    assert ended.data.subtype == "success"
+    assert ended.data.is_error is False
+    assert ended.data.terminal_reason is None
     refuse_content(
         rendered_events(sink),
         ("hidden-delta",),
@@ -401,6 +417,64 @@ def test_claude_event_projection_keeps_the_last_usage_delta() -> None:
     assert usage[1].data.observation_sequence == 1
 
 
+@pytest.mark.asyncio
+async def test_claude_replay_projects_complete_usage(
+    claude_capture: Capture, tmp_path: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    sink = ConformanceSink(None, Trace())
+
+    await run_replayed_session(
+        context_for(claude_capture, FrozenClock()),
+        sink,
+        SecretRegistry(),
+        cwd=work,
+        launch_dir=tmp_path / "launch",
+        recording=RESULT_RECORDING,
+        environment={},
+        prompt=PROMPT,
+        tools=TOOLS,
+        bound=BOUND,
+        output_format=False,
+    )
+
+    assert [event.kind for event in sink.events] == [
+        "session_started",
+        "turn",
+        "usage",
+        "result",
+    ]
+    usage = sink.events[2]
+    ended = sink.events[3]
+    assert isinstance(usage, UsageEvent)
+    assert isinstance(ended, ResultEvent)
+    assert usage.data.message_id == "msg-usage-1"
+    assert usage.data.model == "claude-sonnet-4-5"
+    assert usage.data.input_tokens == 30
+    assert usage.data.cached_input_tokens == 1
+    assert usage.data.cache_creation_tokens == 2
+    assert usage.data.output_tokens == 7
+    assert usage.data.reasoning_tokens == 0
+    assert "reasoning_tokens" not in usage.data.known_token_fields
+    assert usage.data.basis == "price_table"
+    assert usage.data.reported_usd is None
+    assert usage.data.cache_creation_by_ttl is None
+    assert usage.data.coverage.completeness == "complete"
+    assert usage.data.coverage.attribution_gap is False
+    assert usage.data.coverage.observation_gap is False
+    assert ended.data.subtype == "success"
+    assert ended.data.is_error is False
+    assert ended.data.terminal_reason == "completed"
+    refuse_content(
+        rendered_events(sink),
+        ("hidden-delta", "hidden-result"),
+        "session content reached an event",
+    )
+    assert not (tmp_path / "launch" / "environment.json").exists()
+    assert_replay_records(claude_capture.finish(), ("hidden-delta", "hidden-result"))
+
+
 def test_claude_event_projection_refuses_a_non_integer_token_count() -> None:
     sink, events = projector()
     events.observe_init(init_fields())
@@ -414,6 +488,43 @@ def test_claude_event_projection_refuses_a_non_integer_token_count() -> None:
                 "input_tokens": True,
                 "cache_read_input_tokens": 0,
                 "cache_creation_input_tokens": 0,
+            },
+        )
+
+    error = caught.value
+    assert error.code == "harness_error"
+    assert error.message == "the Claude session failed"
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert [event.kind for event in sink.events] == ["session_started"]
+
+
+def test_claude_event_projection_refuses_a_non_integer_final_token_count() -> None:
+    sink, events = projector()
+    events.observe_init(init_fields())
+    events.usage_start(
+        "msg-1",
+        "claude-sonnet-4-5",
+        None,
+        {
+            "input_tokens": 25,
+            "cache_read_input_tokens": 4,
+            "cache_creation_input_tokens": 0,
+        },
+    )
+
+    with pytest.raises(KoraProtocolError) as caught:
+        events.observe_result(
+            "success",
+            False,
+            "completed",
+            {
+                "claude-sonnet-4-5": {
+                    "inputTokens": True,
+                    "outputTokens": 7,
+                    "cacheReadInputTokens": 1,
+                    "cacheCreationInputTokens": 2,
+                }
             },
         )
 

@@ -19,10 +19,11 @@ from kora.ir.cost import (
 )
 from kora.ir.json import JsonShapeError, parse_json_object
 from kora.observability.redaction import SecretRegistry, StreamMasker
-from kora.protocols.errors import KoraProtocolError
+from kora.protocols.errors import ERROR_CODE, KoraProtocolError
 from kora.protocols.harness import (
     MAX_TEXT_BYTES,
     EventSink,
+    ResultData,
     SessionStartedData,
     ToolCallData,
     ToolResultData,
@@ -110,6 +111,26 @@ DELTA_COUNTS: tuple[tuple[str, TokenField], ...] = (
     ("reasoning_tokens", "reasoning_tokens"),
 )
 OUTPUT_FIELDS: frozenset[TokenField] = frozenset(("output_tokens", "reasoning_tokens"))
+MODEL_COUNTS: tuple[tuple[str, TokenField], ...] = (
+    ("inputTokens", "input_tokens"),
+    ("cacheReadInputTokens", "cached_input_tokens"),
+    ("cacheCreationInputTokens", "cache_creation_tokens"),
+    ("outputTokens", "output_tokens"),
+)
+FINAL_FIELDS: frozenset[TokenField] = frozenset(
+    (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_creation_tokens",
+        "output_tokens",
+    )
+)
+
+
+def protocol_code(value: object) -> str:
+    if not isinstance(value, str) or ERROR_CODE.fullmatch(value) is None:
+        refused()
+    return value
 
 
 def require_identifier(value: object) -> str:
@@ -195,6 +216,22 @@ class ToolPiece:
     tool_use_id: str
 
 
+@dataclass(frozen=True)
+class RecordedResult:
+    subtype: str
+    is_error: bool
+    terminal_reason: str | None
+
+
+def recorded_result(
+    subtype: object, is_error: object, terminal_reason: object
+) -> RecordedResult:
+    if type(is_error) is not bool:
+        refused()
+    reason = None if terminal_reason is None else protocol_code(terminal_reason)
+    return RecordedResult(protocol_code(subtype), is_error, reason)
+
+
 @dataclass
 class OpenUsage:
     message_id: str
@@ -206,6 +243,38 @@ class OpenUsage:
     output_tokens: int
     reasoning_tokens: int
     known: frozenset[TokenField]
+    complete: bool = False
+
+
+def apply_final_usage(call: OpenUsage | None, model_usage: object) -> None:
+    if model_usage is None:
+        return
+    if not isinstance(model_usage, dict):
+        refused()
+    entries = cast("dict[object, object]", model_usage)
+    if not entries:
+        return
+    if call is None or len(entries) != 1:
+        refused()
+    key, entry = next(iter(entries.items()))
+    model = require_identifier(key)
+    if call.model is not None and call.model != model:
+        refused()
+    counts, known = usage_counts(entry, MODEL_COUNTS)
+    if known != FINAL_FIELDS:
+        refused()
+    output = counts["output_tokens"]
+    if "reasoning_tokens" in call.known and call.reasoning_tokens > output:
+        refused()
+    call.model = model
+    call.input_tokens = counts["input_tokens"]
+    call.cached_input_tokens = counts["cached_input_tokens"]
+    call.cache_creation_tokens = counts["cache_creation_tokens"]
+    call.output_tokens = output
+    if "reasoning_tokens" not in call.known:
+        call.reasoning_tokens = 0
+    call.known = FINAL_FIELDS | (call.known & frozenset(("reasoning_tokens",)))
+    call.complete = True
 
 
 class ClaudeEvents:
@@ -232,6 +301,7 @@ class ClaudeEvents:
         self._tools: list[ToolPiece] = []
         self._usage: OpenUsage | None = None
         self._usage_sequence = 0
+        self._result: RecordedResult | None = None
 
     def observe_init(self, data: object) -> None:
         if self._started or not isinstance(data, dict):
@@ -343,6 +413,19 @@ class ClaudeEvents:
         call.reasoning_tokens = counts["reasoning_tokens"]
         call.known = call.known - OUTPUT_FIELDS | known
 
+    def observe_result(
+        self,
+        subtype: object,
+        is_error: object,
+        terminal_reason: object,
+        model_usage: object,
+    ) -> None:
+        if not self._started or self._result is not None:
+            refused()
+        recorded = recorded_result(subtype, is_error, terminal_reason)
+        apply_final_usage(self._usage, model_usage)
+        self._result = recorded
+
     def drop(self, kind: str) -> None:
         known = {
             "assistant",
@@ -357,6 +440,7 @@ class ClaudeEvents:
     def finish(self) -> None:
         self._flush()
         self._emit_usage()
+        self._emit_result()
         if not self._started:
             refused()
 
@@ -437,7 +521,7 @@ class ClaudeEvents:
                     version=1,
                     observation_id=call.message_id,
                     observation_sequence=sequence,
-                    completeness="partial",
+                    completeness="complete" if call.complete else "partial",
                     observed_at=when,
                     attribution_gap=call.model is None,
                     observation_gap=False,
@@ -450,6 +534,23 @@ class ClaudeEvents:
         self._emit("usage", usage)
         self._usage_sequence = sequence + 1
 
+    def _emit_result(self) -> None:
+        recorded = self._result
+        if recorded is None:
+            return
+        self._result = None
+        try:
+            result = ResultData(
+                subtype=recorded.subtype,
+                is_error=recorded.is_error,
+                terminal_reason=recorded.terminal_reason,
+            )
+        except ValidationError:
+            result = None
+        if result is None:
+            refused()
+        self._emit("result", result)
+
     def _emit(
         self,
         kind: str,
@@ -457,7 +558,8 @@ class ClaudeEvents:
         | TurnData
         | ToolCallData
         | ToolResultData
-        | UsageData,
+        | UsageData
+        | ResultData,
     ) -> None:
         try:
             dumped = model.model_dump(mode="json")
