@@ -1,6 +1,7 @@
 import pickle
 from dataclasses import dataclass, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from traceback import format_exception, walk_tb
 
 import pytest
@@ -172,19 +173,20 @@ async def promote_two_stages(
 
 @pytest_asyncio.fixture
 async def real_promotions(
-    database: Database, tmp_path: Path, kora_capture: Capture
+    database: Database, kora_capture: Capture
 ) -> tuple[GraphStage, GraphStage, PromotionEvidence]:
     ledger = ConnectionLedger(database)
-    provider = InspectedStorage(local_configuration(tmp_path / "store"))
-    try:
-        original, sibling = await seed_stages(database, provider.identity())
-        assert ledger.outstanding == database.units_in_flight() == 0
-        evidence = await promote_two_stages(
-            provider, context_for(kora_capture), original, sibling
-        )
-    finally:
-        await provider.aclose()
-    provider.assert_closed()
+    with TemporaryDirectory(prefix="kora-graph-promotion-", dir="/tmp") as directory:
+        provider = InspectedStorage(local_configuration(Path(directory) / "store"))
+        try:
+            original, sibling = await seed_stages(database, provider.identity())
+            assert ledger.outstanding == database.units_in_flight() == 0
+            evidence = await promote_two_stages(
+                provider, context_for(kora_capture), original, sibling
+            )
+        finally:
+            await provider.aclose()
+        provider.assert_closed()
     assert ledger.outstanding == database.units_in_flight() == 0
     assert database.writer_is_free()
     return original, sibling, evidence
