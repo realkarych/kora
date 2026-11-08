@@ -71,21 +71,15 @@ def sources_for(
         pinned, max_encoded_bytes=ENCODED_LIMIT
     )
     parameter_value = ObjectReader(parameter_text).object()
-    checked_parameters = read_graph_parameter_binding(
+    read_graph_parameter_binding(
         pinned, parameter_value, max_encoded_bytes=ENCODED_LIMIT
     )
     type_text = build_graph_type_contracts(ir_text, max_encoded_bytes=ENCODED_LIMIT)
-    checked_types = read_graph_type_contracts(
-        ir_text, section_value(type_text), max_encoded_bytes=ENCODED_LIMIT
-    )
-    records = [cast("JsonObject", item) for item in section_value(checked_types)]
-    named_roots: JsonObject = {
-        cast("str", record["name"]): record["schema"] for record in records
-    }
-    effective = ObjectReader(checked_parameters).object()["schema"]
+    records = section_value(type_text)
+    read_graph_type_contracts(ir_text, records, max_encoded_bytes=ENCODED_LIMIT)
     arena = build_parameter_schema_arena(
-        effective,
-        named_roots,
+        parameter_value["schema"],
+        records,
         budget=ample(),
         max_container_depth=64,
         max_integer_bits=20_000,

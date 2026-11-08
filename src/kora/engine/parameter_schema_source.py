@@ -23,6 +23,7 @@ _FRAME_ENTRIES: int = 8
 _ROW_ENTRIES: int = 8
 _PAIR_ENTRIES: int = 8
 _LIST_ENTRIES: int = 5
+_TYPE_RECORD_FIELDS: int = 8
 
 
 class ParameterSchemaSourceFailure(StrEnum):
@@ -70,9 +71,7 @@ class _Builder:
         self.nodes: list[SchemaNode] = []
         self.frames: list[_Frame] = []
 
-    def _rows(
-        self, source: dict[object, object], *, named_roots: bool = False
-    ) -> list[tuple[str, object]]:
+    def _rows(self, source: dict[object, object]) -> list[tuple[str, object]]:
         count = len(source)
         self.budget.reserve(1 + 2 * count, entries=_ROW_ENTRIES * count)
         rows: list[tuple[str, object]] = []
@@ -82,10 +81,6 @@ class _Builder:
                     ParameterSchemaSourceFailure.INVALID
                 )
             row: tuple[str, object] = (key, value)
-            if named_roots and type(value) is not dict:
-                raise ParameterSchemaSourceRejected(
-                    ParameterSchemaSourceFailure.INVALID
-                )
             rows.append(row)
         if len(rows) != count:
             raise ParameterSchemaSourceRejected(ParameterSchemaSourceFailure.INVALID)
@@ -193,14 +188,40 @@ class _Builder:
                 self._attach(frame, self._scalar(value))
         raise ParameterSchemaSourceRejected(ParameterSchemaSourceFailure.INVALID)
 
-    def named_table(self, source: dict[object, object]) -> int:
-        rows = self._rows(source, named_roots=True)
-        self.budget.reserve(entries=_PAIR_ENTRIES * len(rows))
+    def named_table(self, records: list[object]) -> int:
+        self.budget.reserve(1 + len(records), entries=_PAIR_ENTRIES * len(records))
         members: list[tuple[int, int]] = []
         maximum_key = 0
-        for index in range(len(rows)):
-            self.budget.reserve()
-            name, root = rows[index]
+        previous: str | None = None
+        for record in records:
+            self.budget.reserve(1 + _TYPE_RECORD_FIELDS)
+            mapping = cast("dict[object, object]", record)
+            if type(record) is not dict or len(mapping) > _TYPE_RECORD_FIELDS:
+                raise ParameterSchemaSourceRejected(
+                    ParameterSchemaSourceFailure.INVALID
+                )
+            name: object = None
+            root: object = None
+            for key, value in mapping.items():
+                if type(key) is not str:
+                    raise ParameterSchemaSourceRejected(
+                        ParameterSchemaSourceFailure.INVALID
+                    )
+                if key == "name":
+                    name = value
+                elif key == "schema":
+                    root = value
+            if type(name) is not str or type(root) is not dict:
+                raise ParameterSchemaSourceRejected(
+                    ParameterSchemaSourceFailure.INVALID
+                )
+            if previous is not None:
+                self.budget.reserve(1 + min(len(previous), len(name)))
+                if previous >= name:
+                    raise ParameterSchemaSourceRejected(
+                        ParameterSchemaSourceFailure.INVALID
+                    )
+            previous = name
             key = self._scalar(name)
             document = self.document(cast("dict[object, object]", root))
             self.budget.reserve()
@@ -215,14 +236,14 @@ class _Builder:
 
 def _build(
     parameters: object,
-    type_schemas: object,
+    type_records: object,
     budget: ParameterReferenceBudget,
     max_container_depth: int,
     max_integer_bits: int,
 ) -> ParameterSchemaArena:
     if (
         type(parameters) is not dict
-        or type(type_schemas) is not dict
+        or type(type_records) is not list
         or not valid_parameter_reference_budget(budget)
         or any(
             type(limit) is not int or not 0 <= limit <= sys.maxsize
@@ -232,13 +253,13 @@ def _build(
         raise ParameterSchemaSourceRejected(ParameterSchemaSourceFailure.INVALID)
     builder = _Builder(budget, max_container_depth, max_integer_bits)
     root = builder.document(cast("dict[object, object]", parameters))
-    type_roots = builder.named_table(cast("dict[object, object]", type_schemas))
+    type_roots = builder.named_table(cast("list[object]", type_records))
     return builder.finish(root, type_roots)
 
 
 def build_parameter_schema_arena(
     parameters: object,
-    type_schemas: object,
+    type_records: object,
     *,
     budget: ParameterReferenceBudget,
     max_container_depth: int,
@@ -246,7 +267,7 @@ def build_parameter_schema_arena(
 ) -> ParameterSchemaArena:
     try:
         return _build(
-            parameters, type_schemas, budget, max_container_depth, max_integer_bits
+            parameters, type_records, budget, max_container_depth, max_integer_bits
         )
     except ParameterSchemaSourceRejected as rejected:
         reason = rejected.reason
@@ -265,5 +286,5 @@ def build_parameter_schema_arena(
         )
     except MemoryError:
         reason = ParameterSchemaSourceFailure.CAPACITY
-    del parameters, type_schemas, budget, max_container_depth, max_integer_bits
+    del parameters, type_records, budget, max_container_depth, max_integer_bits
     raise_safe(ParameterSchemaSourceRejected(reason))

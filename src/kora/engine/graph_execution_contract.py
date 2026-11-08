@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Never
+from typing import Never, cast
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
@@ -21,6 +21,15 @@ from kora.engine.graph_version_identity import (
     GraphVersionPin,
     graph_version_hash_bytes,
     read_graph_version_identity,
+)
+from kora.engine.parameter_schema_references import (
+    ParameterReferenceBudget,
+    ParameterSchemaArena,
+)
+from kora.engine.parameter_schema_source import (
+    ParameterSchemaSourceFailure,
+    ParameterSchemaSourceRejected,
+    build_parameter_schema_arena,
 )
 from kora.ir.json import JsonObject
 from kora.ir.structured_schema_work import PARAMETERS as SCHEMA_PREPARATION_LIMITS
@@ -50,13 +59,30 @@ class ExecutionContractReadLimits:
     max_work: int
 
 
+@dataclass(frozen=True, slots=True)
+class ParameterSchemaReadLimits:
+    work: int
+    payload_bytes: int
+    entries: int
+    max_container_depth: int
+    max_integer_bits: int
+
+
 class CheckedExecutionContract:
-    __slots__ = ("scope", "pin", "canonical_ir", "canonical_contract", "resources")
+    __slots__ = (
+        "scope",
+        "pin",
+        "canonical_ir",
+        "canonical_contract",
+        "resources",
+        "parameter_schema",
+    )
     scope: GraphResourceScope
     pin: GraphVersionPin
     canonical_ir: str
     canonical_contract: str
     resources: GraphResourceReferences
+    parameter_schema: ParameterSchemaArena | None
 
     def __init__(
         self,
@@ -65,12 +91,14 @@ class CheckedExecutionContract:
         canonical_ir: str,
         canonical_contract: str,
         resources: GraphResourceReferences,
+        parameter_schema: ParameterSchemaArena | None = None,
     ) -> None:
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "pin", pin)
         object.__setattr__(self, "canonical_ir", canonical_ir)
         object.__setattr__(self, "canonical_contract", canonical_contract)
         object.__setattr__(self, "resources", resources)
+        object.__setattr__(self, "parameter_schema", parameter_schema)
 
     def __setattr__(self, name: str, value: object) -> Never:
         raise AttributeError("checked execution contract is immutable")
@@ -195,6 +223,23 @@ def check_execution_contract_members(
     )
 
 
+def _prepare_parameter_schema(
+    saved: JsonObject, limits: ParameterSchemaReadLimits
+) -> ParameterSchemaArena:
+    if type(limits) is not ParameterSchemaReadLimits:
+        raise GraphValueRejected(GraphValueFailure.BUDGET)
+    parameters = cast(JsonObject, saved["parameters"])
+    return build_parameter_schema_arena(
+        parameters["schema"],
+        saved["type_contracts"],
+        budget=ParameterReferenceBudget(
+            limits.work, limits.payload_bytes, limits.entries
+        ),
+        max_container_depth=limits.max_container_depth,
+        max_integer_bits=limits.max_integer_bits,
+    )
+
+
 def _checked_result(
     acquired: AcquiredGraphVersion,
     pin: GraphVersionPin,
@@ -202,6 +247,7 @@ def _checked_result(
     physical: object,
     owners: tuple[GraphResourceOwner, ...],
     limits: ExecutionContractReadLimits,
+    parameter_schema_limits: ParameterSchemaReadLimits | None,
 ) -> CheckedExecutionContract | GraphValueFailure:
     try:
         execution_contract_read_reservation(limits)
@@ -215,19 +261,37 @@ def _checked_result(
         ):
             raise GraphValueRejected(GraphValueFailure.INVALID)
         identity = read_graph_version_identity(acquired, pin, limits=limits.identity)
+        saved = identity.values.execution_contract
         resources = check_execution_contract_members(
             identity.canonical_ir,
-            identity.values.execution_contract,
+            saved,
             physical,
             scope,
             owners,
             limits,
         )
+        parameter_schema = (
+            None
+            if parameter_schema_limits is None
+            else _prepare_parameter_schema(saved, parameter_schema_limits)
+        )
         return CheckedExecutionContract(
-            scope, pin, identity.canonical_ir, identity.canonical_contract, resources
+            scope,
+            pin,
+            identity.canonical_ir,
+            identity.canonical_contract,
+            resources,
+            parameter_schema,
         )
     except GraphValueRejected as rejected:
         return rejected.reason
+    except ParameterSchemaSourceRejected as rejected:
+        rejected.__traceback__ = None
+        return (
+            GraphValueFailure.BUDGET
+            if rejected.reason is ParameterSchemaSourceFailure.CAPACITY
+            else GraphValueFailure.INVALID
+        )
 
 
 def check_detached_execution_contract(
@@ -238,9 +302,12 @@ def check_detached_execution_contract(
     owners: tuple[GraphResourceOwner, ...],
     *,
     limits: ExecutionContractReadLimits,
+    parameter_schema_limits: ParameterSchemaReadLimits | None = None,
 ) -> CheckedExecutionContract:
-    result = _checked_result(acquired, pin, scope, physical, owners, limits)
+    result = _checked_result(
+        acquired, pin, scope, physical, owners, limits, parameter_schema_limits
+    )
     if isinstance(result, CheckedExecutionContract):
         return result
-    del acquired, pin, scope, physical, owners
+    del acquired, pin, scope, physical, owners, parameter_schema_limits
     raise_safe(GraphValueRejected(result))

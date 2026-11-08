@@ -1,3 +1,4 @@
+import gc
 import json
 import pickle
 from dataclasses import replace
@@ -15,6 +16,7 @@ from kora.db.reads import graph_version_by_number
 from kora.db.tables import graph_version
 from kora.engine.graph_execution_contract import (
     ExecutionContractReadLimits,
+    ParameterSchemaReadLimits,
     check_detached_execution_contract,
 )
 from kora.engine.graph_projection_paths import build_graph_cel_projection_paths
@@ -24,9 +26,16 @@ from kora.engine.graph_resource_references import (
     build_graph_resource_references,
 )
 from kora.engine.graph_version_identity import (
+    CheckedGraphVersionIdentity,
     GraphVersionPin,
     PreparedGraphVersionIdentity,
     prepare_graph_version_identity,
+)
+from kora.engine.parameter_schema_references import (
+    ParameterReferenceBudget,
+    ParameterReferenceKeyword,
+    ParameterSchemaPosition,
+    resolve_parameter_reference,
 )
 from kora.ir.json import JsonObject
 from tests.db.closing import ConnectionLedger
@@ -46,6 +55,7 @@ from tests.engine.test_graph_resource_references import (
     declared,
     physical_file,
 )
+from tests.engine.test_graph_types import custom
 
 LIMITS = ExecutionContractReadLimits(
     VERSION_LIMITS,
@@ -56,6 +66,8 @@ LIMITS = ExecutionContractReadLimits(
     1_000_000_000_000_000,
 )
 MARKER = "protected-complete-contract-marker"
+SCHEMA_LIMITS = ParameterSchemaReadLimits(100_000, 100_000, 100_000, 32, 4096)
+NO_SCHEMA_WORK = replace(SCHEMA_LIMITS, work=0)
 
 
 def complete_inputs(
@@ -64,6 +76,7 @@ def complete_inputs(
     resources: bool = True,
     long_integer: bool = False,
     second_command: bool = False,
+    parameter_reference: bool = False,
 ) -> tuple[JsonObject, JsonObject, JsonObject, tuple[GraphResourceOwner, ...]]:
     raw = output_document("command")
     graph = child(raw, "graph")
@@ -80,6 +93,14 @@ def complete_inputs(
     approval["depends_on"] = ["producer"]
     child(approval, "config")["approve_when"] = "response.decision == 'approve'"
     child(raw, "type_contracts")["AgentSession"] = {"builtin_revision": "1"}
+    if parameter_reference:
+        graph["params"] = {
+            "$ref": "urn:kora:artifact:example:Parameter#/$defs/alias",
+            "$defs": {"leaf": False},
+        }
+        child(raw, "type_contracts")["example/Parameter"] = custom(
+            {"$defs": {"alias": {"$ref": "#/$defs/leaf"}, "leaf": True}}
+        )
     raw["x-protected"] = MARKER
     if long_integer:
         raw["x-decimal"] = 10**800 + 71
@@ -207,7 +228,13 @@ def test_complete_reader_refuses_every_rehashed_inconsistent_member(field: str) 
 
     with pytest.raises(GraphValueRejected) as refusal:
         check_detached_execution_contract(
-            acquired, pin, SCOPE, refs, owners, limits=LIMITS
+            acquired,
+            pin,
+            SCOPE,
+            refs,
+            owners,
+            limits=LIMITS,
+            parameter_schema_limits=NO_SCHEMA_WORK,
         )
 
     reason = (
@@ -228,6 +255,7 @@ def test_complete_reader_accepts_legacy_parameter_inner_order() -> None:
     )
 
     assert checked.canonical_contract == prepared.values.execution_contract
+    assert checked.parameter_schema is None
 
 
 def test_complete_reader_rejects_swapped_valid_refs_in_representational_graph() -> None:
@@ -245,7 +273,13 @@ def test_complete_reader_rejects_swapped_valid_refs_in_representational_graph() 
 
     with pytest.raises(GraphValueRejected) as refusal:
         check_detached_execution_contract(
-            acquired, pin, SCOPE, refs, owners, limits=LIMITS
+            acquired,
+            pin,
+            SCOPE,
+            refs,
+            owners,
+            limits=LIMITS,
+            parameter_schema_limits=NO_SCHEMA_WORK,
         )
 
     accepted = ObjectReader(checked.resources.text).object()
@@ -307,16 +341,25 @@ def test_complete_reader_admits_exact_aggregate_and_refuses_one_short(
     assert_refused(malformed.value, GraphValueFailure.INVALID)
 
 
-def test_complete_reader_opaque_result_and_refusal_even_under_ambient_error() -> None:
+@pytest.mark.parametrize("exhausted", [False, True], ids=["wrong-pin", "source-budget"])
+def test_complete_reader_opaque_result_and_refusal_even_under_ambient_error(
+    exhausted: bool,
+) -> None:
     raw, envelope, refs, owners = complete_inputs(SCOPE)
     prepared, pin = prepared_case(raw, envelope, SCOPE)
     acquired = transport(prepared, SCOPE)
-    wrong_pin = replace(pin, execution_contract_digest=DIGEST)
+    requested_pin = pin if exhausted else replace(pin, execution_contract_digest=DIGEST)
     slot = "canonical_ir"
     acquired_slot = "_namespace_id"
 
     checked = check_detached_execution_contract(
-        acquired, pin, SCOPE, refs, owners, limits=LIMITS
+        acquired,
+        pin,
+        SCOPE,
+        refs,
+        owners,
+        limits=LIMITS,
+        parameter_schema_limits=SCHEMA_LIMITS,
     )
     with pytest.raises(AttributeError, match="immutable"):
         setattr(checked, slot, MARKER)
@@ -335,12 +378,20 @@ def test_complete_reader_opaque_result_and_refusal_even_under_ambient_error() ->
     except RuntimeError:
         with pytest.raises(GraphValueRejected) as refusal:
             check_detached_execution_contract(
-                acquired, wrong_pin, SCOPE, refs, owners, limits=LIMITS
+                acquired,
+                requested_pin,
+                SCOPE,
+                refs,
+                owners,
+                limits=LIMITS,
+                parameter_schema_limits=NO_SCHEMA_WORK,
             )
 
     assert MARKER not in repr(checked)
+    assert checked.parameter_schema is not None
     assert MARKER not in repr(encoder.value)
-    assert_refused(refusal.value, GraphValueFailure.INVALID)
+    reason = GraphValueFailure.BUDGET if exhausted else GraphValueFailure.INVALID
+    assert_refused(refusal.value, reason)
     frames = {
         frame.f_code.co_name: frame.f_locals
         for frame, _ in walk_tb(refusal.value.__traceback__)
@@ -348,6 +399,37 @@ def test_complete_reader_opaque_result_and_refusal_even_under_ambient_error() ->
     assert set(frames["check_detached_execution_contract"]) == {"limits", "result"}
     assert "_checked_result" not in frames
     assert "_acquired_values" not in frames
+    assert "_prepare_parameter_schema" not in frames
+
+
+def test_complete_reader_releases_checked_identity_on_source_budget_refusal() -> None:
+    raw, envelope, refs, owners = complete_inputs(SCOPE)
+    prepared, pin = prepared_case(raw, envelope, SCOPE)
+    acquired = transport(prepared, SCOPE)
+    collecting = gc.isenabled()
+
+    gc.disable()
+    try:
+        with pytest.raises(GraphValueRejected) as refusal:
+            check_detached_execution_contract(
+                acquired,
+                pin,
+                SCOPE,
+                refs,
+                owners,
+                limits=LIMITS,
+                parameter_schema_limits=NO_SCHEMA_WORK,
+            )
+        retained = any(
+            type(candidate) is CheckedGraphVersionIdentity and candidate.pin is pin
+            for candidate in gc.get_objects()
+        )
+    finally:
+        if collecting:
+            gc.enable()
+
+    assert_refused(refusal.value, GraphValueFailure.BUDGET)
+    assert not retained
 
 
 async def insert_case(
@@ -393,7 +475,7 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
         scope, bad_scope, empty_scope = (
             GraphResourceScope(namespace, graph, seeder.new_id()) for _ in range(3)
         )
-    raw, envelope, refs, owners = complete_inputs(scope)
+    raw, envelope, refs, owners = complete_inputs(scope, parameter_reference=True)
     good, pin = prepared_case(raw, envelope, scope)
     changed = dict(envelope)
     changed["outputs"] = []
@@ -439,7 +521,25 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
     assert ledger.outstanding == database.units_in_flight() == 0
     after_read = ledger.checkouts
     checked = check_detached_execution_contract(
-        acquired, pin, scope, native.resources, owners, limits=LIMITS
+        acquired,
+        pin,
+        scope,
+        native.resources,
+        owners,
+        limits=LIMITS,
+        parameter_schema_limits=SCHEMA_LIMITS,
+    )
+    arena = checked.parameter_schema
+    assert arena is not None
+    budget = ParameterReferenceBudget(100_000, 100_000, 100_000)
+    alias = resolve_parameter_reference(
+        arena,
+        ParameterSchemaPosition(arena.root, arena.root),
+        keyword=ParameterReferenceKeyword.REF,
+        budget=budget,
+    )
+    leaf = resolve_parameter_reference(
+        arena, alias, keyword=ParameterReferenceKeyword.REF, budget=budget
     )
     checked_empty = check_detached_execution_contract(
         empty_acquired,
@@ -466,6 +566,7 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
             empty_native.resources,
             empty_owners,
             limits=LIMITS,
+            parameter_schema_limits=NO_SCHEMA_WORK,
         )
     await database.close()
 
@@ -473,8 +574,11 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
     assert checked.pin == pin
     assert checked.scope == scope
     assert checked_empty.scope == empty_scope
+    assert checked_empty.parameter_schema is None
     assert checked.canonical_contract == good.values.execution_contract
     assert ObjectReader(checked.resources.text).object() == refs
+    assert leaf.document_root == alias.document_root != arena.root
+    assert arena.nodes[leaf.node].value is True
     assert_refused(invalid_output.value, GraphValueFailure.INVALID)
     assert_refused(invalid_namespace.value, GraphValueFailure.INVALID)
     assert ledger.checkouts == after_read

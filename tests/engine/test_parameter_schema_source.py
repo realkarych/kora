@@ -69,7 +69,10 @@ def test_schema_source_preserves_canonical_scalars_in_ordered_containers() -> No
 
 def test_schema_source_named_table_does_not_add_document_depth() -> None:
     parameters: JsonObject = {}
-    types: JsonObject = {"example/Z": {"type": "integer"}, "example/A": {}}
+    types: list[JsonObject] = [
+        {"name": "example/A", "schema": {}},
+        {"name": "example/Z", "schema": {"type": "integer"}},
+    ]
 
     arena = build_parameter_schema_arena(
         parameters, types, budget=ample(), max_container_depth=1, max_integer_bits=0
@@ -91,7 +94,7 @@ def test_schema_source_duplicates_acyclic_occurrences_and_detaches() -> None:
     parameters: JsonObject = {"right": shared, "left": shared}
 
     arena = build_parameter_schema_arena(
-        parameters, {}, budget=ample(), max_container_depth=2, max_integer_bits=0
+        parameters, [], budget=ample(), max_container_depth=2, max_integer_bits=0
     )
     shared["enabled"] = False
     left = member(arena, arena.root, "left")
@@ -104,32 +107,42 @@ def test_schema_source_duplicates_acyclic_occurrences_and_detaches() -> None:
     assert arena.nodes[left_leaf].value is arena.nodes[right_leaf].value is True
 
 
+def metered_type_records() -> list[JsonObject]:
+    return [{"name": "A", "schema": {}}, {"name": "Z", "schema": {}}]
+
+
 def test_schema_source_accepts_exact_work_payload_and_entries() -> None:
     parameters: JsonObject = {"x": [True]}
-    budget = ParameterReferenceBudget(42, 8, 70)
+    records = metered_type_records()
+    budget = ParameterReferenceBudget(94, 24, 126)
 
     arena = build_parameter_schema_arena(
-        parameters, {}, budget=budget, max_container_depth=2, max_integer_bits=0
+        parameters, records, budget=budget, max_container_depth=2, max_integer_bits=0
     )
 
-    assert len(arena.nodes) == 5
+    assert len(arena.nodes) == 9
     assert budget == ParameterReferenceBudget(0, 0, 0)
 
 
 @pytest.mark.parametrize(
     ("work", "payload", "entries", "depth"),
-    [(41, 8, 70, 2), (42, 7, 70, 2), (42, 8, 69, 2), (42, 8, 70, 1)],
+    [(93, 24, 126, 2), (94, 23, 126, 2), (94, 24, 125, 2), (94, 24, 126, 1)],
     ids=["work", "payload", "entries", "depth"],
 )
 def test_schema_source_refuses_an_independently_short_bound(
     work: int, payload: int, entries: int, depth: int
 ) -> None:
     parameters: JsonObject = {"x": [True]}
+    records = metered_type_records()
     budget = ParameterReferenceBudget(work, payload, entries)
 
     with pytest.raises(ParameterSchemaSourceRejected) as refusal:
         build_parameter_schema_arena(
-            parameters, {}, budget=budget, max_container_depth=depth, max_integer_bits=0
+            parameters,
+            records,
+            budget=budget,
+            max_container_depth=depth,
+            max_integer_bits=0,
         )
 
     assert refusal.value.reason is ParameterSchemaSourceFailure.CAPACITY
@@ -142,14 +155,14 @@ def test_schema_source_keeps_integer_width_separate() -> None:
     collecting = gc.isenabled()
 
     arena = build_parameter_schema_arena(
-        parameters, {}, budget=ample(), max_container_depth=2, max_integer_bits=81
+        parameters, [], budget=ample(), max_container_depth=2, max_integer_bits=81
     )
     gc.disable()
     try:
         with pytest.raises(ParameterSchemaSourceRejected) as refusal:
             build_parameter_schema_arena(
                 parameters,
-                {},
+                [],
                 budget=limited,
                 max_container_depth=2,
                 max_integer_bits=80,
@@ -168,15 +181,31 @@ def test_schema_source_keeps_integer_width_separate() -> None:
     assert not retained
 
 
+INVALID_SOURCES: list[tuple[object, object]] = [
+    (False, []),
+    ({}, {}),
+    ({7: True}, []),
+    ({}, [{"name": "example/Type", "schema": False}]),
+    ({}, [{"name": "Z", "schema": {}}, {"name": "A", "schema": {}}]),
+    ({}, [{"name": "A", "schema": {}}, {"name": "A", "schema": {}}]),
+    ({}, [{"name": "A", "schema": {}, **{str(i): None for i in range(7)}}]),
+    ({}, [{"name": "A", "schema": {}, 7: None}]),
+]
+
+
 @pytest.mark.parametrize(
     ("parameters", "types"),
-    [
-        (False, {}),
-        ({}, []),
-        ({7: True}, {}),
-        ({}, {"example/Type": False}),
+    INVALID_SOURCES,
+    ids=[
+        "parameter-root",
+        "type-list",
+        "object-key",
+        "named-root",
+        "unsorted-name",
+        "duplicate-name",
+        "wide-record",
+        "record-key",
     ],
-    ids=["parameter-root", "type-map", "object-key", "named-root"],
 )
 def test_schema_source_refuses_invalid_input_shape(
     parameters: object, types: object
@@ -205,7 +234,7 @@ def test_schema_source_refuses_late_cycle_without_retaining_private_state() -> N
         with pytest.raises(ParameterSchemaSourceRejected) as refusal:
             build_parameter_schema_arena(
                 parameters,
-                {},
+                [],
                 budget=ample(),
                 max_container_depth=20,
                 max_integer_bits=0,
