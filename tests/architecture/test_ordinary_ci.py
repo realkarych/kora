@@ -9,7 +9,7 @@ from typing import cast
 import pytest
 
 from tests.measurements.storage_evidence_common import EvidenceFailure, junit_nodes
-from tests.scaffold_evidence import COHORTS, SHARD_CHILDREN
+from tests.scaffold_evidence import COHORTS
 from tests.support.workflows import (
     command_lines,
     step_list,
@@ -76,13 +76,22 @@ WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped
 LANE_OUTCOMES = {
     "conformance": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "remainder": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "integration": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "local-runtime": {},
 }
 
 
-def shard_evidence(shard: str) -> tuple[str, ...]:
-    children = SHARD_CHILDREN[shard]
+EXPECTED_ORDINARY = {
+    ("ubuntu-24.04", "conformance"): ("first", "second"),
+    ("ubuntu-24.04", "remainder"): ("measurements", "other"),
+    ("ubuntu-24.04", "integration"): ("integration",),
+    ("macos-15", "conformance"): ("first", "second"),
+    ("macos-15", "remainder"): ("measurements", "integration", "other"),
+}
+
+
+def shard_evidence(children: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(
         f"{child}.{suffix}" for child in children for suffix in ("log", "xml", "exit")
     )
@@ -101,11 +110,6 @@ def ordinary_shell() -> str:
     )
 
 
-def shard_branch(shard: str) -> str:
-    launches = ordinary_shell().partition('pids=()\ncase "$KORA_SCAFFOLD_LANE" in\n')[2]
-    return launches.partition(f"  {shard})\n")[2].partition("    ;;\n")[0]
-
-
 def evidence_validation() -> str:
     marker = 'for name in "${evidence[@]}"; do\n  test -f'
     remainder = ordinary_shell().partition(marker)[2]
@@ -117,7 +121,7 @@ BASE_TEMPORARY = "tmp-"
 PID_RECORD = ("pids+=", "(", "$!", ")")
 
 
-def launch_command(child: str) -> tuple[str, ...]:
+def launch_command() -> tuple[str, ...]:
     return (
         "uv",
         "run",
@@ -128,27 +132,17 @@ def launch_command(child: str) -> tuple[str, ...]:
         "-v",
         "--exitfirst",
         "-o",
-        f"cache_dir={ORDINARY_OUTPUT}/cache-{child}",
-        f"--basetemp={ORDINARY_OUTPUT}/{BASE_TEMPORARY}{child}",
-        f"--junitxml={ORDINARY_OUTPUT}/{child}.xml",
-        f"${{{child}[@]}}",
+        f"cache_dir={ORDINARY_OUTPUT}/cache-$name",
+        f"--basetemp={ORDINARY_OUTPUT}/{BASE_TEMPORARY}$name",
+        f"--junitxml={ORDINARY_OUTPUT}/$name.xml",
+        "${arguments[@]}",
         ">",
-        f"{ORDINARY_OUTPUT}/{child}.log",
+        f"{ORDINARY_OUTPUT}/$name.log",
         "2",
         ">&",
         "1",
         "&",
     )
-
-
-def declared_array(lines: list[tuple[str, ...]], name: str) -> list[str]:
-    values = [
-        list(line[2:-1])
-        for line in lines
-        if line[:2] == (f"{name}=", "(") and line[-1] == ")"
-    ]
-    assert len(values) == 1
-    return values[0]
 
 
 def rendered(template: str, row: dict[str, object]) -> str:
@@ -184,21 +178,16 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
     assert "not measurement" in collection[0]
     assert not any("--collect-only" in line for line in lines)
     assert download["pattern"] == "scaffold-tests-*"
-    for shard, children in SHARD_CHILDREN.items():
-        branch = command_lines(shard_branch(shard))
-        names = declared_array(branch, "names")
-        launches = [launch_command(child) for child in names]
-        assert sorted(names) == sorted(children)
-        assert [
-            line for line in branch if "tests.support.ordinary_pytest" in line
-        ] == launches
-        assert all(
-            branch[branch.index(launch) + 1] == PID_RECORD for launch in launches
-        )
-        assert branch.count(PID_RECORD) == len(children)
-        assert sorted(declared_array(branch, "evidence")) == sorted(
-            shard_evidence(shard)
-        )
+    launch = launch_command()
+    assert [line for line in lines if "tests.support.ordinary_pytest" in line] == [
+        launch
+    ]
+    assert lines[lines.index(launch) + 1] == PID_RECORD
+    assert lines.count(PID_RECORD) == 1
+    assert 'evidence+=("$name.log" "$name.xml" "$name.exit")' in command
+    assert all(
+        f'{name}) arguments=("${{{name}[@]}}") ;;' in command for name in COHORTS
+    )
     assert (
         lines.index(("result=0",))
         < lines.index(("for", "index", "in", "${!pids[@]}", ";", "do"))
@@ -263,6 +252,7 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         env={
             **os.environ,
             "KORA_SCAFFOLD_LANE": "conformance",
+            "KORA_SCAFFOLD_OS": "ubuntu-24.04",
             "KORA_PYTEST_ARGUMENTS": str(row["pytest-arguments"]),
             "KORA_COHORT_OUTPUT": str(tmp_path),
         },
@@ -318,30 +308,71 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
 
 
 def test_shards_partition_every_inventory_group() -> None:
-    children = [child for shard in SHARD_CHILDREN.values() for child in shard]
+    for system in ("ubuntu-24.04", "macos-15"):
+        children = [
+            child
+            for (owner, _), assigned in EXPECTED_ORDINARY.items()
+            if owner == system
+            for child in assigned
+        ]
 
-    assert sorted(children) == sorted(COHORTS)
-    assert len(children) == len(set(children))
+        assert sorted(children) == sorted(COHORTS)
+        assert len(children) == len(set(children))
 
 
-@pytest.mark.parametrize("lane", ["conformance", "remainder", "", "storage", "all"])
-def test_ordinary_shell_refuses_unknown_shard_before_collection(
-    tmp_path: Path, lane: str
+@pytest.mark.parametrize(
+    ("system", "lane"),
+    [
+        *EXPECTED_ORDINARY,
+        ("macos-15", "integration"),
+        ("ubuntu-24.04", ""),
+        ("ubuntu-24.04", "all"),
+        ("macos-26", "conformance"),
+        ("ubuntu-24.04", "storage"),
+    ],
+)
+def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
+    tmp_path: Path, system: str, lane: str
 ) -> None:
     opening = ordinary_shell().partition("esac\n")[0] + "esac\n"
+    source = str(steps(table(workflow_jobs()["scaffold-tests"]))["tests"]["run"])
+    before_collection = source.partition("KORA_CHECKOUT_REVISION=")[0]
+    environment = {
+        **os.environ,
+        "KORA_SCAFFOLD_OS": system,
+        "KORA_SCAFFOLD_LANE": lane,
+        "KORA_PYTEST_ARGUMENTS": "",
+    }
 
     result = subprocess.run(
-        ["/bin/bash", "-e", "-o", "pipefail", "-c", opening + "printf started\n"],
+        [
+            "/bin/bash",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            opening + 'printf "%s\n" "${names[@]}"\n',
+        ],
         cwd=tmp_path,
-        env={**os.environ, "KORA_SCAFFOLD_LANE": lane, "KORA_PYTEST_ARGUMENTS": ""},
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    outer = subprocess.run(
+        ["/bin/bash", "-e", "-c", before_collection + "printf admitted\n"],
+        cwd=tmp_path,
+        env=environment,
         capture_output=True,
         check=False,
         timeout=5,
     )
 
-    valid = lane in SHARD_CHILDREN
-    assert result.returncode == (0 if valid else 1)
-    assert (result.stdout == b"started") is valid
+    children = EXPECTED_ORDINARY.get((system, lane), ())
+    assert result.returncode == (0 if children else 1)
+    assert tuple(result.stdout.decode().splitlines()) == children
+    assert outer.returncode == (0 if children or lane == "storage" else 1)
+    assert (outer.stdout == b"admitted") is bool(children or lane == "storage")
 
 
 @pytest.mark.parametrize("failed_child", [None, 0, 1, 2])
@@ -530,19 +561,19 @@ def test_interrupted_cohort_preserves_only_regular_evidence(tmp_path: Path) -> N
     assert not (evidence / "receipt.json").exists()
     assert entries["cohort_evidence"]["if"] == (
         "${{ always() && (matrix.lane == 'conformance' "
-        "|| matrix.lane == 'remainder') }}"
+        "|| matrix.lane == 'remainder' || matrix.lane == 'integration') }}"
     )
     assert list(entries).index("cohort_evidence") < list(entries).index(
         "evidence_upload"
     )
 
 
-@pytest.mark.parametrize("shard", list(SHARD_CHILDREN))
+@pytest.mark.parametrize("children", list(EXPECTED_ORDINARY.values()))
 @pytest.mark.parametrize("invalid", [None, "missing", "empty", "symlink"])
 def test_ordinary_shell_requires_all_regular_nonempty_evidence(
-    tmp_path: Path, shard: str, invalid: str | None
+    tmp_path: Path, children: tuple[str, ...], invalid: str | None
 ) -> None:
-    evidence = shard_evidence(shard)
+    evidence = shard_evidence(children)
     for name in evidence:
         (tmp_path / name).write_text("complete")
     target = tmp_path / evidence[-1]
@@ -553,7 +584,7 @@ def test_ordinary_shell_requires_all_regular_nonempty_evidence(
     elif invalid == "symlink":
         target.unlink()
         target.symlink_to(tmp_path / "inventory.json")
-    assignment = shard_branch(shard).rpartition("    evidence=")[2]
+    assignment = " ".join(evidence)
 
     result = subprocess.run(
         [
@@ -562,7 +593,7 @@ def test_ordinary_shell_requires_all_regular_nonempty_evidence(
             "-o",
             "pipefail",
             "-c",
-            "evidence=" + assignment + evidence_validation(),
+            "evidence=(" + assignment + ")\n" + evidence_validation(),
         ],
         env={**os.environ, "KORA_ORDINARY_OUTPUT": str(tmp_path)},
         capture_output=True,

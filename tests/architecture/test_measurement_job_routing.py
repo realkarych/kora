@@ -106,7 +106,7 @@ LANE_STEP_CONDITIONS = {
     "teardown": "${{ always() && matrix.lane == 'local-runtime' }}",
     "cohort_evidence": (
         "${{ always() && (matrix.lane == 'conformance' "
-        "|| matrix.lane == 'remainder') }}"
+        "|| matrix.lane == 'remainder' || matrix.lane == 'integration') }}"
     ),
     "evidence_upload": "${{ always() }}",
     "distributions": LOCAL_RUNTIME_ONLY,

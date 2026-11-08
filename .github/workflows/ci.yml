@@ -65,6 +65,11 @@ jobs:
           - os: ubuntu-24.04
             python: 3.11.17
             databases: sqlite,postgresql
+            lane: integration
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
+          - os: ubuntu-24.04
+            python: 3.11.17
+            databases: sqlite,postgresql
             lane: storage
             pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py tests/conformance/test_installed_conformance.py
           - os: ubuntu-24.04
@@ -81,6 +86,11 @@ jobs:
             python: 3.15.0
             databases: sqlite,postgresql
             lane: remainder
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
+          - os: ubuntu-24.04
+            python: 3.15.0
+            databases: sqlite,postgresql
+            lane: integration
             pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
           - os: ubuntu-24.04
             python: 3.15.0
@@ -125,6 +135,7 @@ jobs:
       KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       KORA_PYTEST_ARGUMENTS: ${{ matrix.pytest-arguments }}
       KORA_SCAFFOLD_LANE: ${{ matrix.lane }}
+      KORA_SCAFFOLD_OS: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -195,6 +206,11 @@ jobs:
       - name: Collect and execute the exact test lane
         id: tests
         run: |
+          case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
+            ubuntu-24.04:conformance|ubuntu-24.04:remainder|ubuntu-24.04:integration|ubuntu-24.04:storage|ubuntu-24.04:local-runtime) ;;
+            macos-15:conformance|macos-15:remainder|macos-15:storage|macos-15:local-runtime) ;;
+            *) exit 1 ;;
+          esac
           KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
           test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
           mkdir -p "$KORA_SCAFFOLD_DIRECTORY"
@@ -221,8 +237,11 @@ jobs:
             printf 'KORA_ORDINARY_OUTPUT=%s\n' "$KORA_ORDINARY_OUTPUT" >> "$GITHUB_ENV"
             if bash -e -o pipefail <<'KORA_ORDINARY_SCRIPT' > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
           read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"
-          case "$KORA_SCAFFOLD_LANE" in
-            conformance|remainder) ;;
+          case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
+            ubuntu-24.04:conformance|macos-15:conformance) names=(first second) ;;
+            ubuntu-24.04:remainder) names=(measurements other) ;;
+            macos-15:remainder) names=(measurements integration other) ;;
+            ubuntu-24.04:integration) names=(integration) ;;
             *) exit 1 ;;
           esac
           first=(
@@ -281,27 +300,20 @@ jobs:
             --ignore=tests/ir/test_structured_schema_container_counts.py
           )
           pids=()
-          case "$KORA_SCAFFOLD_LANE" in
-            conformance)
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-first" --junitxml="$KORA_ORDINARY_OUTPUT/first.xml" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.log" 2>&1 &
-              pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
-              pids+=("$!")
-              names=(first second)
-              evidence=(first.log second.log first.xml second.xml first.exit second.exit)
-              ;;
-            remainder)
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-measurements" --junitxml="$KORA_ORDINARY_OUTPUT/measurements.xml" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.log" 2>&1 &
-              pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-integration" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-integration" --junitxml="$KORA_ORDINARY_OUTPUT/integration.xml" "${integration[@]}" > "$KORA_ORDINARY_OUTPUT/integration.log" 2>&1 &
-              pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
-              pids+=("$!")
-              names=(measurements integration other)
-              evidence=(measurements.log integration.log other.log measurements.xml integration.xml other.xml measurements.exit integration.exit other.exit)
-              ;;
-            *) exit 1 ;;
-          esac
+          evidence=()
+          for name in "${names[@]}"; do
+            case "$name" in
+              first) arguments=("${first[@]}") ;;
+              second) arguments=("${second[@]}") ;;
+              measurements) arguments=("${measurements[@]}") ;;
+              integration) arguments=("${integration[@]}") ;;
+              other) arguments=("${other[@]}") ;;
+              *) exit 1 ;;
+            esac
+            uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-$name" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-$name" --junitxml="$KORA_ORDINARY_OUTPUT/$name.xml" "${arguments[@]}" > "$KORA_ORDINARY_OUTPUT/$name.log" 2>&1 &
+            pids+=("$!")
+            evidence+=("$name.log" "$name.xml" "$name.exit")
+          done
           result=0
           for index in "${!pids[@]}"; do
             if wait "${pids[$index]}"; then
@@ -352,7 +364,7 @@ jobs:
           tail -c 2048 "$KORA_SCAFFOLD_DIRECTORY/tests.stdout"
       - name: Preserve ordinary cohort evidence
         id: cohort_evidence
-        if: ${{ always() && (matrix.lane == 'conformance' || matrix.lane == 'remainder') }}
+        if: ${{ always() && (matrix.lane == 'conformance' || matrix.lane == 'remainder' || matrix.lane == 'integration') }}
         run: |
           test -n "${KORA_ORDINARY_OUTPUT:-}"
           for name in first.log second.log measurements.log integration.log other.log first.xml second.xml measurements.xml integration.xml other.xml first.exit second.exit measurements.exit integration.exit other.exit; do
@@ -425,7 +437,7 @@ jobs:
               test "$STATIC_OUTCOME" = skipped
               test "$DISTRIBUTIONS_OUTCOME" = skipped
               ;;
-            remainder)
+            remainder|integration)
               test "$FRONTEND_OUTCOME" = success
               test "$STATIC_OUTCOME" = skipped
               test "$DISTRIBUTIONS_OUTCOME" = skipped
@@ -479,7 +491,7 @@ jobs:
         with:
           pattern: scaffold-tests-*
           path: scaffold-evidence
-      - name: Verify twelve lanes and complete collection coverage
+      - name: Verify fourteen lanes and complete collection coverage
         if: ${{ needs.change-scope.outputs.full != 'false' }}
         id: verification
         env:

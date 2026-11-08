@@ -12,8 +12,7 @@ from tests.scaffold_evidence import (
     COHORTS,
     ENVIRONMENTS,
     LANE_ARGUMENTS,
-    LANES,
-    SHARD_CHILDREN,
+    LANE_CHILDREN,
     collection_nodes,
     record_lane,
     required_host_fixtures,
@@ -28,8 +27,8 @@ GENERAL_NODES = (
     "tests/test_general.py::TestCase::test_value[sqlite-a::b/c]",
     "tests/test_second.py::test_value",
     "tests/measurements/test_value.py::test_value",
-    "tests/db/test_value.py::test_value[sqlite]",
-    "tests/test_other.py::test_value",
+    "tests/api/test_value.py::test_value[sqlite]",
+    "tests/api_v2/test_other.py::test_value",
 )
 STORAGE_NODES = ("tests/plugins/storage/test_value.py::test_value[sqlite]",)
 LOCAL_CONTRACT_NODES = (
@@ -92,9 +91,10 @@ def lane_files(root: Path, lane: str, operating_system: str) -> None:
         )
         (root / "complete.stderr").write_text("")
         (root / "complete.exit").write_text("0\n")
-    if lane in SHARD_CHILDREN:
+    children = LANE_CHILDREN[operating_system][lane]
+    if children:
         groups: dict[str, str] = dict(zip(COHORTS, selected, strict=True))
-        for name in SHARD_CHILDREN[lane]:
+        for name in children:
             write_junit(root / f"{name}.xml", identities((groups[name],)))
             (root / f"{name}.log").write_text("1 passed\n")
             (root / f"{name}.exit").write_text("0\n")
@@ -104,7 +104,7 @@ def lane_files(root: Path, lane: str, operating_system: str) -> None:
 
 def complete_evidence(root: Path) -> None:
     for operating_system, python, databases in ENVIRONMENTS:
-        for lane in LANES:
+        for lane in LANE_CHILDREN[operating_system]:
             directory = root / f"scaffold-tests-{operating_system}-{python}-{lane}"
             lane_files(directory, lane, operating_system)
             record_lane(
@@ -137,7 +137,7 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
     result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
     local = sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
-    assert result == {"environments": 3, "lanes": 12, "tests": 18 + local}
+    assert result == {"environments": 3, "lanes": 14, "tests": 18 + local}
 
 
 @pytest.mark.parametrize("operating_system", ["macos-26", "ubuntu-24.04"])
@@ -201,7 +201,7 @@ def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
     ("corruption", "failure", "match"),
     [
         ("missing", FileNotFoundError, "receipt.json"),
-        ("extra", EvidenceFailure, "exactly twelve lanes"),
+        ("extra", EvidenceFailure, "exactly fourteen lanes"),
         ("stale", EvidenceFailure, "mismatched provenance"),
         ("hash", EvidenceFailure, "hash differs from its receipt"),
         ("failed", EvidenceFailure, "execution did not succeed"),
@@ -293,7 +293,7 @@ def test_collection_preserves_parameter_identity(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("corruption", "match"),
     [
-        ("missing lane", "exactly twelve lanes"),
+        ("missing lane", "exactly fourteen lanes"),
         ("unequal inventories", "unexpected file coverage"),
         ("different cohorts", "cohorts overlap"),
         ("wrong shard", "unexpected file coverage"),
@@ -314,20 +314,83 @@ def test_scaffold_evidence_requires_both_general_shards_to_agree(
         (directory / "inventory.json").write_text('{"full":5}')
     elif corruption == "different cohorts":
         (directory / "other.xml").write_bytes(
-            (directory / "integration.xml").read_bytes()
+            (directory / "measurements.xml").read_bytes()
         )
         changed.append("other.xml")
     elif corruption == "wrong shard":
-        (directory / "first.log").write_text("1 passed\n")
+        (directory / "integration.xml").write_text("1 passed\n")
     else:
-        write_junit(
-            directory / "integration.xml", frozenset({"tests.wrong.test_value"})
-        )
-        changed.append("integration.xml")
+        write_junit(directory / "other.xml", frozenset({"tests.wrong.test_value"}))
+        changed.append("other.xml")
     if changed:
         rehash(directory, changed)
 
     with pytest.raises(EvidenceFailure, match=match):
+        verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
+
+
+def test_record_refuses_macos_integration_before_reading_evidence(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "absent"
+
+    with pytest.raises(EvidenceFailure, match="unknown environment or lane"):
+        record_lane(
+            missing,
+            "123",
+            "1",
+            REVISION,
+            REQUESTED,
+            "macos-15",
+            "3.11.17",
+            "sqlite",
+            "integration",
+            LANE_ARGUMENTS["integration"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("corruption", "failure", "match"),
+    [
+        ("missing", FileNotFoundError, "receipt.json"),
+        ("macos", EvidenceFailure, "exactly fourteen lanes"),
+        ("stale attempt", EvidenceFailure, "mismatched provenance"),
+        ("relabelled", EvidenceFailure, "mismatched provenance"),
+        (
+            "swapped",
+            EvidenceFailure,
+            "integration lane differs from its inventory subset",
+        ),
+    ],
+)
+def test_linux_integration_evidence_requires_its_own_receipt_and_inventory(
+    tmp_path: Path, corruption: str, failure: type[Exception], match: str
+) -> None:
+    complete_evidence(tmp_path)
+    integration = tmp_path / "scaffold-tests-ubuntu-24.04-3.15.0-integration"
+    remainder = tmp_path / "scaffold-tests-ubuntu-24.04-3.15.0-remainder"
+    receipt = integration / "receipt.json"
+    if corruption == "missing":
+        receipt.unlink()
+    elif corruption == "macos":
+        (tmp_path / "scaffold-tests-macos-15-3.11.17-integration").mkdir()
+    elif corruption == "swapped":
+        report = integration / "integration.xml"
+        other = remainder / "other.xml"
+        integration_data, other_data = report.read_bytes(), other.read_bytes()
+        report.write_bytes(other_data)
+        other.write_bytes(integration_data)
+        rehash(integration, ["integration.xml"])
+        rehash(remainder, ["other.xml"])
+    else:
+        data = parse_json_object(json.loads(receipt.read_text()))
+        if corruption == "stale attempt":
+            data["run_attempt"] = "2"
+        else:
+            data["lane"] = "remainder"
+        receipt.write_text(json.dumps(data))
+
+    with pytest.raises(failure, match=match):
         verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
 

@@ -20,10 +20,20 @@ ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
     ("macos-15", "3.11.17", "sqlite"),
 )
-LANES = ("conformance", "remainder", "storage", "local-runtime")
-SHARD_CHILDREN: dict[str, tuple[str, ...]] = {
-    "conformance": ("first", "second"),
-    "remainder": ("measurements", "integration", "other"),
+LANE_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
+    "ubuntu-24.04": {
+        "conformance": ("first", "second"),
+        "remainder": ("measurements", "other"),
+        "integration": ("integration",),
+        "storage": (),
+        "local-runtime": (),
+    },
+    "macos-15": {
+        "conformance": ("first", "second"),
+        "remainder": ("measurements", "integration", "other"),
+        "storage": (),
+        "local-runtime": (),
+    },
 }
 COHORTS = ("first", "second", "measurements", "integration", "other")
 GENERAL_ARGUMENTS = (
@@ -42,6 +52,7 @@ LOCAL_RUNTIME_ARGUMENTS = ("-m", "not measurement", LOCAL_RUNTIME_PATH)
 LANE_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "conformance": GENERAL_ARGUMENTS,
     "remainder": GENERAL_ARGUMENTS,
+    "integration": GENERAL_ARGUMENTS,
     "storage": STORAGE_ARGUMENTS,
     "local-runtime": LOCAL_RUNTIME_ARGUMENTS,
 }
@@ -101,7 +112,7 @@ class LaneReceipt(BoundaryModel):
     operating_system: Literal["ubuntu-24.04", "macos-15"]
     python: Literal["3.11.17", "3.15.0"]
     databases: Literal["sqlite", "sqlite,postgresql"]
-    lane: Literal["conformance", "remainder", "storage", "local-runtime"]
+    lane: Literal["conformance", "remainder", "integration", "storage", "local-runtime"]
     arguments: tuple[StrictStr, ...]
     files: dict[StrictStr, Digest]
 
@@ -178,15 +189,14 @@ def collection_nodes(path: Path) -> frozenset[str]:
     return frozenset(nodes)
 
 
-def expected_files(lane: str) -> frozenset[str]:
+def expected_files(operating_system: str, lane: str) -> frozenset[str]:
+    children = LANE_CHILDREN[operating_system][lane]
     files = {"tests.stdout", "tests.stderr", "tests.exit"}
     if lane == "conformance":
         files.update({"complete.txt", "complete.stderr", "complete.exit"})
-    if lane in SHARD_CHILDREN:
+    if children:
         files.update(
-            f"{name}.{suffix}"
-            for name in SHARD_CHILDREN[lane]
-            for suffix in ("log", "xml", "exit")
+            f"{name}.{suffix}" for name in children for suffix in ("log", "xml", "exit")
         )
     else:
         files.add("junit.xml")
@@ -194,7 +204,7 @@ def expected_files(lane: str) -> frozenset[str]:
 
 
 def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
-    expected = expected_files(receipt.lane)
+    expected = expected_files(receipt.operating_system, receipt.lane)
     if receipt.files.keys() != expected:
         raise EvidenceFailure("scaffold receipt has unexpected file coverage")
     if frozenset(path.name for path in directory.iterdir()) != expected | {
@@ -209,11 +219,8 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
             raise EvidenceFailure("scaffold evidence hash differs from its receipt")
         if filename.endswith(".exit") and encoded != b"0\n":
             raise EvidenceFailure("scaffold execution did not succeed")
-    reports = (
-        tuple(f"{name}.xml" for name in SHARD_CHILDREN[receipt.lane])
-        if receipt.lane in SHARD_CHILDREN
-        else ("junit.xml",)
-    )
+    children = LANE_CHILDREN[receipt.operating_system][receipt.lane]
+    reports = tuple(f"{name}.xml" for name in children) or ("junit.xml",)
     selected: set[str] = set()
     for filename in reports:
         nodes = junit_nodes(directory / filename, 16777216)
@@ -237,7 +244,9 @@ def record_lane(
     lane: str,
     arguments: tuple[str, ...],
 ) -> LaneReceipt:
-    if (operating_system, python, databases) not in ENVIRONMENTS or lane not in LANES:
+    if (operating_system, python, databases) not in ENVIRONMENTS or (
+        lane not in LANE_CHILDREN[operating_system]
+    ):
         raise EvidenceFailure("scaffold execution has an unknown environment or lane")
     receipt = LaneReceipt.model_validate(
         {
@@ -255,7 +264,7 @@ def record_lane(
                 filename: hashlib.sha256(
                     evidence_bytes(directory / filename)
                 ).hexdigest()
-                for filename in expected_files(lane)
+                for filename in expected_files(operating_system, lane)
             },
         }
     )
@@ -274,15 +283,15 @@ def verify_scaffold(
     expected = {
         f"scaffold-tests-{operating_system}-{python}-{lane}"
         for operating_system, python, _ in ENVIRONMENTS
-        for lane in LANES
+        for lane in LANE_CHILDREN[operating_system]
     }
     if {path.name for path in root.iterdir()} != expected:
-        raise EvidenceFailure("scaffold evidence does not cover exactly twelve lanes")
+        raise EvidenceFailure("scaffold evidence does not cover exactly fourteen lanes")
     total = 0
     for operating_system, python, databases in ENVIRONMENTS:
         inventories: dict[str, frozenset[str]] = {}
         complete: frozenset[str] = frozenset()
-        for lane in LANES:
+        for lane in LANE_CHILDREN[operating_system]:
             directory = root / f"scaffold-tests-{operating_system}-{python}-{lane}"
             if directory.is_symlink() or not directory.is_dir():
                 raise EvidenceFailure("scaffold lane is not an owned directory")
@@ -319,6 +328,20 @@ def verify_scaffold(
             raise EvidenceFailure("scaffold lanes contain duplicate tests")
         if combined != complete:
             raise EvidenceFailure("scaffold lanes do not partition the complete suite")
+        if "integration" in inventories and inventories["integration"] != frozenset(
+            node
+            for node in complete
+            if node.startswith(
+                (
+                    "tests.api.",
+                    "tests.cli.",
+                    "tests.ir.test_structured_schema_string_lengths.",
+                )
+            )
+        ):
+            raise EvidenceFailure(
+                "Linux integration lane differs from its inventory subset"
+            )
         total += len(complete)
     return {"environments": len(ENVIRONMENTS), "lanes": len(expected), "tests": total}
 

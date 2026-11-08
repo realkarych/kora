@@ -56,6 +56,11 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
         for lane, arguments in (
             ("conformance", GENERAL_ARGUMENTS),
             ("remainder", GENERAL_ARGUMENTS),
+            *(
+                (("integration", GENERAL_ARGUMENTS),)
+                if operating_system == "ubuntu-24.04"
+                else ()
+            ),
             ("storage", STORAGE_ARGUMENTS),
             ("local-runtime", (LOCAL_RUNTIME_PATH,)),
         )
