@@ -76,3 +76,12 @@ The four exact unset controls now participate in private launch preflight.
 The [dated record](codex-alternate-executor-registry-2026-11-08.md) separates
 native discovery evidence from production executor binding and complete
 declarations.
+
+## Subsequent selected tool inventory
+
+[#996](https://github.com/realkarych/kora/issues/996) records eight
+model-visible identities in the first request from the selected official
+Linux profile and verifies that injected `update_plan` is refused. The
+[dated record](codex-selected-tool-inventory-2026-11-08.md) distinguishes
+the observed inventory and residual candidates from complete Policy
+coverage.
