@@ -18,7 +18,9 @@ from kora.api.graph_cel import COMPLETED, GraphCelChecks
 from kora.api.graph_execution_preparation import (
     ExecutionPreparationLimits,
     PreparedExecutionContract,
+    PreparedLogicalExecutionContract,
     prepare_execution_contract,
+    prepare_logical_execution_contract,
 )
 from kora.cel_eval.binding import load_binding
 from kora.cel_eval.errors import EvaluatorUnavailable, UnavailableReason
@@ -31,6 +33,11 @@ from kora.db.graph_value_json import (
     render_object,
 )
 from kora.db.graph_version_reads import AcquiredGraphVersion
+from kora.engine.graph_command_manifests import (
+    CommandManifestLimits,
+    build_declared_command_manifests,
+    check_declared_command_manifests,
+)
 from kora.engine.graph_execution_contract import (
     MEMBERS,
     check_detached_execution_contract,
@@ -143,14 +150,17 @@ def detached(draft: PreparedExecutionContract) -> AcquiredGraphVersion:
     )
 
 
-def assert_protected(error: BaseException) -> None:
+def assert_protected(
+    error: BaseException, boundary: str = "prepare_execution_contract"
+) -> None:
     frames = {
         frame.f_code.co_name: frame.f_locals
         for frame, _ in walk_tb(error.__traceback__)
     }
-    assert set(frames["prepare_execution_contract"]) == {"limits", "error"}
-    assert "_prepare" not in frames
-    assert "_draft" not in frames
+    assert set(frames[boundary]) == {"limits", "error"}
+    assert (
+        not {"_prepare", "_draft", "_prepare_logical", "_checked_pair"} & frames.keys()
+    )
     assert error.__context__ is None
     assert error.__cause__ is None
     assert MARKER not in repr(error)
@@ -248,6 +258,71 @@ def check_roundtrip() -> None:
     assert OWNER_MARKER not in repr(draft)
     assert MARKER not in repr(encoder.value)
     assert_refused(wrong_incarnation.value, GraphValueFailure.INVALID)
+
+
+def check_logical_roundtrip() -> None:
+    ir_text, owners = source(ordered=True)
+    other_owners = tuple(
+        GraphResourceOwner(
+            owner.scope,
+            owner.path,
+            owner.name,
+            content(store="alternative-store", incarnation="alternative-incarnation"),
+        )
+        for owner in owners
+    )
+
+    with borrowed() as (runner, evaluator):
+        logical = runner.run(
+            prepare_logical_execution_contract(ir_text, evaluator, limits=LIMITS)
+        )
+        original = runner.run(
+            prepare_execution_contract(ir_text, SCOPE, owners, evaluator, limits=LIMITS)
+        )
+        alternative = runner.run(
+            prepare_execution_contract(
+                ir_text, SCOPE, other_owners, evaluator, limits=LIMITS
+            )
+        )
+        assert_idle(evaluator.owner, 1)
+    assert type(logical) is PreparedLogicalExecutionContract
+    with pytest.raises(AttributeError, match="immutable"):
+        logical.canonical_ir = MARKER
+    with pytest.raises(AttributeError, match="immutable"):
+        delattr(logical, "canonical_contract")
+    with pytest.raises(TypeError, match="explicit access") as pickling:
+        pickle.dumps(logical)
+    with pytest.raises(ValueError, match="not iterable") as encoder:
+        jsonable_encoder(logical)
+
+    assert isinstance(original, PreparedExecutionContract)
+    assert isinstance(alternative, PreparedExecutionContract)
+    assert original.resources.text != alternative.resources.text
+    assert (
+        logical.canonical_ir
+        == original.canonical_ir
+        == alternative.canonical_ir
+        == ir_text
+    )
+    assert (
+        logical.canonical_contract
+        == original.canonical_contract
+        == alternative.canonical_contract
+    )
+    assert logical.digests == original.digests == alternative.digests
+    assert logical.digests.ir_digest == digest(ir_text)
+    assert logical.digests.execution_contract_digest == digest(
+        logical.canonical_contract
+    )
+    assert logical.digests.deployment_digest == digest(
+        '{"ir":' + ir_text + ',"execution_contract":' + logical.canonical_contract + "}"
+    )
+    assert not any(
+        hasattr(logical, member) for member in ("scope", "resources", "owners")
+    )
+    for rendered in (repr(logical), repr(encoder.value), repr(pickling.value)):
+        assert MARKER not in rendered
+        assert logical.digests.deployment_digest not in rendered
 
 
 def reject_before_native(
@@ -358,15 +433,20 @@ def check_capacity() -> None:
 
 
 async def closed_under_context(
-    ir_text: str, owners: tuple[GraphResourceOwner, ...], evaluator: Evaluator
+    ir_text: str, owners: tuple[GraphResourceOwner, ...] | None, evaluator: Evaluator
 ) -> EvaluatorUnavailable:
+    preparation = (
+        prepare_logical_execution_contract(ir_text, evaluator, limits=LIMITS)
+        if owners is None
+        else prepare_execution_contract(
+            ir_text, SCOPE, owners, evaluator, limits=LIMITS
+        )
+    )
     try:
         raise RuntimeError(MARKER)
     except RuntimeError:
         with pytest.raises(EvaluatorUnavailable) as unavailable:
-            await prepare_execution_contract(
-                ir_text, SCOPE, owners, evaluator, limits=LIMITS
-            )
+            await preparation
     return unavailable.value
 
 
@@ -407,17 +487,108 @@ def check_refusals() -> None:
     assert_protected(assembled.value)
 
 
-def check_cancellation() -> None:
+def logical_before_comparison(ir_text: str) -> CommandManifestLimits:
+    limits = READ_LIMITS.resources.logical
+    low, high = 1, limits.work
+    while low < high:
+        middle = (low + high) // 2
+        try:
+            build_declared_command_manifests(
+                ir_text, limits=replace(limits, work=middle)
+            )
+        except GraphValueRejected as refusal:
+            assert_refused(refusal, GraphValueFailure.BUDGET)
+            low = middle + 1
+        else:
+            high = middle
+    return replace(limits, work=high)
+
+
+def check_logical_refusals() -> None:
+    ir_text, _ = source()
+    invalid_ir, _ = source(invalid_pattern=True)
+    boundary = "prepare_logical_execution_contract"
+    tight_manifest = logical_before_comparison(ir_text)
+    manifest = build_declared_command_manifests(ir_text, limits=tight_manifest)
+    with pytest.raises(GraphValueRejected) as manifest_comparison:
+        check_declared_command_manifests(
+            ir_text, ObjectReader(manifest.text).object(), limits=tight_manifest
+        )
+    assert_refused(manifest_comparison.value, GraphValueFailure.BUDGET)
+    readers = (
+        replace(READ_LIMITS, projection=TIGHT_PROJECTION),
+        replace(
+            READ_LIMITS,
+            resources=replace(READ_LIMITS.resources, logical=tight_manifest),
+        ),
+    )
+
+    with borrowed() as (runner, evaluator):
+        loop = runner.get_loop()
+        for dimension, units in DIMENSIONS:
+            exact = replace(LIMITS, **{dimension: units})
+            short = replace(exact, **{dimension: units - 1})
+            result = runner.run(
+                prepare_logical_execution_contract(ir_text, evaluator, limits=exact)
+            )
+            task = loop.create_task(
+                prepare_logical_execution_contract(ir_text, evaluator, limits=short)
+            )
+            run_loop_turn(loop)
+            assert task.done()
+            with pytest.raises(GraphValueRejected) as early:
+                task.result()
+            assert type(result) is PreparedLogicalExecutionContract
+            assert_refused(early.value, GraphValueFailure.BUDGET)
+            assert_protected(early.value, boundary)
+            assert_idle(evaluator.owner, 1)
+        invalid = runner.run(
+            prepare_logical_execution_contract(invalid_ir, evaluator, limits=LIMITS)
+        )
+        incomplete = runner.run(
+            prepare_logical_execution_contract(
+                ir_text, evaluator, limits=replace(LIMITS, rendering_characters=1)
+            )
+        )
+        for reader in readers:
+            with pytest.raises(GraphValueRejected) as late:
+                runner.run(
+                    prepare_logical_execution_contract(
+                        ir_text, evaluator, limits=replace(LIMITS, reader=reader)
+                    )
+                )
+            assert_refused(late.value, GraphValueFailure.BUDGET)
+            assert_protected(late.value, boundary)
+            assert_idle(evaluator.owner, 1)
+        runner.run(evaluator.close())
+        unavailable = runner.run(closed_under_context(ir_text, None, evaluator))
+
+    assert isinstance(invalid, GraphCelChecks)
+    assert invalid.facts is None
+    assert [error.code for error in invalid.diagnostics.errors] == ["IR011"]
+    assert incomplete == IncompleteRenderings(RenderingRefusal.CAPACITY_EXHAUSTED)
+    assert unavailable.reason is UnavailableReason.CLOSED
+    assert_protected(unavailable, boundary)
+
+
+def check_cancellation(*, logical: bool = False) -> None:
     ir_text, owners = source()
+    boundary = (
+        "prepare_logical_execution_contract"
+        if logical
+        else "prepare_execution_contract"
+    )
 
     with borrowed() as (runner, evaluator):
         loop = runner.get_loop()
         owner = evaluator.owner
         for prior_deliveries in (0, 1):
             task = loop.create_task(
-                prepare_execution_contract(
+                prepare_logical_execution_contract(ir_text, evaluator, limits=LIMITS)
+                if logical
+                else prepare_execution_contract(
                     ir_text, SCOPE, owners, evaluator, limits=LIMITS
-                )
+                ),
             )
             for _ in range(prior_deliveries):
                 run_loop_turn(loop)
@@ -430,15 +601,23 @@ def check_cancellation() -> None:
                 loop.run_until_complete(task)
             assert active.outstanding == active.deliveries == 1
             assert cancelled.value.args == ()
-            assert_protected(cancelled.value)
+            assert_protected(cancelled.value, boundary)
             assert_idle(owner, 1)
         reused = runner.run(
-            prepare_execution_contract(ir_text, SCOPE, owners, evaluator, limits=LIMITS)
+            prepare_logical_execution_contract(ir_text, evaluator, limits=LIMITS)
+            if logical
+            else prepare_execution_contract(
+                ir_text, SCOPE, owners, evaluator, limits=LIMITS
+            )
         )
 
-    assert isinstance(reused, PreparedExecutionContract)
+    assert isinstance(reused, PreparedLogicalExecutionContract)
     assert reused.canonical_ir == ir_text
-    assert reused.owners == owners
+    if logical:
+        assert type(reused) is PreparedLogicalExecutionContract
+    else:
+        assert isinstance(reused, PreparedExecutionContract)
+        assert reused.owners == owners
 
 
 def run(scenario: str) -> None:
@@ -447,6 +626,9 @@ def run(scenario: str) -> None:
         "capacity": check_capacity,
         "refusals": check_refusals,
         "cancellation": check_cancellation,
+        "logical_roundtrip": check_logical_roundtrip,
+        "logical_refusals": check_logical_refusals,
+        "logical_cancellation": lambda: check_cancellation(logical=True),
     }
     diagnostics = configure_process(
         COMPONENT,
@@ -469,6 +651,13 @@ def run(scenario: str) -> None:
         ("capacity", ["complete"] * 2, 2),
         ("refusals", ["complete", "capacity_exhausted", "complete"], 2),
         ("cancellation", ["complete"], 1),
+        ("logical_roundtrip", ["complete"] * 3, 3),
+        (
+            "logical_refusals",
+            ["complete"] * 3 + ["capacity_exhausted"] + ["complete"] * 2,
+            5,
+        ),
+        ("logical_cancellation", ["complete"], 1),
     ],
 )
 def test_graph_execution_preparation_uses_real_bounded_native_verification(

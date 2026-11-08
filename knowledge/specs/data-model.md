@@ -677,6 +677,8 @@ The [#983 migration](https://github.com/realkarych/kora/issues/983) creates the 
 
 Detached execution preparation retains the original private owner associations in the order of the matched canonical declarations under [#989](https://github.com/realkarych/kora/issues/989). The initial physical-reference build admits the owner data and ordered containers before retaining them. Preparation covers that bounded result while native CEL and the final detached contract check run. The complete prepared result makes ordinal assignment available to publication and leaves the physical JSON and digests unchanged. Only the future locked publisher establishes durable owner provenance and eligibility.
 
+The detached logical preparation under [#1011](https://github.com/realkarych/kora/issues/1011) derives the exact canonical IR, execution contract and deployment digests before physical file preparation. It runs the same bounded native CEL verification and checks the decoded logical contract, including the declared command manifests. This result carries logical identity only. The complete preparation retains its early physical checks, and publication must independently establish the exact associations with verified files and current authority.
+
 ##### Graph-version read admission
 
 The project owner accepted this persisted format on 2026-11-06 under [#844](https://github.com/realkarych/kora/issues/844#issuecomment-6682572078). The record and acquisition invariant are specified here pending implementation and qualification. The physical reference JSON remains in `graph_version.resources`.
