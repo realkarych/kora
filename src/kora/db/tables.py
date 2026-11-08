@@ -40,6 +40,16 @@ from kora.db.graph_publication_digest_v1 import (
     SQLITE_INVALID,
     SQLITE_VALID,
 )
+from kora.db.graph_stage_promotion_custody_v1 import (
+    INTENT_TABLE as PROMOTION_INTENT_TABLE,
+)
+from kora.db.graph_stage_promotion_custody_v1 import (
+    SETTLEMENT_TABLE as PROMOTION_SETTLEMENT_TABLE,
+)
+from kora.db.graph_stage_promotion_custody_v1 import (
+    graph_stage_promotion_intent_elements_v1,
+    graph_stage_promotion_settlement_elements_v1,
+)
 from kora.db.graph_version_resource_owner_v1 import (
     TABLE_NAME as GRAPH_VERSION_RESOURCE_OWNER_TABLE,
 )
@@ -263,6 +273,16 @@ graph_deployment_stage: Table = Table(
 
 graph_deployment_stage_occurrence: Table = Table(
     OCCURRENCE_TABLE, metadata, *graph_deployment_stage_occurrence_elements_v1()
+)
+
+graph_deployment_stage_promotion_intent: Table = Table(
+    PROMOTION_INTENT_TABLE, metadata, *graph_stage_promotion_intent_elements_v1()
+)
+
+graph_deployment_stage_promotion_settlement: Table = Table(
+    PROMOTION_SETTLEMENT_TABLE,
+    metadata,
+    *graph_stage_promotion_settlement_elements_v1(),
 )
 
 preset: Table = Table(
