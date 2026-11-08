@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-native-context|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-bound-configuration|1:--check-selected-bound-bash|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-native-context|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-bound-configuration|1:--check-selected-bound-bash|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-selected-executor-guard|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-native-context|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-bound-configuration|--check-selected-bound-bash|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-native-context|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-bound-configuration|--check-selected-bound-bash|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-selected-executor-guard|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
         exit 2
         ;;
 esac
@@ -89,6 +89,7 @@ cleanup() {
 }
 
 prepare_locked_probe() {
+    probe_dependency=${1:-conformance}
     mkdir "$reservation/source" "$reservation/uv-home" "$reservation/uv-tmp"
     fixture_revision=$(env -i PATH="$PATH" HOME="$reservation/uv-home" git -C "$repo_dir" rev-parse HEAD)
     set -- src/kora tests/plugins/harness/codex pyproject.toml uv.lock .python-version README.md
@@ -104,15 +105,21 @@ prepare_locked_probe() {
         timeout -k 2s 120s sh -eu -c '
             cd "$1"
             probe_python=$(uv --no-config --no-cache --no-python-downloads python find --system 3.11.17)
+            probe_root=$1
+            if [ "$2" = codex-probe ]; then
+                set -- --only-group codex-probe
+            else
+                set -- --no-default-groups --extra conformance
+            fi
             uv --no-config --no-cache --no-python-downloads --offline export \
-                --locked --no-default-groups --extra conformance --no-emit-project \
-                --project "$1/source" --python "$probe_python" \
-                --output-file "$1/requirements.txt" >/dev/null
+                --locked --no-emit-project "$@" \
+                --project "$probe_root/source" --python "$probe_python" \
+                --output-file "$probe_root/requirements.txt" >/dev/null
             uv --no-config --no-cache --no-python-downloads pip install \
                 --default-index https://pypi.org/simple --require-hashes --only-binary :all: --no-deps \
                 --python "$probe_python" --python-platform x86_64-manylinux_2_28 --python-version 3.11.17 \
-                --target "$1/linux-packages" -r "$1/requirements.txt"
-        ' sh "$reservation"
+                --target "$probe_root/linux-packages" -r "$probe_root/requirements.txt"
+        ' sh "$reservation" "$probe_dependency"
     probe_dir=$reservation/source/tests/plugins/harness/codex
     rpc_dir=$reservation/source/src/kora/plugins/harness/codex
 }
@@ -127,6 +134,10 @@ probe_context() {
     esac
     if [ "$variant" = selected-shell-patch-policy ]; then
         set -- "$@" -C "$probe_dir" selected_shell_patch.py
+    fi
+    if [ "$variant" = selected-executor-guard ]; then
+        set -- "$@" -C "$reservation" linux-packages \
+            -C "$probe_dir" guarded_executor.py selected_executor_guard.py
     fi
     case "$variant" in
         selected-gated-*)
@@ -496,6 +507,25 @@ case "${1:-}" in
         prepare_locked_probe
         for probe_case in allow protected exit-one timeout; do
             run_variant selected-shell-patch-policy "--selected-shell-patch-$probe_case"
+            release_container
+        done
+        ;;
+    --check-selected-executor-guard)
+        prepare_locked_probe codex-probe
+        run_variant shell-controls --selected-allow
+        release_container
+        for probe_case in deny no-reason exit-one; do
+            run_variant shell-controls "--selected-hook-$probe_case"
+            release_container
+        done
+        run_variant selected-hook-failures --selected-hook-timeout
+        release_container
+        for probe_case in allow deny exit-one timeout; do
+            run_variant selected-hook-failures "--selected-patch-$probe_case"
+            release_container
+        done
+        for probe_case in bash-allow bash-deny bash-error bash-timeout patch-allow patch-deny patch-error patch-timeout patch-staged-timeout; do
+            run_variant selected-executor-guard "$probe_case"
             release_container
         done
         ;;

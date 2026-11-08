@@ -57,6 +57,11 @@ COPY linux-packages /usr/local/lib/python3.11/site-packages/
 COPY kora /usr/local/lib/python3.11/site-packages/kora/
 COPY selected_shell_patch.py /usr/local/lib/python3.11/site-packages/tests/plugins/harness/codex/
 
+FROM selected-hook-failures AS selected-executor-guard
+COPY linux-packages /usr/local/lib/python3.11/site-packages/
+COPY probe.py guarded_executor.py selected_executor_guard.py /usr/local/lib/python3.11/site-packages/tests/plugins/harness/codex/
+ENTRYPOINT ["/usr/local/bin/python3", "-I", "-m", "tests.plugins.harness.codex.selected_executor_guard"]
+
 FROM shell-controls AS missing-managed-hook
 USER root
 RUN sed -i '/^\[hooks\]/,/^timeout = 60$/d' /etc/codex/requirements.toml && \

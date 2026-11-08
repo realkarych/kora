@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from kora.plugins.harness.codex.pre_tool_use import (
+    HookCall,
     HookInputFailure,
     HookInputRefused,
     decode_pre_tool_use,
@@ -46,6 +47,27 @@ def hold_for_native_timeout() -> None:
         barrier.connect(str(CONTROL / HOOK_TIMEOUT_SOCKET))
         barrier.sendall(b"1")
         signal.pause()
+
+
+def stage_executor_guard_permit(call: HookCall, decision: str) -> None:
+    if not (CONTROL / "executor-guard").is_file():
+        return
+    if decision not in {"selected-allow", "selected-patch-allow"} and not (
+        decision == "selected-patch-timeout"
+        and (CONTROL / "executor-guard-stage").is_file()
+    ):
+        return
+    with (CONTROL / "executor-guard-permit.json").open("x", encoding="utf-8") as permit:
+        json.dump(
+            {
+                "thread": call.session_id,
+                "turn": call.turn_id,
+                "call": call.tool_use_id,
+                "tool": call.tool,
+                "command": call.command,
+            },
+            permit,
+        )
 
 
 def main() -> int:
@@ -134,6 +156,7 @@ def main() -> int:
             )
             + "\n"
         )
+    stage_executor_guard_permit(call, decision)
     if decision in SHELL_PATCH_POLICY_OUTCOMES:
         try:
             from tests.plugins.harness.codex.selected_shell_patch import (

@@ -224,7 +224,11 @@ build = [
     "hatchling==1.32.4",
     "setuptools==84.2.1",
 ]
+codex-probe = [
+    "aiohttp==3.14.5",
+]
 dev = [
+    { include-group = "codex-probe" },
     "claude-agent-sdk==0.2.168",
     "cryptography==50.0.2",
     "jsonschema==4.26.0",

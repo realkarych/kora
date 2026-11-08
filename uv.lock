@@ -1235,7 +1235,11 @@ build = [
     { name = "hatchling" },
     { name = "setuptools" },
 ]
+codex-probe = [
+    { name = "aiohttp" },
+]
 dev = [
+    { name = "aiohttp" },
     { name = "claude-agent-sdk" },
     { name = "cryptography" },
     { name = "jsonschema" },
@@ -1285,7 +1289,9 @@ build = [
     { name = "hatchling", specifier = "==1.32.4" },
     { name = "setuptools", specifier = "==84.2.1" },
 ]
+codex-probe = [{ name = "aiohttp", specifier = "==3.14.5" }]
 dev = [
+    { name = "aiohttp", specifier = "==3.14.5" },
     { name = "claude-agent-sdk", specifier = "==0.2.168" },
     { name = "cryptography", specifier = "==50.0.2" },
     { name = "jsonschema", specifier = "==4.26.0" },
