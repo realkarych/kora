@@ -3013,7 +3013,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         if case == "selected-tls-default":
             assert tls is not None
             unknown_ca = UnknownCaAlert(tls.context)
-            with unknown_ca.capture():
+            async with unknown_ca.capture():
                 await drive(fixture, root, workspace, tls=tls, unknown_ca=unknown_ca)
             unknown_ca.verify()
             diagnostic("INFO", "probe.selected_tls_unknown_ca_verified", case)

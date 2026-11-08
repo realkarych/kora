@@ -2,8 +2,8 @@ import asyncio
 import math
 import ssl
 import subprocess
-from collections.abc import Callable, Coroutine, Generator
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Callable, Coroutine
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -168,8 +168,8 @@ class UnknownCaAlert:
             self.unexpected = True
         self.observed.set()
 
-    @contextmanager
-    def capture(self) -> Generator[None]:
+    @asynccontextmanager
+    async def capture(self) -> AsyncGenerator[None]:
         loop = asyncio.get_running_loop()
         if not isinstance(loop, asyncio.BaseEventLoop):
             raise SelectedTlsError("selected_tls_unexpected_event_loop")
@@ -184,7 +184,15 @@ class UnknownCaAlert:
         finally:
             loop.set_exception_handler(previous_handler)
             loop.set_debug(previous_debug)
-            loop.slow_callback_duration = previous_slow_callback_duration
+            restored: asyncio.Future[None] = loop.create_future()
+
+            def restore_threshold() -> None:
+                loop.slow_callback_duration = previous_slow_callback_duration
+                if not restored.done():
+                    restored.set_result(None)
+
+            loop.call_soon(restore_threshold)
+            await restored
 
     async def wait_for_refusal(self, turn: Coroutine[object, object, None]) -> None:
         running_turn = asyncio.create_task(turn)
