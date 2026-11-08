@@ -371,6 +371,12 @@ def record_acquired(run_locked: bool, scope_keys: int) -> None:
         )
 
 
+@dataclass(frozen=True, repr=False)
+class _GraphPreparationGuard:
+    binding: GraphPreparationBinding
+    selected_graph_id: str | None
+
+
 class TransitionLocks:
     def __init__(self, connection: AsyncConnection) -> None:
         self._lease = writer_transaction(connection)
@@ -378,7 +384,7 @@ class TransitionLocks:
         self._run_id: str | None = None
         self._scopes: frozenset[Scope] | None = None
         self._storage_addresses: frozenset[tuple[str, str]] | None = None
-        self._graph_preparation: GraphPreparationBinding | None = None
+        self._graph_preparation: _GraphPreparationGuard | None = None
         self._usable: bool = True
         self._dialect: str = connection.dialect.name
         if self._dialect not in (POSTGRESQL, SQLITE):
@@ -463,7 +469,7 @@ class TransitionLocks:
         self._usable = True
         return occupied
 
-    def require_graph_publication_scope(
+    def _require_selected_graph_scopes(
         self,
         connection: AsyncConnection,
         binding: GraphPreparationBinding,
@@ -485,6 +491,14 @@ class TransitionLocks:
                 Scope(ScopeKind.GRAPH, (selected_graph_id,)),
             ),
         )
+
+    def require_graph_publication_scope(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> None:
+        self._require_selected_graph_scopes(connection, binding, selected_graph_id)
         if self._storage_addresses is not None:
             raise LockError("the graph publication target precedes storage addresses")
 
@@ -549,13 +563,59 @@ class TransitionLocks:
         binding: GraphPreparationBinding,
     ) -> None:
         self.require_existing_storage_address(connection, store_id, payload_digest)
+        await self._acquire_graph_preparation(connection, binding, None)
+
+    async def _acquire_graph_preparation(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str | None,
+    ) -> None:
         if self._graph_preparation is not None:
             raise LockError("the graph preparation is acquired once")
         self._usable = False
         await _lock_open_preparation(connection, self._dialect, binding)
         self._lease.require_active()
-        self._graph_preparation = binding
+        self._graph_preparation = _GraphPreparationGuard(binding, selected_graph_id)
         self._usable = True
+
+    def _require_publication_preparation_scope(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> None:
+        self._require_selected_graph_scopes(connection, binding, selected_graph_id)
+        if self._storage_addresses is None:
+            raise LockError("the graph preparation follows the completed address phase")
+
+    async def acquire_publication_graph_preparation(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> None:
+        self._require_publication_preparation_scope(
+            connection, binding, selected_graph_id
+        )
+        await self._acquire_graph_preparation(connection, binding, selected_graph_id)
+
+    def require_publication_graph_preparation(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> None:
+        self._require_publication_preparation_scope(
+            connection, binding, selected_graph_id
+        )
+        guard = self._graph_preparation
+        if (
+            guard is None
+            or guard.binding != binding
+            or guard.selected_graph_id != selected_graph_id
+        ):
+            raise LockError("the required publication preparation lock is not held")
 
     def require_open_graph_preparation(
         self,
@@ -566,7 +626,8 @@ class TransitionLocks:
     ) -> None:
         self.require_existing_storage_address(connection, store_id, payload_digest)
         require_graph_preparation_binding(binding)
-        if self._graph_preparation != binding:
+        guard = self._graph_preparation
+        if guard is None or guard.binding != binding:
             raise LockError("the required open graph preparation lock is not held")
 
     async def read_stage_fence_incarnation(
