@@ -123,6 +123,10 @@ def test_owner_parameters_remain_bound_to_issued_scope_and_native_values(
     empty_candidate = attach_graph_deployment_references(
         empty, GraphResourceScope(*TARGET), (), limits=ATTACH_LIMITS
     )
+    malformed_target = (TARGET[0], TARGET[1], "8" + "0" * 25)
+    malformed_candidate = attach_graph_deployment_references(
+        empty, GraphResourceScope(*malformed_target), (), limits=ATTACH_LIMITS
+    )
     intended = expected(TARGET[2])
     exact = 1 + sum(
         len(row)
@@ -149,7 +153,8 @@ def test_owner_parameters_remain_bound_to_issued_scope_and_native_values(
     no_rows = empty_candidate.owner_parameters(TARGET, max_bind_units=1)
     refusals = (
         (candidate, TARGET, exact - 1, GraphValueFailure.BUDGET),
-        (candidate, TARGET, False, GraphValueFailure.BUDGET),
+        (empty_candidate, TARGET, True, GraphValueFailure.BUDGET),
+        (malformed_candidate, malformed_target, 1, GraphValueFailure.INVALID),
         (candidate, changed_target, exact, GraphValueFailure.INVALID),
         (
             candidate,
