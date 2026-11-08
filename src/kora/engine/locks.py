@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from sqlalchemy import and_, bindparam, case, func, literal, select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.sql.elements import ColumnElement
 
 from kora.db.graph_preparation_reads import (
     GraphPreparationBinding,
@@ -16,8 +17,12 @@ from kora.db.graph_preparation_reads import (
     graph_preparation_settlement_statement,
     require_graph_preparation_binding,
 )
-from kora.db.identifiers import is_identifier
-from kora.db.tables import graph_deployment_preparation_capacity, storage_address_fence
+from kora.db.identifiers import IDENTIFIER_LENGTH, is_identifier
+from kora.db.tables import (
+    graph,
+    graph_deployment_preparation_capacity,
+    storage_address_fence,
+)
 from kora.db.transactions import raise_private_metadata_error, writer_transaction
 from kora.db.types import POSTGRESQL, SQLITE
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
@@ -99,6 +104,16 @@ class PreparationCapacityUnavailable(LockError):
 class PreparationCapacityReadFailed(LockError):
     def __init__(self) -> None:
         super().__init__("the graph preparation capacity read failed")
+
+
+class GraphPublicationTargetUnavailable(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph publication target is unavailable")
+
+
+class GraphPublicationTargetReadFailed(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph publication target read failed")
 
 
 def _postgres_lock_contended(dialect: str, error: SQLAlchemyError) -> bool:
@@ -251,6 +266,41 @@ async def _read_preparation_capacity(connection: AsyncConnection, dialect: str) 
     raise_private_metadata_error(PreparationCapacityReadFailed())
 
 
+async def _read_graph_publication_target(
+    connection: AsyncConnection, dialect: str, binding: GraphPreparationBinding
+) -> str | None:
+    fields = graph.c
+    selected: ColumnElement[str] = fields.id
+    if dialect == SQLITE:
+        valid = and_(
+            func.typeof(fields.id) == "text",
+            func.octet_length(fields.id).in_(
+                (IDENTIFIER_LENGTH, 2 * IDENTIFIER_LENGTH)
+            ),
+        )
+        selected = case((valid, fields.id))
+    statement = (
+        select(selected)
+        .where(
+            fields.namespace_id == binding.namespace_id,
+            fields.name == binding.graph_name,
+        )
+        .limit(2)
+    )
+    try:
+        row = (await connection.execute(statement)).one_or_none()
+    except (SQLAlchemyError, UnicodeError):
+        pass
+    else:
+        if row is None:
+            return None
+        graph_id: object = row[0]
+        if type(graph_id) is str and is_identifier(graph_id):
+            return graph_id
+        raise_private_metadata_error(GraphPublicationTargetUnavailable())
+    raise_private_metadata_error(GraphPublicationTargetReadFailed())
+
+
 class ScopeKind(enum.IntEnum):
     PREPARATION_CAPACITY = 0
     GLOBAL = 2
@@ -389,6 +439,38 @@ class TransitionLocks:
         self._lease.require_active()
         self._usable = True
         return occupied
+
+    async def read_graph_publication_target(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> str | None:
+        self.require_connection(connection)
+        require_graph_preparation_binding(binding)
+        if type(selected_graph_id) is not str or not is_identifier(selected_graph_id):
+            raise LockError("invalid selected graph identity")
+        if (
+            binding.initial_graph_id is not None
+            and binding.initial_graph_id != selected_graph_id
+        ):
+            raise LockError("the selected graph differs from the bound graph")
+        self.require(
+            None,
+            (
+                Scope(ScopeKind.NAMESPACE, (binding.namespace_id,)),
+                Scope(ScopeKind.GRAPH, (selected_graph_id,)),
+            ),
+        )
+        if self._storage_address is not None:
+            raise LockError("the graph publication target precedes storage addresses")
+        self._usable = False
+        graph_id = await _read_graph_publication_target(
+            connection, self._dialect, binding
+        )
+        self._lease.require_active()
+        self._usable = True
+        return graph_id
 
     async def acquire_existing_storage_address(
         self, store_id: str, payload_digest: str

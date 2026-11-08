@@ -469,6 +469,8 @@ Only a preparation originally bound by name may use the single [graph ID correct
 
 Under current authority, equal complete deployment retains the original eligible version, witness and owners, with fresh checks under the union of original and newly touched addresses. Different complete deployments may publish distinct versions of the same graph. Cleanup remains with the original typed stage and cannot publish. [#867](https://github.com/realkarych/kora/issues/867) owns the concrete stage format, effect-time authority and release. The actual publisher must prove both commit orders, atomic visibility, bounded recovery and cleanup on SQLite and PostgreSQL.
 
+The [#991 target observation](https://github.com/realkarych/kora/issues/991) uses one exact namespace/name lookup on the live writer after the namespace and selected graph scopes and before the storage address phase. It returns a canonical graph ID or absence. SQLite checks native type and byte width before transferring the ID. A malformed matching row or an unavailable check refuses the observation. The publisher calls it before graph or version writes and owns the comparison, correction, wait deadline and final guards.
+
 ##### Durable graph deployment preparation
 
 The project owner accepted this format on 2026-11-07 under [#899](https://github.com/realkarych/kora/issues/899#issuecomment-6696547668). The private typed relation `graph_deployment_preparation` records the exact original request and its settlement together. Its first five fields are immutable.
