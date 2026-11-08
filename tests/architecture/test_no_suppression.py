@@ -189,6 +189,7 @@ ALLOWED_BLIND_HANDLERS: dict[str, int] = {
     "src/kora/observability/bootstrap.py": 2,
     "src/kora/cel_eval/thread.py": 1,
     "src/kora/observability/sink.py": 1,
+    "src/kora/plugins/harness/claude/sdk.py": 1,
 }
 WARNING_FILTERS_MODULE: str = "tests/support/warning_filters.py"
 ALLOWED_WARNING_NAMES: dict[str, frozenset[str]] = {
@@ -322,6 +323,7 @@ RUFF_TABLE: dict[str, object] = {
             "src/kora/observability/bootstrap.py": ["BLE001"],
             "src/kora/cel_eval/thread.py": ["BLE001"],
             "src/kora/observability/sink.py": ["BLE001"],
+            "src/kora/plugins/harness/claude/sdk.py": ["BLE001"],
             "src/kora/runner/gate.py": ["S606"],
             "tests/support/warning_filters.py": ["TID251"],
             ADVERSE_HELPER: ["TID251"],

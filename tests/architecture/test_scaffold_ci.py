@@ -67,7 +67,10 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
     for name, condition in (
         ("Install locked frontend dependencies", None),
         ("Check Python and frontend sources", "${{ matrix.lane == 'local-runtime' }}"),
-        ("Build isolated distributions offline", "${{ matrix.lane == 'remainder' }}"),
+        (
+            "Build isolated distributions offline",
+            "${{ matrix.lane == 'local-runtime' }}",
+        ),
     ):
         selected = next(step for step in entries if step.get("name") == name)
         assert selected.get("if") == condition
@@ -78,6 +81,16 @@ def test_frontend_consumer_lanes_install_the_pinned_toolchain() -> None:
     entries = [table(value) for value in cast(list[object], job["steps"])]
 
     actions = [action_name(step["uses"]) for step in entries if "uses" in step]
+    checkout = next(
+        step
+        for step in entries
+        if action_name(step.get("uses", "")) == "actions/checkout"
+    )
+    seed = next(
+        step
+        for step in entries
+        if step.get("name") == "Prepare verified Scaffold Node cache"
+    )
     node = next(
         step
         for step in entries
@@ -93,13 +106,21 @@ def test_frontend_consumer_lanes_install_the_pinned_toolchain() -> None:
     )
 
     assert table(node["with"])["node-version-file"] == "web/.node-version"
+    assert table(node["with"])["package-manager-cache"] is False
+    assert table(checkout["with"])["persist-credentials"] is False
+    assert command_lines(seed["run"]) == [("bash", "scripts/ci/setup_scaffold_node.sh")]
     assert table(pnpm["with"])["package_json_file"] == "web/package.json"
-    assert all("if" not in step for step in (node, pnpm, installation))
+    assert all("if" not in step for step in (seed, node, pnpm, installation))
     assert command_lines(installation["run"]) == [
         ("pnpm", "--dir", "web", "install", "--frozen-lockfile")
     ]
-    assert entries.index(node) < entries.index(installation)
-    assert entries.index(pnpm) < entries.index(installation)
+    assert (
+        entries.index(checkout)
+        < entries.index(seed)
+        < entries.index(node)
+        < entries.index(pnpm)
+        < entries.index(installation)
+    )
     assert actions.count("actions/setup-node") == 1
     assert actions.count("pnpm/action-setup") == 1
 
@@ -128,6 +149,44 @@ def test_source_checks_finish_before_host_fixture_acquisition() -> None:
         < entries.index(by_id["unit_collisions"])
         < entries.index(by_id["preparation"])
         < entries.index(by_id["tests"])
+    )
+
+
+def test_distribution_build_uses_locked_inputs_after_host_fixture_teardown() -> None:
+    job = table(workflow_jobs()["scaffold-tests"])
+    entries = [table(value) for value in cast(list[object], job["steps"])]
+    by_id = {str(step["id"]): step for step in entries if "id" in step}
+    distribution = by_id["distributions"]
+    guard = entries[-1]
+
+    commands = command_lines(distribution["run"])
+
+    assert commands == [
+        (
+            "KORA_BUILD_OFFLINE=1",
+            "uv",
+            "build",
+            "--offline",
+            "--python",
+            "$PWD/.venv/bin/python",
+            "--build-constraints",
+            "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt",
+            "--require-hashes",
+            "--clear",
+        )
+    ]
+    assert (
+        entries.index(by_id["dependencies"])
+        < entries.index(by_id["frontend_dependencies"])
+        < entries.index(by_id["tests"])
+        < entries.index(by_id["teardown"])
+        < entries.index(distribution)
+        < entries.index(by_id["final_sync"])
+        < entries.index(guard)
+    )
+    assert (
+        table(guard["env"])["DISTRIBUTIONS_OUTCOME"]
+        == "${{ steps.distributions.outcome }}"
     )
 
 

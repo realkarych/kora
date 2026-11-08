@@ -26,7 +26,7 @@ class Artifact:
 
 
 SCANNER = Artifact(
-    "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz",
+    "https://api.github.com/repos/gitleaks/gitleaks/releases/assets/378332058",
     "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
     "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509",
 )
@@ -157,6 +157,7 @@ def cached_archive(cache: Path, artifact: Artifact) -> Path:
             subprocess.run(
                 [
                     command("curl"),
+                    "--disable",
                     "--fail",
                     "--location",
                     "--silent",
@@ -165,6 +166,8 @@ def cached_archive(cache: Path, artifact: Artifact) -> Path:
                     "=https",
                     "--max-time",
                     "60",
+                    "--header",
+                    "Accept: application/octet-stream",
                     artifact.url,
                     "--output",
                     str(candidate),

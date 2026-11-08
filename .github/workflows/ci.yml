@@ -129,6 +129,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Prepare verified Scaffold Node cache
+        run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
@@ -149,7 +151,7 @@ jobs:
       - name: Install locked dependencies
         id: dependencies
         run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          uv sync --locked --no-build --group build --extra postgres --extra cel --extra claude --no-install-project
           KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
           uv export --locked --only-group build --no-emit-project \
             --format requirements.txt \
@@ -371,7 +373,7 @@ jobs:
         run: sudo scripts/ci/prepare-local-runtime-fixtures.sh teardown
       - name: Build isolated distributions offline
         id: distributions
-        if: ${{ matrix.lane == 'remainder' }}
+        if: ${{ matrix.lane == 'local-runtime' }}
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
@@ -426,7 +428,7 @@ jobs:
             remainder)
               test "$FRONTEND_OUTCOME" = success
               test "$STATIC_OUTCOME" = skipped
-              test "$DISTRIBUTIONS_OUTCOME" = success
+              test "$DISTRIBUTIONS_OUTCOME" = skipped
               ;;
             storage)
               test "$FRONTEND_OUTCOME" = success
@@ -436,7 +438,7 @@ jobs:
             local-runtime)
               test "$FRONTEND_OUTCOME" = success
               test "$STATIC_OUTCOME" = success
-              test "$DISTRIBUTIONS_OUTCOME" = skipped
+              test "$DISTRIBUTIONS_OUTCOME" = success
               ;;
             *) exit 1 ;;
           esac
@@ -1590,26 +1592,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Discover repository Markdown
-        id: markdown-files
-        shell: bash
-        run: |
-          set -euo pipefail
-          KORA_DOC_FILES="$(mktemp)"
-          git ls-files --cached --others --exclude-standard -z -- '*.md' > "$KORA_DOC_FILES"
-          test -s "$KORA_DOC_FILES"
-          args='--config lychee.toml --'
-          while IFS= read -r -d '' file; do
-            printf -v escaped '%q' "$file"
-            args+=" $escaped"
-          done < "$KORA_DOC_FILES"
-          printf 'args=%s\n' "$args" >> "$GITHUB_OUTPUT"
-      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
-        with:
-          lycheeVersion: v0.24.2
-          args: ${{ steps.markdown-files.outputs.args }}
-          jobSummary: false
-          output: ${{ runner.temp }}/lychee.md
+      - name: Check repository Markdown offline
+        run: bash scripts/ci/check_links.sh
 
   mermaid:
     name: Mermaid diagrams
