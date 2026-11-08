@@ -67,3 +67,12 @@ environment override. The exact unset `CODEX_SQLITE_HOME` control now
 participates in private launch preflight. The [dated record](codex-sqlite-state-home-2026-11-08.md)
 keeps this Linux observation separate from complete declarations and
 production placement.
+
+## Subsequent alternate executor registry reservation
+
+[#992](https://github.com/realkarych/kora/issues/992) observes a refused
+alternate registry connection on the pinned selected Linux app-server.
+The four exact unset controls now participate in private launch preflight.
+The [dated record](codex-alternate-executor-registry-2026-11-08.md) separates
+native discovery evidence from production executor binding and complete
+declarations.
