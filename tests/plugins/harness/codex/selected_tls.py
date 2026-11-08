@@ -1,4 +1,5 @@
 import asyncio
+import math
 import ssl
 import subprocess
 from collections.abc import Callable, Coroutine, Generator
@@ -170,15 +171,20 @@ class UnknownCaAlert:
     @contextmanager
     def capture(self) -> Generator[None]:
         loop = asyncio.get_running_loop()
+        if not isinstance(loop, asyncio.BaseEventLoop):
+            raise SelectedTlsError("selected_tls_unexpected_event_loop")
         previous_handler = loop.get_exception_handler()
         previous_debug = loop.get_debug()
+        previous_slow_callback_duration = loop.slow_callback_duration
         try:
+            loop.slow_callback_duration = math.inf
             loop.set_debug(True)
             loop.set_exception_handler(self.observe)
             yield
         finally:
             loop.set_exception_handler(previous_handler)
             loop.set_debug(previous_debug)
+            loop.slow_callback_duration = previous_slow_callback_duration
 
     async def wait_for_refusal(self, turn: Coroutine[object, object, None]) -> None:
         running_turn = asyncio.create_task(turn)
