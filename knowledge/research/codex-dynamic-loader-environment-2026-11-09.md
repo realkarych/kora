@@ -24,6 +24,8 @@ Each case checked the exact managed hook input and successful tool result. The c
 
 The initial audit object lacked a linked libc dependency. Its adverse run failed the normal command assertion. The successful pair used the object with a `libc.so.6` dependency and the `la_version` entry point.
 
+The selected launch control passed all five cases on constructor revision `c4ac8b1ff2bb086a82ee6837503451bb1785adab` using `--check-selected-launch`. It confirmed the ordinary allow, denial, missing key, command metadata and exit-seven outcomes, reaped both roles in each case and removed all five exact containers. Before and after inventories were empty. Wall time was 42 seconds and the log SHA-256 was `224e6d80db27b9d33a2625d739ab7dc2efe0771fe84a1a154957fef2505ff24d`.
+
 ## Scratch reproduction
 
 Use a disposable directory and the existing probe prerequisites. The compiler step uses Apple clang 21 or a clang with the Linux x86-64 target, and GNU ld in a disposable Linux amd64 container. The compiler image may fetch binutils. The [native probe](../../tests/plugins/harness/codex/Dockerfile) pins the same official Codex archive and Python base. The two loader assignments belong only to the scratch executor environment.
@@ -61,15 +63,16 @@ Compile the two objects with the audit entry point added only to the audit objec
 ```sh
 set -eu
 scratch=$(pwd -P)
-cp loader.c audit.c
-cat >> audit.c <<'AUDIT'
+mkdir audit
+cp loader.c audit/loader.c
+cat >> audit/loader.c <<'AUDIT'
 
 unsigned int la_version(unsigned int version) {
     return version;
 }
 AUDIT
 clang --target=x86_64-linux-gnu -fPIC -O2 -c loader.c -o loader.o
-clang --target=x86_64-linux-gnu -fPIC -O2 -c audit.c -o audit.o
+clang --target=x86_64-linux-gnu -fPIC -O2 -c audit/loader.c -o audit.o
 timeout -k 5s 125s docker run --rm --init --platform linux/amd64 \
   --mount "type=bind,source=$scratch,target=/fixture" \
   ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 \
@@ -81,6 +84,8 @@ timeout -k 5s 125s docker run --rm --init --platform linux/amd64 \
     readelf -d /fixture/audit.so
   '
 ```
+
+The documented compiler block reproduced both source and object hashes in the recorded toolchain.
 
 From the repository, archive the recorded revision's `tests/plugins/harness/codex` and `src/kora/plugins/harness/codex` into a fresh directory for each pair. In the scratch fixture's `tests/plugins/harness/codex`, copy the pair's object to `loader.so`. Apply these changes in each scratch copy.
 
