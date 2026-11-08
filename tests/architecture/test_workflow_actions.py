@@ -21,7 +21,6 @@ ACTION_COMMITS = {
     "astral-sh/setup-uv": "c18668ad3cf93ea998bef934396af7bb5c839dc7",
     "github/codeql-action": "6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee",
     "google/osv-scanner-action": "b1d267aea5211fa648d9d442fa64b90dbdcbdd36",
-    "lycheeverse/lychee-action": "e7477775783ea5526144ba13e8db5eec57747ce8",
     "pnpm/action-setup": "ea17c68df8912ef543352723c149a84f56e3d413",
 }
 FAILURE_HANDLERS = frozenset({"||", "trap"})

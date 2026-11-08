@@ -78,6 +78,16 @@ def test_frontend_consumer_lanes_install_the_pinned_toolchain() -> None:
     entries = [table(value) for value in cast(list[object], job["steps"])]
 
     actions = [action_name(step["uses"]) for step in entries if "uses" in step]
+    checkout = next(
+        step
+        for step in entries
+        if action_name(step.get("uses", "")) == "actions/checkout"
+    )
+    seed = next(
+        step
+        for step in entries
+        if step.get("name") == "Prepare verified Scaffold Node cache"
+    )
     node = next(
         step
         for step in entries
@@ -93,13 +103,21 @@ def test_frontend_consumer_lanes_install_the_pinned_toolchain() -> None:
     )
 
     assert table(node["with"])["node-version-file"] == "web/.node-version"
+    assert table(node["with"])["package-manager-cache"] is False
+    assert table(checkout["with"])["persist-credentials"] is False
+    assert command_lines(seed["run"]) == [("bash", "scripts/ci/setup_scaffold_node.sh")]
     assert table(pnpm["with"])["package_json_file"] == "web/package.json"
-    assert all("if" not in step for step in (node, pnpm, installation))
+    assert all("if" not in step for step in (seed, node, pnpm, installation))
     assert command_lines(installation["run"]) == [
         ("pnpm", "--dir", "web", "install", "--frozen-lockfile")
     ]
-    assert entries.index(node) < entries.index(installation)
-    assert entries.index(pnpm) < entries.index(installation)
+    assert (
+        entries.index(checkout)
+        < entries.index(seed)
+        < entries.index(node)
+        < entries.index(pnpm)
+        < entries.index(installation)
+    )
     assert actions.count("actions/setup-node") == 1
     assert actions.count("pnpm/action-setup") == 1
 

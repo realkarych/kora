@@ -354,7 +354,7 @@ uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-forms .github/I
 uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-config .github/ISSUE_TEMPLATE/config.yml
 ```
 
-Mermaid rendering uses Puppeteer and its downloaded browser. `rg` (ripgrep) selects Markdown files containing a Mermaid fence; CI installs it explicitly before discovery. Empty discovery fails. In CI, the pinned lychee action receives the same discovered filenames after Bash escaping because its entrypoint evaluates its arguments.
+Mermaid rendering uses Puppeteer and its downloaded browser. `rg` (ripgrep) selects Markdown files containing a Mermaid fence; CI installs it explicitly before discovery. Empty discovery fails. On 2026-11-08, the project owner approved the pinned CI tool acquisition under [issue #1068](https://github.com/realkarych/kora/issues/1068). The offline link job gives Lychee the same discovered filenames as separate arguments, escapes glob metacharacters and requires at least one link. Scaffold uses the existing pinned Node setup action after preparing a verified official archive when the exact hosted cache entry is absent.
 
 ## Local and native review
 
