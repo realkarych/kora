@@ -307,9 +307,36 @@ def feed(events: ClaudeEvents, message: Message) -> None:
         events.drop("result")
         return
     if isinstance(message, StreamEvent):
-        events.drop("stream_event")
+        feed_stream(events, message)
         return
     events.drop("message")
+
+
+def feed_stream(events: ClaudeEvents, message: StreamEvent) -> None:
+    event = cast("object", message.event)
+    if not isinstance(event, dict):
+        refused()
+    payload = cast("dict[object, object]", event)
+    kind = payload.get("type")
+    if kind == "message_start":
+        body = payload.get("message")
+        if not isinstance(body, dict):
+            refused()
+        fields = cast("dict[object, object]", body)
+        message_id = fields.get("id")
+        if not isinstance(message_id, str):
+            refused()
+        events.usage_start(
+            message_id,
+            fields.get("model"),
+            message.parent_tool_use_id,
+            fields.get("usage"),
+        )
+        return
+    if kind == "message_delta":
+        events.usage_delta(payload.get("usage"))
+        return
+    events.drop("stream_event")
 
 
 async def read_replay(client: ClaudeSDKClient, events: ClaudeEvents) -> None:

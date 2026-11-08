@@ -264,6 +264,7 @@ async def run_replayed_session(
             registry,
             output_format=output_format,
             check_deadline=deadline_check(context.clock, deadline_ns),
+            observed_at=context.clock.now,
         )
         try:
             await run_replayed_client(

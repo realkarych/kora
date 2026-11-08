@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","session_id":"sess-replay-1","apiKeySource":"ANTHROPIC_API_KEY","claude_code_version":"2.1.301","plugins":[],"mcp_servers":[],"tools":[],"model":"claude-sonnet-4-5","permissionMode":"bypassPermissions","uuid":"init-usage","cwd":"/work","slash_commands":[],"output_style":"default","skills":[]}
+{"type":"stream_event","uuid":"stream-start","session_id":"sess-replay-1","event":{"type":"message_start","message":{"id":"msg-usage-1","model":"claude-sonnet-4-5","usage":{"input_tokens":25,"cache_read_input_tokens":4,"cache_creation_input_tokens":0,"output_tokens":99}}}}
+{"type":"stream_event","uuid":"stream-early","session_id":"sess-replay-1","event":{"type":"message_delta","usage":{"output_tokens":3}}}
+{"type":"stream_event","uuid":"stream-hidden","session_id":"sess-replay-1","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hidden-delta"}}}
+{"type":"stream_event","uuid":"stream-final","session_id":"sess-replay-1","event":{"type":"message_delta","usage":{"output_tokens":12}}}
+{"type":"assistant","uuid":"asst-usage","session_id":"sess-replay-1","message":{"id":"msg-usage-1","model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":1000},"content":[{"type":"text","text":"hello"}]}}
+{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"num_turns":1,"session_id":"sess-replay-1","uuid":"result-usage"}

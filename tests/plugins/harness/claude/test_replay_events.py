@@ -1,7 +1,7 @@
 import hashlib
 import json
 from collections.abc import Generator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from json.encoder import encode_basestring
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from kora.protocols.harness import (
     ToolCallEvent,
     ToolResultEvent,
     TurnEvent,
+    UsageEvent,
 )
 from kora.protocols.time import Clock, SystemClock
 
@@ -33,6 +34,10 @@ RECORDING: Path = (
     / "recordings"
     / "constructed-tool-turn-2.1.301.ndjson"
 )
+USAGE_RECORDING: Path = (
+    Path(__file__).resolve().parent / "recordings" / "constructed-usage-2.1.301.ndjson"
+)
+WHEN = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
 PROMPT = "replay the turn"
 TOOLS = ("Write",)
 BOUND = timedelta(seconds=30)
@@ -62,6 +67,11 @@ def context_for(capture: Capture, clock: Clock) -> ProtocolContext:
     )
 
 
+class FrozenClock(SystemClock):
+    def now(self) -> datetime:
+        return WHEN
+
+
 def projector() -> tuple[ConformanceSink, ClaudeEvents]:
     sink = ConformanceSink(None, Trace())
     events = ClaudeEvents(
@@ -69,6 +79,7 @@ def projector() -> tuple[ConformanceSink, ClaudeEvents]:
         SecretRegistry(),
         output_format=False,
         check_deadline=lambda: None,
+        observed_at=lambda: WHEN,
     )
     return sink, events
 
@@ -274,6 +285,144 @@ def test_claude_event_projection_truncates_turn_text() -> None:
     assert turn.data.truncated is True
     assert turn.data.text.endswith(MARKER)
     assert len(encode_basestring(turn.data.text).encode("utf-8")) == MAX_TEXT_BYTES
+
+
+@pytest.mark.asyncio
+async def test_claude_replay_projects_partial_usage(
+    claude_capture: Capture, tmp_path: Path
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    sink = ConformanceSink(None, Trace())
+
+    await run_replayed_session(
+        context_for(claude_capture, FrozenClock()),
+        sink,
+        SecretRegistry(),
+        cwd=work,
+        launch_dir=tmp_path / "launch",
+        recording=USAGE_RECORDING,
+        environment={},
+        prompt=PROMPT,
+        tools=TOOLS,
+        bound=BOUND,
+        output_format=False,
+    )
+
+    assert [event.kind for event in sink.events] == [
+        "session_started",
+        "turn",
+        "usage",
+    ]
+    turn = sink.events[1]
+    usage = sink.events[2]
+    assert isinstance(turn, TurnEvent)
+    assert isinstance(usage, UsageEvent)
+    assert turn.data.text == "hello"
+    assert usage.data.message_id == "msg-usage-1"
+    assert usage.data.model == "claude-sonnet-4-5"
+    assert usage.data.input_tokens == 25
+    assert usage.data.cached_input_tokens == 4
+    assert usage.data.cache_creation_tokens == 0
+    assert usage.data.output_tokens == 12
+    assert usage.data.reasoning_tokens == 0
+    assert usage.data.known_token_fields == frozenset(
+        {
+            "input_tokens",
+            "cached_input_tokens",
+            "cache_creation_tokens",
+            "output_tokens",
+        }
+    )
+    assert usage.data.basis == "price_table"
+    assert usage.data.billing_class == "api_key"
+    assert usage.data.reported_usd is None
+    assert usage.data.observation_sequence == 0
+    assert usage.data.observed_at == WHEN
+    assert usage.data.coverage.completeness == "partial"
+    assert usage.data.coverage.attribution_gap is False
+    refuse_content(
+        rendered_events(sink),
+        ("hidden-delta",),
+        "session content reached an event",
+    )
+    assert not (tmp_path / "launch" / "environment.json").exists()
+    assert_replay_records(claude_capture.finish(), ("hidden-delta",))
+
+
+def test_claude_event_projection_keeps_the_last_usage_delta() -> None:
+    sink, events = projector()
+    events.observe_init(init_fields())
+    events.usage_start(
+        "msg-1",
+        "claude-sonnet-4-5",
+        None,
+        {
+            "input_tokens": 25,
+            "cache_read_input_tokens": 4,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 99,
+        },
+    )
+    events.usage_delta({"output_tokens": 3})
+    events.usage_delta({"output_tokens": 12})
+    events.usage_start(
+        "msg-2",
+        "claude-sonnet-4-5",
+        None,
+        {
+            "input_tokens": 1,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
+    )
+    events.usage_delta({"output_tokens": 2})
+
+    events.finish()
+
+    usage = [event for event in sink.events if isinstance(event, UsageEvent)]
+    assert [event.kind for event in sink.events] == [
+        "session_started",
+        "usage",
+        "usage",
+    ]
+    assert usage[0].data.message_id == "msg-1"
+    assert usage[0].data.input_tokens == 25
+    assert usage[0].data.cached_input_tokens == 4
+    assert usage[0].data.cache_creation_tokens == 0
+    assert usage[0].data.output_tokens == 12
+    assert usage[0].data.reasoning_tokens == 0
+    assert "reasoning_tokens" not in usage[0].data.known_token_fields
+    assert usage[0].data.observation_sequence == 0
+    assert usage[0].data.coverage.completeness == "partial"
+    assert usage[1].data.message_id == "msg-2"
+    assert usage[1].data.input_tokens == 1
+    assert usage[1].data.output_tokens == 2
+    assert usage[1].data.observation_sequence == 1
+
+
+def test_claude_event_projection_refuses_a_non_integer_token_count() -> None:
+    sink, events = projector()
+    events.observe_init(init_fields())
+
+    with pytest.raises(KoraProtocolError) as caught:
+        events.usage_start(
+            "msg-1",
+            "claude-sonnet-4-5",
+            None,
+            {
+                "input_tokens": True,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        )
+
+    error = caught.value
+    assert error.code == "harness_error"
+    assert error.message == "the Claude session failed"
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert [event.kind for event in sink.events] == ["session_started"]
 
 
 def test_claude_event_projection_refuses_an_unknown_api_key_source() -> None:

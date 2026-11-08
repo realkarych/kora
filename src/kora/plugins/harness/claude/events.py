@@ -2,13 +2,21 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from json.encoder import encode_basestring
 from typing import NoReturn, cast
 
 from pydantic import ValidationError
 
 from kora.ir.agent_session_validation import TRUNCATION_MARKER
-from kora.ir.cost import BillingClass
+from kora.ir.cost import (
+    MAX_IDENTIFIER_LENGTH,
+    MAX_SUM,
+    MAX_TOKEN,
+    BillingClass,
+    TokenField,
+    UsageCoverage,
+)
 from kora.ir.json import JsonShapeError, parse_json_object
 from kora.observability.redaction import SecretRegistry, StreamMasker
 from kora.protocols.errors import KoraProtocolError
@@ -19,6 +27,7 @@ from kora.protocols.harness import (
     ToolCallData,
     ToolResultData,
     TurnData,
+    UsageData,
 )
 
 MASK_CHUNK_BYTES = 8192
@@ -91,6 +100,58 @@ def plugins_digest(names: tuple[str, ...]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+START_COUNTS: tuple[tuple[str, TokenField], ...] = (
+    ("input_tokens", "input_tokens"),
+    ("cache_read_input_tokens", "cached_input_tokens"),
+    ("cache_creation_input_tokens", "cache_creation_tokens"),
+)
+DELTA_COUNTS: tuple[tuple[str, TokenField], ...] = (
+    ("output_tokens", "output_tokens"),
+    ("reasoning_tokens", "reasoning_tokens"),
+)
+OUTPUT_FIELDS: frozenset[TokenField] = frozenset(("output_tokens", "reasoning_tokens"))
+
+
+def require_identifier(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > MAX_IDENTIFIER_LENGTH
+        or not value.isprintable()
+    ):
+        refused()
+    return value
+
+
+def optional_identifier(value: object) -> str | None:
+    if value is None:
+        return None
+    return require_identifier(value)
+
+
+def token_count(value: object) -> int:
+    if type(value) is not int or value < 0 or value > MAX_TOKEN:
+        refused()
+    return value
+
+
+def usage_counts(
+    value: object, names: tuple[tuple[str, TokenField], ...]
+) -> tuple[dict[TokenField, int], frozenset[TokenField]]:
+    if not isinstance(value, dict):
+        refused()
+    fields = cast("dict[object, object]", value)
+    counts: dict[TokenField, int] = {}
+    known: set[TokenField] = set()
+    for source, target in names:
+        if source not in fields:
+            counts[target] = 0
+            continue
+        counts[target] = token_count(fields[source])
+        known.add(target)
+    return counts, frozenset(known)
+
+
 def require_list(value: object) -> list[object]:
     if not isinstance(value, list):
         refused()
@@ -134,6 +195,19 @@ class ToolPiece:
     tool_use_id: str
 
 
+@dataclass
+class OpenUsage:
+    message_id: str
+    model: str | None
+    agent_id: str | None
+    input_tokens: int
+    cached_input_tokens: int
+    cache_creation_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    known: frozenset[TokenField]
+
+
 class ClaudeEvents:
     def __init__(
         self,
@@ -142,17 +216,22 @@ class ClaudeEvents:
         *,
         output_format: bool,
         check_deadline: Callable[[], None],
+        observed_at: Callable[[], datetime],
     ) -> None:
         self._sink = sink
         self._registry = registry
         self._output_format = output_format
         self._check_deadline = check_deadline
+        self._observed_at = observed_at
         self._started = False
+        self._billing: BillingClass | None = None
         self._message_id: str | None = None
         self._agent_id: str | None = None
         self._parts: list[str] = []
         self._saw_text = False
         self._tools: list[ToolPiece] = []
+        self._usage: OpenUsage | None = None
+        self._usage_sequence = 0
 
     def observe_init(self, data: object) -> None:
         if self._started or not isinstance(data, dict):
@@ -185,6 +264,7 @@ class ClaudeEvents:
         if started is None:
             refused()
         self._emit("session_started", started)
+        self._billing = selected
         self._started = True
 
     def assistant(
@@ -232,6 +312,37 @@ class ClaudeEvents:
             refused()
         self._emit("tool_result", result)
 
+    def usage_start(
+        self, message_id: str, model: object, agent_id: object, usage: object
+    ) -> None:
+        if not self._started:
+            refused()
+        identity = require_identifier(message_id)
+        if self._usage is not None and self._usage.message_id == identity:
+            refused()
+        self._emit_usage()
+        counts, known = usage_counts(usage, START_COUNTS)
+        self._usage = OpenUsage(
+            message_id=identity,
+            model=optional_identifier(model),
+            agent_id=optional_identifier(agent_id),
+            input_tokens=counts["input_tokens"],
+            cached_input_tokens=counts["cached_input_tokens"],
+            cache_creation_tokens=counts["cache_creation_tokens"],
+            output_tokens=0,
+            reasoning_tokens=0,
+            known=known,
+        )
+
+    def usage_delta(self, usage: object) -> None:
+        call = self._usage
+        if not self._started or call is None:
+            refused()
+        counts, known = usage_counts(usage, DELTA_COUNTS)
+        call.output_tokens = counts["output_tokens"]
+        call.reasoning_tokens = counts["reasoning_tokens"]
+        call.known = call.known - OUTPUT_FIELDS | known
+
     def drop(self, kind: str) -> None:
         known = {
             "assistant",
@@ -245,6 +356,7 @@ class ClaudeEvents:
 
     def finish(self) -> None:
         self._flush()
+        self._emit_usage()
         if not self._started:
             refused()
 
@@ -295,10 +407,57 @@ class ClaudeEvents:
             refused()
         self._emit("tool_call", call)
 
+    def _emit_usage(self) -> None:
+        call = self._usage
+        if call is None:
+            return
+        self._usage = None
+        billing = self._billing
+        sequence = self._usage_sequence
+        if billing is None or sequence > MAX_SUM:
+            refused()
+        when = self._observed_at()
+        try:
+            usage = UsageData(
+                observation_id=call.message_id,
+                observation_sequence=sequence,
+                observed_at=when,
+                message_id=call.message_id,
+                agent_id=call.agent_id,
+                model=call.model,
+                input_tokens=call.input_tokens,
+                cached_input_tokens=call.cached_input_tokens,
+                cache_creation_tokens=call.cache_creation_tokens,
+                output_tokens=call.output_tokens,
+                reasoning_tokens=call.reasoning_tokens,
+                known_token_fields=call.known,
+                basis="price_table",
+                billing_class=billing,
+                coverage=UsageCoverage(
+                    version=1,
+                    observation_id=call.message_id,
+                    observation_sequence=sequence,
+                    completeness="partial",
+                    observed_at=when,
+                    attribution_gap=call.model is None,
+                    observation_gap=False,
+                ),
+            )
+        except ValidationError:
+            usage = None
+        if usage is None:
+            refused()
+        self._emit("usage", usage)
+        self._usage_sequence = sequence + 1
+
     def _emit(
         self,
         kind: str,
-        model: SessionStartedData | TurnData | ToolCallData | ToolResultData,
+        model: SessionStartedData
+        | TurnData
+        | ToolCallData
+        | ToolResultData
+        | UsageData,
     ) -> None:
         try:
             dumped = model.model_dump(mode="json")
