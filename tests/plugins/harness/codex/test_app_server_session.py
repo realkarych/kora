@@ -23,6 +23,7 @@ from kora.plugins.harness.codex.app_server_session import (
     SessionRefused,
     TurnObservations,
 )
+from kora.plugins.harness.codex.app_server_tools import ToolObservation
 from kora.plugins.harness.codex.app_server_turn import TerminalStatus
 from kora.plugins.harness.codex.app_server_usage import UsageError, UsageFailure
 from tests.plugins.harness.codex.test_app_server_errors import (
@@ -39,6 +40,10 @@ from tests.plugins.harness.codex.test_app_server_output import (
     terminal_frame,
     terminal_params,
 )
+from tests.plugins.harness.codex.test_app_server_tools import (
+    PRIVATE as TOOL_PRIVATE,
+)
+from tests.plugins.harness.codex.test_app_server_tools import tool_notice
 from tests.plugins.harness.codex.test_app_server_turn import (
     PROMPT,
     THREAD,
@@ -143,6 +148,167 @@ async def test_combined_state_is_published_only_after_matching_acknowledgement(
         assert state.final_message == completion.final_message
         assert candidate is not None
         assert candidate.value == {"ok": True}
+        assert owned_tasks() == set()
+
+
+@pytest.mark.parametrize("order", ["late", "early", "early-terminal"])
+@pytest.mark.asyncio
+async def test_confirmed_tool_handoff_preserves_receipt_order_and_cutoff(
+    order: str,
+) -> None:
+    async with wire() as connection:
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=3)
+        deliveries: list[tuple[int | str, str]] = []
+        results: list[ToolObservation] = []
+        raw: list[Notification] = []
+
+        def observe_tool(tool: ToolObservation) -> None:
+            results.append(tool)
+            deliveries.append((tool.item_id, tool.status))
+
+        operation = connection.start(
+            session.run(
+                connection.rpc,
+                prompt=PROMPT,
+                deadline=future_deadline(),
+                observe=raw.append,
+                on_message=lambda ordinal, msg: deliveries.append(
+                    (ordinal, msg.message_id)
+                ),
+                on_tool_completed=observe_tool,
+            )
+        )
+        await start_request(connection)
+        command_start = encoded(tool_notice(status="completed", identity="command"))
+        patch_end = encoded(
+            tool_notice(
+                phase="completed",
+                kind="fileChange",
+                identity="patch",
+                status="inProgress",
+            )
+        )
+        command_end = encoded(
+            tool_notice(
+                phase="completed",
+                identity="command",
+                status="failed",
+                exit_code=7,
+                source="unifiedExecStartup",
+            )
+        )
+        first = encoded(message(identity="first"))
+        second = encoded(message(identity="second"))
+        unrelated = encoded(tool_notice(kind="reasoning", phase="completed"))
+        after_cutoff = encoded(tool_notice(phase="completed", identity="after-cutoff"))
+        frames = (command_start, patch_end, first, unrelated, command_end, second)
+        if order == "late":
+            frames = (started(), *frames, completed())
+        elif order == "early-terminal":
+            frames = (*frames[:4], completed(), *frames[4:], started())
+        else:
+            frames = (*frames, started(), completed())
+
+        await connection.send(*frames, after_cutoff)
+        terminal = await operation
+
+        assert terminal.turn_id == TURN
+        assert deliveries == [
+            ("patch", "inProgress"),
+            (1, "first"),
+            ("command", "failed"),
+            (2, "second"),
+        ]
+        assert results == [
+            ToolObservation(
+                THREAD,
+                TURN,
+                "patch",
+                "fileChange",
+                "completed",
+                "inProgress",
+                None,
+                None,
+            ),
+            ToolObservation(
+                THREAD,
+                TURN,
+                "command",
+                "commandExecution",
+                "completed",
+                "failed",
+                "unifiedExecStartup",
+                7,
+            ),
+        ]
+        assert len(raw) == 6
+        assert TOOL_PRIVATE in repr(raw)
+        assert TOOL_PRIVATE not in repr(results)
+        assert all(
+            not hasattr(tool, "command") and not hasattr(tool, "changes")
+            for tool in results
+        )
+        assert session.snapshot().tool_counts.completion_without_start == 1
+        assert owned_tasks() == set()
+
+
+@pytest.mark.parametrize("end", ["expired", "raised"])
+@pytest.mark.asyncio
+async def test_tool_callback_failure_keeps_confirmed_prefix_and_releases_staging(
+    end: str,
+) -> None:
+    clock = Clock()
+    deadline = future_deadline()
+    async with wire(clock=clock.now) as connection:
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=2)
+        deliveries: list[str] = []
+        staged: list[weakref.ReferenceType[ToolObservation]] = []
+        injected_error = ValueError("fixture observer refused")
+
+        def observe_tool(tool: ToolObservation) -> None:
+            staged.append(weakref.ref(tool))
+            deliveries.append(tool.item_id)
+            if end == "raised":
+                raise injected_error
+            clock.value = deadline
+
+        operation = connection.start(
+            session.run(
+                connection.rpc,
+                prompt=PROMPT,
+                deadline=deadline,
+                on_message=lambda _, msg: deliveries.append(msg.message_id),
+                on_tool_completed=observe_tool,
+            )
+        )
+        await start_request(connection)
+        first = encoded(tool_notice(phase="completed", identity="first-tool"))
+        second = encoded(tool_notice(phase="completed", identity="second-tool"))
+
+        await connection.send(
+            encoded(message(identity="first-message")),
+            first,
+            encoded(message(identity="second-message")),
+            completed(),
+            second,
+            started(),
+        )
+        with pytest.raises((ValueError, RpcError)) as caught:
+            await operation
+        gc.collect()
+        state = session.snapshot()
+
+        assert deliveries == ["first-message", "first-tool"]
+        assert state.turn_id == TURN
+        assert state.latest_tool is not None
+        assert state.latest_tool.item_id == "second-tool"
+        assert state.message_count == state.tool_counts.completed == 2
+        if end == "raised":
+            assert caught.value is injected_error
+        else:
+            assert isinstance(caught.value, RpcError)
+            assert caught.value.reason is RpcFailure.DEADLINE
+            assert staged[0]() is None
         assert owned_tasks() == set()
 
 

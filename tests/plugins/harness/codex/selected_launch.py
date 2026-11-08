@@ -25,6 +25,7 @@ SelectedShellPatchCase = Literal[
 ]
 SelectedHookCase = (
     Literal[
+        "selected-command-exit-seven",
         "selected-hook-deny",
         "selected-hook-no-reason",
         "selected-hook-exit-one",
@@ -103,6 +104,7 @@ SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
     {
         *SELECTED_PATCH_CASES,
         *SELECTED_SHELL_PATCH_CASES,
+        "selected-command-exit-seven",
         "selected-hook-deny",
         "selected-hook-no-reason",
         "selected-hook-exit-one",
@@ -230,6 +232,8 @@ def selected_command(case: str) -> str:
         return SHELL_PATCH_COMMAND
     if case in SELECTED_EXPLICIT_TRACE_CASES:
         return "set -x; " + SELECTED_COMMAND
+    if case == "selected-command-exit-seven":
+        return SELECTED_COMMAND + " && exit 7"
     return METADATA_COMMAND if case == "selected-command-metadata" else SELECTED_COMMAND
 
 

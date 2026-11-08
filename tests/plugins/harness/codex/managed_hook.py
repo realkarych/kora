@@ -150,6 +150,7 @@ def main() -> int:
         "interactive",
         "shell_controls",
         "executor-allow",
+        "selected-command-exit-seven",
         "selected-command-metadata",
         "selected-allow",
         "selected-patch-allow",

@@ -45,6 +45,7 @@ from kora.plugins.harness.codex.app_server_startup import (
 )
 from kora.plugins.harness.codex.app_server_tools import (
     ToolCounts,
+    ToolObservation,
     ToolRefused,
     reject_premature_tool,
 )
@@ -155,6 +156,7 @@ ProbeCase = (
 
 PATCH_DENIAL = "kora managed hook probe denied the direct patch"
 SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, tuple[str, str] | None]] = {
+    "selected-command-exit-seven": ("completed", None),
     "selected-hook-deny": ("blocked", ("feedback", SELECTED_DENIAL)),
     "selected-hook-no-reason": (
         "failed",
@@ -1133,6 +1135,7 @@ class ResponsesFixture:
             )
         elif self.case in SHELL_ARGUMENTS or self.case in SELECTED_AUTH_CASES:
             header, separator, body = output.partition("\nOutput:\n")
+            exit_code = 7 if self.case == "selected-command-exit-seven" else 0
             status = [
                 line
                 for line in header.splitlines()
@@ -1141,7 +1144,7 @@ class ResponsesFixture:
                 )
             ]
             require(
-                bool(separator) and status == ["Process exited with code 0"],
+                bool(separator) and status == [f"Process exited with code {exit_code}"],
                 "shell_command_failed",
             )
             if (
@@ -1196,6 +1199,11 @@ class ToolProbe:
         self.thread_id = thread_id
         self.turn_id: str | None = None
         self.events: list[tuple[str, str, str, str | None, int | None]] = []
+        self.confirmed: list[ToolObservation] = []
+
+    def confirm_completion(self, tool: ToolObservation) -> None:
+        require(not self.confirmed, "tool_completion_handoff_overflow")
+        self.confirmed.append(tool)
 
     def observe(self, notification: Notification) -> None:
         if notification.method not in ("item/started", "item/completed"):
@@ -1254,7 +1262,13 @@ class ToolProbe:
         self, terminal: TurnCompletion, session: AppServerTurnSession | None
     ) -> None:
         expected: tuple[tuple[str, str, str, str | None, int | None], ...]
-        if self.case in ("allow", "selected-command-metadata"):
+        if self.case in (
+            "allow",
+            "selected-command-metadata",
+            "selected-command-exit-seven",
+        ):
+            exit_code = 7 if self.case == "selected-command-exit-seven" else 0
+            status = "failed" if exit_code else "completed"
             expected = (
                 (
                     "commandExecution",
@@ -1263,7 +1277,13 @@ class ToolProbe:
                     "unifiedExecStartup",
                     None,
                 ),
-                ("commandExecution", "completed", "completed", "unifiedExecStartup", 0),
+                (
+                    "commandExecution",
+                    "completed",
+                    status,
+                    "unifiedExecStartup",
+                    exit_code,
+                ),
             )
         elif self.case in PATCH_WRITE_CASES:
             expected = (
@@ -1282,8 +1302,9 @@ class ToolProbe:
             raise ProbeFailure("tool_fixture_case_unknown")
         require(tuple(self.events) == expected, "tool_native_lifecycle_mismatch")
         require(self.turn_id in (None, terminal.turn_id), "tool_native_turn_mismatch")
-        if session is not None:
-            self.verify_session(session)
+        if session is None:
+            raise ProbeFailure("tool_completion_session_missing")
+        self.verify_session(session)
         diagnostic(
             "INFO", "probe.tool_lifecycle_verified", f"{self.case}:{len(self.events)}"
         )
@@ -1319,6 +1340,32 @@ class ToolProbe:
             )
         else:
             require(latest is None, "tool_session_observation_invented")
+        require(
+            [
+                (
+                    tool.thread_id,
+                    tool.turn_id,
+                    tool.item_id,
+                    tool.kind,
+                    tool.phase,
+                    tool.status,
+                    tool.source,
+                    tool.exit_code,
+                )
+                for tool in self.confirmed
+            ]
+            == [
+                (self.thread_id, self.turn_id, CALL_ID, *event)
+                for event in self.events
+                if event[1] == "completed"
+            ],
+            "tool_completion_handoff_mismatch",
+        )
+        diagnostic(
+            "INFO",
+            "probe.tool_completion_handoff_verified",
+            f"{self.case}:{completions}",
+        )
 
 
 class OutputProbe:
@@ -1782,7 +1829,14 @@ class Stdio:
             ToolProbe(case, thread_id)
             if case in DIRECT_PATCH_CASES
             or case in SELECTED_SHELL_PATCH_CASES
-            or case in ("allow", "deny", "decoder-refuse", "selected-command-metadata")
+            or case
+            in (
+                "allow",
+                "deny",
+                "decoder-refuse",
+                "selected-command-metadata",
+                "selected-command-exit-seven",
+            )
             else None
         )
         hook = (
@@ -1837,7 +1891,7 @@ class Stdio:
             if outputs is not None:
                 outputs.started(turn_id)
 
-        if case not in SELECTED_FILE_CHANGE_CASES and any(
+        if any(
             value is not None for value in (usage, errors, messages, outputs, tools)
         ):
             self.session = AppServerTurnSession(
@@ -1851,6 +1905,9 @@ class Stdio:
                 on_waiting=self.waiting_terminal.set,
                 on_started=observe_started,
                 on_message=messages.confirmed if messages is not None else None,
+                on_tool_completed=tools.confirm_completion
+                if tools is not None
+                else None,
                 output_schema=OUTPUT_SCHEMA if outputs is not None else None,
                 usage_observer=(
                     UsageObserver(lambda: USAGE_SOURCE_TIME, usage.confirmed)
