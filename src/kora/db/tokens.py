@@ -2,13 +2,16 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Final, Protocol, cast
 
-from sqlalchemy import or_, update
+from sqlalchemy import Integer, literal_column, or_, select, update
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as DatabaseTimeout
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, DatabaseClosedError, Dialect
+from kora.db.identifiers import is_identifier
 from kora.db.tables import api_token
+from kora.db.transactions import raise_private_metadata_error, writer_transaction
+from kora.db.types import POSTGRESQL, SQLITE
 
 REVOKED: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
 UNAVAILABLE_SQLITE: Final[frozenset[int]] = frozenset(
@@ -29,6 +32,39 @@ class PostgresDriver(Protocol):
 
 class PostgresAdapter(Protocol):
     asyncpg: PostgresDriver
+
+
+class GraphCredentialGuardRejected(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("graph credential guard rejected")
+
+
+class GraphCredentialGuardFailed(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("graph credential guard failed")
+
+
+async def acquire_graph_credential_guard(
+    connection: AsyncConnection, token_id: str
+) -> None:
+    lease = writer_transaction(connection)
+    dialect = connection.dialect.name
+    if (
+        dialect not in (POSTGRESQL, SQLITE)
+        or type(token_id) is not str
+        or not is_identifier(token_id)
+    ):
+        raise_private_metadata_error(GraphCredentialGuardRejected())
+    statement = select(literal_column("1", Integer)).where(api_token.c.id == token_id)
+    if dialect == POSTGRESQL:
+        statement = statement.with_for_update(read=True, of=api_token)
+    try:
+        marker: object = (await connection.execute(statement)).scalar_one_or_none()
+    except SQLAlchemyError:
+        raise_private_metadata_error(GraphCredentialGuardFailed())
+    lease.require_active()
+    if marker != 1:
+        raise_private_metadata_error(GraphCredentialGuardRejected())
 
 
 def authentication_errors(database: Database) -> tuple[type[Exception], ...]:
