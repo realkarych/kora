@@ -18,6 +18,7 @@ from kora.engine.graph_command_manifests import (
 from kora.engine.graph_resource_references import (
     GraphResourceOwner,
     GraphResourceReferenceLimits,
+    GraphResourceReferences,
     GraphResourceScope,
     build_graph_resource_references,
     check_graph_resource_references,
@@ -392,9 +393,21 @@ def test_prepared_owner_retention_fits_exact_limit_with_unchanged_reader(
         limits=reader_limits,
     )
 
+    frames = {
+        frame.f_code.co_name: frame.f_locals
+        for frame, _ in walk_tb(refused.value.__traceback__)
+    }
+
     assert built.owners == owners
+    assert type(checked) is GraphResourceReferences
     assert checked.text == built.text
     assert_refused(refused.value, GraphValueFailure.BUDGET)
+    assert "_references_result" not in frames
+    assert set(frames["build_graph_resource_references"]) == {
+        "limits",
+        "result",
+        "reason",
+    }
 
 
 def test_physical_references_charge_saved_comparison_and_repeated_occurrences() -> None:

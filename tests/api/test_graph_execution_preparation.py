@@ -61,6 +61,7 @@ from tests.engine.test_graph_execution_contract import complete_inputs
 from tests.engine.test_graph_resource_references import SCOPE, assert_refused, content
 
 MARKER = "private-preparation-837"
+OWNER_MARKER = "second-object"
 LIMITS = ExecutionPreparationLimits(
     READ_LIMITS, 100_000, 100_000, 100_000, 200_000_000, 400_000_000_000_000
 )
@@ -77,8 +78,8 @@ def source(
     raw, _, _, owners = complete_inputs(SCOPE, long_integer=True)
     raw["x-signed-zero"] = -0.0
     graph = child(raw, "graph")
+    root = owners[0]
     if ordered:
-        root = owners[0]
         child(graph, "nodes", "producer", "config").update(
             authored_manifest([resource("é.sh"), resource("z.sh")])
         )
@@ -87,9 +88,15 @@ def source(
                 SCOPE,
                 root.path,
                 "é.sh",
-                content(store="second-store", incarnation="second-object"),
+                content(store="second-store", incarnation=OWNER_MARKER),
             ),
             GraphResourceOwner(SCOPE, root.path, "z.sh", content(incarnation=MARKER)),
+        )
+    else:
+        owners = (
+            GraphResourceOwner(
+                SCOPE, root.path, root.name, content(incarnation=OWNER_MARKER)
+            ),
         )
     child(graph, "params")["required"] = ["enabled"]
     pattern = ("(?ii)" if invalid_pattern else "^") + MARKER
@@ -147,6 +154,7 @@ def assert_protected(error: BaseException) -> None:
     assert error.__context__ is None
     assert error.__cause__ is None
     assert MARKER not in repr(error)
+    assert OWNER_MARKER not in repr(error)
 
 
 def check_roundtrip() -> None:
@@ -156,7 +164,10 @@ def check_roundtrip() -> None:
         original.scope,
         original.path,
         original.name,
-        content(incarnation="other-instance"),
+        content(
+            store=original.reference.address.storage_identity.store_id,
+            incarnation="other-instance",
+        ),
     )
 
     with borrowed() as (runner, evaluator):
@@ -234,6 +245,7 @@ def check_roundtrip() -> None:
         for output in outputs
     )
     assert MARKER not in repr(draft)
+    assert OWNER_MARKER not in repr(draft)
     assert MARKER not in repr(encoder.value)
     assert_refused(wrong_incarnation.value, GraphValueFailure.INVALID)
 
@@ -473,6 +485,7 @@ def test_graph_execution_preparation_uses_real_bounded_native_verification(
     assert result.code == 0, result.stderr
     assert result.stdout == ""
     assert MARKER not in result.stderr
+    assert OWNER_MARKER not in result.stderr
     assert "Function 'matches' error:" not in result.stderr
     records: list[dict[str, object]] = [
         json.loads(line) for line in result.stderr.splitlines()
