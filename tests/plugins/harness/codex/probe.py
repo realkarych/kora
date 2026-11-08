@@ -90,6 +90,8 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_PATCH_CASES,
     SELECTED_REFUSALS,
     SELECTED_SQLITE_HOME_CASES,
+    SELECTED_TLS_CASES,
+    SELECTED_TLS_OVERRIDES,
     SELECTED_TOOL_INVENTORY_CASES,
     SELECTED_TURN_CASES,
     SQLITE_HOME_CANARY,
@@ -102,6 +104,12 @@ from tests.plugins.harness.codex.selected_launch import (
     role_homes,
     selected_command,
     workspace_remains_untrusted,
+)
+from tests.plugins.harness.codex.selected_tls import (
+    SelectedTls,
+    SelectedTlsError,
+    UnknownCaAlert,
+    create_selected_tls,
 )
 
 Case = Literal["allow", "deny", "stall", "interactive", "usage"]
@@ -2639,7 +2647,14 @@ async def observe_hook_timeout(
             await asyncio.gather(observation, return_exceptions=True)
 
 
-async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
+async def drive(
+    fixture: ResponsesFixture,
+    root: Path,
+    workspace: Path,
+    *,
+    tls: SelectedTls | None = None,
+    unknown_ca: UnknownCaAlert | None = None,
+) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
     async with asyncio.timeout_at(deadline):
         server = await asyncio.start_server(
@@ -2647,6 +2662,8 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             "127.0.0.1",
             0,
             limit=16_384,
+            ssl=None if tls is None else tls.context,
+            ssl_handshake_timeout=None if tls is None else CLEANUP_SECONDS,
         )
     process: asyncio.subprocess.Process | None = None
     executor: asyncio.subprocess.Process | None = None
@@ -2671,10 +2688,28 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             if fixture.case in SELECTED_LAUNCH_CASES:
                 bearer = secrets.token_urlsafe(32)
                 inputs = prepare_native_inputs(
-                    root, workspace, binary=Path(CODEX), port=port, bearer=bearer
+                    root,
+                    workspace,
+                    binary=Path(CODEX),
+                    port=port,
+                    bearer=bearer,
+                    https=tls is not None,
                 )
                 child_env = materialize_native_inputs(inputs.app_server)
                 exec_env = materialize_native_inputs(inputs.exec_server)
+                if tls is not None:
+                    names = SELECTED_TLS_OVERRIDES.values()
+                    require(
+                        not any(
+                            name in child_env or name in exec_env for name in names
+                        ),
+                        "selected_tls_inherited_override",
+                    )
+                    tls_name = SELECTED_TLS_OVERRIDES.get(fixture.case)
+                    if tls_name is not None:
+                        child_env[tls_name] = str(
+                            tls.roots if tls_name == "SSL_CERT_DIR" else tls.bundle
+                        )
                 if fixture.case == "selected-command-metadata":
                     exec_env.update(METADATA_ENVIRONMENT)
                 if fixture.case == "selected-sqlite-home-override":
@@ -2765,7 +2800,13 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 )
             elif fixture.case in SELECTED_LAUNCH_CASES:
                 assert executor_url is not None
-                if fixture.case in SELECTED_HOOK_TIMEOUT_CASES:
+                if unknown_ca is not None:
+                    await unknown_ca.wait_for_refusal(
+                        stdio.observe_selected(
+                            workspace, fixture.case, executor_url, bearer
+                        )
+                    )
+                elif fixture.case in SELECTED_HOOK_TIMEOUT_CASES:
                     assert executor is not None
                     await observe_hook_timeout(
                         stdio,
@@ -2937,6 +2978,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             or case in SELECTED_TURN_CASES
             or case in SELECTED_SQLITE_HOME_CASES
             or case in SELECTED_BASH_STARTUP_CASES
+            or case in SELECTED_TLS_CASES
             or case in SELECTED_TOOL_INVENTORY_CASES
             else case
         )
@@ -2960,7 +3002,20 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             plant_checkout_canaries(workspace)
         marker = workspace / MARKER
         fixture = ResponsesFixture(case, one_shot=True)
-        await drive(fixture, root, workspace)
+        tls = (
+            create_selected_tls(root / "model-tls")
+            if case in SELECTED_TLS_CASES
+            else None
+        )
+        if case == "selected-tls-default":
+            assert tls is not None
+            unknown_ca = UnknownCaAlert(tls.context)
+            with unknown_ca.capture():
+                await drive(fixture, root, workspace, tls=tls, unknown_ca=unknown_ca)
+            unknown_ca.verify()
+            diagnostic("INFO", "probe.selected_tls_unknown_ca_verified", case)
+        else:
+            await drive(fixture, root, workspace, tls=tls)
         require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
         require(
             fixture.connections == fixture.requests == fixture.request_limit,
@@ -3384,7 +3439,7 @@ def report_connection_failure(
 def main() -> int:
     try:
         asyncio.run(run())
-    except ProbeFailure as error:
+    except (ProbeFailure, SelectedTlsError) as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
     except (

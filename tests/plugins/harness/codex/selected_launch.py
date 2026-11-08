@@ -38,6 +38,12 @@ SelectedBashTraceCase = Literal[
     "selected-bash-trace-command",
     "selected-bash-trace-ps4",
 ]
+SelectedTlsCase = Literal[
+    "selected-tls-default",
+    "selected-tls-codex-ca",
+    "selected-tls-cert-file",
+    "selected-tls-cert-dir",
+]
 SelectedNoiseRegistryCase = Literal[
     "selected-noise-registry-default", "selected-noise-registry-override"
 ]
@@ -53,6 +59,7 @@ SelectedLaunchCase = (
     | SelectedSqliteHomeCase
     | SelectedBashStartupCase
     | SelectedBashTraceCase
+    | SelectedTlsCase
     | Literal[
         "selected-command-metadata",
         "selected-allow",
@@ -113,6 +120,12 @@ SELECTED_TOOL_INVENTORY_CASES = frozenset(
         "selected-tool-search",
     }
 )
+SELECTED_TLS_OVERRIDES = {
+    "selected-tls-codex-ca": "CODEX_CA_CERTIFICATE",
+    "selected-tls-cert-file": "SSL_CERT_FILE",
+    "selected-tls-cert-dir": "SSL_CERT_DIR",
+}
+SELECTED_TLS_CASES = frozenset({"selected-tls-default", *SELECTED_TLS_OVERRIDES})
 SELECTED_LAUNCH_CASES = frozenset(
     {
         *SELECTED_NOISE_REGISTRY_CASES,
@@ -122,6 +135,7 @@ SELECTED_LAUNCH_CASES = frozenset(
         *SELECTED_SQLITE_HOME_CASES,
         *SELECTED_BASH_STARTUP_CASES,
         *SELECTED_BASH_TRACE_CASES,
+        *SELECTED_TLS_CASES,
         "selected-command-metadata",
         "selected-allow",
         "selected-deny",
@@ -139,6 +153,7 @@ SELECTED_AUTH_CASES = frozenset(
         *SELECTED_SQLITE_HOME_CASES,
         *SELECTED_BASH_STARTUP_CASES,
         *SELECTED_BASH_TRACE_CASES,
+        *SELECTED_TLS_CASES,
         "selected-command-metadata",
         "selected-allow",
         "selected-deny",
@@ -148,6 +163,7 @@ SELECTED_AUTH_CASES = frozenset(
 SELECTED_REFUSALS = frozenset(
     {
         *SELECTED_NOISE_REGISTRY_CASES,
+        "selected-tls-default",
         "selected-key-absent",
         "selected-startup-bearer",
         "selected-startup-bash",
@@ -189,11 +205,18 @@ def role_homes(root: Path) -> NativeHomes:
 
 
 def prepare_native_inputs(
-    root: Path, workspace: Path, *, binary: Path, port: int, bearer: str
+    root: Path,
+    workspace: Path,
+    *,
+    binary: Path,
+    port: int,
+    bearer: str,
+    https: bool = False,
 ) -> CodexLaunchInputs:
+    scheme = "https" if https else "http"
     return build_launch_inputs(
         CodexLaunchProfile(
-            SELECTED_MODEL, f"http://127.0.0.1:{port}/v1", "danger-full-access"
+            SELECTED_MODEL, f"{scheme}://127.0.0.1:{port}/v1", "danger-full-access"
         ),
         executable=binary,
         bash=Path("/bin/bash"),
