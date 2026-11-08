@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from typing import Protocol
 
 from kora.ir.structured_schema_input import SchemaArena
 from kora.ir.structured_schema_work import (
@@ -44,8 +45,12 @@ def matches(value: str, choices: tuple[str, ...], meter: PreparationMeter) -> bo
     return any(meter.compare(value, choice) == 0 for choice in choices)
 
 
+class _ReferenceMeter(Protocol):
+    def reserve(self, work: int = 1, byte_count: int = 0, entries: int = 0) -> None: ...
+
+
 def decode_reference(
-    reference: str, meter: PreparationMeter
+    reference: str, meter: _ReferenceMeter
 ) -> tuple[str | None, list[str], int]:
     length = len(reference)
     meter.reserve(1 + 8 * length, 4 * length, length + 1)

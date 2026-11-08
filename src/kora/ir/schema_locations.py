@@ -92,10 +92,18 @@ class Position(Enum):
 
 
 def next_position(position: Position, key: str, value: JsonValue) -> Position:
+    return schema_child_position(
+        position,
+        key,
+        position is Position.DEPENDENCIES and isinstance(value, dict | bool),
+    )
+
+
+def schema_child_position(position: Position, key: str, is_schema: bool) -> Position:
     if position in {Position.NAMED, Position.LISTED}:
         return Position.SCHEMA
     if position is Position.DEPENDENCIES:
-        return Position.SCHEMA if isinstance(value, dict | bool) else Position.DATA
+        return Position.SCHEMA if is_schema else Position.DATA
     if position is Position.SCHEMA:
         if key in SINGLE_SCHEMAS:
             return Position.SCHEMA
