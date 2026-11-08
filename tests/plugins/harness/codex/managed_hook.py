@@ -17,6 +17,8 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_HOOK_CASES,
     SELECTED_HOOK_TIMEOUT_CASES,
     SELECTED_PATCH_CASES,
+    SHELL_PATCH_DENIAL,
+    SHELL_PATCH_POLICY_OUTCOMES,
     selected_command,
 )
 
@@ -31,6 +33,7 @@ PATCH = (
 INPUT_REFUSAL = "kora managed hook probe refused input"
 CAP_REFUSAL = "kora managed hook probe refused oversized input"
 PATCH_DENIAL = "kora managed hook probe denied the direct patch"
+POLICY_REFUSAL = "kora managed hook probe could not verify the shell patch policy"
 
 
 def deny(reason: str) -> int:
@@ -131,6 +134,17 @@ def main() -> int:
             )
             + "\n"
         )
+    if decision in SHELL_PATCH_POLICY_OUTCOMES:
+        try:
+            from tests.plugins.harness.codex.selected_shell_patch import (
+                decide_shell_patch,
+            )
+        except ImportError:
+            return deny(POLICY_REFUSAL)
+        allowed = decide_shell_patch(call, CONTROL, decision)
+        if allowed is None:
+            return deny(POLICY_REFUSAL)
+        return 0 if allowed else deny(SHELL_PATCH_DENIAL)
     if decision in SELECTED_BASH_TRACE_CASES or decision in {
         "allow",
         "interactive",
@@ -153,7 +167,11 @@ def main() -> int:
         return deny(SELECTED_DENIAL)
     if decision == "selected-hook-no-reason":
         return 2
-    if decision in {"selected-hook-exit-one", "selected-patch-exit-one"}:
+    if decision in {
+        "selected-hook-exit-one",
+        "selected-patch-exit-one",
+        "selected-shell-patch-exit-one",
+    }:
         return 1
     if decision in SELECTED_HOOK_TIMEOUT_CASES:
         hold_for_native_timeout()

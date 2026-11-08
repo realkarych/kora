@@ -51,3 +51,8 @@ USER 65532:65532
 FROM shell-controls AS selected-turn
 COPY linux-packages /usr/local/lib/python3.11/site-packages/
 COPY kora /usr/local/lib/python3.11/site-packages/kora/
+
+FROM selected-hook-failures AS selected-shell-patch-policy
+COPY linux-packages /usr/local/lib/python3.11/site-packages/
+COPY kora /usr/local/lib/python3.11/site-packages/kora/
+COPY selected_shell_patch.py /usr/local/lib/python3.11/site-packages/tests/plugins/harness/codex/

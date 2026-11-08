@@ -89,11 +89,16 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_NOISE_REGISTRY_CASES,
     SELECTED_PATCH_CASES,
     SELECTED_REFUSALS,
+    SELECTED_SHELL_PATCH_CASES,
     SELECTED_SQLITE_HOME_CASES,
     SELECTED_TLS_CASES,
     SELECTED_TLS_OVERRIDES,
     SELECTED_TOOL_INVENTORY_CASES,
     SELECTED_TURN_CASES,
+    SHELL_PATCH_DENIAL,
+    SHELL_PATCH_POLICY_OUTCOMES,
+    SHELL_PATCH_POLICY_RECEIPT,
+    SHELL_PATCH_WORKSPACE,
     SQLITE_HOME_CANARY,
     SelectedHookCase,
     SelectedLaunchCase,
@@ -165,6 +170,10 @@ SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, tuple[str, str] | None
     "selected-patch-deny": ("blocked", ("feedback", PATCH_DENIAL)),
     "selected-patch-exit-one": ("failed", ("error", "hook exited with code 1")),
     "selected-patch-timeout": ("failed", ("error", "hook timed out after 5s")),
+    "selected-shell-patch-allow": ("completed", None),
+    "selected-shell-patch-protected": ("blocked", ("feedback", SHELL_PATCH_DENIAL)),
+    "selected-shell-patch-exit-one": ("failed", ("error", "hook exited with code 1")),
+    "selected-shell-patch-timeout": ("failed", ("error", "hook timed out after 5s")),
 }
 
 CODEX = "/usr/local/bin/codex"
@@ -206,12 +215,16 @@ CLIENT_CASES = frozenset({"client-complete", "client-exit"})
 PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
 HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
 DIRECT_PATCH_CASES = PATCH_CASES | SELECTED_PATCH_CASES
+SELECTED_FILE_CHANGE_CASES = SELECTED_PATCH_CASES | SELECTED_SHELL_PATCH_CASES
 PATCH_WRITE_CASES = frozenset(
     {
         "patch-allow",
         "selected-patch-allow",
         "selected-patch-exit-one",
         "selected-patch-timeout",
+        "selected-shell-patch-allow",
+        "selected-shell-patch-exit-one",
+        "selected-shell-patch-timeout",
     }
 )
 INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
@@ -1088,7 +1101,9 @@ class ResponsesFixture:
             return FINAL_RESPONSE
 
         output = tool_output(request, CALL_ID)
-        if self.case == "selected-tool-inventory-disabled":
+        if self.case in SELECTED_SHELL_PATCH_CASES:
+            verify_shell_patch_output(self.case, output)
+        elif self.case == "selected-tool-inventory-disabled":
             require(
                 output == "unsupported call: update_plan", "disabled_plan_not_refused"
             )
@@ -1259,6 +1274,7 @@ class ToolProbe:
             "deny",
             "patch-deny",
             "selected-patch-deny",
+            "selected-shell-patch-protected",
             "decoder-refuse",
         ):
             expected = ()
@@ -1765,6 +1781,7 @@ class Stdio:
         tools = (
             ToolProbe(case, thread_id)
             if case in DIRECT_PATCH_CASES
+            or case in SELECTED_SHELL_PATCH_CASES
             or case in ("allow", "deny", "decoder-refuse", "selected-command-metadata")
             else None
         )
@@ -1820,7 +1837,7 @@ class Stdio:
             if outputs is not None:
                 outputs.started(turn_id)
 
-        if case not in SELECTED_PATCH_CASES and any(
+        if case not in SELECTED_FILE_CHANGE_CASES and any(
             value is not None for value in (usage, errors, messages, outputs, tools)
         ):
             self.session = AppServerTurnSession(
@@ -2620,7 +2637,7 @@ async def observe_hook_timeout(
             pid = (
                 verify_patch_hook(selected_binding=True)
                 if case in SELECTED_PATCH_CASES
-                else verify_shell_hook(SELECTED_COMMAND, selected_binding=True)
+                else verify_shell_hook(selected_command(case), selected_binding=True)
             )
             credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             require(
@@ -2973,6 +2990,42 @@ def verify_bash_extra_effect(workspace: Path, *, expected_effect: bool) -> None:
         )
 
 
+def verify_shell_patch_output(case: ProbeCase, output: str) -> None:
+    if case == "selected-shell-patch-protected":
+        require(
+            output
+            == (
+                f"Command blocked by PreToolUse hook: {SHELL_PATCH_DENIAL}. "
+                f"Command: {selected_command(case)}"
+            ),
+            "shell_patch_policy_denial_missing",
+        )
+    else:
+        require(
+            output.splitlines()
+            == [
+                "Wall time: 0.0000 seconds",
+                "Output:",
+                "Success. Updated the following files:",
+                f"A {MARKER}",
+            ],
+            "shell_patch_function_result_missing",
+        )
+
+
+def verify_shell_patch_policy(case: SelectedLaunchCase) -> None:
+    receipt = CONTROL / SHELL_PATCH_POLICY_RECEIPT
+    expected = SHELL_PATCH_POLICY_OUTCOMES.get(case)
+    if expected is None:
+        require(not os.path.lexists(receipt), "unexpected_shell_patch_policy_receipt")
+        return
+    with receipt.open("rb") as contents:
+        require(
+            contents.read(len(expected) + 1) == expected, "shell_patch_policy_receipt"
+        )
+    diagnostic("INFO", "probe.shell_patch_policy_verified", expected.decode().strip())
+
+
 async def run_selected_launch(case: SelectedLaunchCase) -> None:
     if case in SELECTED_AUTH_CASES:
         decision = (
@@ -2992,6 +3045,9 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             "workspace :@" if case == "selected-startup-ready" else "workspace"
         )
         workspace.mkdir()
+        if case in SHELL_PATCH_POLICY_OUTCOMES:
+            with (CONTROL / SHELL_PATCH_WORKSPACE).open("xb") as binding:
+                binding.write(os.fsencode(workspace))
         if case in SELECTED_SQLITE_HOME_CASES:
             (root / SQLITE_HOME_CANARY).mkdir(mode=0o700)
         if case in SELECTED_BASH_STARTUP_CASES:
@@ -3049,8 +3105,9 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             "selected-deny",
             "selected-hook-deny",
             "selected-patch-deny",
+            "selected-shell-patch-protected",
         }
-        if case in SELECTED_PATCH_CASES:
+        if case in SELECTED_FILE_CHANGE_CASES:
             verify_patch_marker(marker, writes=executes)
         elif executes:
             bash = Path("/bin/bash").resolve(strict=True)
@@ -3066,6 +3123,8 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
                 )
         else:
             require(not os.path.lexists(marker), "refused_selected_marker_exists")
+        if case in SELECTED_SHELL_PATCH_CASES:
+            verify_shell_patch_policy(case)
         if case in SELECTED_HOOK_CASES:
             effect = "executed" if executes else "blocked"
             diagnostic(

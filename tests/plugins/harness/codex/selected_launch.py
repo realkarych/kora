@@ -17,6 +17,12 @@ SelectedPatchCase = Literal[
     "selected-patch-exit-one",
     "selected-patch-timeout",
 ]
+SelectedShellPatchCase = Literal[
+    "selected-shell-patch-allow",
+    "selected-shell-patch-protected",
+    "selected-shell-patch-exit-one",
+    "selected-shell-patch-timeout",
+]
 SelectedHookCase = (
     Literal[
         "selected-hook-deny",
@@ -25,6 +31,7 @@ SelectedHookCase = (
         "selected-hook-timeout",
     ]
     | SelectedPatchCase
+    | SelectedShellPatchCase
 )
 SelectedSqliteHomeCase = Literal[
     "selected-sqlite-home-default", "selected-sqlite-home-override"
@@ -80,9 +87,22 @@ SELECTED_PATCH_CASES: frozenset[SelectedPatchCase] = frozenset(
         "selected-patch-timeout",
     }
 )
+SELECTED_SHELL_PATCH_CASES: frozenset[SelectedShellPatchCase] = frozenset(
+    {
+        "selected-shell-patch-allow",
+        "selected-shell-patch-protected",
+        "selected-shell-patch-exit-one",
+        "selected-shell-patch-timeout",
+    }
+)
+SHELL_PATCH_POLICY_OUTCOMES = {
+    "selected-shell-patch-allow": b"allowed\n",
+    "selected-shell-patch-protected": b"argument_invalid\n",
+}
 SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
     {
         *SELECTED_PATCH_CASES,
+        *SELECTED_SHELL_PATCH_CASES,
         "selected-hook-deny",
         "selected-hook-no-reason",
         "selected-hook-exit-one",
@@ -90,7 +110,7 @@ SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
     }
 )
 SELECTED_HOOK_TIMEOUT_CASES: frozenset[SelectedHookCase] = frozenset(
-    {"selected-hook-timeout", "selected-patch-timeout"}
+    {"selected-hook-timeout", "selected-patch-timeout", "selected-shell-patch-timeout"}
 )
 SELECTED_SQLITE_HOME_CASES: frozenset[SelectedSqliteHomeCase] = frozenset(
     {"selected-sqlite-home-default", "selected-sqlite-home-override"}
@@ -173,6 +193,17 @@ SELECTED_MODEL = "gpt-5.5"
 PROJECT_MODEL_CANARY = "kora-checkout-model-canary"
 PROJECT_DOC_CANARY = b"kora-checkout-instruction-canary"
 SELECTED_DENIAL = "kora managed hook probe denied the selected command"
+SHELL_PATCH_DENIAL = "kora managed hook probe denied the protected shell patch"
+SHELL_PATCH_POLICY_RECEIPT = "shell-patch-policy-receipt"
+SHELL_PATCH_WORKSPACE = "shell-patch-workspace"
+SHELL_PATCH_COMMAND = (
+    "apply_patch <<'KORA_PATCH'\n"
+    "*** Begin Patch\n"
+    "*** Add File: kora-probe.marker\n"
+    "+direct patch marker\n"
+    "*** End Patch\n"
+    "KORA_PATCH"
+)
 HOOK_TIMEOUT_SOCKET = "selected-hook-timeout.sock"
 SELECTED_COMMAND = (
     'test -z "${CODEX_API_KEY+x}" && '
@@ -195,6 +226,8 @@ METADATA_COMMAND = (
 
 
 def selected_command(case: str) -> str:
+    if case in SELECTED_SHELL_PATCH_CASES:
+        return SHELL_PATCH_COMMAND
     if case in SELECTED_EXPLICIT_TRACE_CASES:
         return "set -x; " + SELECTED_COMMAND
     return METADATA_COMMAND if case == "selected-command-metadata" else SELECTED_COMMAND
