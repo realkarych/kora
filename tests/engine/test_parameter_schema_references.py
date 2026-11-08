@@ -19,13 +19,14 @@ from kora.engine.parameter_schema_references import (
     ParameterReferenceFailure,
     ParameterReferenceKeyword,
     ParameterReferenceRejected,
+    ParameterSchemaArena,
     ParameterSchemaPosition,
     resolve_parameter_reference,
+    schema_member,
 )
+from kora.engine.parameter_schema_source import build_parameter_schema_arena
 from kora.ir import GraphDocument, render_ir_json
 from kora.ir.json import JsonObject
-from kora.ir.structured_schema_input import FrozenSchemaArena, SchemaArena
-from kora.ir.structured_schema_work import PreparationMeter
 from tests.engine.test_graph_types import custom, section_value
 from tests.ir.document_cases import document
 
@@ -37,9 +38,7 @@ PRIVATE = "private-reference-marker"
 
 @dataclass(frozen=True, slots=True)
 class Sources:
-    arena: FrozenSchemaArena
-    root: int
-    type_roots: int
+    arena: ParameterSchemaArena
     origin: int
     alternative: int | None = None
 
@@ -52,10 +51,9 @@ class Sources:
     ) -> ParameterSchemaPosition:
         return resolve_parameter_reference(
             self.arena,
-            ParameterSchemaPosition(self.root, self.origin)
+            ParameterSchemaPosition(self.arena.root, self.origin)
             if position is None
             else position,
-            type_roots=self.type_roots,
             keyword=keyword,
             budget=budget,
         )
@@ -85,17 +83,25 @@ def sources_for(
         cast("str", record["name"]): record["schema"] for record in records
     }
     effective = ObjectReader(checked_parameters).object()["schema"]
-    builder = SchemaArena(PreparationMeter())
-    root = builder.snapshot(effective)
-    type_roots = builder.snapshot(named_roots)
+    arena = build_parameter_schema_arena(
+        effective,
+        named_roots,
+        budget=ample(),
+        max_container_depth=64,
+        max_integer_bits=20_000,
+    )
     if not nested:
-        return Sources(builder.freeze(root), root, type_roots, root)
-    properties = builder.lookup(root, "properties")
-    origin = builder.lookup(properties, "local")
-    alternative = builder.lookup(properties, "other")
-    assert origin >= 0
-    assert alternative >= 0
-    return Sources(builder.freeze(root), root, type_roots, origin, alternative)
+        return Sources(arena, arena.root)
+    lookup = ample()
+    properties = schema_member(
+        arena.nodes, arena.nodes[arena.root], "properties", lookup
+    )
+    assert properties is not None
+    origin = schema_member(arena.nodes, arena.nodes[properties], "local", lookup)
+    alternative = schema_member(arena.nodes, arena.nodes[properties], "other", lookup)
+    assert origin is not None
+    assert alternative is not None
+    return Sources(arena, origin, alternative)
 
 
 def ample() -> ParameterReferenceBudget:
@@ -140,19 +146,19 @@ def test_parameter_references_preserve_the_original_root_after_a_cross_type_hop(
     local_at_shared_site = sources.resolve(
         ParameterReferenceKeyword.REF,
         budget,
-        position=ParameterSchemaPosition(sources.root, alternative),
+        position=ParameterSchemaPosition(sources.arena.root, alternative),
     )
     external = sources.resolve(
         ParameterReferenceKeyword.DYNAMIC_REF,
         budget,
-        position=ParameterSchemaPosition(sources.root, alternative),
+        position=ParameterSchemaPosition(sources.arena.root, alternative),
     )
     nested = sources.resolve(ParameterReferenceKeyword.REF, budget, position=external)
-    roots = sources.arena.nodes[sources.type_roots].members
+    roots = sources.arena.nodes[sources.arena.type_roots].members
 
-    assert local.document_root == sources.root
+    assert local.document_root == sources.arena.root
     assert sources.arena.nodes[local.node].value is True
-    assert local_at_shared_site.document_root == sources.root
+    assert local_at_shared_site.document_root == sources.arena.root
     assert sources.arena.nodes[local_at_shared_site.node].value is False
     assert external.document_root == nested.document_root == roots[0][1]
     assert external.document_root != local.document_root
@@ -184,7 +190,7 @@ def test_parameter_references_resolve_typed_boolean_locations(
 
     target = sources.resolve(ParameterReferenceKeyword.REF, ample())
 
-    assert target.document_root == sources.root
+    assert target.document_root == sources.arena.root
     assert sources.arena.nodes[target.node].value is expected
 
 
@@ -198,9 +204,9 @@ def test_parameter_references_resolve_empty_fragments_at_the_selected_root(
 ) -> None:
     sources = sources_for({"$ref": reference}, {PINNED_TYPE: custom({})})
     expected = (
-        sources.arena.nodes[sources.type_roots].members[0][1]
+        sources.arena.nodes[sources.arena.type_roots].members[0][1]
         if reference.startswith(PINNED_URI)
-        else sources.root
+        else sources.arena.root
     )
 
     target = sources.resolve(ParameterReferenceKeyword.REF, ample())
@@ -281,7 +287,7 @@ def test_parameter_references_refuse_a_malformed_intermediate_position(
 def test_parameter_reference_budget_accepts_exact_cumulative_charges() -> None:
     sources = sources_for({"$ref": "#"})
     budget = ParameterReferenceBudget(62, 88, 36)
-    expected = ParameterSchemaPosition(sources.root, sources.root)
+    expected = ParameterSchemaPosition(sources.arena.root, sources.arena.root)
 
     first = sources.resolve(ParameterReferenceKeyword.REF, budget)
     second = sources.resolve(ParameterReferenceKeyword.REF, budget)
@@ -302,7 +308,7 @@ def test_parameter_reference_budget_refuses_an_independently_short_allowance(
     budget = ParameterReferenceBudget(
         62 - work_short, 88 - bytes_short, 36 - entries_short
     )
-    expected = ParameterSchemaPosition(sources.root, sources.root)
+    expected = ParameterSchemaPosition(sources.arena.root, sources.arena.root)
 
     first = sources.resolve(ParameterReferenceKeyword.REF, budget)
     with pytest.raises(ParameterReferenceRejected) as refusal:

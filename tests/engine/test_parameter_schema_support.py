@@ -38,7 +38,6 @@ def check(
 ) -> ParameterSchemaSupport:
     return check_parameter_schema_support(
         sources.arena,
-        type_roots=sources.type_roots,
         budget=ample() if budget is None else budget,
         max_active_frames=frames,
         max_call_depth=depth,

@@ -9,6 +9,7 @@ from kora.engine.parameter_schema_references import (
     ParameterReferenceFailure,
     ParameterReferenceKeyword,
     ParameterReferenceRejected,
+    ParameterSchemaArena,
     ParameterSchemaPosition,
     is_schema_node,
     resolve_parameter_reference,
@@ -16,7 +17,7 @@ from kora.engine.parameter_schema_references import (
     schema_node,
     valid_parameter_reference_budget,
 )
-from kora.ir.structured_schema_input import FrozenSchemaArena, SchemaNode
+from kora.ir.structured_schema_input import SchemaNode
 
 _EXCLUDED = (
     "pattern",
@@ -88,14 +89,12 @@ class _Frame:
 class _Traversal:
     def __init__(
         self,
-        arena: FrozenSchemaArena,
-        type_roots: int,
+        arena: ParameterSchemaArena,
         budget: ParameterReferenceBudget,
         max_frames: int,
         max_depth: int,
     ) -> None:
-        self.arena: FrozenSchemaArena = arena
-        self.type_roots: int = type_roots
+        self.arena: ParameterSchemaArena = arena
         self.budget: ParameterReferenceBudget = budget
         self.max_frames: int = max_frames
         self.max_depth: int = max_depth
@@ -163,7 +162,6 @@ class _Traversal:
                 yield resolve_parameter_reference(
                     self.arena,
                     position,
-                    type_roots=self.type_roots,
                     keyword=group,
                     budget=self.budget,
                 )
@@ -233,14 +231,13 @@ class _Traversal:
 
 
 def _check(
-    arena: FrozenSchemaArena,
-    type_roots: int,
+    arena: ParameterSchemaArena,
     budget: ParameterReferenceBudget,
     max_active_frames: int,
     max_call_depth: int,
 ) -> ParameterSchemaSupport:
     if (
-        type(arena) is not FrozenSchemaArena
+        type(arena) is not ParameterSchemaArena
         or not valid_parameter_reference_budget(budget)
         or any(
             type(limit) is not int or not 0 <= limit <= sys.maxsize
@@ -249,24 +246,21 @@ def _check(
     ):
         raise ParameterSupportRejected(ParameterSupportFailure.INVALID)
     root = schema_node(arena.nodes, arena.root, budget)
-    roots = schema_node(arena.nodes, type_roots, budget)
+    roots = schema_node(arena.nodes, arena.type_roots, budget)
     if root.kind != "object" or roots.kind != "object":
         raise ParameterSupportRejected(ParameterSupportFailure.INVALID)
-    return _Traversal(
-        arena, type_roots, budget, max_active_frames, max_call_depth
-    ).walk(arena.root)
+    return _Traversal(arena, budget, max_active_frames, max_call_depth).walk(arena.root)
 
 
 def check_parameter_schema_support(
-    arena: FrozenSchemaArena,
+    arena: ParameterSchemaArena,
     *,
-    type_roots: int,
     budget: ParameterReferenceBudget,
     max_active_frames: int,
     max_call_depth: int,
 ) -> ParameterSchemaSupport:
     try:
-        return _check(arena, type_roots, budget, max_active_frames, max_call_depth)
+        return _check(arena, budget, max_active_frames, max_call_depth)
     except ParameterSupportRejected as rejected:
         reason = rejected.reason
     except ParameterReferenceRejected as rejected:
@@ -278,5 +272,5 @@ def check_parameter_schema_support(
         rejected.__traceback__ = None
     except MemoryError:
         reason = ParameterSupportFailure.CAPACITY
-    del arena, type_roots, budget, max_active_frames, max_call_depth
+    del arena, budget, max_active_frames, max_call_depth
     raise_safe(ParameterSupportRejected(reason))

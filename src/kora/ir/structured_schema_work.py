@@ -106,9 +106,11 @@ class PreparationMeter:
         return charged_finite_float_text(value, self)
 
 
-class _NumberSpellingMeter(Protocol):
+class _ReservationMeter(Protocol):
     def reserve(self, work: int = 1, byte_count: int = 0, entries: int = 0) -> None: ...
 
+
+class _NumberSpellingMeter(_ReservationMeter, Protocol):
     def result(self, size: int) -> None: ...
 
 
@@ -147,7 +149,7 @@ def charged_finite_float_text(value: float, meter: _NumberSpellingMeter) -> str:
     return spelling
 
 
-def merge_sort(rows: list[T], key: Callable[[T], K], meter: PreparationMeter) -> None:
+def merge_sort(rows: list[T], key: Callable[[T], K], meter: _ReservationMeter) -> None:
     count = len(rows)
     levels = (max(1, count) - 1).bit_length()
     meter.reserve(1 + 2 * levels * count, entries=2 * count)

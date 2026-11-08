@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from kora.cel_eval.errors import raise_safe
 from kora.ir.schema_locations import Position, schema_child_position
-from kora.ir.structured_schema_input import FrozenSchemaArena, SchemaNode
+from kora.ir.structured_schema_input import SchemaNode
 from kora.ir.structured_schema_locations import decode_reference
 from kora.ir.structured_schema_work import PreparationRefused
 
@@ -29,6 +29,13 @@ class ParameterReferenceRejected(ValueError):
 class ParameterSchemaPosition:
     document_root: int
     node: int
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ParameterSchemaArena:
+    nodes: tuple[SchemaNode, ...]
+    root: int
+    type_roots: int
 
 
 @dataclass(slots=True)
@@ -177,14 +184,13 @@ def valid_parameter_reference_budget(budget: ParameterReferenceBudget) -> bool:
 
 
 def _resolve(
-    arena: FrozenSchemaArena,
+    arena: ParameterSchemaArena,
     origin: ParameterSchemaPosition,
-    type_roots: int,
     keyword: ParameterReferenceKeyword,
     budget: ParameterReferenceBudget,
 ) -> ParameterSchemaPosition:
     if (
-        type(arena) is not FrozenSchemaArena
+        type(arena) is not ParameterSchemaArena
         or type(origin) is not ParameterSchemaPosition
         or type(keyword) is not ParameterReferenceKeyword
         or not valid_parameter_reference_budget(budget)
@@ -203,7 +209,7 @@ def _resolve(
     budget.reserve(length, 20 * length, 8 * length)
     name, pool, used = decode_reference(reference, budget)
     if name is not None:
-        named = schema_node(nodes, type_roots, budget)
+        named = schema_node(nodes, arena.type_roots, budget)
         selected = schema_member(nodes, named, name, budget)
         if selected is None:
             raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
@@ -212,20 +218,19 @@ def _resolve(
 
 
 def resolve_parameter_reference(
-    arena: FrozenSchemaArena,
+    arena: ParameterSchemaArena,
     origin: ParameterSchemaPosition,
     *,
-    type_roots: int,
     keyword: ParameterReferenceKeyword,
     budget: ParameterReferenceBudget,
 ) -> ParameterSchemaPosition:
     try:
-        return _resolve(arena, origin, type_roots, keyword, budget)
+        return _resolve(arena, origin, keyword, budget)
     except ParameterReferenceRejected as rejected:
         reason = rejected.reason
     except PreparationRefused:
         reason = ParameterReferenceFailure.INVALID
     except MemoryError:
         reason = ParameterReferenceFailure.CAPACITY
-    del arena, origin, type_roots, keyword, budget
+    del arena, origin, keyword, budget
     raise_safe(ParameterReferenceRejected(reason))
