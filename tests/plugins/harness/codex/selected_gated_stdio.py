@@ -78,38 +78,40 @@ def live_pid(pid: int) -> Generator[int]:
         os.close(identity)
 
 
-def executable_mapping(pid: int, executable: InstalledExecutable) -> bool:
+def executable_mappings(pid: int) -> set[tuple[bytes, bytes, bytes]]:
     with Path(f"/proc/{pid}/maps").open("rb") as source:
         mappings = source.read(MAX_PROCESS_MAPS + 1)
     if len(mappings) > MAX_PROCESS_MAPS:
         raise GatedObservationError("selected_bound_maps_limit")
-    device = (
-        f"{os.major(executable.device):02x}:{os.minor(executable.device):02x}".encode()
-    )
-    inode = str(executable.inode).encode()
-    path = os.fsencode(executable.path)
+    entries: set[tuple[bytes, bytes, bytes]] = set()
     for line in mappings.splitlines():
         fields = line.split(maxsplit=5)
-        if (
-            len(fields) == 6
-            and fields[1] == b"r-xp"
-            and fields[3:] == [device, inode, path]
-        ):
-            return True
-    return False
+        if len(fields) == 6 and fields[1] == b"r-xp":
+            entries.add((fields[3], fields[4], fields[5]))
+    return entries
+
+
+def mapping_identity(
+    path: str | Path, device: int, inode: int
+) -> tuple[bytes, bytes, bytes]:
+    return (
+        f"{os.major(device):02x}:{os.minor(device):02x}".encode(),
+        str(inode).encode(),
+        os.fsencode(path),
+    )
 
 
 def verify_executed_image(pid: int, executable: InstalledExecutable) -> None:
     exe = f"/proc/{pid}/exe"
     entry = os.stat(exe)
-    identity = (entry.st_dev, entry.st_ino)
-    if identity == (executable.device, executable.inode):
+    if (entry.st_dev, entry.st_ino) == (executable.device, executable.inode):
         return
     if os.readlink(exe) == ROSETTA_EXECUTABLE:
-        translator = os.stat(ROSETTA_EXECUTABLE)
-        if identity == (translator.st_dev, translator.st_ino) and executable_mapping(
-            pid, executable
-        ):
+        expected = {
+            mapping_identity(ROSETTA_EXECUTABLE, entry.st_dev, entry.st_ino),
+            mapping_identity(executable.path, executable.device, executable.inode),
+        }
+        if expected.issubset(executable_mappings(pid)):
             return
     raise GatedObservationError("selected_bound_executable_mismatch")
 
