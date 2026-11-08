@@ -160,6 +160,16 @@ class StorageAddressStageReadFailed(LockError):
         super().__init__("the storage address staging check failed")
 
 
+class StorageAddressPublicationFenceUnavailable(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph publication stage fence could not be verified")
+
+
+class StorageAddressPublicationFenceReadFailed(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph publication stage fence read failed")
+
+
 class GraphPreparationLockRejected(LockError):
     def __init__(self) -> None:
         super().__init__("the open graph preparation lock was rejected")
@@ -327,15 +337,21 @@ async def _lock_open_preparation(
     raise_private_metadata_error(failure)
 
 
-async def _read_stage_fence_incarnation(
-    connection: AsyncConnection, dialect: str, store_id: str, payload_digest: str
+async def _read_storage_fence_incarnation(
+    connection: AsyncConnection,
+    dialect: str,
+    store_id: str,
+    payload_digest: str,
+    *,
+    max_last_generation: int,
+    read_failed: type[LockError],
 ) -> tuple[int | None] | None:
     fields = storage_address_fence.c
     eligible = and_(
         fields.fence_incarnation > 0,
         fields.fence_incarnation <= MAX_COUNT,
         fields.last_deletion_generation >= 0,
-        fields.last_deletion_generation < MAX_COUNT,
+        fields.last_deletion_generation <= max_last_generation,
         fields.pending_deletion_generation.is_(None),
     )
     if dialect == SQLITE:
@@ -363,7 +379,7 @@ async def _read_stage_fence_incarnation(
             type(incarnation) is int and 0 < incarnation <= MAX_COUNT
         ):
             return (incarnation,)
-    raise_private_metadata_error(StorageAddressStageReadFailed())
+    raise_private_metadata_error(read_failed())
 
 
 async def _read_preparation_capacity(connection: AsyncConnection, dialect: str) -> int:
@@ -850,8 +866,13 @@ class TransitionLocks:
             connection, store_id, payload_digest, binding
         )
         self._usable = False
-        row = await _read_stage_fence_incarnation(
-            connection, self._dialect, store_id, payload_digest
+        row = await _read_storage_fence_incarnation(
+            connection,
+            self._dialect,
+            store_id,
+            payload_digest,
+            max_last_generation=MAX_COUNT - 1,
+            read_failed=StorageAddressStageReadFailed,
         )
         self._lease.require_active()
         if row is None:
@@ -861,3 +882,37 @@ class TransitionLocks:
         if incarnation is None:
             raise_private_metadata_error(StorageAddressStageUnavailable())
         return incarnation
+
+    async def require_publication_stage_fence(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+        store_id: str,
+        payload_digest: str,
+        expected_incarnation: int,
+    ) -> None:
+        self.require_publication_graph_preparation(
+            connection, binding, selected_graph_id
+        )
+        self.require_existing_storage_address(connection, store_id, payload_digest)
+        if (
+            type(expected_incarnation) is not int
+            or not 0 < expected_incarnation <= MAX_COUNT
+        ):
+            raise_private_metadata_error(StorageAddressPublicationFenceUnavailable())
+        self._usable = False
+        row = await _read_storage_fence_incarnation(
+            connection,
+            self._dialect,
+            store_id,
+            payload_digest,
+            max_last_generation=MAX_COUNT,
+            read_failed=StorageAddressPublicationFenceReadFailed,
+        )
+        self._lease.require_active()
+        if row is None:
+            raise_private_metadata_error(StorageAddressPublicationFenceUnavailable())
+        self._usable = True
+        if row[0] != expected_incarnation:
+            raise_private_metadata_error(StorageAddressPublicationFenceUnavailable())
