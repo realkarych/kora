@@ -10,6 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, Protocol, cast
 
+from kora.plugins.runtime.local.bound_native_launch import BoundNativeGate
 from kora.protocols.lifetime import (
     EnvironmentVariable,
     ProcessDomain,
@@ -187,7 +188,9 @@ async def close_gated(
 
 
 class SelectedGatedApp:
-    def __init__(self, owner: GatedProcess, clock: SystemClock) -> None:
+    def __init__(
+        self, owner: GatedProcess | BoundNativeGate, clock: SystemClock
+    ) -> None:
         self._owner = owner
         self._clock = clock
         self._pid: int | None = None
@@ -336,7 +339,15 @@ class SelectedGatedApp:
                 "selected_bound_executable_observation_failed"
             ) from None
 
+    @property
+    def bound_gate(self) -> BoundNativeGate:
+        if not isinstance(self._owner, BoundNativeGate):
+            raise GatedObservationError("selected_bound_gate_required")
+        return self._owner
+
     async def close(self, deadline: float) -> None:
+        if not isinstance(self._owner, GatedProcess):
+            raise GatedObservationError("selected_bound_gate_requires_owner_settlement")
         await close_gated(
             self._owner, runner_deadline(deadline, self._clock), self._clock
         )

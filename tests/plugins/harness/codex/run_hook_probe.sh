@@ -334,6 +334,22 @@ case "${1:-}" in
             cat "$reservation/expected-refusal"
             release_container
         done
+        for refusal in phase-failure phase-cancellation phase-entry-expiry phase-resume-expiry; do
+            refusal_exit=0
+            run_variant selected-gated-bound "--selected-bound-$refusal" > "$reservation/refused" 2>&1 || refusal_exit=$?
+            test "$refusal_exit" = 1
+            printf '%s\n' '{"level": "INFO", "event": "probe.selected_bound_executor_ready", "detail": "selected-startup-ready"}' > "$reservation/expected-refusal"
+            printf '{"level": "INFO", "event": "probe.selected_bound_phase_writer_fenced", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+            printf '%s\n' \
+                '{"level": "INFO", "event": "probe.selected_bound_streams_closed", "detail": "selected-startup-ready"}' \
+                '{"level": "INFO", "event": "probe.selected_children_reaped", "detail": "selected-startup-ready"}' \
+                >> "$reservation/expected-refusal"
+            printf '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "%s"}\n' "$refusal" >> "$reservation/expected-refusal"
+            printf '%s\n' '{"level": "ERROR", "event": "probe.case_failed", "detail": "selected_bound_phase_refused"}' >> "$reservation/expected-refusal"
+            cmp -s "$reservation/refused" "$reservation/expected-refusal"
+            cat "$reservation/expected-refusal"
+            release_container
+        done
         ;;
     --check-selected-bound-checkout)
         prepare_locked_probe

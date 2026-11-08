@@ -3038,6 +3038,15 @@ async def drive(
                     )
                     natural_app_refusal = bound.case == "before-activation"
                     raise BoundProbeRefusal("selected_bound_fence_refused")
+                if bound.phase_refusal:
+                    assert bound_exec_writer is not None
+                    await bound.verify_phase_refusal(
+                        bound_launch, gated_app, bound_exec_writer
+                    )
+                    diagnostic(
+                        "INFO", "probe.selected_bound_phase_writer_fenced", bound.case
+                    )
+                    raise BoundProbeRefusal("selected_bound_phase_refused")
                 reader, writer = await gated_app.prepare()
                 diagnostic("INFO", "probe.selected_gated_stdio_bound", fixture.case)
             elif gated_stdio:
@@ -3542,7 +3551,7 @@ async def run_selected_launch(
             fenced = bound.case in {"before-activation", "before-delivery"}
             expected_roles = (
                 2
-                if fenced
+                if fenced or bound.phase_refusal
                 else int(
                     bound.late_configuration_case
                     or bound.case
@@ -4020,6 +4029,10 @@ async def run_selected_bound(name: str) -> None:
         "partial",
         "acquisition",
         "handoff-expiry",
+        "phase-failure",
+        "phase-cancellation",
+        "phase-entry-expiry",
+        "phase-resume-expiry",
         "before-activation",
         "before-delivery",
         "executable-pin",

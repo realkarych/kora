@@ -8,6 +8,10 @@ class BoundGateFence:
         self._gates: list[GatedProcess] = []
 
     @property
+    def stopped(self) -> bool:
+        return self._slots.stopped
+
+    @property
     def gates(self) -> tuple[GatedProcess, ...]:
         return tuple(self._gates)
 

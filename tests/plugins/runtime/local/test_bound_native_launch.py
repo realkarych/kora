@@ -25,7 +25,10 @@ from kora.plugins.runtime.local.environment import (
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.lifetime import ProcessDomain
+from kora.protocols.time import Clock, SystemClock
+from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.installed_executable import InstalledExecutable
+from tests.plugins.harness.codex.selected_gated_stdio import close_gated
 from tests.plugins.runtime.local.frames_support import ORIGIN_NS, StepClock
 
 __all__ = ["kora_capture"]
@@ -62,7 +65,12 @@ class NativeInputs:
         )
 
     def acquire_owner(
-        self, binding: BoundCandidateEnvironments, roles: Mapping[str, BoundNativeRole]
+        self,
+        binding: BoundCandidateEnvironments,
+        roles: Mapping[str, BoundNativeRole],
+        *,
+        clock: Clock | None = None,
+        cutoff_ns: int = CUTOFF,
     ) -> BoundNativeLaunch:
         return BoundNativeLaunch(
             binding,
@@ -72,8 +80,8 @@ class NativeInputs:
             directory_id="1" * 32,
             domain=ProcessDomain.DETACHED,
             stdio_limit=4096,
-            clock=self.clock,
-            cutoff_ns=CUTOFF,
+            clock=self.clock if clock is None else clock,
+            cutoff_ns=cutoff_ns,
         )
 
 
@@ -190,3 +198,91 @@ def test_materialized_input_validation_returns_fixed_error_and_fences(
     assert fenced.value.message == "the bound native role is unavailable"
     assert owner.gates == ()
     assert set(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.asyncio
+async def test_bound_gate_delivers_once_and_refuses_wrong_phases(
+    native_inputs: NativeInputs, kora_capture: Capture
+) -> None:
+    roles = native_inputs.roles.copy()
+    app = roles["app"]
+    roles["app"] = replace(
+        app, argv=(app.argv[0], "-c", "import sys; sys.stdin.buffer.read()")
+    )
+    binding = native_inputs.bind(kora_capture)
+    clock = SystemClock()
+    cutoff = clock.monotonic_ns() + 10_000_000_000
+    owner = native_inputs.acquire_owner(binding, roles, clock=clock, cutoff_ns=cutoff)
+    handle = owner.start("app")
+    (gate,) = owner.gates
+    try:
+        with pytest.raises(ChannelError) as premature:
+            handle.borrow_stdio()
+        prepared = await handle.prepare()
+        with pytest.raises(ChannelError) as repeated_prepare:
+            await handle.prepare()
+        await handle.acknowledge()
+        with pytest.raises(ChannelError) as repeated_activation:
+            await handle.acknowledge()
+        _, writer = handle.borrow_stdio()
+        with pytest.raises(ChannelError) as repeated_delivery:
+            handle.borrow_stdio()
+        writer_still_open = not writer.is_closing()
+        remained_admitted = not owner.stopped
+    finally:
+        owner.stop()
+        await close_gated(gate, clock.monotonic_ns() + 5_000_000_000, clock)
+
+    assert prepared == gate.registration
+    assert all(
+        refusal.value.reason is ChannelFailure.BUSY
+        for refusal in (
+            premature,
+            repeated_prepare,
+            repeated_activation,
+            repeated_delivery,
+        )
+    )
+    assert writer_still_open
+    assert remained_admitted
+    assert handle.closed
+
+
+class ExpiryClock(SystemClock):
+    def __init__(self) -> None:
+        self.expired_at: int | None = None
+
+    def monotonic_ns(self) -> int:
+        return super().monotonic_ns() if self.expired_at is None else self.expired_at
+
+
+@pytest.mark.asyncio
+async def test_valid_bound_prepare_at_cutoff_fences_its_registered_gate(
+    native_inputs: NativeInputs, kora_capture: Capture
+) -> None:
+    binding = native_inputs.bind(kora_capture)
+    clock = ExpiryClock()
+    cutoff = clock.monotonic_ns() + 10_000_000_000
+    owner = native_inputs.acquire_owner(
+        binding, native_inputs.roles, clock=clock, cutoff_ns=cutoff
+    )
+    handle = owner.start("app")
+    (gate,) = owner.gates
+    clock.expired_at = cutoff
+    try:
+        with pytest.raises(ChannelError) as wrong_phase:
+            handle.borrow_stdio()
+        stopped_by_contender = owner.stopped
+        with pytest.raises(ChannelError) as expired:
+            await handle.prepare()
+        stopped_by_prepare = owner.stopped
+    finally:
+        clock.expired_at = None
+        owner.stop()
+        await close_gated(gate, clock.monotonic_ns() + 5_000_000_000, clock)
+
+    assert wrong_phase.value.reason is ChannelFailure.BUSY
+    assert expired.value.reason is ChannelFailure.DEADLINE
+    assert not stopped_by_contender
+    assert stopped_by_prepare
+    assert handle.closed
