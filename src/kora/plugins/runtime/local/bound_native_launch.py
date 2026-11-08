@@ -8,13 +8,17 @@ from types import MappingProxyType
 
 from pydantic import ValidationError
 
-from kora.plugins.runtime.local.bound_checkout import BoundCheckout
+from kora.plugins.runtime.local.bound_checkout import BoundCheckout, BoundCheckoutError
 from kora.plugins.runtime.local.bound_gate_fence import (
+    BoundGateFailure,
     BoundGateFence,
-    BoundPhaseFailure,
+    GateAcquisitionFailure,
     GatePhaseFailure,
 )
-from kora.plugins.runtime.local.bound_role_configuration import BoundRoleConfiguration
+from kora.plugins.runtime.local.bound_role_configuration import (
+    BoundRoleConfiguration,
+    BoundRoleConfigurationError,
+)
 from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
 from kora.plugins.runtime.local.environment import (
     BoundCandidateEnvironments,
@@ -29,6 +33,7 @@ from kora.protocols.lifetime import (
     ResourceId,
     new_operation_id,
 )
+from kora.protocols.secret_value import SecretRevealRefused
 from kora.protocols.time import Clock
 from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.installed_executable import InstalledExecutable
@@ -100,7 +105,7 @@ class BoundNativeGate:
         if self._phase is not expected:
             raise ChannelError(ChannelFailure.BUSY)
         self._phase = pending
-        cause: BoundPhaseFailure = GatePhaseFailure.UNEXPECTED
+        cause: BoundGateFailure = GatePhaseFailure.UNEXPECTED
         try:
             self._require_open()
             yield
@@ -118,7 +123,7 @@ class BoundNativeGate:
         finally:
             if self._phase is not completed:
                 self._phase = _GatePhase.FAILED
-                self._fence.fail_phase(cause)
+                self._fence.fail(cause)
 
     async def prepare(self) -> ProcessRegistration:
         with self._transition(
@@ -217,8 +222,8 @@ class BoundNativeLaunch:
         return self._fence.close_failed
 
     @property
-    def phase_failure(self) -> BoundPhaseFailure | None:
-        return self._fence.phase_failure
+    def failure(self) -> BoundGateFailure | None:
+        return self._fence.failure
 
     def stop(self) -> None:
         if _current_loop() is not self._loop:
@@ -257,10 +262,19 @@ class BoundNativeLaunch:
             )
 
         try:
-            return self._slots.start(role, claim, acquire, preflight=preflight)
+            return self._slots.start(
+                role,
+                claim,
+                acquire,
+                preflight=preflight,
+                on_failure=self._fail_acquisition,
+            )
         finally:
             if self._slots.stopped:
                 self.stop()
+
+    def _fail_acquisition(self, error: BaseException) -> None:
+        self._fence.record_failure(_acquisition_cause(error))
 
     def _process_launch(
         self, argv: tuple[str, ...], environment: Mapping[str, str]
@@ -282,6 +296,24 @@ class BoundNativeLaunch:
         except ValidationError:
             pass
         raise _binding_refused()
+
+
+def _acquisition_cause(error: BaseException) -> BoundGateFailure:
+    if isinstance(
+        error, (BoundCheckoutError, BoundRoleConfigurationError, ChannelError)
+    ):
+        return error.reason
+    if isinstance(error, ProcessError):
+        return error.condition
+    if isinstance(error, SecretRevealRefused):
+        return GateAcquisitionFailure.GRANT_UNAVAILABLE
+    if isinstance(error, KoraProtocolError):
+        return GateAcquisitionFailure.REJECTED
+    if isinstance(error, OSError):
+        return GateAcquisitionFailure.OS_ERROR
+    if isinstance(error, asyncio.CancelledError):
+        return GatePhaseFailure.CANCELLED
+    return GatePhaseFailure.UNEXPECTED
 
 
 def _current_loop() -> asyncio.AbstractEventLoop | None:

@@ -49,25 +49,27 @@ class BoundRoleSlots:
         acquire: Callable[[dict[str, str]], T],
         *,
         preflight: Callable[[], None] | None = None,
+        on_failure: Callable[[BaseException], None] | None = None,
     ) -> T:
         self.require_open()
         issued = self._claims.get(role)
         if issued is None or issued is not claim:
             raise _slot_refused()
         self._claims[role] = None
-        started = False
         try:
             if preflight is not None:
                 preflight()
                 self.require_open()
             environment = self._binding.materialize(role)
             self.require_open()
-            resource = acquire(environment)
-            started = True
-            return resource
-        finally:
-            if not started:
+            return acquire(environment)
+        except BaseException as error:
+            try:
+                if on_failure is not None:
+                    on_failure(error)
+            finally:
                 self.stop()
+            raise
 
 
 def _slot_refused() -> KoraProtocolError:

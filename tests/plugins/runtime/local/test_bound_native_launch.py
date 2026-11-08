@@ -12,7 +12,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.conformance.harness import NoLaunches
-from kora.plugins.runtime.local.bound_checkout import BoundCheckout
+from kora.plugins.runtime.local.bound_checkout import BoundCheckout, CheckoutFailure
 from kora.plugins.runtime.local.bound_native_context import BoundNativeLaunchContext
 from kora.plugins.runtime.local.bound_native_launch import (
     BoundNativeGate,
@@ -311,11 +311,11 @@ async def test_valid_bound_prepare_at_cutoff_fences_its_registered_gate(
         with pytest.raises(ChannelError) as expired:
             await handle.prepare()
         stopped_by_prepare = owner.stopped
-        first_cause = owner.phase_failure
+        first_cause = owner.failure
         owner.stop()
         with pytest.raises(ChannelError) as later:
             await handle.prepare()
-        retained_cause = owner.phase_failure
+        retained_cause = owner.failure
     finally:
         clock.expired_at = None
         owner.stop()
@@ -389,6 +389,10 @@ async def test_bound_context_maps_preflight_deadline_without_private_context(
 
     with pytest.raises(KoraProtocolError) as expired:
         await context.start_bound("app")
+    first_cause = owner.failure
+    with pytest.raises(KoraProtocolError) as refused:
+        await context.start_bound("exec")
+    owner.stop()
 
     assert expired.value.code == "launch_failed"
     assert expired.value.message == "the bound native start reached its deadline"
@@ -396,6 +400,8 @@ async def test_bound_context_maps_preflight_deadline_without_private_context(
     assert expired.value.details == {}
     assert expired.value.__context__ is None
     assert expired.value.__cause__ is None
+    assert refused.value.code == "launch_rejected"
+    assert first_cause is owner.failure is CheckoutFailure.DEADLINE
     assert owner.stopped
     assert owner.gates == ()
 

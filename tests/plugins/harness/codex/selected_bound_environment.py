@@ -24,7 +24,10 @@ from kora.plugins.runtime.local.bound_checkout import (
     BoundCheckoutError,
     CheckoutFailure,
 )
-from kora.plugins.runtime.local.bound_gate_fence import GatePhaseFailure
+from kora.plugins.runtime.local.bound_gate_fence import (
+    GateAcquisitionFailure,
+    GatePhaseFailure,
+)
 from kora.plugins.runtime.local.bound_native_context import BoundNativeLaunchContext
 from kora.plugins.runtime.local.bound_native_launch import (
     BoundNativeLaunch,
@@ -345,10 +348,18 @@ class BoundEnvironmentProbe:
                 raise BoundEnvironmentError("selected_bound_checkout_not_refused")
             return started
         except BoundCheckoutError as error:
-            if not checkout_refusal or error.reason is not CheckoutFailure.IDENTITY:
+            if (
+                not checkout_refusal
+                or error.reason is not CheckoutFailure.IDENTITY
+                or launch.native.failure is not error.reason
+            ):
                 raise BoundEnvironmentError("selected_bound_checkout_failed") from None
         except BoundRoleConfigurationError as error:
-            if error.reason is not expected_configuration or not launch.native.stopped:
+            if (
+                error.reason is not expected_configuration
+                or not launch.native.stopped
+                or launch.native.failure is not error.reason
+            ):
                 raise BoundEnvironmentError(
                     "selected_bound_configuration_failed"
                 ) from None
@@ -360,6 +371,7 @@ class BoundEnvironmentProbe:
                     not slot_refusal(error)
                     or self._clock.observed_cutoff is None
                     or not launch.native.stopped
+                    or launch.native.failure is not GateAcquisitionFailure.REJECTED
                     or len(gates) != 2
                     or any(gate.registration is None for gate in gates)
                 ):
@@ -374,6 +386,7 @@ class BoundEnvironmentProbe:
                 not acquisition_control
                 or error.condition is not ProcessCondition.START_FAILED
                 or not launch.native.stopped
+                or launch.native.failure is not error.condition
                 or len(gates) != 2
                 or gates[0].registration is None
                 or gates[1].registration is not None
@@ -383,7 +396,11 @@ class BoundEnvironmentProbe:
                     "selected_bound_unexpected_spawn_refusal"
                 ) from None
         except SecretRevealRefused:
-            if self.case != "partial" or role != "app":
+            if (
+                self.case != "partial"
+                or role != "app"
+                or launch.native.failure is not GateAcquisitionFailure.GRANT_UNAVAILABLE
+            ):
                 raise BoundEnvironmentError(
                     "selected_bound_secret_reveal_refused"
                 ) from None
@@ -423,7 +440,9 @@ class BoundEnvironmentProbe:
         if (
             launch.native.gates
             or launch.native.stopped
+            or launch.native.failure is not None
             or self.app_scope.released != released
+            or self.attempt_scope.released != released
         ):
             raise BoundEnvironmentError("selected_native_context_legacy_effect")
 
@@ -486,7 +505,7 @@ class BoundEnvironmentProbe:
             await asyncio.gather(pending, return_exceptions=True)
         if (
             not pending.cancelled()
-            or launch.native.phase_failure is not GatePhaseFailure.CANCELLED
+            or launch.native.failure is not GatePhaseFailure.CANCELLED
         ):
             raise BoundEnvironmentError("selected_native_context_cancel_not_retained")
         try:
@@ -518,7 +537,7 @@ class BoundEnvironmentProbe:
         if (
             not launch.native.stopped
             or not exec_writer.is_closing()
-            or launch.native.phase_failure is not expected
+            or launch.native.failure is not expected
         ):
             raise BoundEnvironmentError("selected_bound_phase_writer_not_fenced")
 

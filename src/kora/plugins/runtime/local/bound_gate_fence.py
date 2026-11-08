@@ -1,5 +1,7 @@
 from enum import StrEnum
 
+from kora.plugins.runtime.local.bound_checkout import CheckoutFailure
+from kora.plugins.runtime.local.bound_role_configuration import RoleConfigurationFailure
 from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
 from kora.runner.channels import ChannelFailure
 from kora.runner.processes import GatedProcess, ProcessCondition
@@ -10,22 +12,39 @@ class GatePhaseFailure(StrEnum):
     UNEXPECTED = "unexpected"
 
 
-BoundPhaseFailure = GatePhaseFailure | ChannelFailure | ProcessCondition
+class GateAcquisitionFailure(StrEnum):
+    REJECTED = "acquisition_rejected"
+    GRANT_UNAVAILABLE = "acquisition_grant_unavailable"
+    OS_ERROR = "acquisition_os_error"
+
+
+BoundGateFailure = (
+    GatePhaseFailure
+    | GateAcquisitionFailure
+    | CheckoutFailure
+    | RoleConfigurationFailure
+    | ChannelFailure
+    | ProcessCondition
+)
 
 
 class BoundGateFence:
     def __init__(self, slots: BoundRoleSlots) -> None:
         self._slots = slots
         self._gates: list[GatedProcess] = []
-        self._phase_failure: BoundPhaseFailure | None = None
+        self._failure: BoundGateFailure | None = None
 
     @property
-    def phase_failure(self) -> BoundPhaseFailure | None:
-        return self._phase_failure
+    def failure(self) -> BoundGateFailure | None:
+        return self._failure
 
-    def fail_phase(self, cause: BoundPhaseFailure) -> None:
+    def record_failure(self, cause: BoundGateFailure) -> None:
         if not self.stopped:
-            self._phase_failure = cause
+            self._failure = cause
+
+    def fail(self, cause: BoundGateFailure) -> None:
+        if not self.stopped:
+            self.record_failure(cause)
             self.stop()
 
     @property
