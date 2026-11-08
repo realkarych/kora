@@ -238,7 +238,7 @@ async def check_native_projection(database: Database) -> None:
     valid = await read_target(database, binding, selected)
     invalid: tuple[str | bytes, ...] = ("8" + "Z" * 25,)
     if database.dialect is Dialect.SQLITE:
-        invalid = (*invalid, "M" * (1 << 20), b"B" * (1 << 20))
+        invalid = (*invalid, b"B" * 26, "M" * (1 << 20), b"B" * (1 << 20))
     current: str | bytes = selected
 
     for value in invalid:
