@@ -16,13 +16,17 @@ async def test_tls_observer_restores_threshold_after_debug_callback(
     original_debug = loop.get_debug()
     original_threshold = loop.slow_callback_duration
     observer = UnknownCaAlert(ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER))
-    loop.set_debug(False)
-    loop.slow_callback_duration = 0.0
-    try:
+
+    async def observe() -> None:
         async with observer.capture():
             next_turn: asyncio.Future[None] = loop.create_future()
             loop.call_soon(next_turn.set_result, None)
             await next_turn
+
+    loop.set_debug(False)
+    loop.slow_callback_duration = 0.0
+    try:
+        await asyncio.create_task(observe())
         restored = (
             loop.get_exception_handler(),
             loop.get_debug(),
