@@ -11,8 +11,12 @@ from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.graph_stage_promotion_custody_v1 import (
     MAX_PROMOTION_DOCUMENT_BYTES_V1,
 )
-from kora.db.migrations import current_revision, upgrade_database
-from kora.db.migrations.environment import alembic_config
+from kora.db.migrations import MigrationReport, current_revision, upgrade_database
+from kora.db.migrations.environment import (
+    alembic_config,
+    bound_lock_waits,
+    pending_steps,
+)
 from kora.db.tables import (
     graph_deployment_stage as stage,
 )
@@ -277,6 +281,17 @@ async def stage_snapshot(connection: AsyncConnection) -> tuple[object, ...]:
     return stage_rows, occurrence_rows, fence_rows
 
 
+def upgrade_custody_revision(connection: Connection) -> MigrationReport:
+    bound_lock_waits(connection)
+    config = alembic_config(connection)
+    predecessor = current_revision(connection)
+    steps = pending_steps(config, predecessor, REVISION)
+    if connection.dialect.name == str(Dialect.POSTGRESQL):
+        connection.commit()
+    command.upgrade(config, REVISION)
+    return MigrationReport(connection.dialect.name, predecessor, REVISION, steps)
+
+
 @pytest.mark.asyncio
 async def test_promotion_custody_migration_rolls_back_collision_and_preserves_history(
     empty_database_settings: DatabaseSettings,
@@ -289,6 +304,14 @@ async def test_promotion_custody_migration_rolls_back_collision_and_preserves_hi
         owner = Database(settings)
         migration_owners.append((owner, ConnectionLedger(owner)))
         return owner
+
+    async def upgrade_custody() -> MigrationReport:
+        owner = open_observed(empty_database_settings)
+        try:
+            async with owner.migration_connection() as connection:
+                return await connection.run_sync(upgrade_custody_revision)
+        finally:
+            await owner.close()
 
     try:
         async with database.migration_connection() as connection:
@@ -313,8 +336,8 @@ async def test_promotion_custody_migration_rolls_back_collision_and_preserves_hi
             collision_marker = await connection.scalar(COLLISION_SELECT)
         async with database.transaction() as connection:
             await connection.execute(COLLISION_DROP)
-        report = await upgrade_database(empty_database_settings, open_observed)
-        repeated = await upgrade_database(empty_database_settings, open_observed)
+        report = await upgrade_custody()
+        repeated = await upgrade_custody()
         async with database.transaction() as connection:
             empty = (
                 (await connection.execute(select(intent))).all(),

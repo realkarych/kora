@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from alembic import command
-from sqlalchemy import Connection, inspect, text
+from sqlalchemy import Connection, inspect, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -19,15 +19,25 @@ from kora.db.graph_publication_ordinal_v1 import (
 )
 from kora.db.migrations import current_revision, upgrade_database, upgrade_to_head
 from kora.db.migrations.environment import alembic_config
-from kora.db.tables import graph_version
+from kora.db.tables import (
+    graph_deployment_stage_promotion_intent,
+    graph_deployment_stage_promotion_settlement,
+    graph_version,
+)
 from kora.engine.locks import SQLITE_ORDINAL_OBSERVATION
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
+from tests.db.test_graph_deployment_stage_migration import insert_fence
 from tests.db.test_graph_publication_digest_migration import (
     assert_sqlite_index,
     history,
 )
 from tests.db.test_graph_read_admission import executed_queries, sqlite_instructions
+from tests.db.test_graph_stage_promotion_custody_migration import (
+    INTENT_INSERT,
+    SETTLEMENT_INSERT,
+    seed_stage,
+)
 from tests.engine.test_graph_publication_ordinal import read_ordinal
 from tests.engine.test_graph_publication_target import seed_target
 from tests.support.databases import sqlite_settings
@@ -68,6 +78,28 @@ def reflected_indexes(connection: Connection) -> set[str]:
         entry["name"] for entry in inspect(connection).get_indexes("graph_version")
     )
     return {name for name in names if name is not None}
+
+
+async def seed_custody(connection: AsyncConnection) -> None:
+    incarnation = await insert_fence(connection, "Store")
+    original = await seed_stage(connection, "ordinal-retained", incarnation=incarnation)
+    await connection.execute(
+        INTENT_INSERT, original.request("ordinal-retained-op", b'{"intent":1}')
+    )
+    await connection.execute(
+        SETTLEMENT_INSERT,
+        {"stage_id": original.stage_id, "observation_bytes": b'{"settlement":1}'},
+    )
+
+
+async def custody_rows(connection: AsyncConnection) -> tuple[object, ...]:
+    intent = (
+        await connection.execute(select(graph_deployment_stage_promotion_intent))
+    ).one()
+    settlement = (
+        await connection.execute(select(graph_deployment_stage_promotion_settlement))
+    ).one()
+    return tuple(intent), tuple(settlement)
 
 
 async def replace_with_blob(writer: AsyncConnection, version: str, width: int) -> None:
@@ -146,6 +178,8 @@ async def test_graph_ordinal_migration_preserves_rows_and_unique_identity(
         binding, selected = await seed_target(database)
         async with database.transaction() as writer:
             await Seeder(writer).graph_version(selected, 7, ir={"legacy": "value"})
+            await seed_custody(writer)
+            original_custody = await custody_rows(writer)
         before = await history(database)
 
         report = await upgrade_database(empty_database_settings)
@@ -160,6 +194,7 @@ async def test_graph_ordinal_migration_preserves_rows_and_unique_identity(
         async with database.read_transaction() as reader:
             native_indexes = await reader.run_sync(reflected_indexes)
             revision = await reader.run_sync(current_revision)
+            retained_custody = await custody_rows(reader)
         with pytest.raises(IntegrityError):
             async with database.transaction() as writer:
                 await Seeder(writer).graph_version(selected, 7)
@@ -172,6 +207,7 @@ async def test_graph_ordinal_migration_preserves_rows_and_unique_identity(
         assert again.steps == 0
         assert revision == REVISION
         assert before == after
+        assert retained_custody == original_custody
         assert observed == 7
         assert native_indexes & INDEXES == (
             INDEXES if database.dialect is Dialect.SQLITE else set()
@@ -277,6 +313,8 @@ async def test_sqlite_ordinal_migration_rolls_back_first_index_on_second_conflic
         binding, selected = await seed_target(database)
         async with database.transaction() as writer:
             await Seeder(writer).graph_version(selected, 6)
+            await seed_custody(writer)
+            original_custody = await custody_rows(writer)
             await writer.exec_driver_sql(
                 f"CREATE INDEX {ORDINAL_INVALID_INDEX} ON graph_version (number)"
             )
@@ -298,10 +336,13 @@ async def test_sqlite_ordinal_migration_rolls_back_first_index_on_second_conflic
         async with database.transaction() as writer:
             revision = await writer.run_sync(current_revision)
             retained_indexes = await writer.run_sync(reflected_indexes)
+            failed_custody = await custody_rows(writer)
             await writer.exec_driver_sql(f"DROP INDEX {ORDINAL_INVALID_INDEX}")
         recovered = await upgrade_database(settings)
         after = await history(database)
         observed = await read_ordinal(database, binding, selected)
+        async with database.read_transaction() as reader:
+            recovered_custody = await custody_rows(reader)
 
         assert [
             index
@@ -314,6 +355,7 @@ async def test_sqlite_ordinal_migration_rolls_back_first_index_on_second_conflic
         assert retained_indexes & INDEXES == {ORDINAL_INVALID_INDEX}
         assert recovered.to_revision == REVISION
         assert before == after
+        assert failed_custody == recovered_custody == original_custody
         assert observed == 6
         assert database.writer_is_free()
         assert ledger.outstanding == database.units_in_flight() == 0
