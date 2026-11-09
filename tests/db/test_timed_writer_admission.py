@@ -88,7 +88,7 @@ class WriterCutoffLoop(asyncio.SelectorEventLoop):
         return super().time() + self._offset
 
     def advance_to(self, deadline: float) -> None:
-        self._offset = deadline - super().time()
+        self._offset = max(self._offset, deadline - super().time())
 
 
 def test_admitted_writer_keeps_caller_lease_and_commits_after_cutoff(
