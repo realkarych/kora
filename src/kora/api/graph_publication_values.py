@@ -25,6 +25,8 @@ from kora.engine.graph_version_identity import GraphVersionDigests
 IR_PARAMETER = "publication_ir_json"
 CONTRACT_PARAMETER = "publication_execution_json"
 RESOURCE_PARAMETER = "publication_resources_json"
+RESOLVED_DIGESTS_PARAMETER = "publication_resolved_digests_json"
+DEPLOYED_BY_PARAMETER = "publication_deployed_by"
 BINDING_SLOTS = 32
 _BIND_ISSUER = object()
 
@@ -124,6 +126,16 @@ def graph_publication_measurement_statement(
                 "resource_transport_bytes"
             ),
         )
+    return select(*_sqlite_publication_size_columns(ir, execution, transport))
+
+
+def _sqlite_publication_size_columns(
+    ir: ColumnElement[str] | ColumnElement[object],
+    execution: ColumnElement[str] | ColumnElement[object],
+    transport: ColumnElement[bytes],
+) -> tuple[
+    ColumnElement[int], ColumnElement[int], ColumnElement[int], ColumnElement[int]
+]:
     sizes = select(
         func.length(sql_cast(ir, LargeBinary()), type_=BigInteger()).label(
             "ir_native_bytes"
@@ -136,11 +148,41 @@ def graph_publication_measurement_statement(
     ir_width: ColumnElement[int] = sizes.c.ir_native_bytes
     execution_width: ColumnElement[int] = sizes.c.execution_native_bytes
     resource_width: ColumnElement[int] = sizes.c.resources_native_bytes
-    return select(
+    return (
         ir_width,
         execution_width,
         resource_width,
         resource_width.label("resource_transport_bytes"),
+    )
+
+
+def sqlite_graph_publication_metadata_bind_expressions() -> dict[
+    str, ColumnElement[str]
+]:
+    return {
+        "resolved_digests": bindparam(
+            RESOLVED_DIGESTS_PARAMETER, type_=Text(), required=True
+        ),
+        "deployed_by": bindparam(DEPLOYED_BY_PARAMETER, type_=Text(), required=True),
+    }
+
+
+def sqlite_graph_publication_record_measurement_statement() -> Select[
+    int, int, int, int, int, int
+]:
+    values = graph_publication_bind_expressions(Dialect.SQLITE)
+    metadata = sqlite_graph_publication_metadata_bind_expressions()
+    transport = graph_resource_binary_projection(Dialect.SQLITE, values["resources"])
+    return select(
+        *_sqlite_publication_size_columns(
+            values["ir"], values["execution_contract"], transport
+        ),
+        func.length(
+            sql_cast(metadata["resolved_digests"], LargeBinary()), type_=BigInteger()
+        ).label("resolved_digests_native_bytes"),
+        func.length(
+            sql_cast(metadata["deployed_by"], LargeBinary()), type_=BigInteger()
+        ).label("deployed_by_native_bytes"),
     )
 
 

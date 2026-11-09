@@ -4,24 +4,39 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
-from sqlalchemy import BigInteger, LargeBinary, Select, Text, bindparam, func, select
+from sqlalchemy import (
+    BigInteger,
+    LargeBinary,
+    Select,
+    Text,
+    bindparam,
+    func,
+    insert,
+    select,
+)
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy.sql.elements import ColumnElement
 
 from kora.api.graph_deployment_attachment import attach_graph_deployment_references
 from kora.api.graph_publication_values import (
+    DEPLOYED_BY_PARAMETER,
+    RESOLVED_DIGESTS_PARAMETER,
     PreparedGraphPublicationBinds,
     graph_publication_bind_expressions,
     graph_publication_measurement_statement,
     prepare_graph_publication_binds,
+    sqlite_graph_publication_metadata_bind_expressions,
+    sqlite_graph_publication_record_measurement_statement,
 )
 from kora.db.connection import Database, Dialect
 from kora.db.graph_resource_transport import graph_resource_binary_projection
 from kora.db.graph_value_json import ObjectReader, TextBudget, render_object
 from kora.db.migrations import upgrade_database
 from kora.db.tables import graph_version
+from kora.db.types import JsonObject, canonical_json
 from tests.api.test_graph_deployment_attachment import (
     ATTACH_LIMITS,
     attachment_inputs,
@@ -34,7 +49,7 @@ from tests.api.test_graph_publication_values import (
     publication_limits,
 )
 from tests.db.closing import ConnectionLedger
-from tests.db.seed import Seeder
+from tests.db.seed import DIGEST, Seeder
 from tests.db.test_graph_read_admission import executed_queries
 from tests.engine.test_graph_resource_references import SCOPE
 from tests.support.databases import sqlite_settings
@@ -290,3 +305,138 @@ async def test_graph_publication_measurement_matches_native_storage(
         finally:
             await encoded.close()
         assert ledger.opened == ledger.closed > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["UTF-8", *SQLITE_ENCODINGS])
+async def test_sqlite_record_measurement_matches_inserted_metadata(
+    tmp_path: Path,
+    measurements_inputs: tuple[PreparedGraphPublicationBinds, ...],
+    encoding: str,
+) -> None:
+    path = tmp_path / "graph-record.db"
+    with closing(sqlite3.connect(path)) as native:
+        native.execute(f"PRAGMA encoding = '{encoding}'")
+        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
+        native.execute("DROP TABLE encoding_seed")
+        native.commit()
+    settings = sqlite_settings(path)
+    await upgrade_database(settings)
+    database = Database(settings)
+    ledger = ConnectionLedger(database)
+    documents: tuple[JsonObject, ...] = (
+        {},
+        {"clé 😀": 'quote " and \\', "日本": "démo"},
+    )
+    actors = ("owner-ascii", "部署 😀")
+    inputs = measurements_inputs[:2]
+    parameters = tuple(
+        item.parameters()
+        | {
+            RESOLVED_DIGESTS_PARAMETER: canonical_json(document),
+            DEPLOYED_BY_PARAMETER: actor,
+        }
+        for item, document, actor in zip(inputs, documents, actors, strict=True)
+    )
+    measurement = sqlite_graph_publication_record_measurement_statement()
+    values = graph_publication_bind_expressions(Dialect.SQLITE)
+    metadata = sqlite_graph_publication_metadata_bind_expressions()
+    fields = graph_version.c
+
+    try:
+        async with database.transaction() as writer:
+            seeder = Seeder(writer)
+            namespace_id = await seeder.namespace()
+            graph_id = await seeder.graph(namespace_id)
+            measured: list[tuple[int, ...]] = []
+            positions: list[tuple[list[str] | None, list[str] | None]] = []
+            captured: list[list[tuple[str, tuple[object, ...]]]] = []
+            compiled_measurement = measurement.compile(dialect=writer.dialect)
+            assert isinstance(compiled_measurement, SQLCompiler)
+            assert all(
+                compiled_measurement.binds[name].required for name in parameters[0]
+            )
+            for index, (item, document, actor, binds) in enumerate(
+                zip(inputs, documents, actors, parameters, strict=True)
+            ):
+                common = dict(
+                    graph_id=graph_id,
+                    ir_digest=DIGEST,
+                    source_digest=DIGEST,
+                    execution_contract_digest=DIGEST,
+                    deployment_digest=DIGEST,
+                    value_encoding_version=1,
+                    deployed_at=seeder.clock.now(),
+                    status="active",
+                    **seeder.stamps(),
+                )
+                proposed = (
+                    insert(graph_version)
+                    .values(**common, id=seeder.new_id(), number=2 * index + 1)
+                    .values(values | metadata)
+                )
+                ordinary = (
+                    insert(graph_version)
+                    .values(
+                        **common,
+                        id=seeder.new_id(),
+                        number=2 * index + 2,
+                        resolved_digests=document,
+                        deployed_by=actor,
+                    )
+                    .values(values)
+                )
+                compiled_insert = proposed.compile(dialect=writer.dialect)
+                assert isinstance(compiled_insert, SQLCompiler)
+                with executed_queries(writer) as operations:
+                    measured.append(
+                        tuple((await writer.execute(measurement, binds)).one())
+                    )
+                    await writer.execute(proposed, binds)
+                captured.append(operations)
+                positions.append(
+                    (compiled_measurement.positiontup, compiled_insert.positiontup)
+                )
+                await writer.execute(ordinary, item.parameters())
+        async with database.read_snapshot() as reader:
+            stored = (
+                await reader.execute(
+                    select(
+                        *(
+                            sql_cast(fields[name], LargeBinary())
+                            for name in (*values, *metadata)
+                        )
+                    )
+                    .where(fields.graph_id == graph_id)
+                    .order_by(fields.number)
+                )
+            ).all()
+    finally:
+        await database.close()
+
+    assert tuple(measurement.selected_columns.keys()) == (
+        *SIZE_COLUMNS,
+        "resolved_digests_native_bytes",
+        "deployed_by_native_bytes",
+    )
+    assert len(stored) == 4
+    assert captured[0][0][0] == captured[1][0][0]
+    for index, (binds, sizes, operations, bind_positions) in enumerate(
+        zip(parameters, measured, captured, positions, strict=True)
+    ):
+        expected = tuple(value.encode(encoding) for value in binds.values())
+        assert stored[2 * index] == stored[2 * index + 1] == expected
+        ir, execution, resources, resolved, actor = map(len, expected)
+        assert sizes == (ir, execution, resources, resources, resolved, actor)
+        assert all(type(size) is int and size > 0 for size in sizes)
+        assert len(operations) == len(bind_positions) == 2
+        assert "graph_version" not in operations[0][0]
+        for (sql, arguments), names in zip(operations, bind_positions, strict=True):
+            assert names is not None
+            assert set(binds) <= set(names)
+            for name, argument in zip(names, arguments, strict=True):
+                if name in binds:
+                    assert argument is binds[name]
+                    assert binds[name] not in sql
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert ledger.opened == ledger.closed > 0
