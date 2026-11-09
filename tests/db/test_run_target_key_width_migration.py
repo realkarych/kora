@@ -18,6 +18,7 @@ from tests.db.seed import START, Seeder
 
 PREDECESSOR = "0017"
 REVISION = "0018"
+HEAD_REVISION = "0019"
 ORIGINAL = "R" * 255
 UPPER = "A" * 256
 LOWER = "a" * 256
@@ -34,11 +35,35 @@ def prepare(connection: Connection) -> None:
     command.upgrade(alembic_config(connection), PREDECESSOR)
 
 
+def upgrade_width(connection: Connection) -> None:
+    command.upgrade(alembic_config(connection), REVISION)
+
+
 def downgrade(connection: Connection) -> None:
     command.downgrade(alembic_config(connection), PREDECESSOR)
 
 
 def target_index(connection: Connection) -> tuple[tuple[str | None, ...], bool]:
+    if connection.dialect.name == Dialect.SQLITE:
+        with connection.execute(
+            text(
+                'SELECT columns.name, indexes."unique" '
+                "FROM pragma_index_list('run') AS indexes "
+                "CROSS JOIN pragma_index_info('ix_run_namespace_target') AS columns "
+                "WHERE indexes.name = 'ix_run_namespace_target' ORDER BY columns.seqno"
+            )
+        ) as result:
+            rows = result.all()
+        names: list[str | None] = []
+        flags: set[bool] = set()
+        for name, unique in rows:
+            assert name is None or type(name) is str
+            assert type(unique) is int
+            assert unique in (0, 1)
+            names.append(name)
+            flags.add(bool(unique))
+        (is_unique,) = flags
+        return tuple(names), is_unique
     (index,) = (
         index
         for index in inspect(connection).get_indexes("run")
@@ -118,6 +143,18 @@ async def test_target_width_migration_preserves_order_and_existing_keys(
         scope, original_id = await seed(database)
         before = await state(database, scope, original_id)
 
+        async with database.migration_connection() as migration:
+            await migration.run_sync(upgrade_width)
+        widened = await state(database, scope, original_id)
+        async with database.migration_connection() as migration:
+            with pytest.raises(
+                RuntimeError,
+                match=(
+                    "^run target key migration cannot be downgraded; "
+                    "restore a compatible backup$"
+                ),
+            ):
+                await migration.run_sync(downgrade)
         report = await upgrade_database(empty_database_settings)
         upgraded = await state(database, scope, original_id)
         lower_id = await add_run(database, scope, LOWER)
@@ -131,27 +168,25 @@ async def test_target_width_migration_preserves_order_and_existing_keys(
             overflow_state = getattr(over.value.orig, "sqlstate", None)
         else:
             overflow_state = None
-        async with database.migration_connection() as migration:
-            with pytest.raises(RuntimeError, match="restore a compatible backup"):
-                await migration.run_sync(downgrade)
         after = await state(database, scope, original_id)
         repeated = await upgrade_database(empty_database_settings)
     finally:
         await database.close()
 
     assert before.revision == PREDECESSOR
+    assert widened.revision == REVISION
     assert (report.from_revision, report.to_revision, report.steps) == (
-        PREDECESSOR,
         REVISION,
+        HEAD_REVISION,
         1,
     )
     assert (repeated.from_revision, repeated.to_revision, repeated.steps) == (
-        REVISION,
-        REVISION,
+        HEAD_REVISION,
+        HEAD_REVISION,
         0,
     )
-    assert after.revision == upgraded.revision == REVISION
-    assert before.keys == upgraded.keys == (ORIGINAL,)
+    assert after.revision == upgraded.revision == HEAD_REVISION
+    assert before.keys == widened.keys == upgraded.keys == (ORIGINAL,)
     assert after.keys == (UPPER, ORIGINAL, LOWER)
     assert (
         before.original_key == upgraded.original_key == after.original_key == ORIGINAL
@@ -161,16 +196,18 @@ async def test_target_width_migration_preserves_order_and_existing_keys(
     assert [holder.run_id for holder in upper] == [upper_id]
     assert (
         before.index
+        == widened.index
         == upgraded.index
         == after.index
         == (("namespace_id", "target_key"), False)
     )
     if database.dialect is Dialect.POSTGRESQL:
         assert before.column == (255, "C", "YES")
-        assert upgraded.column == after.column == (256, "C", "YES")
+        assert widened.column == upgraded.column == after.column == (256, "C", "YES")
         assert overflow_state == "22001"
     else:
-        assert before.column == upgraded.column == after.column == ("VARCHAR(255)", 0)
+        assert before.column == widened.column == upgraded.column == after.column
+        assert after.column == ("VARCHAR(255)", 0)
     assert database.units_in_flight() == 0
 
 
@@ -248,5 +285,5 @@ async def test_target_width_migration_cancellation_rolls_back_and_releases(
     assert pause.ledger.opened == pause.ledger.closed > 0
     assert pause.ledger.closed_while_checked_out == 0
     assert recovered.from_revision == PREDECESSOR
-    assert recovered.to_revision == ready.revision == REVISION
+    assert recovered.to_revision == ready.revision == HEAD_REVISION
     assert ready.keys == (UPPER, ORIGINAL)
