@@ -11,6 +11,7 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import insert, select
 
 from kora.db.connection import Database
+from kora.db.graph_resource_transport import graph_resource_binary_projection
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected, ObjectReader
 from kora.db.graph_version_reads import AcquiredGraphVersion, acquire_graph_version
 from kora.db.reads import graph_version_by_number
@@ -25,6 +26,7 @@ from kora.engine.graph_projection_paths import build_graph_cel_projection_paths
 from kora.engine.graph_resource_references import (
     GraphResourceOwner,
     GraphResourceScope,
+    NativeGraphResourceTransport,
     build_graph_resource_references,
 )
 from kora.engine.graph_version_identity import (
@@ -985,6 +987,14 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
             await graph_version_by_number(connection, namespace, graph, number)
             for number in (1, 2, 3, 4, 5)
         ]
+        physical_field = graph_resource_binary_projection(
+            database.dialect, graph_version.c.resources
+        )
+        physical_wire: bytes = (
+            await connection.execute(
+                select(physical_field).where(graph_version.c.id == scope.version_id)
+            )
+        ).scalar_one()
     acquired, bad_acquired, empty_acquired, drift_acquired, tampered_acquired = pairs
     assert acquired is not None
     assert bad_acquired is not None
@@ -998,12 +1008,13 @@ async def test_complete_reader_uses_exact_db_scope_and_checks_after_release(
     assert tampered_native is not None
     assert ledger.checkouts > before_read
     assert ledger.outstanding == database.units_in_flight() == 0
+    assert len(physical_wire) <= LIMITS.physical_input_bytes
     after_read = ledger.checkouts
     checked = check_detached_execution_contract(
         acquired,
         pin,
         scope,
-        native.resources,
+        NativeGraphResourceTransport(physical_wire, "utf-8"),
         owners,
         limits=LIMITS,
         parameter_schema_limits=SCHEMA_LIMITS,

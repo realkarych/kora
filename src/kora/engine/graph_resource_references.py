@@ -1,5 +1,6 @@
+import json
 from dataclasses import dataclass
-from typing import Never, cast
+from typing import Literal, Never, cast
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.graph_value_json import (
@@ -16,13 +17,24 @@ from kora.engine.graph_command_manifests import (
     build_declared_command_manifests,
     check_declared_command_manifests,
 )
+from kora.ir.config import COMMAND_RESOURCE_MAX_BYTES
 from kora.ir.json import JsonObject, JsonValue
+from kora.ir.vcs_ref_json import lexical_depth_valid, unique_object, valid_scalars
 from kora.protocols.storage_models import MAX_STORAGE_METADATA, ContentRef
 
 INTERPRETATION = "kora.graph-resource-refs.v1"
 MAX_MEMBER_NAME = len("resource_set_digest")
 RENDER_COPIES = 3
+NATIVE_DEPTH = 8
+NATIVE_INTEGER_DIGITS = len(str(COMMAND_RESOURCE_MAX_BYTES))
+UNICODE_BYTES_PER_NATIVE_BYTE = 4
+UTF8_BYTES_PER_UTF16_BYTE = 2
+DECODE_TEXT_COPIES = 3
+DECODE_STRUCTURE_UNITS = 10
+DECODE_SCANS = 6
 _BUILD = object()
+
+NativeResourceEncoding = Literal["utf-8", "utf-16le", "utf-16be"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +100,19 @@ class GraphResourceReferences(_ProtectedGraphResources):
         return self._text
 
 
+class NativeGraphResourceTransport(_ProtectedGraphResources):
+    __slots__ = ("payload", "encoding")
+    payload: bytes
+    encoding: NativeResourceEncoding
+
+    def __init__(self, payload: bytes, encoding: NativeResourceEncoding) -> None:
+        if hasattr(self, "payload"):
+            del self, payload, encoding
+            raise AttributeError("native graph resources are immutable")
+        object.__setattr__(self, "payload", payload)
+        object.__setattr__(self, "encoding", encoding)
+
+
 class PreparedGraphResourceReferences(GraphResourceReferences):
     __slots__ = ("owners",)
     owners: tuple[GraphResourceOwner, ...]
@@ -121,6 +146,56 @@ class ReferenceAdmission:
         if max_output_bytes is not None:
             available = min(available, TextBudget(max_output_bytes).remaining)
         return render_object(value, TextBudget(available))
+
+
+def _read_native_integer(token: str) -> int:
+    if len(token) > NATIVE_INTEGER_DIGITS:
+        raise ValueError("invalid graph resource integer")
+    return int(token)
+
+
+def _refuse_native_number(token: str) -> Never:
+    raise ValueError("invalid graph resource number")
+
+
+def _decode_native_resources(
+    transport: NativeGraphResourceTransport, admission: ReferenceAdmission
+) -> JsonObject:
+    payload, encoding = transport.payload, transport.encoding
+    if (
+        type(payload) is not bytes
+        or not payload
+        or type(encoding) is not str
+        or encoding not in ("utf-8", "utf-16le", "utf-16be")
+    ):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    width = len(payload)
+    normalized = 0 if encoding == "utf-8" else UTF8_BYTES_PER_UTF16_BYTE * width
+    text_units = DECODE_TEXT_COPIES * UNICODE_BYTES_PER_NATIVE_BYTE * width
+    admission.inspect(width)
+    admission.keep(text_units + DECODE_STRUCTURE_UNITS * width + normalized)
+    admission.work.reserve(DECODE_SCANS * width + (normalized or width) + normalized)
+    try:
+        text = payload.decode(encoding)
+        lexical = text.encode("utf-8") if normalized else payload
+        if not lexical_depth_valid(lexical, NATIVE_DEPTH):
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        del lexical
+        value: object = json.loads(
+            text,
+            object_pairs_hook=unique_object,
+            parse_int=_read_native_integer,
+            parse_float=_refuse_native_number,
+            parse_constant=_refuse_native_number,
+        )
+    except (ValueError, RecursionError):
+        raise GraphValueRejected(GraphValueFailure.INVALID) from None
+    if type(value) is not dict:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    document = cast(JsonObject, value)
+    if not valid_scalars(document):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    return document
 
 
 def _scope_values(
@@ -299,6 +374,8 @@ def _references_result(
 ) -> GraphResourceReferences | GraphValueFailure:
     try:
         admission = ReferenceAdmission(limits)
+        if type(saved_physical) is NativeGraphResourceTransport:
+            saved_physical = _decode_native_resources(saved_physical, admission)
         ordered: list[GraphResourceOwner] | None = None
         if saved_logical is _BUILD:
             declared = build_declared_command_manifests(ir_text, limits=limits.logical)
