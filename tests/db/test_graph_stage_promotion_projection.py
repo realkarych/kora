@@ -1,4 +1,5 @@
 from traceback import format_exception, walk_tb
+from typing import cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -12,10 +13,12 @@ from kora.db.graph_stage_promotion_custody_v1 import (
 from kora.db.graph_stage_promotion_projection import (
     MAX_PROMOTION_PAIR_BYTES,
     PromotionDocumentProjectionRejected,
+    graph_stage_promotion_document_comparison_statement,
     graph_stage_promotion_document_statement,
 )
 from kora.db.tables import graph_deployment_stage_promotion_intent as intent
 from kora.db.tables import graph_deployment_stage_promotion_settlement as settlement
+from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
 from tests.db.test_graph_read_admission import executed_queries
 from tests.db.test_graph_stage_promotion_custody_migration import (
@@ -40,6 +43,159 @@ async def projected(
         return tuple(result.one())
     finally:
         result.close()
+
+
+async def compared(
+    connection: AsyncConnection,
+    stage_id: str,
+    request: bytes | None,
+    observation: bytes | None,
+) -> bool:
+    statement = graph_stage_promotion_document_comparison_statement(
+        connection.dialect.name,
+        stage_id,
+        request_bytes=request,
+        observation_bytes=observation,
+    )
+    result = await connection.execute(statement)
+    try:
+        (matched,) = tuple(result.one())
+    finally:
+        result.close()
+    assert type(matched) is bool
+    return matched
+
+
+@pytest.mark.asyncio
+async def test_promotion_document_comparison_matches_exactly_without_returning_bytes(
+    database: Database,
+) -> None:
+    ledger = ConnectionLedger(database)
+    observation = BOUNDARY_BYTES[::-1]
+    wrong_request = BOUNDARY_BYTES[:-1] + bytes((BOUNDARY_BYTES[-1] ^ 1,))
+    wrong_observation = observation[:-1] + bytes((observation[-1] ^ 1,))
+    async with database.transaction() as connection:
+        selected = await seed_stage(connection, "comparison")
+        pending = await seed_stage(connection, "comparison-unsettled")
+        missing = Seeder(connection).new_id()
+        await connection.execute(
+            INTENT_INSERT,
+            [
+                selected.request("comparison", BOUNDARY_BYTES),
+                pending.request("comparison-unsettled", BOUNDARY_BYTES),
+            ],
+        )
+        await connection.execute(
+            SETTLEMENT_INSERT,
+            {"stage_id": selected.stage_id, "observation_bytes": observation},
+        )
+    alternatives = (
+        (selected.stage_id, BOUNDARY_BYTES, None),
+        (selected.stage_id, None, None),
+        (pending.stage_id, BOUNDARY_BYTES, observation),
+        (pending.stage_id, None, None),
+        (missing, BOUNDARY_BYTES, None),
+        (selected.stage_id, wrong_request, observation),
+        (selected.stage_id, BOUNDARY_BYTES, wrong_observation),
+    )
+
+    async with database.read_snapshot() as connection:
+        checkouts = ledger.checkouts
+        with executed_queries(connection) as queries:
+            exact = await compared(
+                connection, selected.stage_id, BOUNDARY_BYTES, observation
+            )
+        intent_only = await compared(connection, pending.stage_id, BOUNDARY_BYTES, None)
+        absent = await compared(connection, missing, None, None)
+        alternatives_match = [
+            await compared(connection, stage_id, request, receipt)
+            for stage_id, request, receipt in alternatives
+        ]
+        assert ledger.checkouts == checkouts
+
+    assert exact is intent_only is absent is True
+    assert alternatives_match == [False] * len(alternatives)
+    [(sql, parameters)] = queries
+    assert sql.count("LEFT JOIN") == 2
+    if database.dialect is Dialect.SQLITE:
+        assert sql.count("typeof(") == 2
+        assert sql.count("length(") == 2
+        assert (
+            "THEN intent.request_bytes = ? AND settlement.observation_bytes = ?" in sql
+        )
+        assert parameters == (
+            "blob",
+            WIDTH,
+            "blob",
+            WIDTH,
+            BOUNDARY_BYTES,
+            observation,
+            selected.stage_id,
+        )
+    else:
+        assert sql.count("pg_catalog.octet_length(") == 2
+        assert sql.count("OPERATOR(pg_catalog.=)") == 6
+        assert sql.count("AS pg_catalog.bytea)") == 2
+        assert sql.count("AS pg_catalog.int8)") == 2
+        assert "::BYTEA" not in sql.upper()
+        assert parameters == (
+            WIDTH,
+            WIDTH,
+            BOUNDARY_BYTES,
+            observation,
+            selected.stage_id,
+        )
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert database.writer_is_free()
+
+
+@pytest.mark.asyncio
+async def test_promotion_document_comparison_uses_native_postgresql_operators(
+    database: Database,
+) -> None:
+    ledger = ConnectionLedger(database)
+    async with database.transaction() as connection:
+        selected = await seed_stage(connection, "comparison-native")
+        await connection.execute(
+            INTENT_INSERT, selected.request("comparison-native", b"request")
+        )
+        if database.dialect is Dialect.POSTGRESQL:
+            await connection.exec_driver_sql("CREATE SCHEMA promotion_shadow")
+            await connection.exec_driver_sql(
+                "CREATE FUNCTION promotion_shadow.always_equal("
+                "pg_catalog.int8, pg_catalog.int8) RETURNS pg_catalog.bool "
+                "IMMUTABLE LANGUAGE SQL AS 'SELECT true'"
+            )
+            await connection.exec_driver_sql(
+                "CREATE OPERATOR promotion_shadow.= ("
+                "LEFTARG = pg_catalog.int8, RIGHTARG = pg_catalog.int8, "
+                "FUNCTION = promotion_shadow.always_equal)"
+            )
+            await connection.exec_driver_sql(
+                "CREATE DOMAIN promotion_shadow.bytea AS pg_catalog.text"
+            )
+
+    async with database.read_snapshot() as connection:
+        if database.dialect is Dialect.POSTGRESQL:
+            await connection.exec_driver_sql(
+                "SET LOCAL search_path TO promotion_shadow, pg_catalog, public"
+            )
+            shadowed = await connection.exec_driver_sql(
+                "SELECT 1::pg_catalog.int8 = 2::pg_catalog.int8, "
+                "pg_catalog.pg_typeof(CAST(NULL AS bytea)) "
+                "OPERATOR(pg_catalog.=) pg_catalog.to_regtype('promotion_shadow.bytea')"
+            )
+            try:
+                assert tuple(shadowed.one()) == (True, True)
+            finally:
+                shadowed.close()
+        correct = await compared(connection, selected.stage_id, b"request", None)
+        wrong_width = await compared(connection, selected.stage_id, b"r", None)
+        same_width = await compared(connection, selected.stage_id, b"replica", None)
+
+    assert correct is True
+    assert wrong_width is same_width is False
+    assert ledger.outstanding == database.units_in_flight() == 0
 
 
 @pytest.mark.asyncio
@@ -86,6 +242,7 @@ async def test_promotion_document_projection_refuses_damaged_witnesses(
     database: Database,
 ) -> None:
     wrong_storage: tuple[object, ...] | None = None
+    damaged_matches: list[bool] = []
     wide = BOUNDARY_BYTES + b"x"
     async with database.transaction() as connection:
         selected = await seed_stage(connection, "damaged")
@@ -120,9 +277,19 @@ async def test_promotion_document_projection_refuses_damaged_witnesses(
             empty = await projected(
                 connection, selected.stage_id, MAX_PROMOTION_PAIR_BYTES
             )
+            damaged_matches.append(
+                await compared(
+                    connection, selected.stage_id, BOUNDARY_BYTES, BOUNDARY_BYTES
+                )
+            )
             await connection.execute(settlement_update.values(observation_bytes=wide))
             oversized_settlement = await projected(
                 connection, selected.stage_id, MAX_PROMOTION_PAIR_BYTES
+            )
+            damaged_matches.append(
+                await compared(
+                    connection, selected.stage_id, BOUNDARY_BYTES, BOUNDARY_BYTES
+                )
             )
             if database.dialect is Dialect.SQLITE:
                 await connection.exec_driver_sql(
@@ -132,6 +299,11 @@ async def test_promotion_document_projection_refuses_damaged_witnesses(
                 )
                 wrong_storage = await projected(
                     connection, selected.stage_id, MAX_PROMOTION_PAIR_BYTES
+                )
+                damaged_matches.append(
+                    await compared(
+                        connection, selected.stage_id, BOUNDARY_BYTES, BOUNDARY_BYTES
+                    )
                 )
             await connection.execute(
                 settlement_update.values(observation_bytes=BOUNDARY_BYTES)
@@ -144,11 +316,19 @@ async def test_promotion_document_projection_refuses_damaged_witnesses(
             oversized_intent = await projected(
                 connection, selected.stage_id, MAX_PROMOTION_PAIR_BYTES
             )
+            damaged_matches.append(
+                await compared(
+                    connection, selected.stage_id, BOUNDARY_BYTES, BOUNDARY_BYTES
+                )
+            )
             await connection.execute(
                 intent.delete().where(intent.c.stage_id == selected.stage_id)
             )
             orphan = await projected(
                 connection, selected.stage_id, MAX_PROMOTION_PAIR_BYTES
+            )
+            damaged_matches.append(
+                await compared(connection, selected.stage_id, None, None)
             )
         finally:
             await savepoint.rollback()
@@ -166,6 +346,7 @@ async def test_promotion_document_projection_refuses_damaged_witnesses(
     if database.dialect is Dialect.SQLITE:
         assert wrong_storage == (True, True, WIDTH, None, None, None)
     assert orphan == (False, True, None, WIDTH, None, None)
+    assert damaged_matches == [False] * (5 if database.dialect is Dialect.SQLITE else 4)
     assert restored == (True, True, WIDTH, WIDTH, BOUNDARY_BYTES, BOUNDARY_BYTES)
     assert database.units_in_flight() == 0
 
@@ -301,6 +482,47 @@ def test_promotion_document_projection_refuses_invalid_arguments_privately(
         frame.f_locals
         for frame, _ in walk_tb(error.__traceback__)
         if frame.f_code.co_name == "graph_stage_promotion_document_statement"
+    )
+    assert wrapper == {}
+    assert error.__context__ is error.__cause__ is None
+    assert PRIVATE not in "".join(format_exception(error))
+
+
+@pytest.mark.parametrize(
+    ("dialect", "stage_id", "expected_request", "expected_observation"),
+    [
+        (PRIVATE, "0" * 26, None, None),
+        ("sqlite", PRIVATE, None, None),
+        ("postgresql", "0" * 26, cast("bytes", bytearray(PRIVATE.encode())), None),
+        ("sqlite", "0" * 26, b"", None),
+        ("postgresql", "0" * 26, b"request", b""),
+        ("sqlite", "0" * 26, BOUNDARY_BYTES + b"x", None),
+        ("postgresql", "0" * 26, b"request", BOUNDARY_BYTES + b"x"),
+        ("postgresql", "0" * 26, None, PRIVATE.encode()),
+    ],
+)
+def test_promotion_document_comparison_refuses_invalid_expected_values_privately(
+    dialect: str,
+    stage_id: str,
+    expected_request: bytes | None,
+    expected_observation: bytes | None,
+) -> None:
+    try:
+        raise RuntimeError(PRIVATE)
+    except RuntimeError:
+        with pytest.raises(PromotionDocumentProjectionRejected) as refused:
+            graph_stage_promotion_document_comparison_statement(
+                dialect,
+                stage_id,
+                request_bytes=expected_request,
+                observation_bytes=expected_observation,
+            )
+
+    error = refused.value
+    wrapper = next(
+        frame.f_locals
+        for frame, _ in walk_tb(error.__traceback__)
+        if frame.f_code.co_name == "graph_stage_promotion_document_comparison_statement"
     )
     assert wrapper == {}
     assert error.__context__ is error.__cause__ is None

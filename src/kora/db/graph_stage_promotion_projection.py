@@ -4,8 +4,10 @@ from sqlalchemy import (
     LargeBinary,
     Text,
     and_,
+    bindparam,
     case,
     cast,
+    false,
     func,
     literal_column,
     or_,
@@ -13,6 +15,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.sqltypes import NullType
 
 from kora.db.graph_stage_promotion_custody_v1 import MAX_PROMOTION_DOCUMENT_BYTES_V1
 from kora.db.identifiers import is_identifier
@@ -46,6 +49,8 @@ REQUEST: ColumnElement[bytes] = literal_column("intent.request_bytes", LargeBina
 OBSERVATION: ColumnElement[bytes] = literal_column(
     "settlement.observation_bytes", LargeBinary()
 )
+_POSTGRES_EXPECTED_WIDTH = text("CAST(:expected_width AS pg_catalog.int8)")
+_POSTGRES_EXPECTED_BYTES = text("CAST(:expected_bytes AS pg_catalog.bytea)")
 
 
 class PromotionDocumentProjectionRejected(RuntimeError):
@@ -119,4 +124,85 @@ def graph_stage_promotion_document_statement(
     ):
         return _projection(dialect, stage_id, max_document_bytes)
     del dialect, stage_id, max_document_bytes
+    raise_private_metadata_error(PromotionDocumentProjectionRejected())
+
+
+def _bounded_expected_document(document: bytes | None) -> bool:
+    return document is None or (
+        type(document) is bytes and 0 < len(document) <= MAX_PROMOTION_DOCUMENT_BYTES_V1
+    )
+
+
+def _document_comparison(
+    stored: ColumnElement[bytes], expected: bytes, sqlite: bool
+) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
+    width = _document_width(stored, sqlite)
+    if sqlite:
+        return width == len(expected), stored == expected
+    expected_width = _POSTGRES_EXPECTED_WIDTH.bindparams(
+        bindparam("expected_width", len(expected), type_=NullType(), unique=True)
+    )
+    expected_bytes = _POSTGRES_EXPECTED_BYTES.bindparams(
+        bindparam("expected_bytes", expected, type_=NullType(), unique=True)
+    )
+    return (
+        width.bool_op("OPERATOR(pg_catalog.=)")(expected_width),
+        stored.bool_op("OPERATOR(pg_catalog.=)")(expected_bytes),
+    )
+
+
+def _comparison(
+    dialect: str,
+    stage_id: str,
+    request_bytes: bytes | None,
+    observation_bytes: bytes | None,
+) -> Executable:
+    sqlite = dialect == SQLITE
+    relations = SQLITE_RELATIONS if sqlite else POSTGRES_RELATIONS
+    if request_bytes is None:
+        matches = and_(INTENT_KEY.is_(None), SETTLEMENT_KEY.is_(None))
+    else:
+        request_width, request_equal = _document_comparison(
+            REQUEST, request_bytes, sqlite
+        )
+        if observation_bytes is None:
+            admitted = and_(
+                INTENT_KEY.is_not(None), request_width, SETTLEMENT_KEY.is_(None)
+            )
+            equal = request_equal
+        else:
+            observation_width, observation_equal = _document_comparison(
+                OBSERVATION, observation_bytes, sqlite
+            )
+            admitted = and_(
+                INTENT_KEY.is_not(None),
+                request_width,
+                SETTLEMENT_KEY.is_not(None),
+                observation_width,
+            )
+            equal = and_(request_equal, observation_equal)
+        matches = case((admitted, equal), else_=false())
+    return select(matches.label("matches")).select_from(
+        relations.bindparams(stage_id=stage_id)
+    )
+
+
+def graph_stage_promotion_document_comparison_statement(
+    dialect: str,
+    stage_id: str,
+    *,
+    request_bytes: bytes | None,
+    observation_bytes: bytes | None,
+) -> Executable:
+    if (
+        type(dialect) is str
+        and dialect in (SQLITE, POSTGRESQL)
+        and type(stage_id) is str
+        and is_identifier(stage_id)
+        and _bounded_expected_document(request_bytes)
+        and _bounded_expected_document(observation_bytes)
+        and (request_bytes is not None or observation_bytes is None)
+    ):
+        return _comparison(dialect, stage_id, request_bytes, observation_bytes)
+    del dialect, stage_id, request_bytes, observation_bytes
     raise_private_metadata_error(PromotionDocumentProjectionRejected())
