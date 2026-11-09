@@ -153,6 +153,10 @@ probe_context() {
 run_variant() {
     variant=$1
     shift
+    private_capture=no
+    if [ "${1:-}" = --selected-bound-private-executor ]; then
+        private_capture=yes
+    fi
     image=$(
         probe_context |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
@@ -162,14 +166,21 @@ run_variant() {
         *) return 1 ;;
     esac
     create_pending=yes
-    container_id=$(
-        local_docker 10s create --name "$container" --platform linux/amd64 \
-            --pull never --network none --init --cap-drop ALL --security-opt no-new-privileges \
-            "$image" "$@"
-    ) || return $?
+    set -- --name "$container" --platform linux/amd64 \
+        --pull never --network none --init --cap-drop ALL --security-opt no-new-privileges \
+        "$image" "$@"
+    if [ "$private_capture" = yes ]; then
+        set -- --log-driver none "$@"
+    fi
+    container_id=$(local_docker 10s create "$@") || return $?
     create_pending=no
-    timeout -k 2s 75s env -i PATH="$PATH" HOME="$reservation" \
-        DOCKER_CONFIG="$reservation" DOCKER_HOST="$endpoint" docker start --attach "$container_id" &
+    (
+        if [ "$private_capture" = yes ]; then
+            ulimit -f 8
+        fi
+        exec timeout -k 2s 75s env -i PATH="$PATH" HOME="$reservation" \
+            DOCKER_CONFIG="$reservation" DOCKER_HOST="$endpoint" docker start --attach "$container_id"
+    ) &
     attach_pid=$!
     status=0
     wait "$attach_pid" || status=$?

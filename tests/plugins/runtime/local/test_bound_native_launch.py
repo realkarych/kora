@@ -490,7 +490,7 @@ async def test_bound_context_borrows_narrow_real_stdio(
     assert owner.gates[0].closed
 
 
-@pytest.mark.parametrize("roles", [frozenset(), frozenset({"app", "missing"})])
+@pytest.mark.parametrize("roles", [frozenset[str](), frozenset({"app", "missing"})])
 @pytest.mark.asyncio
 async def test_bound_context_refuses_invalid_provider_roles(
     native_inputs: NativeInputs, kora_capture: Capture, roles: frozenset[str]
@@ -604,8 +604,14 @@ async def test_bound_owner_fences_pending_private_stream_with_live_app(
                     await asyncio.gather(pending, return_exceptions=True)
     finally:
         owner.stop()
-        for gate in owner.gates:
-            await close_gated(gate, clock.monotonic_ns() + 5_000_000_000, clock)
+        cleanup_cutoff = clock.monotonic_ns() + 5_000_000_000
+        outcomes = await asyncio.gather(
+            *(close_gated(gate, cleanup_cutoff, clock) for gate in owner.gates),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
     async with asyncio.timeout(5):
         app_eof = await app_stream.reader.read(1)
 

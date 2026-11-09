@@ -52,6 +52,7 @@ from kora.protocols.harness import (
     LaunchInputs,
     NativeLaunch,
     NativeLaunchContext,
+    NativeLaunchReader,
 )
 from kora.protocols.lifetime import ProcessDomain
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope, SecretValue
@@ -958,34 +959,75 @@ def native_roles(
     return (("app", inputs.app_server), ("exec", inputs.exec_server))
 
 
+class StartupOutputReader:
+    def __init__(self, reader: NativeLaunchReader, key: bytes, limit: int) -> None:
+        self._reader = reader
+        self._key = key
+        self._remaining = limit
+        self._overlap = b""
+
+    async def read(self, size: int, /) -> bytes:
+        return self._inspect(await self._reader.read(size))
+
+    async def readline(self) -> bytes:
+        return self._inspect(await self._reader.readline())
+
+    def _inspect(self, contents: bytes) -> bytes:
+        self._remaining -= len(contents)
+        combined = self._overlap + contents
+        if self._remaining < 0 or self._key in combined:
+            raise BoundEnvironmentError("selected_native_startup_output_rejected")
+        self._overlap = combined[max(0, len(combined) - len(self._key) + 1) :]
+        return contents
+
+
 def verify_startup_files(root: Path, key: bytes) -> None:
-    entries_left = MAX_STARTUP_ENTRIES
-    bytes_left = MAX_STARTUP_BYTES
-    for _, directories, files, parent in os.fwalk(root):
-        entries_left -= len(directories) + len(files)
-        if entries_left < 0:
-            raise BoundEnvironmentError("selected_native_startup_entries_limit")
-        for name in (*directories, *files):
-            if key in os.fsencode(name):
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        verify_startup_directory(
+            descriptor, key, MAX_STARTUP_ENTRIES, MAX_STARTUP_BYTES
+        )
+    finally:
+        os.close(descriptor)
+
+
+def verify_startup_directory(
+    parent: int, key: bytes, entries_left: int, bytes_left: int
+) -> tuple[int, int]:
+    with os.scandir(parent) as entries:
+        for entry in entries:
+            entries_left -= 1
+            if entries_left < 0:
+                raise BoundEnvironmentError("selected_native_startup_entries_limit")
+            if key in os.fsencode(entry.name):
                 raise BoundEnvironmentError("selected_native_startup_key_in_path")
-        for name in directories:
-            mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
-            if not stat.S_ISDIR(mode):
-                raise BoundEnvironmentError("selected_native_startup_unexpected_path")
-        for name in files:
-            mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
+            mode = entry.stat(follow_symlinks=False).st_mode
+            if stat.S_ISDIR(mode):
+                child = os.open(
+                    entry.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=parent,
+                )
+                try:
+                    entries_left, bytes_left = verify_startup_directory(
+                        child, key, entries_left, bytes_left
+                    )
+                finally:
+                    os.close(child)
+                continue
             if stat.S_ISSOCK(mode):
                 continue
             if not stat.S_ISREG(mode):
                 raise BoundEnvironmentError("selected_native_startup_unexpected_path")
             descriptor = os.open(
-                name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+                entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
             )
             with os.fdopen(descriptor, "rb") as source:
                 contents = source.read(bytes_left + 1)
             if key in contents or len(contents) > bytes_left:
                 raise BoundEnvironmentError("selected_native_startup_file_rejected")
             bytes_left -= len(contents)
+    return entries_left, bytes_left
 
 
 @contextmanager

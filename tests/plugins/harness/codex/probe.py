@@ -349,7 +349,7 @@ HTTP_FIELD_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 if TYPE_CHECKING:
-    from kora.protocols.harness import NativeLaunch
+    from kora.protocols.harness import NativeLaunch, NativeLaunchReader
     from tests.plugins.harness.codex.selected_bash import BashWitness
     from tests.plugins.harness.codex.selected_bound_environment import (
         BoundEnvironmentProbe,
@@ -4049,7 +4049,7 @@ async def run_selected_gated(name: str) -> None:
 
 
 async def initialize_private_executor(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    reader: "NativeLaunchReader", writer: asyncio.StreamWriter
 ) -> None:
     writer.write(
         encode_frame(
@@ -4078,6 +4078,7 @@ async def initialize_private_executor(
 
 async def run_selected_private_executor(bound: "BoundEnvironmentProbe") -> None:
     from tests.plugins.harness.codex.selected_bound_environment import (
+        StartupOutputReader,
         verify_startup_files,
     )
     from tests.plugins.harness.codex.selected_gated_stdio import (
@@ -4087,6 +4088,8 @@ async def run_selected_private_executor(bound: "BoundEnvironmentProbe") -> None:
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + TURN_SECONDS
+    key = SYNTHETIC_BEARER.encode()
+    output_limit = 4 * MAX_FRAME_BYTES
     with selected_launch_workspace(bound) as root:
         workspace = root / "workspace :@"
         workspace.mkdir(mode=0o700)
@@ -4116,10 +4119,12 @@ async def run_selected_private_executor(bound: "BoundEnvironmentProbe") -> None:
                 executor = SelectedGatedApp.observe_started(
                     gate, launch.clock, previous
                 )
-                await initialize_private_executor(reader, writer)
+                await initialize_private_executor(
+                    StartupOutputReader(reader, key, output_limit), writer
+                )
                 app_stream, app = await bound.start_context_role(launch, "app")
                 rpc = AppServerRpc(
-                    app_stream.reader,
+                    StartupOutputReader(app_stream.reader, key, output_limit),
                     app_stream.writer,
                     clock=loop.time,
                     next_request_id=lambda: secrets.randbits(63),
@@ -4155,7 +4160,7 @@ async def run_selected_private_executor(bound: "BoundEnvironmentProbe") -> None:
                 if observation is not None:
                     observation.verify_revoked()
             bound.settled = True
-        verify_startup_files(root, SYNTHETIC_BEARER.encode())
+        verify_startup_files(root, key)
         require(
             bound.starts == 2 and bound.unix_sockets == 8 and bound.cwd_opens == 0,
             "selected_private_executor_owner_witness",
