@@ -18,7 +18,7 @@ from tests.db.seed import START, Seeder
 
 PREDECESSOR = "0017"
 REVISION = "0018"
-HEAD_REVISION = "0019"
+HEAD_REVISION = "0020"
 ORIGINAL = "R" * 255
 UPPER = "A" * 256
 LOWER = "a" * 256
@@ -178,7 +178,7 @@ async def test_target_width_migration_preserves_order_and_existing_keys(
     assert (report.from_revision, report.to_revision, report.steps) == (
         REVISION,
         HEAD_REVISION,
-        1,
+        2,
     )
     assert (repeated.from_revision, repeated.to_revision, repeated.steps) == (
         HEAD_REVISION,

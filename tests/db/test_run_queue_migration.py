@@ -27,7 +27,7 @@ from tests.engine.test_run_queue import acquire, queue_case
 from tests.support.databases import sqlite_settings
 
 PREDECESSOR = "0018"
-REVISION = "0019"
+HEAD_REVISION = "0020"
 WIDE = 4 * 1024 * 1024
 
 
@@ -36,8 +36,13 @@ def _predecessor(connection: Connection) -> None:
 
 
 async def _history(database: Database) -> tuple[tuple[object, ...], ...]:
+    legacy_fields = tuple(
+        column for column in run.c if column.name != "input_encoding_version"
+    )
     async with database.read_transaction() as connection:
-        with await connection.execute(select(run).order_by(run.c.id)) as result:
+        with await connection.execute(
+            select(*legacy_fields).order_by(run.c.id)
+        ) as result:
             return tuple(tuple(row) for row in result)
 
 
@@ -98,8 +103,8 @@ async def test_queue_index_upgrade_recovers_and_preserves_existing_history(
         assert invalid is (False if postgres else None)
         assert (report.from_revision, report.to_revision, report.steps) == (
             PREDECESSOR,
-            REVISION,
-            1,
+            HEAD_REVISION,
+            2,
         )
         assert state is QueueState.OLDER_PENDING
         assert before == after

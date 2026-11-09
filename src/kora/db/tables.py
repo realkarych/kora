@@ -63,6 +63,8 @@ from kora.db.graph_version_resource_owner_v1 import (
 from kora.db.graph_version_resource_owner_v1 import (
     graph_version_resource_owner_elements_v1,
 )
+from kora.db.run_inputs_v1 import TABLE_NAME as RUN_INPUTS_TABLE
+from kora.db.run_inputs_v1 import run_input_elements_v1
 from kora.db.run_queue_index_v1 import (
     ACTIVE_QUEUE_ROWS,
     POSTGRES_QUEUE_INDEX,
@@ -432,6 +434,7 @@ run: Table = Table(
     timestamp("deadline_expired_at", nullable=True),
     timestamp("finished_at", nullable=True),
     *audit_columns(),
+    Column("input_encoding_version", Integer, nullable=True),
     UniqueConstraint("graph_id", "idempotency_key"),
     CheckConstraint(
         "retention_version IS NULL OR retention_version = 1", name="retention_version"
@@ -461,6 +464,8 @@ Index(
     literal_column(f"({SQLITE_QUEUE_KEY})", String()),
     sqlite_where=literal_column(SQLITE_QUEUE_ROWS),
 ).ddl_if(dialect="sqlite")
+
+run_inputs: Table = Table(RUN_INPUTS_TABLE, metadata, *run_input_elements_v1())
 
 node_instance: Table = Table(
     "node_instance",
