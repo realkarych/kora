@@ -960,12 +960,14 @@ class Database:
 
     @asynccontextmanager
     async def _read_transaction(
-        self, deadline: float | None
+        self, deadline: float | None, *, snapshot: bool = False
     ) -> AsyncGenerator[AsyncConnection, None]:
         self._enter_unit()
         cancelled = False
         try:
-            async with self._unit(self._reader, deadline=deadline) as connection:
+            async with self._unit(
+                self._reader, deadline=deadline, snapshot=snapshot
+            ) as connection:
                 yield connection
         except asyncio.CancelledError:
             cancelled = True
@@ -974,19 +976,24 @@ class Database:
             try:
                 await self._leave_unit_and_release()
             except (asyncio.CancelledError, *SNAPSHOT_NATIVE_ERRORS):
-                if deadline is None or not cancelled:
+                if not snapshot or not cancelled:
                     raise
 
     @asynccontextmanager
     async def read_snapshot(
         self, *, deadline: float | None = None
     ) -> AsyncGenerator[AsyncConnection, None]:
+        connection = None
         if deadline is None:
-            async with self._read_snapshot(None) as connection:
-                yield connection
+            try:
+                async with self._read_snapshot(None) as connection:
+                    yield connection
+            except asyncio.CancelledError as error:
+                clear_snapshot_error(error)
+                del self, connection
+                raise
             return
         timer = asyncio.timeout_at(deadline)
-        connection = None
         try:
             if type(deadline) is not float or not math.isfinite(deadline):
                 raise DatabaseSnapshotRejected(DatabaseSnapshotFailure.UNAVAILABLE)
@@ -1027,7 +1034,7 @@ class Database:
             setup = text("BEGIN DEFERRED")
         else:
             setup = text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        async with self._read_transaction(deadline) as connection:
+        async with self._read_transaction(deadline, snapshot=True) as connection:
             await self._run_snapshot_phase(deadline, lambda: connection.execute(setup))
             self._require_snapshot_current(deadline)
             yield connection
@@ -1218,6 +1225,7 @@ class Database:
         transactional: bool = True,
         *,
         deadline: float | None = None,
+        snapshot: bool = False,
         admission: _WriterAdmission | None = None,
         verify_postgresql_writer: bool = False,
     ) -> AsyncGenerator[AsyncConnection, None]:
@@ -1244,7 +1252,12 @@ class Database:
             except BaseException as error:
                 if admission is not None and not admission.handed_off:
                     raise
-                await self._rollback_unit(connection, deadline, error)
+                await self._rollback_unit(
+                    connection,
+                    error,
+                    verify_snapshot=deadline is not None
+                    or (snapshot and isinstance(error, asyncio.CancelledError)),
+                )
                 self._record_rollback(error)
                 raise
         except BaseException as error:
@@ -1262,8 +1275,7 @@ class Database:
                     connection,
                     verify_generation=deadline is not None
                     or (admission is not None and engine is self._reader),
-                    preserve_cancellation=cancelled
-                    and (deadline is not None or before_handoff),
+                    preserve_cancellation=cancelled and (snapshot or before_handoff),
                 )
         if deadline is not None:
             self._snapshot_admission.require_current(engine, deadline)
@@ -1271,10 +1283,11 @@ class Database:
     async def _rollback_unit(
         self,
         connection: AsyncConnection,
-        deadline: float | None,
         cause: BaseException,
+        *,
+        verify_snapshot: bool,
     ) -> None:
-        if deadline is None:
+        if not verify_snapshot:
             await complete(connection.rollback())
             return
 
