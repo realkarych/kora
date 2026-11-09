@@ -37,6 +37,8 @@ The scheduler runs the following passes continuously; each database phase is a s
 
 The detached initial-materialization helper ([#1238](https://github.com/realkarych/kora/issues/1238)) prepares from an issued checked execution view outside a metadata transaction. It admits the canonical IR bytes before decoding and the root-node count before building the inventory. It retains the exact namespace, graph, version and execution-contract digest, root paths, node kinds, trigger rules in stored member order and the authored run timeout or its omission. The helper includes top-level wrappers and leaves their body nodes to lazy materialization. Its caller must admit this extra decode separately from the checked reader, including temporary whole-document representations and bounded decimal conversion work.
 
+The [pinned manual overlap preparation](https://github.com/realkarych/kora/issues/1245) uses the same checked IR view. It keeps the explicit manual policy or resolves an omission to `allow`. Before applying the policy, the promotion writer verifies that the saved manual header agrees with this exact pinned view under its existing locks.
+
 Promotion still requires the exact live run and checked pin, the matching timeout, current authority and the pending and overlap checks under the ordered locks. For a manual start, the writer also checks its recognized [manual run header and receipt](data-model.md#manual-run-header-and-timeline). The writer owns the complete state change, clock, event and node writes.
 
 **Run finish and outcome** (data-model section 4). Pass 8 finishes a `running` run under the run lock once every top-level instance is finished for the run. A pending run never finishes through this rule.

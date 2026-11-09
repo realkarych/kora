@@ -2,6 +2,7 @@ import enum
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from pydantic import MISSING
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -69,6 +70,10 @@ def outstanding_limit(policy: object) -> int:
     if type(limit) is not int or limit <= 0:
         raise InvalidCapacityPolicy()
     return limit
+
+
+def resolve_manual_overlap(authored: Overlap | MISSING) -> Overlap:
+    return "allow" if authored is MISSING else authored
 
 
 def manual_start_scopes(namespace_id: str, graph_id: str) -> tuple[Scope, ...]:

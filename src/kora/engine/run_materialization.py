@@ -10,6 +10,7 @@ from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_types import read_document
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.engine.locks import COMPONENT
+from kora.engine.start_capacity import Overlap, resolve_manual_overlap
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
 _ISSUER = object()
@@ -43,10 +44,11 @@ class InitialNode(NamedTuple):
 
 
 class PreparedRunMaterialization:
-    __slots__ = ("_binding", "nodes", "timeout")
+    __slots__ = ("_binding", "nodes", "timeout", "manual_overlap")
     _binding: tuple[str, str, str, str]
     nodes: tuple[InitialNode, ...]
     timeout: str | None
+    manual_overlap: Overlap
 
     def __new__(
         cls,
@@ -54,14 +56,16 @@ class PreparedRunMaterialization:
         binding: tuple[str, str, str, str],
         nodes: tuple[InitialNode, ...],
         timeout: str | None,
+        manual_overlap: Overlap,
     ) -> Self:
         if issuer is not _ISSUER:
-            del issuer, binding, nodes, timeout
+            del issuer, binding, nodes, timeout, manual_overlap
             raise TypeError("run materialization requires checked preparation")
         result = super().__new__(cls)
         object.__setattr__(result, "_binding", binding)
         object.__setattr__(result, "nodes", nodes)
         object.__setattr__(result, "timeout", timeout)
+        object.__setattr__(result, "manual_overlap", manual_overlap)
         return result
 
     def matches(self, scope: GraphResourceScope, pin: GraphVersionPin) -> bool:
@@ -142,6 +146,7 @@ def _prepare(
             for name, node in nodes.items()
         ),
         timeout,
+        resolve_manual_overlap(document.graph.overlap),
     )
 
 

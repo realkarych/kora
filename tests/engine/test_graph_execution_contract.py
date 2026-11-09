@@ -568,8 +568,9 @@ async def insert_case(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("older_policy", ["allow", "skip", "queue"])
 async def test_run_materialization_keeps_the_exact_saved_root_inventory(
-    database: Database,
+    database: Database, older_policy: str
 ) -> None:
     ledger = ConnectionLedger(database)
     async with database.transaction() as connection:
@@ -584,6 +585,7 @@ async def test_run_materialization_keeps_the_exact_saved_root_inventory(
         old_scope,
         resources=False,
         graph_settings={
+            "overlap": older_policy,
             "nodes": {
                 "wrapper": {
                     "kind": "subgraph",
@@ -684,9 +686,11 @@ async def test_run_materialization_keeps_the_exact_saved_root_inventory(
         previous.nodes = later.nodes
     with pytest.raises(AttributeError, match="immutable"):
         delattr(previous, "timeout")
+    with pytest.raises(AttributeError, match="immutable"):
+        previous.manual_overlap = "allow"
     with pytest.raises(TypeError, match="requires checked preparation"):
         PreparedRunMaterialization(
-            object(), (MARKER, MARKER, MARKER, MARKER), later.nodes, None
+            object(), (MARKER, MARKER, MARKER, MARKER), later.nodes, None, "allow"
         )
     with pytest.raises(TypeError, match="requires explicit access"):
         pickle.dumps(previous)
@@ -705,6 +709,8 @@ async def test_run_materialization_keeps_the_exact_saved_root_inventory(
     )
     assert previous.timeout == "001h"
     assert later.timeout is None
+    assert previous.manual_overlap == older_policy
+    assert later.manual_overlap == "allow"
     assert previous.matches(old_scope, old_pin)
     assert later.matches(new_scope, new_pin)
     assert not previous.matches(replace(old_scope, namespace_id=MARKER), old_pin)
