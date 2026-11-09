@@ -400,13 +400,22 @@ def test_codex_launch_refuses_another_owner_of_native_names(
     ids=("direct", "stdio"),
 )
 def test_codex_launch_refuses_scalar_owner_names(
-    tmp_path: Path, owner: Literal["workload", "secret"]
+    tmp_path: Path,
+    owner: Literal["workload", "secret"],
+    transport: ExecutorTransport,
+    digest: str | None,
 ) -> None:
     workload = "CODEX_API_KEY" if owner == "workload" else ()
     workload_secrets = "CODEX_API_KEY" if owner == "secret" else ()
 
     with pytest.raises(LaunchConfigurationError) as caught:
-        construct(tmp_path, workload=workload, workload_secrets=workload_secrets)
+        construct(
+            tmp_path,
+            workload=workload,
+            workload_secrets=workload_secrets,
+            transport=transport,
+            digest=digest,
+        )
 
     assert caught.value.reason is LaunchConfigurationFailure.INVALID_ENVIRONMENT_NAMES
     assert str(caught.value) == "codex_launch_invalid_environment_names"
