@@ -5,6 +5,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import TextClause
 
+from kora.db.transactions import WriterTransactionError, writer_transaction
 from kora.db.types import POSTGRESQL, SQLITE
 
 SQLITE_QUERY_ONLY: TextClause = text("PRAGMA query_only")
@@ -142,9 +143,9 @@ WITH relations(kind, name, key_name, column_count) AS (
       )
 )
 SELECT pg_catalog.current_setting('transaction_isolation'::pg_catalog.text)
-           OPERATOR(pg_catalog.=) 'repeatable read'::pg_catalog.text
+           OPERATOR(pg_catalog.=) CAST(:expected_isolation AS pg_catalog.text)
    AND pg_catalog.current_setting('transaction_read_only'::pg_catalog.text)
-           OPERATOR(pg_catalog.=) 'on'::pg_catalog.text
+           OPERATOR(pg_catalog.=) CAST(:expected_read_only AS pg_catalog.text)
    AND (SELECT pg_catalog.count(*) OPERATOR(pg_catalog.=) 2 FROM native)
    AND (
        SELECT pg_catalog.count(*) OPERATOR(pg_catalog.=) 10
@@ -214,12 +215,34 @@ class GraphStagePromotionLayout(Enum):
     REFUSED = "refused"
 
 
-async def _sqlite_layout(connection: AsyncConnection) -> bool:
-    for statement in (SQLITE_QUERY_ONLY, SQLITE_RELATIONS, SQLITE_COLUMNS, SQLITE_KEYS):
+async def _sqlite_layout(connection: AsyncConnection, query_only: int) -> bool:
+    mode: object = await connection.scalar(SQLITE_QUERY_ONLY)
+    if type(mode) is not int or mode != query_only:
+        return False
+    for statement in (SQLITE_RELATIONS, SQLITE_COLUMNS, SQLITE_KEYS):
         observed: object = await connection.scalar(statement)
         if type(observed) is not int or observed != 1:
             return False
     return True
+
+
+async def _observe_layout(connection: AsyncConnection, *, writable: bool) -> bool:
+    if connection.dialect.name == SQLITE:
+        return await _sqlite_layout(connection, 0 if writable else 1)
+    if connection.dialect.name == POSTGRESQL:
+        return (
+            await connection.scalar(
+                POSTGRES_LAYOUT,
+                {
+                    "expected_isolation": "read committed"
+                    if writable
+                    else "repeatable read",
+                    "expected_read_only": "off" if writable else "on",
+                },
+            )
+            is True
+        )
+    return False
 
 
 async def observe_graph_stage_promotion_layout(
@@ -235,12 +258,7 @@ async def observe_graph_stage_promotion_layout(
     ):
         return GraphStagePromotionLayout.REFUSED
     try:
-        if connection.dialect.name == SQLITE:
-            verified = await _sqlite_layout(connection)
-        elif connection.dialect.name == POSTGRESQL:
-            verified = await connection.scalar(POSTGRES_LAYOUT) is True
-        else:
-            return GraphStagePromotionLayout.REFUSED
+        verified = await _observe_layout(connection, writable=False)
     except SQLAlchemyError:
         return GraphStagePromotionLayout.REFUSED
     return (
@@ -248,5 +266,21 @@ async def observe_graph_stage_promotion_layout(
         if verified
         and transaction.is_active
         and connection.get_transaction() is transaction
+        else GraphStagePromotionLayout.REFUSED
+    )
+
+
+async def observe_graph_stage_promotion_writer_layout(
+    connection: AsyncConnection,
+) -> GraphStagePromotionLayout:
+    try:
+        writer = writer_transaction(connection)
+        verified = await _observe_layout(connection, writable=True)
+        writer.require_active()
+    except (WriterTransactionError, SQLAlchemyError):
+        return GraphStagePromotionLayout.REFUSED
+    return (
+        GraphStagePromotionLayout.VERIFIED
+        if verified
         else GraphStagePromotionLayout.REFUSED
     )
