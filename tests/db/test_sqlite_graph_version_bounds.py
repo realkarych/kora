@@ -1,4 +1,3 @@
-import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
@@ -7,17 +6,20 @@ from typing import BinaryIO, cast
 
 import pytest
 from sqlalchemy import Text, bindparam
+from sqlalchemy.sql.compiler import SQLCompiler
 
+from kora.api.graph_publication_sqlite import observe_sqlite_graph_publication
 from kora.api.graph_publication_values import (
-    CONTRACT_PARAMETER,
-    IR_PARAMETER,
-    RESOURCE_PARAMETER,
+    DEPLOYED_BY_PARAMETER,
+    RESOLVED_DIGESTS_PARAMETER,
+    PreparedGraphPublicationBinds,
     graph_publication_bind_expressions,
-    graph_publication_measurement_statement,
+    prepare_graph_publication_binds,
+    sqlite_graph_publication_metadata_bind_expressions,
+    sqlite_graph_publication_record_measurement_statement,
 )
 from kora.db.connection import Database
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
-from kora.db.graph_values import prepare_graph_values
 from kora.db.migrations import upgrade_database
 from kora.db.sqlite_graph_version_bounds import (
     SQLiteGraphVersionFootprint,
@@ -26,13 +28,35 @@ from kora.db.sqlite_graph_version_bounds import (
 )
 from kora.db.tables import graph_version
 from kora.db.types import JsonObject, canonical_json
+from tests.api.test_graph_publication_values import (
+    checked_attachment,
+    publication_limits,
+)
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
+from tests.db.test_graph_read_admission import executed_queries
+from tests.db.test_sqlite_graph_version_layout import PROBE_STATEMENTS
 from tests.support.databases import sqlite_settings
 
 SMALL_WIDTHS = SQLiteGraphVersionWidths(2, 2, 2, 2, 0)
 RECORD_IMPLEMENTATION_MAX = 2_147_483_645
 FIXTURE_PAGE_LIMIT = 2_048
+
+
+@pytest.fixture(scope="module")
+def record_publication_binds() -> tuple[
+    PreparedGraphPublicationBinds, PreparedGraphPublicationBinds
+]:
+    without_files = checked_attachment(with_files=False)
+    with_files = checked_attachment(with_files=True)
+    return (
+        prepare_graph_publication_binds(
+            without_files, limits=publication_limits(without_files)
+        ),
+        prepare_graph_publication_binds(
+            with_files, limits=publication_limits(with_files)
+        ),
+    )
 
 
 def test_sqlite_graph_record_counts_fixed_fields_and_overflow_threshold() -> None:
@@ -179,11 +203,17 @@ def stored_record_footprint(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("encoding", "page_size", "padding"),
-    [("UTF-8", 65_536, 32), ("UTF-16le", 512, 20_000), ("UTF-16be", 4_096, 5_000)],
+    ("encoding", "page_size", "with_files"),
+    [("UTF-8", 65_536, False), ("UTF-16le", 512, True), ("UTF-16be", 4_096, True)],
 )
 async def test_sqlite_graph_record_bound_covers_actual_migrated_file(
-    tmp_path: Path, encoding: str, page_size: int, padding: int
+    tmp_path: Path,
+    record_publication_binds: tuple[
+        PreparedGraphPublicationBinds, PreparedGraphPublicationBinds
+    ],
+    encoding: str,
+    page_size: int,
+    with_files: bool,
 ) -> None:
     path = tmp_path / "record.db"
     with closing(sqlite3.connect(path)) as native:
@@ -196,41 +226,48 @@ async def test_sqlite_graph_record_bound_covers_actual_migrated_file(
     await upgrade_database(settings)
     database = Database(settings)
     ledger = ConnectionLedger(database)
-    paired = prepare_graph_values(
-        {"x-data": "x" * padding}, {}, max_encoded_bytes=30_000
-    )
-    parameters = {
-        IR_PARAMETER: json.dumps(paired.ir),
-        CONTRACT_PARAMETER: json.dumps(paired.execution_contract),
-        RESOURCE_PARAMETER: (
-            '{"interpretation":"kora.graph-resource-refs.v1","commands":[]}'
-        ),
-    }
+    binds = record_publication_binds[int(with_files)]
     resolved: JsonObject = {"café": "digest"}
+    resolved_json = canonical_json(resolved)
     owner = "部署 😀"
+    parameters = binds.parameters() | {
+        RESOLVED_DIGESTS_PARAMETER: resolved_json,
+        DEPLOYED_BY_PARAMETER: owner,
+    }
+    widths = SQLiteGraphVersionWidths(
+        len(binds.ir_json.encode(encoding)),
+        len(binds.execution_json.encode(encoding)),
+        len(binds.resources_json.encode(encoding)),
+        len(resolved_json.encode(encoding)),
+        len(owner.encode(encoding)),
+    )
+    expected = bound_sqlite_graph_version_record(
+        widths, encoding=encoding.lower(), page_size=page_size
+    )
+    max_metadata_bytes = len(resolved_json.encode()) + len(owner.encode())
 
     try:
         async with database.transaction() as writer:
+            checkouts = ledger.checkouts
+            compiled_measurement = (
+                sqlite_graph_publication_record_measurement_statement().compile(
+                    dialect=writer.dialect
+                )
+            )
+            assert isinstance(compiled_measurement, SQLCompiler)
+            with executed_queries(writer) as queries:
+                observed = await observe_sqlite_graph_publication(
+                    writer,
+                    binds,
+                    resolved_json,
+                    owner,
+                    max_metadata_bytes=max_metadata_bytes,
+                )
+            observation_checkouts = ledger.checkouts
             seeder = Seeder(writer)
             namespace_id = await seeder.namespace()
             graph_id = await seeder.graph(namespace_id)
             version_id = await seeder.graph_version(graph_id)
-            measured = (
-                await writer.execute(
-                    graph_publication_measurement_statement(database.dialect),
-                    parameters,
-                )
-            ).one()
-            widths = SQLiteGraphVersionWidths(
-                measured[0],
-                measured[1],
-                measured[2],
-                len(canonical_json(resolved).encode(encoding)),
-                len(owner.encode(encoding)),
-            )
-            estimate = bound_sqlite_graph_version_record(
-                widths, encoding=encoding.lower(), page_size=page_size
-            )
             await writer.execute(
                 graph_version.update()
                 .where(
@@ -238,9 +275,8 @@ async def test_sqlite_graph_record_bound_covers_actual_migrated_file(
                     == bindparam("version_id", type_=Text(), required=True)
                 )
                 .values(graph_publication_bind_expressions(database.dialect))
+                .values(sqlite_graph_publication_metadata_bind_expressions())
                 .values(
-                    resolved_digests=resolved,
-                    deployed_by=owner,
                     status="retired",
                     value_encoding_version=1,
                 ),
@@ -265,10 +301,27 @@ async def test_sqlite_graph_record_bound_covers_actual_migrated_file(
     assert checkpoint[0] == 0
     assert saved_page == (page_size,)
     assert saved_encoding == (encoding,)
+    assert len(queries) == 6
+    assert queries[:-1] == [(statement.text, ()) for statement in PROBE_STATEMENTS]
+    measurement_sql, measurement_args = queries[-1]
+    assert measurement_sql == str(compiled_measurement)
+    bind_names = compiled_measurement.positiontup
+    assert bind_names is not None
+    assert set(bind_names) == set(parameters)
+    assert all(
+        value is parameters[name]
+        for name, value in zip(bind_names, measurement_args, strict=True)
+    )
+    assert all(value not in measurement_sql for value in parameters.values())
+    assert observation_checkouts == checkouts
+    assert observed.footprint == expected
+    assert observed.resource_transport_bytes == len(
+        binds.resources_json.encode(encoding)
+    )
     assert len(columns) == 17
     assert set(columns) == set(graph_version.c.keys())
-    assert 0 < actual.record_payload_bytes <= estimate.record_payload_bytes
-    assert actual.leaf_and_overflow_bytes <= estimate.leaf_and_overflow_bytes
-    assert (actual.leaf_and_overflow_bytes == page_size) is (padding == 32)
+    assert 0 < actual.record_payload_bytes <= observed.footprint.record_payload_bytes
+    assert actual.leaf_and_overflow_bytes <= observed.footprint.leaf_and_overflow_bytes
+    assert (actual.leaf_and_overflow_bytes > page_size) is with_files
     assert ledger.outstanding == database.units_in_flight() == 0
     assert ledger.opened == ledger.closed > 0
