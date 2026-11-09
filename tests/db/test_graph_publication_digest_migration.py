@@ -271,7 +271,9 @@ async def test_migrated_sqlite_digest_lookup_never_loads_base_values(
         await database.close()
 
 
-async def wait_for_invalid_index(database: Database) -> int:
+async def wait_for_invalid_index(
+    database: Database, index_name: str = DIGEST_INDEX
+) -> int:
     async with asyncio.timeout(DEADLINE):
         while True:
             async with database.read_transaction() as connection:
@@ -281,7 +283,7 @@ async def wait_for_invalid_index(database: Database) -> int:
                         "ON c.oid = i.indexrelid "
                         "WHERE c.relname = :name AND NOT i.indisvalid"
                     ),
-                    {"name": DIGEST_INDEX},
+                    {"name": index_name},
                 )
             if type(oid) is int:
                 return oid

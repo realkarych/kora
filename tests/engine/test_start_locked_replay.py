@@ -16,13 +16,13 @@ from kora.engine.start_capacity import manual_start_scopes
 from kora.engine.start_records import PreparedManualStartRequest, StartRecordRejected
 from kora.engine.start_records import prepare_manual_start_request as prepare_request
 from kora.engine.start_replay import (
-    START_WRITER_MODE,
     ReplayOutcome,
     StartReadFailed,
     StartReplay,
     recheck_locked_manual_start_receipt,
     replay_manual_start,
 )
+from kora.engine.writer_mode import WRITABLE_POSTGRES_MODE
 from kora.observability import Level, LoggingSettings
 from kora.protocols.authentication import Principal
 from tests.db.closing import ConnectionLedger
@@ -70,7 +70,7 @@ async def acquire_locks(
 
 def expected_queries(database: Database, queries: list[str]) -> None:
     expected_mode = (
-        [START_WRITER_MODE.text] if database.dialect is Dialect.POSTGRESQL else []
+        [WRITABLE_POSTGRES_MODE.text] if database.dialect is Dialect.POSTGRESQL else []
     )
     assert queries[:-1] == expected_mode
     assert queries[-1].startswith("SELECT inbound_event.start_outcome ")
@@ -322,7 +322,9 @@ async def test_locked_replay_refuses_unsupported_postgres_writer_mode(
                 await recheck_locked_manual_start_receipt(
                     writer, locks, scenario.principal, request, KEY, RUN_A
                 )
-        assert queries == ([] if mode == "autocommit" else [START_WRITER_MODE.text])
+        assert queries == (
+            [] if mode == "autocommit" else [WRITABLE_POSTGRES_MODE.text]
+        )
 
     with captured(
         COMPONENT,
@@ -416,7 +418,7 @@ async def test_locked_replay_mode_query_failure_releases_the_writer(
             writer, locks, scenario.principal, request, KEY, RUN_B
         )
 
-    assert failed_statements == [START_WRITER_MODE.text]
+    assert failed_statements == [WRITABLE_POSTGRES_MODE.text]
     assert not any(
         record["event"] == "engine.start_replay.checked" for record in records
     )

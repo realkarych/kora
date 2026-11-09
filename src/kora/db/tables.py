@@ -8,6 +8,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     PrimaryKeyConstraint,
+    String,
     Table,
     UniqueConstraint,
     func,
@@ -61,6 +62,14 @@ from kora.db.graph_version_resource_owner_v1 import (
 )
 from kora.db.graph_version_resource_owner_v1 import (
     graph_version_resource_owner_elements_v1,
+)
+from kora.db.run_queue_index_v1 import (
+    ACTIVE_QUEUE_ROWS,
+    POSTGRES_QUEUE_INDEX,
+    POSTGRES_QUEUE_KEY,
+    SQLITE_QUEUE_INDEX,
+    SQLITE_QUEUE_KEY,
+    SQLITE_QUEUE_ROWS,
 )
 from kora.db.storage_address_fence_v1 import TABLE_NAME as STORAGE_ADDRESS_FENCE_TABLE
 from kora.db.storage_address_fence_v1 import storage_address_fence_elements_v1
@@ -435,6 +444,23 @@ run: Table = Table(
         sqlite_where=text("needs_scheduling = 1"),
     ),
 )
+
+Index(
+    POSTGRES_QUEUE_INDEX,
+    run.c.namespace_id,
+    run.c.graph_id,
+    run.c.status,
+    literal_column(f"(\n{POSTGRES_QUEUE_KEY})", String()),
+    postgresql_where=literal_column(ACTIVE_QUEUE_ROWS),
+).ddl_if(dialect="postgresql")
+Index(
+    SQLITE_QUEUE_INDEX,
+    run.c.namespace_id,
+    run.c.graph_id,
+    run.c.status,
+    literal_column(f"({SQLITE_QUEUE_KEY})", String()),
+    sqlite_where=literal_column(SQLITE_QUEUE_ROWS),
+).ddl_if(dialect="sqlite")
 
 node_instance: Table = Table(
     "node_instance",

@@ -18,8 +18,9 @@ from kora.db.graph_publication_ordinal_v1 import (
     ORDINAL_INVALID_INDEX,
     ORDINAL_VALID_INDEX,
 )
+from kora.db.run_queue_index_v1 import POSTGRES_QUEUE_INDEX, SQLITE_QUEUE_INDEX
 from kora.db.tables import GRAPH_VERSION_SCOPE_INDEX, metadata
-from kora.db.types import POSTGRESQL
+from kora.db.types import POSTGRESQL, SQLITE
 
 MIGRATIONS_DIRECTORY: Path = Path(__file__).resolve().parent
 HEAD: str = "head"
@@ -110,6 +111,16 @@ def include_schema_object(
     reflected: bool,
     compare_to: SchemaItem | None,
 ) -> bool:
+    if (
+        type_ == "index"
+        and not reflected
+        and compare_to is None
+        and (
+            (name == POSTGRES_QUEUE_INDEX and dialect == SQLITE)
+            or (name == SQLITE_QUEUE_INDEX and dialect == POSTGRESQL)
+        )
+    ):
+        return False
     return not (
         dialect == POSTGRESQL
         and type_ == "index"
