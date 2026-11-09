@@ -1,6 +1,8 @@
+import asyncio
 import enum
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, replace
 
@@ -75,6 +77,19 @@ CONTENDED: EventSpec = CATALOG.register(
 RUN_CLASS: int = 1
 STORE_ID_PATTERN: re.Pattern[str] = re.compile(r"[!-~]{1,256}")
 STORAGE_DIGEST_PATTERN: re.Pattern[str] = re.compile(r"sha256:[0-9a-f]{64}")
+SCOPE_TIMEOUT_SETTING = text(
+    "SELECT setting::pg_catalog.int4, unit, vartype, max_val::pg_catalog.int4 "
+    "FROM pg_catalog.pg_settings WHERE name = 'statement_timeout'"
+)
+SET_SCOPE_TIMEOUT = text(
+    "SELECT pg_catalog.set_config('statement_timeout', :milliseconds, true)"
+).bindparams(bindparam("milliseconds", type_=String()))
+TIMED_SCOPE_LOCK = text(
+    "SELECT pg_catalog.pg_advisory_xact_lock(:kind, :identity)"
+).bindparams(
+    bindparam("kind", type_=Integer()),
+    bindparam("identity", type_=Integer()),
+)
 DIGEST_MATCH_KEY: ColumnElement[bool] = and_(
     column("graph_id", String()) == bindparam("graph_id"),
     column("deployment_digest", String()) == bindparam("deployment_digest"),
@@ -133,6 +148,16 @@ POSTGRESQL_ORDINAL_OBSERVATION = text(
 
 class LockError(RuntimeError):
     pass
+
+
+class ScopeDeadlineExpired(LockError):
+    def __init__(self) -> None:
+        super().__init__("the scope lock deadline expired")
+
+
+class TimedScopeLockFailed(LockError):
+    def __init__(self) -> None:
+        super().__init__("the timed scope lock could not be acquired")
 
 
 class StorageAddressMissing(LockError):
@@ -504,6 +529,77 @@ class ScopeKind(enum.IntEnum):
     TARGET = 7
 
 
+def _scope_remaining_seconds(deadline: float) -> float:
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise_private_metadata_error(ScopeDeadlineExpired())
+    return remaining
+
+
+async def _read_scope_timeout(
+    connection: AsyncConnection, deadline: float
+) -> tuple[int, int]:
+    _scope_remaining_seconds(deadline)
+    row: tuple[object, ...] = tuple(
+        (await connection.execute(SCOPE_TIMEOUT_SETTING)).one()
+    )
+    current, unit, value_kind, maximum = row
+    if (
+        type(current) is not int
+        or type(maximum) is not int
+        or not 0 <= current <= maximum
+        or maximum <= 0
+        or unit != "ms"
+        or value_kind != "integer"
+    ):
+        raise_private_metadata_error(TimedScopeLockFailed())
+    return current, maximum
+
+
+async def _set_scope_timeout(
+    connection: AsyncConnection, deadline: float, milliseconds: int
+) -> None:
+    _scope_remaining_seconds(deadline)
+    result: object = await connection.scalar(
+        SET_SCOPE_TIMEOUT, {"milliseconds": str(milliseconds)}
+    )
+    if type(result) is not str:
+        raise_private_metadata_error(TimedScopeLockFailed())
+
+
+async def _acquire_postgresql_scopes_before(
+    connection: AsyncConnection, keys: list[tuple[int, int]], deadline: float
+) -> None:
+    timer = asyncio.timeout_at(deadline)
+    try:
+        async with timer:
+            original, maximum = await _read_scope_timeout(connection, deadline)
+            cap = original or maximum
+            for kind, identity in keys:
+                remaining = _scope_remaining_seconds(deadline)
+                milliseconds = (
+                    math.floor(remaining * 1000) if remaining < cap / 1000 else cap
+                )
+                if milliseconds <= 0:
+                    raise_private_metadata_error(ScopeDeadlineExpired())
+                await _set_scope_timeout(connection, deadline, milliseconds)
+                _scope_remaining_seconds(deadline)
+                result = await connection.execute(
+                    TIMED_SCOPE_LOCK, {"kind": kind, "identity": identity}
+                )
+                result.close()
+            await _set_scope_timeout(connection, deadline, original)
+            if await _read_scope_timeout(connection, deadline) != (original, maximum):
+                raise_private_metadata_error(TimedScopeLockFailed())
+    except TimeoutError:
+        failure = ScopeDeadlineExpired() if timer.expired() else TimedScopeLockFailed()
+    except (OSError, SQLAlchemyError):
+        failure = TimedScopeLockFailed()
+    else:
+        return
+    raise_private_metadata_error(failure)
+
+
 def identity_hash(parts: tuple[str, ...]) -> int:
     encoded = json.dumps(parts, ensure_ascii=True, separators=(",", ":")).encode()
     return int.from_bytes(hashlib.sha256(encoded).digest()[:4], "big", signed=True)
@@ -602,14 +698,26 @@ class TransitionLocks:
         record_acquired(True, 0)
         return True
 
-    async def acquire_scopes(self, scopes: tuple[Scope, ...]) -> None:
+    async def acquire_scopes(
+        self, scopes: tuple[Scope, ...], *, deadline: float | None = None
+    ) -> None:
         self._require_current()
         if self._scopes is not None:
             raise LockError("the scope set is acquired once")
+        if deadline is not None:
+            self._usable = False
+            if type(deadline) is not float or not math.isfinite(deadline):
+                raise_private_metadata_error(TimedScopeLockFailed())
+            _scope_remaining_seconds(deadline)
         selected = frozenset(scopes)
         keys = sorted({scope.key for scope in selected})
         self._usable = False
-        if self._dialect == POSTGRESQL:
+        if deadline is not None:
+            if self._dialect == POSTGRESQL and keys:
+                await _acquire_postgresql_scopes_before(
+                    self._lease.connection, keys, deadline
+                )
+        elif self._dialect == POSTGRESQL:
             for kind, identity in keys:
                 result = await self._lease.connection.execute(
                     text("SELECT pg_advisory_xact_lock(:kind, :identity)"),
@@ -617,6 +725,8 @@ class TransitionLocks:
                 )
                 result.close()
         self._lease.require_active()
+        if deadline is not None:
+            _scope_remaining_seconds(deadline)
         self._scopes = selected
         self._usable = True
         record_acquired(self._run_id is not None, len(keys))
