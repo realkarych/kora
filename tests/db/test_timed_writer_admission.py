@@ -2,7 +2,7 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import AsyncIterator
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,8 +48,8 @@ INSERT_PROBE: str = "INSERT INTO writer_entry_probe VALUES (17)"
 READ_PROBE: str = "SELECT id FROM writer_entry_probe"
 
 
-@pytest_asyncio.fixture
-async def timed_database(
+@asynccontextmanager
+async def open_timed_database(
     database_settings: DatabaseSettings,
 ) -> AsyncIterator[Database]:
     settings = narrow_settings(database_settings, pool_size=1)
@@ -66,37 +66,57 @@ async def timed_database(
         await database.close()
 
 
+@pytest_asyncio.fixture
+async def timed_database(
+    database_settings: DatabaseSettings,
+) -> AsyncIterator[Database]:
+    async with open_timed_database(database_settings) as database:
+        yield database
+
+
 async def enter(database: Database, deadline: float) -> None:
     async with database.transaction(admission_deadline=deadline) as writer:
         await writer.exec_driver_sql(INSERT_PROBE)
 
 
-@pytest.mark.asyncio
-async def test_admitted_writer_keeps_caller_lease_and_commits_after_cutoff(
-    timed_database: Database,
+class WriterCutoffLoop(asyncio.SelectorEventLoop):
+    def __init__(self) -> None:
+        super().__init__()
+        self._offset: float = 0.0
+
+    def time(self) -> float:
+        return super().time() + self._offset
+
+    def advance_to(self, deadline: float) -> None:
+        self._offset = deadline - super().time()
+
+
+def test_admitted_writer_keeps_caller_lease_and_commits_after_cutoff(
+    database_settings: DatabaseSettings,
 ) -> None:
-    database = timed_database
-    ledger = ConnectionLedger(database)
-    loop = asyncio.get_running_loop()
-    expired = asyncio.Event()
-    deadline = loop.time() + ENTRY_SECONDS
-    handle = loop.call_at(deadline, expired.set)
+    loop = WriterCutoffLoop()
 
-    try:
-        async with database.transaction(admission_deadline=deadline) as writer:
-            lease = writer_transaction(writer)
-            await asyncio.wait_for(expired.wait(), CONDITION_DEADLINE_SECONDS)
-            assert writer_transaction(writer) is lease
-            assert loop.time() >= deadline
-            await writer.exec_driver_sql(INSERT_PROBE)
-        async with database.read_transaction() as reader:
-            rows = (await reader.exec_driver_sql(READ_PROBE)).scalars().all()
-    finally:
-        handle.cancel()
+    async def exercise() -> None:
+        async with open_timed_database(database_settings) as database:
+            ledger = ConnectionLedger(database)
+            deadline = loop.time() + CONDITION_DEADLINE_SECONDS
 
-    assert rows == [17]
-    assert database.units_in_flight() == ledger.outstanding == 0
-    assert database.writer_is_free()
+            async with database.transaction(admission_deadline=deadline) as writer:
+                lease = writer_transaction(writer)
+                assert loop.time() < deadline
+                loop.advance_to(deadline)
+                assert loop.time() >= deadline
+                assert writer_transaction(writer) is lease
+                await writer.exec_driver_sql(INSERT_PROBE)
+            async with database.read_transaction() as reader:
+                rows = (await reader.exec_driver_sql(READ_PROBE)).scalars().all()
+
+            assert rows == [17]
+            assert database.units_in_flight() == ledger.outstanding == 0
+            assert database.writer_is_free()
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        runner.run(exercise())
 
 
 @pytest.mark.asyncio
