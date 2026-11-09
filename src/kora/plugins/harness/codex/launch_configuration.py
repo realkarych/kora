@@ -68,10 +68,16 @@ exclude = ["{PROVIDER_KEY}", "{BUILTIN_EXECUTOR}"]
 """
 
 
+class ExecutorTransport(StrEnum):
+    DIRECT_WEBSOCKET = "direct-websocket"
+    PRIVATE_STDIO = "private-stdio"
+
+
 class LaunchConfigurationFailure(StrEnum):
     INVALID_PROVIDER = "codex_launch_invalid_provider"
     INVALID_PLACEMENT = "codex_launch_invalid_placement"
     INVALID_EXECUTOR_DIGEST = "codex_launch_invalid_executor_digest"
+    INVALID_EXECUTOR_TRANSPORT = "codex_launch_invalid_executor_transport"
     INVALID_ENVIRONMENT_NAMES = "codex_launch_invalid_environment_names"
     ENVIRONMENT_CONFLICT = "codex_launch_environment_conflict"
 
@@ -194,6 +200,32 @@ def disjoint_paths(paths: tuple[Path, ...]) -> bool:
     )
 
 
+def _executor_endpoint_arguments(
+    transport: ExecutorTransport, digest: str | None
+) -> tuple[str, ...]:
+    if transport is ExecutorTransport.PRIVATE_STDIO:
+        if digest is not None:
+            raise LaunchConfigurationError(
+                LaunchConfigurationFailure.INVALID_EXECUTOR_DIGEST
+            )
+        return ("stdio://",)
+    if transport is not ExecutorTransport.DIRECT_WEBSOCKET:
+        raise LaunchConfigurationError(
+            LaunchConfigurationFailure.INVALID_EXECUTOR_TRANSPORT
+        )
+    if not isinstance(digest, str) or BEARER_DIGEST.fullmatch(digest) is None:
+        raise LaunchConfigurationError(
+            LaunchConfigurationFailure.INVALID_EXECUTOR_DIGEST
+        )
+    return (
+        "ws://127.0.0.1:0",
+        "--ws-auth",
+        "capability-token",
+        "--ws-token-sha256",
+        digest,
+    )
+
+
 def build_launch_inputs(
     profile: CodexLaunchProfile,
     *,
@@ -202,7 +234,8 @@ def build_launch_inputs(
     workspace: Path,
     app_homes: NativeHomes,
     exec_homes: NativeHomes,
-    executor_digest: str,
+    executor_digest: str | None,
+    executor_transport: ExecutorTransport = ExecutorTransport.DIRECT_WEBSOCKET,
     workload_names: Collection[str] = (),
     workload_secret_names: Collection[str] = (),
 ) -> CodexLaunchInputs:
@@ -211,10 +244,7 @@ def build_launch_inputs(
         valid_path(path) for path in (executable, bash, *private_paths)
     ) or not disjoint_paths(private_paths):
         raise LaunchConfigurationError(LaunchConfigurationFailure.INVALID_PLACEMENT)
-    if len(executor_digest) != 64 or BEARER_DIGEST.fullmatch(executor_digest) is None:
-        raise LaunchConfigurationError(
-            LaunchConfigurationFailure.INVALID_EXECUTOR_DIGEST
-        )
+    exec_endpoint = _executor_endpoint_arguments(executor_transport, executor_digest)
     app_env = app_homes.assignments(bash)
     exec_env = exec_homes.assignments(bash)
     app_env[BUILTIN_EXECUTOR] = "none"
@@ -256,11 +286,7 @@ def build_launch_inputs(
                 "exec-server",
                 "--strict-config",
                 "--listen",
-                "ws://127.0.0.1:0",
-                "--ws-auth",
-                "capability-token",
-                "--ws-token-sha256",
-                executor_digest,
+                *exec_endpoint,
             ),
             cwd=workspace,
             config=NATIVE_SETTINGS,

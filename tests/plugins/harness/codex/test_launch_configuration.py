@@ -4,13 +4,14 @@ import tomllib
 from collections.abc import Collection
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 
 from kora.plugins.harness.codex.launch_configuration import (
     CodexLaunchInputs,
     CodexLaunchProfile,
+    ExecutorTransport,
     LaunchConfigurationError,
     LaunchConfigurationFailure,
     NativeHomes,
@@ -32,7 +33,8 @@ def construct(
     *,
     app: NativeHomes | None = None,
     executable: Path = EXECUTABLE,
-    digest: str = DIGEST,
+    digest: str | None = DIGEST,
+    transport: ExecutorTransport = ExecutorTransport.DIRECT_WEBSOCKET,
     workload: Collection[str] = (),
     workload_secrets: Collection[str] = (),
 ) -> CodexLaunchInputs:
@@ -46,13 +48,35 @@ def construct(
         app_homes=homes(root / "app") if app is None else app,
         exec_homes=homes(root / "exec"),
         executor_digest=digest,
+        executor_transport=transport,
         workload_names=workload,
         workload_secret_names=workload_secrets,
     )
 
 
+@pytest.mark.parametrize(
+    ("transport", "digest", "endpoint_arguments"),
+    [
+        (
+            ExecutorTransport.DIRECT_WEBSOCKET,
+            DIGEST,
+            (
+                "ws://127.0.0.1:0",
+                "--ws-auth",
+                "capability-token",
+                "--ws-token-sha256",
+                DIGEST,
+            ),
+        ),
+        (ExecutorTransport.PRIVATE_STDIO, None, ("stdio://",)),
+    ],
+    ids=("direct", "stdio"),
+)
 def test_codex_recipes_bind_distinct_roles_and_exact_native_controls(
     tmp_path: Path,
+    transport: ExecutorTransport,
+    digest: str | None,
+    endpoint_arguments: tuple[str, ...],
 ) -> None:
     root = tmp_path / "absent"
     app = homes(root / "app")
@@ -60,6 +84,8 @@ def test_codex_recipes_bind_distinct_roles_and_exact_native_controls(
 
     inputs = construct(
         root,
+        transport=transport,
+        digest=digest,
         workload=(
             "WORKLOAD_VAR",
             "CODEX_THREAD_ID_ALIAS",
@@ -128,11 +154,7 @@ def test_codex_recipes_bind_distinct_roles_and_exact_native_controls(
         "exec-server",
         "--strict-config",
         "--listen",
-        "ws://127.0.0.1:0",
-        "--ws-auth",
-        "capability-token",
-        "--ws-token-sha256",
-        DIGEST,
+        *endpoint_arguments,
     )
     assert inputs.app_server.cwd == inputs.exec_server.cwd == root / "workspace"
     assert inputs.app_server.environment == {
@@ -243,14 +265,63 @@ def test_codex_launch_refuses_invalid_or_overlapping_placements(
     assert not root.exists()
 
 
-def test_codex_launch_refuses_raw_executor_bearer(tmp_path: Path) -> None:
-    bearer = "private-bearer-canary"
+@pytest.mark.parametrize(
+    ("transport", "digest", "reason"),
+    [
+        (
+            ExecutorTransport.DIRECT_WEBSOCKET,
+            "private-bearer-canary",
+            LaunchConfigurationFailure.INVALID_EXECUTOR_DIGEST,
+        ),
+        (
+            ExecutorTransport.DIRECT_WEBSOCKET,
+            None,
+            LaunchConfigurationFailure.INVALID_EXECUTOR_DIGEST,
+        ),
+        (
+            ExecutorTransport.DIRECT_WEBSOCKET,
+            "AB" * 32,
+            LaunchConfigurationFailure.INVALID_EXECUTOR_DIGEST,
+        ),
+        (
+            ExecutorTransport.PRIVATE_STDIO,
+            DIGEST,
+            LaunchConfigurationFailure.INVALID_EXECUTOR_DIGEST,
+        ),
+        (
+            ExecutorTransport.PRIVATE_STDIO,
+            "",
+            LaunchConfigurationFailure.INVALID_EXECUTOR_DIGEST,
+        ),
+        (
+            cast("ExecutorTransport", "private-stdio"),
+            None,
+            LaunchConfigurationFailure.INVALID_EXECUTOR_TRANSPORT,
+        ),
+    ],
+    ids=(
+        "raw-bearer",
+        "missing-digest",
+        "uppercase-digest",
+        "stdio-digest",
+        "stdio-empty",
+        "raw-selector",
+    ),
+)
+def test_codex_launch_refuses_mismatched_transport_inputs(
+    tmp_path: Path,
+    transport: ExecutorTransport,
+    digest: str | None,
+    reason: LaunchConfigurationFailure,
+) -> None:
+    root = tmp_path / "absent"
 
     with pytest.raises(LaunchConfigurationError) as caught:
-        construct(tmp_path, digest=bearer)
+        construct(root, digest=digest, transport=transport)
 
-    assert caught.value.reason is LaunchConfigurationFailure.INVALID_EXECUTOR_DIGEST
-    assert str(caught.value) == "codex_launch_invalid_executor_digest"
+    assert caught.value.reason is reason
+    assert str(caught.value) == reason.value
+    assert not root.exists()
 
 
 @pytest.mark.parametrize(
@@ -288,20 +359,46 @@ def test_codex_launch_refuses_raw_executor_bearer(tmp_path: Path) -> None:
     ],
 )
 @pytest.mark.parametrize("owner", ["workload", "secret"])
+@pytest.mark.parametrize(
+    ("transport", "digest"),
+    [
+        (ExecutorTransport.DIRECT_WEBSOCKET, DIGEST),
+        (ExecutorTransport.PRIVATE_STDIO, None),
+    ],
+    ids=("direct", "stdio"),
+)
 def test_codex_launch_refuses_another_owner_of_native_names(
-    tmp_path: Path, name: str, owner: Literal["workload", "secret"]
+    tmp_path: Path,
+    name: str,
+    owner: Literal["workload", "secret"],
+    transport: ExecutorTransport,
+    digest: str | None,
 ) -> None:
     workload = (name,) if owner == "workload" else ()
     workload_secrets = (name,) if owner == "secret" else ()
 
     with pytest.raises(LaunchConfigurationError) as caught:
-        construct(tmp_path, workload=workload, workload_secrets=workload_secrets)
+        construct(
+            tmp_path,
+            workload=workload,
+            workload_secrets=workload_secrets,
+            transport=transport,
+            digest=digest,
+        )
 
     assert caught.value.reason is LaunchConfigurationFailure.ENVIRONMENT_CONFLICT
     assert str(caught.value) == "codex_launch_environment_conflict"
 
 
 @pytest.mark.parametrize("owner", ["workload", "secret"])
+@pytest.mark.parametrize(
+    ("transport", "digest"),
+    [
+        (ExecutorTransport.DIRECT_WEBSOCKET, DIGEST),
+        (ExecutorTransport.PRIVATE_STDIO, None),
+    ],
+    ids=("direct", "stdio"),
+)
 def test_codex_launch_refuses_scalar_owner_names(
     tmp_path: Path, owner: Literal["workload", "secret"]
 ) -> None:

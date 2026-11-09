@@ -7,6 +7,7 @@ from typing import Literal
 from kora.plugins.harness.codex.launch_configuration import (
     CodexLaunchInputs,
     CodexLaunchProfile,
+    ExecutorTransport,
     NativeHomes,
     NativeProcessInputs,
     build_launch_inputs,
@@ -283,7 +284,8 @@ def prepare_native_inputs(
     binary: Path,
     port: int,
     bash: Path = Path("/bin/bash"),
-    bearer: str,
+    bearer: str | None,
+    executor_transport: ExecutorTransport = ExecutorTransport.DIRECT_WEBSOCKET,
     https: bool = False,
     workload_names: Collection[str] = (),
     workload_secret_names: Collection[str] = (),
@@ -298,7 +300,12 @@ def prepare_native_inputs(
         workspace=workspace,
         app_homes=role_homes(root / "app"),
         exec_homes=role_homes(root / "exec"),
-        executor_digest=hashlib.sha256(bearer.encode("ascii")).hexdigest(),
+        executor_digest=(
+            hashlib.sha256(bearer.encode("ascii")).hexdigest()
+            if bearer is not None
+            else None
+        ),
+        executor_transport=executor_transport,
         workload_names=workload_names,
         workload_secret_names=workload_secret_names,
     )

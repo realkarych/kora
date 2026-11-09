@@ -16,6 +16,7 @@ from kora.plugins.harness.codex.app_server_turn import (
     TurnError,
     observe_app_server_turn,
 )
+from kora.plugins.harness.codex.launch_configuration import ExecutorTransport
 from kora.plugins.harness.codex.selected_startup import (
     SelectedEnvironment,
     prepare_selected_thread,
@@ -47,6 +48,7 @@ from tests.plugins.harness.codex.selected_launch import (
 )
 
 Mode = Literal["allow", "deny", "error", "timeout", "staged-timeout"]
+MAX_INITIAL_ENV_BYTES = 131_072
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +140,24 @@ async def spawn(
         start_new_session=True,
         limit=probe.MAX_FRAME_BYTES,
     )
+
+
+def verify_executor_key_absent(child: asyncio.subprocess.Process) -> None:
+    pidfd = probe.open_child_pidfd(child.pid)
+    try:
+        with Path(f"/proc/{child.pid}/environ").open("rb") as source:
+            contents = source.read(MAX_INITIAL_ENV_BYTES + 1)
+        probe.require(
+            0 < len(contents) <= MAX_INITIAL_ENV_BYTES
+            and all(
+                not entry.startswith(b"CODEX_API_KEY=")
+                for entry in contents.split(b"\0")
+            )
+            and not select.select([pidfd], [], [], 0)[0],
+            "guard_native_executor_key_boundary",
+        )
+    finally:
+        os.close(pidfd)
 
 
 def stdio(
@@ -247,20 +267,18 @@ async def run_guard(root: Path, scenario: Scenario, *, witness_peer: bool) -> No
                         raise GuardFailure("executor fixture model endpoint mismatch")
                 token = secrets.token_urlsafe(32)
                 recipe = prepare_native_inputs(
-                    root, workspace, binary=Path(probe.CODEX), port=port, bearer=token
+                    root,
+                    workspace,
+                    binary=Path(probe.CODEX),
+                    port=port,
+                    bearer=None,
+                    executor_transport=ExecutorTransport.PRIVATE_STDIO,
                 )
                 environment = materialize_native_inputs(recipe.exec_server)
                 backend = await spawn(
-                    (
-                        probe.CODEX,
-                        "exec-server",
-                        "--strict-config",
-                        "--listen",
-                        "stdio://",
-                    ),
-                    workspace,
-                    environment,
+                    recipe.exec_server.argv, recipe.exec_server.cwd, environment
                 )
+                verify_executor_key_absent(backend)
                 backend_reader, backend_writer = stdio(backend)
                 action = GuardAction(
                     scenario.kind,
@@ -291,7 +309,9 @@ async def run_guard(root: Path, scenario: Scenario, *, witness_peer: bool) -> No
                 await verify_malformed_header_refused(endpoint)
                 environment = materialize_native_inputs(recipe.app_server)
                 environment["CODEX_API_KEY"] = probe.SYNTHETIC_BEARER
-                app = await spawn(recipe.app_server.argv, workspace, environment)
+                app = await spawn(
+                    recipe.app_server.argv, recipe.app_server.cwd, environment
+                )
                 if witness_peer:
                     app_pidfd = probe.open_child_pidfd(app.pid)
                     owned.callback(os.close, app_pidfd)
