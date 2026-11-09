@@ -17,6 +17,7 @@ from kora.plugins.harness.codex.selected_startup import (
     SelectedStartupFailure,
 )
 from kora.plugins.harness.codex.selected_turn import (
+    DirectFixtureRpc,
     SelectedTurnInputs,
     run_selected_turn,
 )
@@ -88,7 +89,7 @@ def selected_operation(
 ) -> asyncio.Task[TerminalResult]:
     return connection.start(
         run_selected_turn(
-            connection.rpc,
+            DirectFixtureRpc(connection.rpc),
             IDENTITY,
             SELECTED,
             BEARER,

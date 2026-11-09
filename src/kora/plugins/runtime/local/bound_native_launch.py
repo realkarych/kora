@@ -178,6 +178,7 @@ class BoundNativeLaunch:
         self._slots = BoundRoleSlots(binding, clock, cutoff_ns)
         self._fence = BoundGateFence(self._slots)
         self._loop = loop
+        self._root_turn_admitted = False
         inputs: dict[str, _RoleGateInputs] = {}
         placements: set[tuple[int, int]] = set()
         for role, recipe in captured.items():
@@ -239,6 +240,15 @@ class BoundNativeLaunch:
         await gate.prepare()
         await gate.acknowledge()
         return gate.borrow_stdio()
+
+    def admit_root_turn(self) -> None:
+        if _current_loop() is not self._loop or self.stopped:
+            raise ChannelError(ChannelFailure.CLOSED)
+        if self._clock.monotonic_ns() >= self._cutoff_ns:
+            raise ChannelError(ChannelFailure.DEADLINE)
+        if self._root_turn_admitted:
+            raise ChannelError(ChannelFailure.BUSY)
+        self._root_turn_admitted = True
 
     def start(self, role: str) -> BoundNativeGate:
         if _current_loop() is not self._loop:

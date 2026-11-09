@@ -11,8 +11,9 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, cast
 
+from kora.plugins.harness.codex.app_server_rpc import decode_object
 from kora.plugins.harness.codex.launch_configuration import (
     PROVIDER_KEY,
     CodexLaunchInputs,
@@ -30,7 +31,10 @@ from kora.plugins.runtime.local.bound_gate_fence import (
     GateAcquisitionFailure,
     GatePhaseFailure,
 )
-from kora.plugins.runtime.local.bound_native_context import BoundNativeLaunchContext
+from kora.plugins.runtime.local.bound_native_context import (
+    BoundAppTurn,
+    BoundNativeLaunchContext,
+)
 from kora.plugins.runtime.local.bound_native_launch import (
     BoundNativeLaunch,
     BoundNativeRole,
@@ -81,6 +85,7 @@ BoundCase = Literal[
     "context-legacy-live",
     "context-legacy-released",
     "context-cancel",
+    "context-root",
     "private-executor",
     "path",
     "grant",
@@ -111,8 +116,10 @@ CONTEXT_LEGACY_CASES = frozenset({"context-legacy-live", "context-legacy-release
 CONTEXT_CASES = CONTEXT_LEGACY_CASES | {
     "context-ready",
     "context-cancel",
+    "context-root",
     "private-executor",
 }
+APP_ONLY_CASES = frozenset({"context-root", "private-executor"})
 PHASE_REFUSALS = frozenset(
     {"phase-failure", "phase-cancellation", "phase-entry-expiry", "phase-resume-expiry"}
 )
@@ -156,6 +163,37 @@ MAX_STARTUP_BYTES = 16 * 1024 * 1024
 
 class BoundEnvironmentError(ValueError):
     pass
+
+
+class RootAppWitness:
+    def __init__(self, app: BoundAppTurn) -> None:
+        self._app = app
+        self.stream = NativeLaunch(app.stream.reader, self)
+        self.root_writes = 0
+        self.root_params: dict[str, object] | None = None
+
+    @property
+    def stream_limit(self) -> int:
+        return self._app.stream_limit
+
+    def admit_root_turn(self) -> None:
+        self._app.admit_root_turn()
+
+    def write(self, data: bytes, /) -> None:
+        message = decode_object(data)
+        if message is None:
+            raise BoundEnvironmentError("selected_root_outbound_frame_invalid")
+        if message.get("method") == "turn/start":
+            params = message.get("params")
+            if not isinstance(params, dict):
+                raise BoundEnvironmentError("selected_root_parameters_invalid")
+            self.root_writes += 1
+            if self.root_params is None:
+                self.root_params = cast("dict[str, object]", params)
+        self._app.stream.writer.write(data)
+
+    async def drain(self) -> None:
+        await self._app.stream.writer.drain()
 
 
 class SpawnClock(SystemClock):
@@ -500,6 +538,22 @@ class BoundEnvironmentProbe:
         if launch.native.stopped or len(owned) != len(gates) + 1 or owned[:-1] != gates:
             raise BoundEnvironmentError("selected_native_context_gate_owner")
         return accepted, SelectedGatedApp.observe_started(
+            owned[-1], launch.clock, previous
+        )
+
+    async def start_root_app(
+        self, launch: BoundLaunch
+    ) -> tuple[RootAppWitness, SelectedGatedApp]:
+        context = launch.context
+        if not isinstance(context, BoundNativeLaunchContext):
+            raise BoundEnvironmentError("selected_native_context_missing")
+        previous = parent_sockets()
+        gates = launch.native.gates
+        app = await context.start_app_turn()
+        owned = launch.native.gates
+        if launch.native.stopped or len(owned) != len(gates) + 1 or owned[:-1] != gates:
+            raise BoundEnvironmentError("selected_native_context_gate_owner")
+        return RootAppWitness(app), SelectedGatedApp.observe_started(
             owned[-1], launch.clock, previous
         )
 
@@ -927,7 +981,7 @@ class BoundEnvironmentProbe:
                 {},
                 provider_roles=(
                     frozenset({self.role_name("app")})
-                    if self.case == "private-executor"
+                    if self.case in APP_ONLY_CASES
                     else native.roles
                 ),
             )

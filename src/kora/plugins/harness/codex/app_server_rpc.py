@@ -235,13 +235,15 @@ class AppServerRpc:
         next_request_id: Callable[[], int],
         max_frame_bytes: int,
         max_messages: int,
+        max_read_bytes: int = READ_SIZE,
     ) -> None:
-        if max_frame_bytes < 1 or max_messages < 1:
+        if max_frame_bytes < 1 or max_messages < 1 or max_read_bytes < 1:
             raise ValueError("invalid app-server RPC budget")
         self._clock = clock
         self._reader = reader
         self._writer = writer
         self._max_frame_bytes = max_frame_bytes
+        self._read_size = min(READ_SIZE, max_read_bytes)
         self._remaining_messages = max_messages
         self._lookahead = b""
         self._next_request_id = next_request_id
@@ -296,7 +298,7 @@ class AppServerRpc:
             if not chunk:
                 allowance = self._max_frame_bytes - len(frame) + 1
                 try:
-                    chunk = await self._reader.read(min(READ_SIZE, allowance))
+                    chunk = await self._reader.read(min(self._read_size, allowance))
                 except OSError:
                     raise RpcError(RpcFailure.DISCONNECTED) from None
                 if not chunk:

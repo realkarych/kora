@@ -54,6 +54,19 @@ class _Refusal(StrEnum):
     FAILED = "the bound native start failed"
 
 
+@dataclass(frozen=True, repr=False, slots=True)
+class BoundAppTurn:
+    stream: NativeLaunch
+    _owner: BoundNativeLaunch
+
+    @property
+    def stream_limit(self) -> int:
+        return self._owner.stream_limit
+
+    def admit_root_turn(self) -> None:
+        self._owner.admit_root_turn()
+
+
 class BoundNativeLaunchContext:
     def __init__(
         self,
@@ -68,6 +81,11 @@ class BoundNativeLaunchContext:
         self._owner = owner
         self._provider_roles = visible
         self.placements: Mapping[Placement, Path] = MappingProxyType(dict(placements))
+
+    async def start_app_turn(self) -> BoundAppTurn:
+        if self._provider_roles != frozenset({"app-server"}):
+            raise _public_error(_Refusal.UNAVAILABLE)
+        return BoundAppTurn(await self.start_bound("app-server"), self._owner)
 
     async def allocate(self, inputs: LaunchInputs) -> Launch:
         raise KoraProtocolError(

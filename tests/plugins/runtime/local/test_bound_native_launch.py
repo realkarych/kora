@@ -1,9 +1,11 @@
 import asyncio
 import os
+import socket
 import sys
 from collections.abc import Generator, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
+from itertools import count
 from pathlib import Path
 from typing import cast
 
@@ -12,8 +14,13 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.conformance.harness import NoLaunches
+from kora.plugins.harness.codex.app_server_rpc import RpcError, RpcFailure
+from kora.plugins.harness.codex.selected_turn import BoundTurnRpc
 from kora.plugins.runtime.local.bound_checkout import BoundCheckout, CheckoutFailure
-from kora.plugins.runtime.local.bound_native_context import BoundNativeLaunchContext
+from kora.plugins.runtime.local.bound_native_context import (
+    BoundAppTurn,
+    BoundNativeLaunchContext,
+)
 from kora.plugins.runtime.local.bound_native_launch import (
     BoundNativeGate,
     BoundNativeLaunch,
@@ -32,6 +39,7 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
     LaunchContext,
     LaunchInputs,
+    NativeLaunch,
     NativeLaunchContext,
     Placement,
 )
@@ -40,6 +48,7 @@ from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.installed_executable import InstalledExecutable
 from tests.plugins.harness.codex.selected_gated_stdio import close_gated
+from tests.plugins.harness.codex.wire_fixture import FRAME_BUDGET, future_deadline, wire
 from tests.plugins.runtime.local.frames_support import (
     ORIGIN_NS,
     StepClock,
@@ -67,10 +76,11 @@ class NativeInputs:
         cwd: Path | None = None,
         roles: Mapping[str, CandidateRoleEnvironment] | None = None,
         workload: Mapping[str, str] | None = None,
+        attempt_marker: str = "synthetic-attempt",
     ) -> BoundCandidateEnvironments:
         return bind_candidate_environments(
             cwd=self.checkout.path if cwd is None else cwd,
-            attempt_token=capture.scope.admit("synthetic-attempt"),
+            attempt_token=capture.scope.admit(attempt_marker),
             workload={} if workload is None else workload,
             secrets={},
             harness_credentials={"CODEX_API_KEY": capture.scope.admit("synthetic-key")},
@@ -88,6 +98,7 @@ class NativeInputs:
         *,
         clock: Clock | None = None,
         cutoff_ns: int = CUTOFF,
+        stdio_limit: int = 4096,
     ) -> BoundNativeLaunch:
         return BoundNativeLaunch(
             binding,
@@ -96,7 +107,7 @@ class NativeInputs:
             checkout=self.checkout,
             directory_id="1" * 32,
             domain=ProcessDomain.DETACHED,
-            stdio_limit=4096,
+            stdio_limit=stdio_limit,
             clock=self.clock if clock is None else clock,
             cutoff_ns=cutoff_ns,
         )
@@ -622,3 +633,213 @@ async def test_bound_owner_fences_pending_private_stream_with_live_app(
     assert owner.gates == registered
     assert all(gate.closed for gate in registered)
     assert app_eof == b""
+
+
+def root_rpc(app: BoundAppTurn) -> BoundTurnRpc:
+    return BoundTurnRpc(
+        app,
+        clock=asyncio.get_running_loop().time,
+        next_request_id=count(1).__next__,
+        max_messages=16,
+    )
+
+
+@pytest.mark.asyncio
+async def test_bound_root_app_spends_once_on_its_native_stream(
+    native_inputs: NativeInputs, kora_capture: Capture
+) -> None:
+    app = native_inputs.roles["app"]
+    script = (
+        "import json,sys; "
+        "request=json.loads(sys.stdin.buffer.readline()); "
+        "print(json.dumps({'id':request['id'],'result':{}}),flush=True); "
+        "sys.stdin.buffer.read()"
+    )
+    roles = {
+        "app-server": replace(app, argv=(app.argv[0], "-u", "-c", script)),
+        "exec-server": native_inputs.roles["exec"],
+    }
+    binding = native_inputs.bind(
+        kora_capture, roles={role: recipe.environment for role, recipe in roles.items()}
+    )
+    clock = SystemClock()
+    owner = native_inputs.acquire_owner(
+        binding, roles, clock=clock, cutoff_ns=clock.monotonic_ns() + 10_000_000_000
+    )
+    context = BoundNativeLaunchContext(
+        owner, {}, provider_roles=frozenset({"app-server"})
+    )
+    historical = BoundNativeLaunchContext(owner, {}, provider_roles=frozenset(roles))
+
+    try:
+        async with asyncio.timeout(10):
+            with pytest.raises(KoraProtocolError) as historical_refusal:
+                await historical.start_app_turn()
+            turn = await context.start_app_turn()
+            with pytest.raises(ChannelError) as foreign:
+                await asyncio.to_thread(turn.admit_root_turn)
+            first = await root_rpc(turn).call(
+                "turn/start", {}, deadline=future_deadline(), observe=lambda _: None
+            )
+            with pytest.raises(ChannelError) as duplicate:
+                await root_rpc(turn).call(
+                    "turn/start", {}, deadline=future_deadline(), observe=lambda _: None
+                )
+            still_open = not owner.stopped
+    finally:
+        owner.stop()
+        for gate in owner.gates:
+            await close_gated(gate, clock.monotonic_ns() + 5_000_000_000, clock)
+
+    assert first == {}
+    check_slot_refusal(historical_refusal.value)
+    assert foreign.value.reason is ChannelFailure.CLOSED
+    assert duplicate.value.reason is ChannelFailure.BUSY
+    assert still_open
+    assert owner.failure is None
+    assert len(owner.gates) == 1
+    assert owner.gates[0].closed
+
+
+class RootWireWriter:
+    def __init__(self, writer: asyncio.StreamWriter, *, raw_write: bool) -> None:
+        self.writer = writer
+        self.descriptor = cast(
+            "socket.socket", writer.get_extra_info("socket")
+        ).fileno()
+        self.raw_write = raw_write
+        self.entries = 0
+        self.draining = asyncio.Event()
+
+    def write(self, data: bytes, /) -> None:
+        self.entries += 1
+        if self.raw_write:
+            if os.write(self.descriptor, data) != len(data):
+                raise OSError("root fixture write was partial")
+        else:
+            self.writer.write(data)
+
+    async def drain(self) -> None:
+        self.draining.set()
+        await self.writer.drain()
+
+
+@pytest.mark.parametrize("failure", ["write", "drain", "missing_ack"])
+@pytest.mark.asyncio
+async def test_root_credit_stays_spent_after_native_send_failure(
+    native_inputs: NativeInputs, kora_capture: Capture, failure: str
+) -> None:
+    owner = native_inputs.acquire_owner(
+        native_inputs.bind(kora_capture), native_inputs.roles, stdio_limit=FRAME_BUDGET
+    )
+    async with wire() as connection:
+        witness = RootWireWriter(connection.writer, raw_write=failure == "write")
+        turn = BoundAppTurn(NativeLaunch(connection.reader, witness), owner)
+        contender = root_rpc(turn)
+        params: dict[str, object] = (
+            {"prompt": "x" * 120_000} if failure == "drain" else {}
+        )
+        observed_frame = b""
+        if failure == "write":
+            connection.peer_writer.close()
+            await connection.peer_writer.wait_closed()
+            assert await connection.reader.read() == b""
+        if failure == "drain":
+            peer_transport = connection.peer_writer.transport
+            assert isinstance(peer_transport, asyncio.ReadTransport)
+            peer_transport.pause_reading()
+            connection.writer.transport.set_write_buffer_limits(high=4096, low=1024)
+
+        request = connection.start(
+            root_rpc(turn).call(
+                "turn/start", params, deadline=future_deadline(), observe=lambda _: None
+            )
+        )
+        if failure == "drain":
+            await witness.draining.wait()
+            assert connection.writer.transport.get_write_buffer_size() > 4096
+            connection.peer_writer.transport.abort()
+        elif failure == "missing_ack":
+            observed_frame = await connection.peer_reader.readline()
+            with pytest.raises(ChannelError) as competing:
+                await contender.call(
+                    "turn/start", {}, deadline=future_deadline(), observe=lambda _: None
+                )
+            assert competing.value.reason is ChannelFailure.BUSY
+            assert not request.done()
+            connection.peer_writer.close()
+        with pytest.raises(RpcError) as original:
+            await request
+        with pytest.raises(ChannelError) as replacement:
+            await root_rpc(turn).call(
+                "turn/start", {}, deadline=future_deadline(), observe=lambda _: None
+            )
+
+        assert original.value.reason is RpcFailure.DISCONNECTED
+        assert replacement.value.reason is ChannelFailure.BUSY
+        assert witness.entries == 1
+        assert witness.draining.is_set() == (failure != "write")
+        if failure == "missing_ack":
+            assert observed_frame == b'{"id":1,"method":"turn/start","params":{}}\n'
+        assert not owner.stopped
+        assert owner.failure is None
+
+
+@pytest.mark.parametrize("fence", ["deadline", "stop"])
+@pytest.mark.asyncio
+async def test_root_fence_refuses_before_writer_and_new_attempt_can_start(
+    native_inputs: NativeInputs, kora_capture: Capture, fence: str
+) -> None:
+    clock = ExpiryClock()
+    cutoff = clock.monotonic_ns() + 10_000_000_000
+    owner = native_inputs.acquire_owner(
+        native_inputs.bind(kora_capture),
+        native_inputs.roles,
+        clock=clock,
+        cutoff_ns=cutoff,
+    )
+    fresh = native_inputs.acquire_owner(
+        native_inputs.bind(kora_capture, attempt_marker="synthetic-fresh-attempt"),
+        native_inputs.roles,
+    )
+    async with wire() as connection:
+        witness = RootWireWriter(connection.writer, raw_write=False)
+        stream = NativeLaunch(connection.reader, witness)
+        deadline = future_deadline()
+        if fence == "deadline":
+            clock.expired_at = cutoff
+        else:
+            owner.stop()
+
+        with pytest.raises(ChannelError) as expired:
+            await root_rpc(BoundAppTurn(stream, owner)).call(
+                "turn/start", {}, deadline=deadline, observe=lambda _: None
+            )
+        expired_entries = witness.entries
+        fresh_turn = BoundAppTurn(stream, fresh)
+        with pytest.raises(RpcError) as invalid:
+            await root_rpc(fresh_turn).call(
+                "turn/start",
+                {"large": "x" * FRAME_BUDGET},
+                deadline=deadline,
+                observe=lambda _: None,
+            )
+        invalid_entries = witness.entries
+        request = connection.start(
+            root_rpc(fresh_turn).call(
+                "turn/start", {}, deadline=deadline, observe=lambda _: None
+            )
+        )
+        frame = await connection.peer_reader.readline()
+        await connection.send(b'{"id":1,"result":{}}\n')
+        result = await request
+
+        expected_reason = (
+            ChannelFailure.DEADLINE if fence == "deadline" else ChannelFailure.CLOSED
+        )
+        assert expired.value.reason is expected_reason
+        assert expired_entries == invalid_entries == 0
+        assert invalid.value.reason is RpcFailure.FRAME_LIMIT
+        assert result == {}
+        assert frame == b'{"id":1,"method":"turn/start","params":{}}\n'
+        assert witness.entries == 1

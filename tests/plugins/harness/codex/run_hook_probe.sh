@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-native-context|1:--check-selected-private-executor|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-bound-configuration|1:--check-selected-bound-bash|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-selected-executor-guard|1:--check-selected-executor-peer|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-native-context|1:--check-selected-root-admission|1:--check-selected-private-executor|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-bound-configuration|1:--check-selected-bound-bash|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-selected-executor-guard|1:--check-selected-executor-peer|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-native-context|--check-selected-private-executor|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-bound-configuration|--check-selected-bound-bash|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-selected-executor-guard|--check-selected-executor-peer|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-native-context|--check-selected-root-admission|--check-selected-private-executor|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-bound-configuration|--check-selected-bound-bash|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-selected-executor-guard|--check-selected-executor-peer|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
         exit 2
         ;;
 esac
@@ -154,9 +154,9 @@ run_variant() {
     variant=$1
     shift
     private_capture=no
-    if [ "${1:-}" = --selected-bound-private-executor ]; then
-        private_capture=yes
-    fi
+    case "${1:-}" in
+        --selected-bound-private-executor|--selected-bound-context-root) private_capture=yes ;;
+    esac
     image=$(
         probe_context |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
@@ -314,6 +314,17 @@ case "${1:-}" in
             > "$reservation/expected-private-executor"
         cmp -s "$reservation/private-executor" "$reservation/expected-private-executor"
         cat "$reservation/private-executor"
+        ;;
+    --check-selected-root-admission)
+        prepare_locked_probe
+        run_variant selected-gated-bound --selected-bound-context-root > "$reservation/root-admission" 2>&1
+        for verdict in \
+            '{"level": "INFO", "event": "probe.selected_root_admission_verified", "detail": "context-root"}' \
+            '{"level": "INFO", "event": "probe.selected_children_reaped", "detail": "selected-turn-complete"}' \
+            '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "context-root"}'; do
+            test "$(grep -Fxc "$verdict" "$reservation/root-admission")" = 1
+            printf '%s\n' "$verdict"
+        done
         ;;
     --check-selected-native-context)
         prepare_locked_probe
