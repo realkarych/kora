@@ -20,6 +20,7 @@ from kora.plugins.runtime.local.bound_checkout import BoundCheckout, CheckoutFai
 from kora.plugins.runtime.local.bound_native_context import (
     BoundAppTurn,
     BoundNativeLaunchContext,
+    start_bound_app_turn,
 )
 from kora.plugins.runtime.local.bound_native_launch import (
     BoundNativeGate,
@@ -669,13 +670,10 @@ async def test_bound_root_app_spends_once_on_its_native_stream(
     context = BoundNativeLaunchContext(
         owner, {}, provider_roles=frozenset({"app-server"})
     )
-    historical = BoundNativeLaunchContext(owner, {}, provider_roles=frozenset(roles))
 
     try:
         async with asyncio.timeout(10):
-            with pytest.raises(KoraProtocolError) as historical_refusal:
-                await historical.start_app_turn()
-            turn = await context.start_app_turn()
+            turn = await start_bound_app_turn(owner, context.placements)
             with pytest.raises(ChannelError) as foreign:
                 await asyncio.to_thread(turn.admit_root_turn)
             first = await root_rpc(turn).call(
@@ -692,7 +690,7 @@ async def test_bound_root_app_spends_once_on_its_native_stream(
             await close_gated(gate, clock.monotonic_ns() + 5_000_000_000, clock)
 
     assert first == {}
-    check_slot_refusal(historical_refusal.value)
+    assert not hasattr(context, "start_app_turn")
     assert foreign.value.reason is ChannelFailure.CLOSED
     assert duplicate.value.reason is ChannelFailure.BUSY
     assert still_open
@@ -806,15 +804,23 @@ async def test_root_fence_refuses_before_writer_and_new_attempt_can_start(
         witness = RootWireWriter(connection.writer, raw_write=False)
         stream = NativeLaunch(connection.reader, witness)
         deadline = future_deadline()
-        if fence == "deadline":
-            clock.expired_at = cutoff
-        else:
-            owner.stop()
+
+        def fence_during_request() -> int:
+            if fence == "deadline":
+                clock.expired_at = cutoff
+            else:
+                owner.stop()
+            return 1
+
+        rpc = BoundTurnRpc(
+            BoundAppTurn(stream, owner),
+            clock=asyncio.get_running_loop().time,
+            next_request_id=fence_during_request,
+            max_messages=16,
+        )
 
         with pytest.raises(ChannelError) as expired:
-            await root_rpc(BoundAppTurn(stream, owner)).call(
-                "turn/start", {}, deadline=deadline, observe=lambda _: None
-            )
+            await rpc.call("turn/start", {}, deadline=deadline, observe=lambda _: None)
         expired_entries = witness.entries
         fresh_turn = BoundAppTurn(stream, fresh)
         with pytest.raises(RpcError) as invalid:

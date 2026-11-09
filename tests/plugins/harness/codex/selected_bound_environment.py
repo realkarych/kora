@@ -34,6 +34,7 @@ from kora.plugins.runtime.local.bound_gate_fence import (
 from kora.plugins.runtime.local.bound_native_context import (
     BoundAppTurn,
     BoundNativeLaunchContext,
+    start_bound_app_turn,
 )
 from kora.plugins.runtime.local.bound_native_launch import (
     BoundNativeLaunch,
@@ -229,6 +230,7 @@ class BoundLaunch:
         wrappers: tuple[SelectedGatedApp | None, ...],
         *,
         natural_app_refusal: bool,
+        verify_revoked: bool = False,
     ) -> None:
         cutoff = runner_deadline(deadline, self.clock)
         gates = self.native.gates
@@ -250,6 +252,8 @@ class BoundLaunch:
         for wrapper in wrappers:
             if wrapper is not None:
                 wrapper.verify_closed()
+                if verify_revoked:
+                    wrapper.verify_revoked()
         if self.native.close_failed or any(not gate.closed for gate in gates):
             raise BoundEnvironmentError("selected_bound_gate_close_failed")
 
@@ -386,7 +390,7 @@ class BoundEnvironmentProbe:
         expiry_control = self.case == "handoff-expiry" and role == "app"
         try:
             with prohibit_spawn() if acquisition_control else nullcontext():
-                gate = launch.native.start(role)
+                gate = launch.native.start(self.role_name(role))
             if acquisition_control or expiry_control:
                 raise BoundEnvironmentError("selected_bound_expected_spawn_refusal")
             started = SelectedGatedApp(gate, launch.clock)
@@ -549,7 +553,7 @@ class BoundEnvironmentProbe:
             raise BoundEnvironmentError("selected_native_context_missing")
         previous = parent_sockets()
         gates = launch.native.gates
-        app = await context.start_app_turn()
+        app = await start_bound_app_turn(launch.native, context.placements)
         owned = launch.native.gates
         if launch.native.stopped or len(owned) != len(gates) + 1 or owned[:-1] != gates:
             raise BoundEnvironmentError("selected_native_context_gate_owner")

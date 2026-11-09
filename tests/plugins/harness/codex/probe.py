@@ -75,8 +75,6 @@ from kora.plugins.harness.codex.selected_startup import (
     SelectedStartupFailure,
     prepare_selected_thread,
 )
-from kora.plugins.harness.codex.selected_turn import BoundTurnRpc, DirectFixtureRpc
-from kora.runner.channels import ChannelError, ChannelFailure
 from tests.plugins.harness.codex.owned_loopback import LoopbackError, OwnedLoopback
 from tests.plugins.harness.codex.selected_launch import (
     BASH_WITNESS_SOCKET,
@@ -351,6 +349,7 @@ HTTP_FIELD_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 if TYPE_CHECKING:
+    from kora.plugins.harness.codex.selected_turn import BoundTurnRpc, DirectFixtureRpc
     from kora.protocols.harness import NativeLaunch, NativeLaunchReader
     from tests.plugins.harness.codex.selected_bash import BashWitness
     from tests.plugins.harness.codex.selected_bound_environment import (
@@ -368,8 +367,10 @@ class BoundProbeRefusal(ProbeFailure):
 
 
 async def verify_root_repeat_refusal(
-    control: BoundTurnRpc, witness: "RootAppWitness", deadline: float
+    control: "BoundTurnRpc", witness: "RootAppWitness", deadline: float
 ) -> None:
+    from kora.runner.channels import ChannelError, ChannelFailure
+
     params = witness.root_params
     if params is None or witness.root_writes != 1:
         raise ProbeFailure("selected_root_first_frame_missing")
@@ -2487,7 +2488,7 @@ async def stop_native_process(process: asyncio.subprocess.Process) -> None:
 
 async def observe_selected_event_turn(
     fixture: ResponsesFixture,
-    control: BoundTurnRpc | DirectFixtureRpc,
+    control: "BoundTurnRpc | DirectFixtureRpc",
     identity: StartupIdentity,
     expected: SelectedEnvironment,
     bearer: str,
@@ -3043,8 +3044,12 @@ async def drive(
                     )
                     raise BoundProbeRefusal("selected_native_context_app_cancelled")
                 if bound.case == "context-root":
+                    from kora.plugins.harness.codex.selected_turn import (
+                        BoundTurnRpc as SelectedBoundTurnRpc,
+                    )
+
                     root_witness, gated_app = await bound.start_root_app(bound_launch)
-                    root_control = BoundTurnRpc(
+                    root_control = SelectedBoundTurnRpc(
                         root_witness,
                         clock=asyncio.get_running_loop().time,
                         next_request_id=lambda: secrets.randbits(63),
@@ -3173,6 +3178,8 @@ async def drive(
             elif fixture.case in SELECTED_NOISE_REGISTRY_CASES:
                 await stdio.observe_noise_registry(fixture.case)
             elif fixture.case in SELECTED_TURN_CASES:
+                from kora.plugins.harness.codex.selected_turn import DirectFixtureRpc
+
                 assert executor_url is not None
                 await observe_selected_event_turn(
                     fixture,
@@ -3343,6 +3350,8 @@ async def drive(
                         cleanup_deadline,
                         (gated_app, gated_executor),
                         natural_app_refusal=natural_app_refusal,
+                        verify_revoked=bound is not None
+                        and bound.case == "context-root",
                     )
                 )
             if bash_witness is not None:
@@ -3372,11 +3381,6 @@ async def drive(
             if cleanup_failed:
                 diagnostic("ERROR", "probe.selected_gated_cleanup_failed", fixture.case)
             elif bound is not None:
-                if root_control is not None:
-                    assert gated_app is not None
-                    assert gated_executor is not None
-                    gated_app.verify_revoked()
-                    gated_executor.verify_revoked()
                 bound.settled = True
                 if gated_app is not None and gated_executor is not None:
                     diagnostic(

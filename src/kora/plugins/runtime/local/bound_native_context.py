@@ -82,11 +82,6 @@ class BoundNativeLaunchContext:
         self._provider_roles = visible
         self.placements: Mapping[Placement, Path] = MappingProxyType(dict(placements))
 
-    async def start_app_turn(self) -> BoundAppTurn:
-        if self._provider_roles != frozenset({"app-server"}):
-            raise _public_error(_Refusal.UNAVAILABLE)
-        return BoundAppTurn(await self.start_bound("app-server"), self._owner)
-
     async def allocate(self, inputs: LaunchInputs) -> Launch:
         raise KoraProtocolError(
             "launch_rejected", "this invocation requires bound native start", False, {}
@@ -129,6 +124,15 @@ class BoundNativeLaunchContext:
                 _BorrowedWriter(writer),
             )
         raise _public_error(reason)
+
+
+async def start_bound_app_turn(
+    owner: BoundNativeLaunch, placements: Mapping[Placement, Path]
+) -> BoundAppTurn:
+    context = BoundNativeLaunchContext(
+        owner, placements, provider_roles=frozenset({"app-server"})
+    )
+    return BoundAppTurn(await context.start_bound("app-server"), owner)
 
 
 def _public_error(reason: _Refusal) -> KoraProtocolError:
