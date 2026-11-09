@@ -861,6 +861,7 @@ async def test_repeat_cancellation_preserves_verified_native_return(
             finish_reset.set()
         with pytest.raises(asyncio.CancelledError) as cancelled:
             await asyncio.wait_for(task, CONDITION_DEADLINE_SECONDS)
+        assert ledger.outstanding == database.units_in_flight() == 0
     finally:
         event.remove(engine, "reset", pause_reset)
     verified = await timed_snapshot(database, deadline)
