@@ -313,6 +313,7 @@ async def retained_live_invocation(
             handles.callback(process.stdout.close)
         anchor = ExitAnchor(process.pid)
         handles.callback(anchor.close)
+        acquisition_phase = "reading_header"
         try:
             assert process.stdin is not None
             assert process.stdout is not None
@@ -329,6 +330,7 @@ async def retained_live_invocation(
                 raise ChannelError(ChannelFailure.CAPACITY)
             if phase == "before_report":
                 deadline = actual.monotonic_ns()
+            acquisition_phase = "reading_report"
             encoded = await read_handoff_bytes(
                 descriptor,
                 size,
@@ -337,8 +339,10 @@ async def retained_live_invocation(
                 entered if phase == "partial" else None,
                 handoff,
             )
+            acquisition_phase = "validating_report"
             report = RecoveryProbeReport.model_validate_json(encoded)
             assert report.mode == mode
+            acquisition_phase = "preparing_observers"
             recovered: list[RecoveredProcess] = []
             for registration in report.registrations:
                 owner = RecoveredProcess(registration, actual, NativeIdentityReader())
@@ -346,29 +350,36 @@ async def retained_live_invocation(
                 releases.push_async_callback(release, owner)
                 recovered.append(owner)
             if phase == "cancel_before_ack":
+                acquisition_phase = "before_ack_barrier"
                 assert entered is not None
                 entered.set()
                 waiting: asyncio.Future[None] = (
                     asyncio.get_running_loop().create_future()
                 )
                 await waiting
+            acquisition_phase = "writing_ack"
             if phase == "ack_failure":
                 process.stdin.close()
             assert os.write(process.stdin.fileno(), b"a") == 1
             transferred = True
             process.stdin.close()
+            acquisition_phase = "waiting_child_exit"
             await anchor.wait(deadline, actual)
+            acquisition_phase = "reaping_child"
             process.returncode = await reap_once_reapable(
                 KernelChildReaper(), process.pid, deadline, actual
             )
             assert process.returncode == 0
-            yield RetainedInvocation(
+            invocation = RetainedInvocation(
                 CleanupReference(invocation_id=report.invocation_id),
                 tuple(recovered),
                 closing,
             )
+            acquisition_phase = "consumer_handoff"
+            yield invocation
         finally:
             original = sys.exception()
+            phase_at_unwind = acquisition_phase
 
             async def close() -> None:
                 deadline = closing()
@@ -402,13 +413,17 @@ async def retained_live_invocation(
                     captured = diagnostics.read(8193)
                     note = (
                         f"recovery probe returncode={process.returncode} "
-                        f"stderr_truncated={len(captured) > 8192}\n"
+                        f"stderr_truncated={len(captured) > 8192} "
+                        f"parent_acquisition_phase={phase_at_unwind}\n"
                         + captured[:8192].decode("utf-8", errors="replace")
                     )
                 except OSError as error:
                     if failure is None and original is None:
                         raise
-                    note = f"recovery probe capture_unavailable errno={error.errno}"
+                    note = (
+                        f"recovery probe capture_unavailable errno={error.errno} "
+                        f"parent_acquisition_phase={phase_at_unwind}"
+                    )
                 if evidence is not None:
                     evidence.append(note)
                 if failure is not None:

@@ -565,6 +565,13 @@ async def test_live_probe_handoff_failure_releases_acquired_processes(
 ) -> None:
     gc.collect()
     baseline = set(os.listdir("/dev/fd"))
+    expected_phase = {
+        "before_report": "reading_report",
+        "partial": "reading_report",
+        "refused": "validating_report",
+        "cancel_before_ack": "before_ack_barrier",
+        "ack_failure": "writing_ack",
+    }[phase]
     entered = asyncio.Event()
     started: list[subprocess.Popen[bytes]] = []
     observed: list[BaseException] = []
@@ -618,6 +625,8 @@ async def test_live_probe_handoff_failure_releases_acquired_processes(
 
     assert len(evidence) == 1
     assert "returncode=0 stderr_truncated=False" in evidence[0]
+    diagnostic_header = evidence[0].partition("\n")[0]
+    assert diagnostic_header.endswith(f"parent_acquisition_phase={expected_phase}")
     assert "stage=entered" in evidence[0]
     assert "stage=report_ready" in evidence[0]
     for error in observed:
@@ -657,6 +666,8 @@ async def test_pair_preparation_refusal_closes_every_native_handle_without_hando
     assert "stage=pair_preparation_refused" in evidence[0]
     assert "stage=report_ready" not in evidence[0]
     assert "returncode=0 stderr_truncated=False" in evidence[0]
+    diagnostic_header = evidence[0].partition("\n")[0]
+    assert diagnostic_header.endswith("parent_acquisition_phase=reading_header")
 
 
 @pytest.mark.asyncio
@@ -767,6 +778,10 @@ async def test_live_probe_readiness_timeout_retains_joined_diagnostics(
     started: list[subprocess.Popen[bytes]] = []
     observers: list[RecoveredProcess] = []
     original: list[BaseException] = []
+    initial_readiness_reached = False
+    expected_phase = (
+        "before_ack_barrier" if when == "before_ack" else "consumer_handoff"
+    )
 
     async def acquire() -> None:
         async with retained_live_invocation(
@@ -782,9 +797,11 @@ async def test_live_probe_readiness_timeout_retains_joined_diagnostics(
             await never_ready.wait()
 
     async def expire_readiness() -> None:
+        nonlocal initial_readiness_reached
         task = asyncio.create_task(acquire())
         try:
             await asyncio.wait_for(entered.wait(), 5)
+            initial_readiness_reached = True
             assert not evidence
             await asyncio.wait_for(never_ready.wait(), 0)
         finally:
@@ -808,6 +825,9 @@ async def test_live_probe_readiness_timeout_retains_joined_diagnostics(
     assert len(started) == 1
     assert started[0].returncode == 0
     assert NativeIdentityReader().read(started[0].pid).state is IdentityState.ABSENT
-    assert len(observers) == (0 if when == "before_ack" else 2)
     assert_recovered_processes_absent(observers)
     assert set(os.listdir("/dev/fd")) == baseline
+    diagnostic_header = evidence[0].partition("\n")[0]
+    assert initial_readiness_reached, diagnostic_header
+    assert diagnostic_header.endswith(f"parent_acquisition_phase={expected_phase}")
+    assert len(observers) == (0 if when == "before_ack" else 2)
