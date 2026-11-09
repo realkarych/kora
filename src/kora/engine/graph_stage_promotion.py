@@ -6,6 +6,8 @@ from kora.db.graph_deployment_stage_reads import (
     STORE_ID_WIDTH,
     GraphStage,
 )
+from kora.db.graph_stage_promotion_intent_reads import GraphStagePromotionIntentScalars
+from kora.db.graph_stage_promotion_snapshot import GraphStagePromotionDocuments
 from kora.db.identifiers import is_identifier
 from kora.db.transactions import raise_private_metadata_error
 from kora.ir.config import COMMAND_RESOURCE_MAX_BYTES
@@ -362,6 +364,75 @@ def prepare_graph_stage_promotion_intent(
     except (GraphStagePromotionRejected, ValueError) as refused:
         _discard_private_error(refused)
     del stage, content_generation, request_bytes
+    raise_private_metadata_error(GraphStagePromotionRejected())
+
+
+def _require_saved_intent_fields(
+    native: GraphStagePromotionIntentScalars, prepared: PromotionIntentValues
+) -> None:
+    if (
+        type(native.store_id) is not str
+        or native.store_id != prepared["store_id"]
+        or type(native.payload_digest) is not str
+        or native.payload_digest != prepared["payload_digest"]
+        or type(native.fence_incarnation) is not int
+        or native.fence_incarnation != prepared["fence_incarnation"]
+        or type(native.operation_id) is not str
+        or native.operation_id != prepared["operation_id"]
+        or type(native.request_digest) is not str
+        or native.request_digest != prepared["request_digest"]
+    ):
+        raise GraphStagePromotionRejected()
+
+
+def _read_detached_graph_stage_promotion(
+    stage: GraphStage, documents: GraphStagePromotionDocuments
+) -> (
+    tuple[
+        PreparedGraphStagePromotionIntent, PreparedGraphStagePromotionSettlement | None
+    ]
+    | None
+):
+    if (
+        type(stage) is not GraphStage
+        or type(stage.stage_id) is not str
+        or type(documents) is not GraphStagePromotionDocuments
+        or type(documents.stage_id) is not str
+        or documents.stage_id != stage.stage_id
+    ):
+        raise GraphStagePromotionRejected()
+    native = documents.intent_scalars
+    request = documents.request_bytes
+    observation = documents.observation_bytes
+    if native is None and request is None and observation is None:
+        _require_stage_shape(stage, 0)
+        return None
+    if type(native) is not GraphStagePromotionIntentScalars or request is None:
+        raise GraphStagePromotionRejected()
+    _require_document_bytes(request)
+    if observation is not None:
+        _require_document_bytes(observation)
+    intent = _prepare_intent(stage, native.content_generation, request)
+    _require_saved_intent_fields(native, intent.values())
+    settlement = (
+        intent.prepare_settlement(observation) if observation is not None else None
+    )
+    return intent, settlement
+
+
+def read_detached_graph_stage_promotion(
+    stage: GraphStage, documents: GraphStagePromotionDocuments
+) -> (
+    tuple[
+        PreparedGraphStagePromotionIntent, PreparedGraphStagePromotionSettlement | None
+    ]
+    | None
+):
+    try:
+        return _read_detached_graph_stage_promotion(stage, documents)
+    except (GraphStagePromotionRejected, ValueError) as refused:
+        _discard_private_error(refused)
+    del stage, documents
     raise_private_metadata_error(GraphStagePromotionRejected())
 
 
