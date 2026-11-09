@@ -14,6 +14,7 @@ from sqlalchemy.util import await_
 
 from kora.db.connection import SQLITE_READERS, Database, Dialect
 from kora.db.graph_preparation_reads import GraphPreparationBinding
+from kora.db.graph_stage_promotion_intent_reads import GraphStagePromotionIntentScalars
 from kora.db.graph_stage_promotion_snapshot import (
     GraphStagePromotionDocuments,
     GraphStagePromotionSnapshot,
@@ -46,6 +47,7 @@ from tests.db.test_graph_deployment_stage_migration import (
 from tests.db.test_graph_preparation_reads import seed_preparation
 from tests.db.test_graph_stage_promotion_custody_migration import (
     INTENT_INSERT,
+    REQUEST_DIGEST,
     SETTLEMENT_INSERT,
     OriginalStage,
 )
@@ -55,6 +57,20 @@ SETTLED: bytes = b"defg"
 SECOND: bytes = b"hijkl"
 DOCUMENT_BYTES: int = len(FIRST) + len(SETTLED) + len(SECOND)
 PRIVATE: str = "private-promotion-snapshot"
+
+
+def expected_intent(
+    snapshot: GraphStagePromotionSnapshot, index: int, operation: str
+) -> GraphStagePromotionIntentScalars:
+    entry = snapshot.inventory.stages[index]
+    return GraphStagePromotionIntentScalars(
+        entry.store_id,
+        entry.payload_digest,
+        entry.fence_incarnation,
+        operation,
+        REQUEST_DIGEST,
+        2**63 - 1,
+    )
 
 
 async def seed_stage_for_binding(
@@ -147,9 +163,13 @@ async def test_promotion_snapshot_returns_exact_complete_detached_batch(
         tuple(entry.stage_id for entry in snapshot.inventory.occurrences) == stage_ids
     )
     assert snapshot.documents == (
-        GraphStagePromotionDocuments(stage_ids[0], FIRST, SETTLED),
-        GraphStagePromotionDocuments(stage_ids[1], SECOND, None),
-        GraphStagePromotionDocuments(stage_ids[2], None, None),
+        GraphStagePromotionDocuments(
+            stage_ids[0], FIRST, SETTLED, expected_intent(snapshot, 0, "first")
+        ),
+        GraphStagePromotionDocuments(
+            stage_ids[1], SECOND, None, expected_intent(snapshot, 1, "second")
+        ),
+        GraphStagePromotionDocuments(stage_ids[2], None, None, None),
     )
     assert len(projections) == len(stage_ids) == 3
     assert ledger.checkouts == 1
@@ -498,10 +518,10 @@ async def test_promotion_snapshot_retains_visibility_across_a_real_commit(
     after = await read(database, binding)
 
     assert before.documents[1] == GraphStagePromotionDocuments(
-        stage_ids[1], SECOND, None
+        stage_ids[1], SECOND, None, expected_intent(before, 1, "second")
     )
     assert after.documents[1] == GraphStagePromotionDocuments(
-        stage_ids[1], replaced, None
+        stage_ids[1], replaced, None, expected_intent(after, 1, "second")
     )
     assert ledger.checkouts == 3
     assert ledger.outstanding == database.units_in_flight() == 0

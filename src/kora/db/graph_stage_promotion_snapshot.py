@@ -2,6 +2,7 @@ import asyncio
 import math
 from dataclasses import dataclass
 from enum import StrEnum
+from sqlite3 import Error as SQLiteError
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -28,6 +29,12 @@ from kora.db.graph_preparation_reads import (
     require_graph_preparation_binding,
 )
 from kora.db.graph_stage_promotion_custody_v1 import MAX_PROMOTION_DOCUMENT_BYTES_V1
+from kora.db.graph_stage_promotion_intent_reads import (
+    GraphStagePromotionIntentScalars,
+    PromotionIntentScalarsRejected,
+    read_graph_stage_promotion_intent_scalars,
+    read_intent_text_width_factor,
+)
 from kora.db.graph_stage_promotion_layout import (
     GraphStagePromotionLayout,
     observe_graph_stage_promotion_layout,
@@ -59,6 +66,7 @@ class GraphStagePromotionDocuments:
     stage_id: str
     request_bytes: bytes | None
     observation_bytes: bytes | None
+    intent_scalars: GraphStagePromotionIntentScalars | None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -94,10 +102,15 @@ def _document_width(width: object) -> int:
 
 
 async def _project_stage(
-    connection: AsyncConnection, stage_id: str, allowance: int
+    connection: AsyncConnection,
+    stage_id: str,
+    allowance: int,
+    intent_scalars: GraphStagePromotionIntentScalars | None,
 ) -> tuple[GraphStagePromotionDocuments, int]:
     statement = graph_stage_promotion_document_statement(
-        connection.dialect.name, stage_id, max_document_bytes=allowance
+        connection.dialect.name,
+        stage_id,
+        max_document_bytes=0 if intent_scalars is None else allowance,
     )
     result = await connection.execute(statement)
     try:
@@ -105,12 +118,16 @@ async def _project_stage(
     finally:
         result.close()
     intent, settlement, intent_width, settlement_width, request, observation = row
-    if type(intent) is not bool or type(settlement) is not bool:
+    if (
+        type(intent) is not bool
+        or intent is not (intent_scalars is not None)
+        or type(settlement) is not bool
+    ):
         raise _unverified()
     if not intent:
         if settlement or any(value is not None for value in row[2:]):
             raise _unverified()
-        return GraphStagePromotionDocuments(stage_id, None, None), 0
+        return GraphStagePromotionDocuments(stage_id, None, None, None), 0
     request_size = _document_width(intent_width)
     if settlement:
         observation_size = _document_width(settlement_width)
@@ -133,7 +150,10 @@ async def _project_stage(
         raise _unverified()
     if observation is not None and type(observation) is not bytes:
         raise _unverified()
-    return GraphStagePromotionDocuments(stage_id, request, observation), transferred
+    return (
+        GraphStagePromotionDocuments(stage_id, request, observation, intent_scalars),
+        transferred,
+    )
 
 
 async def _collect(
@@ -163,10 +183,19 @@ async def _collect(
         )
     documents: list[GraphStagePromotionDocuments] = []
     remaining = max_document_bytes
+    _require_time(deadline)
+    width_factor = await read_intent_text_width_factor(connection)
     for stage in inventory.stages:
         _require_time(deadline)
+        intent_scalars = await read_graph_stage_promotion_intent_scalars(
+            connection, stage, width_factor, deadline
+        )
+        _require_time(deadline)
         document, transferred = await _project_stage(
-            connection, stage.stage_id, min(remaining, MAX_PROMOTION_PAIR_BYTES)
+            connection,
+            stage.stage_id,
+            min(remaining, MAX_PROMOTION_PAIR_BYTES),
+            intent_scalars,
         )
         documents.append(document)
         remaining -= transferred
@@ -193,7 +222,10 @@ async def _read_current(
         GraphStageInventoryReadFailed,
         GraphStageInventoryRejected,
         PromotionDocumentProjectionRejected,
+        PromotionIntentScalarsRejected,
+        SQLiteError,
         SQLAlchemyError,
+        UnicodeDecodeError,
         OSError,
     ) as error:
         reason = GraphStagePromotionSnapshotFailure.UNVERIFIED
