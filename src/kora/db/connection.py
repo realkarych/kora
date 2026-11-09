@@ -2,13 +2,14 @@ import asyncio
 import enum
 import math
 import os
+import sqlite3
 import sys
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
-from contextlib import asynccontextmanager, closing, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 from weakref import ReferenceType, ref
 
 from sqlalchemy import URL, Connection, event, make_url, text
@@ -25,7 +26,11 @@ from sqlalchemy.pool.base import ConnectionPoolEntry
 from sqlalchemy.sql.elements import TextClause
 
 from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
-from kora.db.transactions import managed_writer, raise_private_metadata_error
+from kora.db.transactions import (
+    WriterTransactionError,
+    managed_writer,
+    raise_private_metadata_error,
+)
 from kora.db.types import POSTGRESQL, SQLITE
 from kora.observability import ComponentLogger, current_diagnostics
 
@@ -55,6 +60,7 @@ READER_PRAGMAS: tuple[str, ...] = (
     "PRAGMA query_only=ON",
 )
 BEGIN_IMMEDIATE: str = "BEGIN IMMEDIATE"
+SQLITE_WRITER_DISPATCH: str = "kora_sqlite_writer_dispatch"
 MIGRATION_LOCK_ID: int = 213_0002
 MIGRATION_LEASE: str = "kora_migration_lease"
 POSTGRESQL_WAL_SETTINGS_QUERY: TextClause = text(
@@ -85,6 +91,23 @@ class DatabaseSnapshotRejected(RuntimeError):
     def __init__(self, reason: DatabaseSnapshotFailure) -> None:
         self.reason: DatabaseSnapshotFailure = reason
         super().__init__(reason.value)
+
+
+class DatabaseWriterFailure(enum.StrEnum):
+    DEADLINE = "the database writer admission deadline expired"
+    UNAVAILABLE = "database writer admission is unavailable"
+
+
+class DatabaseWriterRejected(RuntimeError):
+    def __init__(self, reason: DatabaseWriterFailure) -> None:
+        self.reason: DatabaseWriterFailure = reason
+        super().__init__(reason.value)
+
+
+@dataclass
+class _WriterAdmission:
+    deadline: float
+    handed_off: bool = False
 
 
 class DatabaseConfigurationError(ValueError):
@@ -236,6 +259,7 @@ def configure_full_sync_reader(
 
 def begin_immediately(connection: Connection) -> None:
     with closing(connection.connection.cursor()) as cursor:
+        require_sqlite_writer_dispatch(connection)
         cursor.execute(BEGIN_IMMEDIATE)
 
 
@@ -256,6 +280,7 @@ def guarded_sqlite_writer_cursor(
 
 def begin_verified_sqlite_write(connection: Connection) -> None:
     with guarded_sqlite_writer_cursor(connection) as cursor:
+        require_sqlite_writer_dispatch(connection)
         cursor.execute(BEGIN_IMMEDIATE)
         cursor.execute("PRAGMA main.journal_mode")
         if cursor.fetchone() != ("wal",):
@@ -268,6 +293,49 @@ def begin_verified_sqlite_write(connection: Connection) -> None:
 def verify_macos_sqlite_commit(connection: Connection) -> None:
     with guarded_sqlite_writer_cursor(connection) as cursor:
         verify_macos_fullfsync(cursor)
+
+
+@dataclass(frozen=True)
+class _SQLiteWriterDispatch:
+    owner: asyncio.Task[object]
+    cancellation_count: int
+    require_entry: Callable[[], None]
+
+    def check(self) -> None:
+        self.require_entry()
+        if self.owner.cancelling() > self.cancellation_count:
+            raise DatabaseSnapshotRejected(DatabaseSnapshotFailure.UNAVAILABLE)
+
+
+def require_sqlite_writer_dispatch(connection: Connection) -> None:
+    dispatch: object = connection.info.get(SQLITE_WRITER_DISPATCH)
+    if isinstance(dispatch, _SQLiteWriterDispatch):
+        dispatch.check()
+
+
+def read_sqlite_busy_timeout(cursor: DBAPICursor) -> int:
+    cursor.execute("PRAGMA busy_timeout")
+    row: object = cursor.fetchone()
+    fields = cast(tuple[object, ...], row) if isinstance(row, tuple) else ()
+    value = fields[0] if len(fields) == 1 else None
+    if type(value) is not int or not 0 <= value <= 2**31 - 1:
+        raise SQLiteSynchronizationError("SQLite writer busy timeout is unknown")
+    return value
+
+
+def sqlite_writer_busy_timeout(connection: Connection) -> tuple[DBAPIConnection, int]:
+    raw = connection.connection.dbapi_connection
+    if raw is None:
+        raise SQLiteSynchronizationError("SQLite writer checkout is unavailable")
+    with closing(raw.cursor()) as cursor:
+        return raw, read_sqlite_busy_timeout(cursor)
+
+
+def set_sqlite_writer_busy_timeout(raw: DBAPIConnection, milliseconds: int) -> None:
+    with closing(raw.cursor()) as cursor:
+        cursor.execute(f"PRAGMA busy_timeout={milliseconds}")
+        if read_sqlite_busy_timeout(cursor) != milliseconds:
+            raise SQLiteSynchronizationError("SQLite writer busy timeout was not set")
 
 
 def keep_connection_on_cancellation(context: ExceptionContext) -> None:
@@ -546,6 +614,12 @@ SNAPSHOT_NATIVE_ERRORS: tuple[type[Exception], ...] = (
     SQLiteSynchronizationError,
     SQLAlchemyError,
 )
+WRITER_ENTRY_NATIVE_ERRORS: tuple[type[Exception], ...] = (
+    *SNAPSHOT_NATIVE_ERRORS,
+    PostgreSQLDurabilityError,
+    sqlite3.Error,
+    WriterTransactionError,
+)
 
 
 class Database:
@@ -567,6 +641,7 @@ class Database:
         self.dialect = settings.dialect
         self._require_postgresql_wal_settings = require_postgresql_wal_settings
         self._writer_lock = asyncio.Lock()
+        self._sqlite_writer_usable = True
         if settings.dialect is Dialect.SQLITE:
             create_private_file(settings.sqlite_path)
             self._writer = sqlite_engine(
@@ -637,10 +712,66 @@ class Database:
             raise DatabaseClosedError("the database closed before the unit finished")
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncGenerator[AsyncConnection, None]:
-        async with self._lease(transactional=True) as connection:
-            with managed_writer(connection):
-                yield connection
+    async def transaction(
+        self, *, admission_deadline: float | None = None
+    ) -> AsyncGenerator[AsyncConnection, None]:
+        if admission_deadline is None:
+            async with self._lease(transactional=True) as connection:
+                with managed_writer(connection):
+                    yield connection
+            return
+        async with self._timed_writer(admission_deadline) as connection:
+            yield connection
+
+    @asynccontextmanager
+    async def _timed_writer(
+        self, deadline: float
+    ) -> AsyncGenerator[AsyncConnection, None]:
+        if type(deadline) is not float or not math.isfinite(deadline):
+            raise_private_metadata_error(
+                DatabaseWriterRejected(DatabaseWriterFailure.UNAVAILABLE)
+            )
+        timer = asyncio.timeout_at(deadline)
+        admission = _WriterAdmission(deadline)
+        connection = None
+        try:
+            async with AsyncExitStack() as stack:
+                self._require_writer_entry(deadline)
+                async with timer:
+                    connection = await stack.enter_async_context(
+                        self._lease(transactional=True, admission=admission)
+                    )
+                self._require_writer_entry(deadline)
+                with managed_writer(connection):
+                    admission.handed_off = True
+                    yield connection
+            return
+        except asyncio.CancelledError as error:
+            if admission.handed_off:
+                raise
+            clear_snapshot_error(error)
+            del self, deadline, timer, connection
+            raise
+        except DatabaseSnapshotRejected as error:
+            if admission.handed_off:
+                raise
+            reason = (
+                DatabaseWriterFailure.DEADLINE
+                if error.reason is DatabaseSnapshotFailure.DEADLINE
+                else DatabaseWriterFailure.UNAVAILABLE
+            )
+            clear_snapshot_error(error)
+        except WRITER_ENTRY_NATIVE_ERRORS as error:
+            if admission.handed_off:
+                raise
+            reason = (
+                DatabaseWriterFailure.DEADLINE
+                if isinstance(error, TimeoutError) and timer.expired()
+                else DatabaseWriterFailure.UNAVAILABLE
+            )
+            clear_snapshot_error(error)
+        del self, deadline, timer, connection
+        raise_private_metadata_error(DatabaseWriterRejected(reason))
 
     @asynccontextmanager
     async def migration_connection(self) -> AsyncGenerator[AsyncConnection, None]:
@@ -691,22 +822,40 @@ class Database:
 
     @asynccontextmanager
     async def _lease(
-        self, transactional: bool
+        self, transactional: bool, *, admission: _WriterAdmission | None = None
     ) -> AsyncGenerator[AsyncConnection, None]:
         self._enter_unit()
+        cancelled_entry = False
         try:
             if self.dialect is Dialect.SQLITE:
                 async with self._writer_lock:
-                    async with self._unit(self._writer, transactional) as connection:
+                    if not self._sqlite_writer_usable:
+                        raise DatabaseClosedError("the database writer is unavailable")
+                    async with self._unit(
+                        self._writer, transactional, admission=admission
+                    ) as connection:
                         yield connection
             else:
-                async with self._unit(self._writer, transactional) as connection:
-                    if transactional and self._require_postgresql_wal_settings:
+                async with self._unit(
+                    self._writer, transactional, admission=admission
+                ) as connection:
+                    if (
+                        admission is None
+                        and transactional
+                        and self._require_postgresql_wal_settings
+                    ):
                         await complete(verify_postgresql_wal_settings(connection))
                         self._refuse_when_closed()
                     yield connection
+        except asyncio.CancelledError:
+            cancelled_entry = admission is not None and not admission.handed_off
+            raise
         finally:
-            await self._leave_unit_and_release()
+            try:
+                await self._leave_unit_and_release()
+            except WRITER_ENTRY_NATIVE_ERRORS:
+                if not cancelled_entry:
+                    raise
 
     async def run(self, unit: Unit[Result]) -> Result:
         async def execute() -> Result:
@@ -831,6 +980,155 @@ class Database:
             self._snapshot_admission.release,
         )
 
+    def _require_writer_entry(self, deadline: float) -> None:
+        require_snapshot_time(deadline)
+        if self._lifecycle is not Lifecycle.OPEN or not self._sqlite_writer_usable:
+            raise DatabaseSnapshotRejected(DatabaseSnapshotFailure.UNAVAILABLE)
+        if self.dialect is Dialect.POSTGRESQL:
+            self._snapshot_admission.require_current(self._writer, deadline)
+
+    async def _checkout_writer_before(self, deadline: float) -> AsyncConnection:
+        self._require_writer_entry(deadline)
+        if self.dialect is Dialect.POSTGRESQL:
+            return await self._snapshot_admission.connect_before(self._writer, deadline)
+
+        async def connect() -> AsyncConnection:
+            self._require_writer_entry(deadline)
+            return await self._writer.connect()
+
+        async def release_late_checkout(connection: AsyncConnection) -> None:
+            await self._release_sqlite_writer_entry(connection, cancelled=True)
+
+        return await start_snapshot_phase(connect, release_late_checkout)
+
+    async def _run_writer_entry_phase(
+        self, deadline: float, operation: Callable[[], Awaitable[Result]]
+    ) -> Result:
+        async def checked_phase() -> Result:
+            self._require_writer_entry(deadline)
+            return await operation()
+
+        return await start_snapshot_phase(checked_phase, nothing)
+
+    async def _prepare_writer_entry(
+        self, connection: AsyncConnection, deadline: float
+    ) -> None:
+        if self.dialect is Dialect.SQLITE:
+            await self._begin_sqlite_writer_before(connection, deadline)
+        else:
+            await self._run_writer_entry_phase(deadline, connection.begin)
+            if self._require_postgresql_wal_settings:
+                await self._run_writer_entry_phase(
+                    deadline, lambda: verify_postgresql_wal_settings(connection)
+                )
+        self._require_writer_entry(deadline)
+        root = connection.get_transaction()
+        if root is None or not root.is_active or connection.invalidated:
+            raise DatabaseSnapshotRejected(DatabaseSnapshotFailure.UNAVAILABLE)
+
+    async def _begin_sqlite_writer_before(
+        self, connection: AsyncConnection, deadline: float
+    ) -> None:
+        owner = asyncio.current_task()
+        if owner is None:
+            raise DatabaseSnapshotRejected(DatabaseSnapshotFailure.UNAVAILABLE)
+        raw, previous = await self._run_writer_entry_phase(
+            deadline, lambda: connection.run_sync(sqlite_writer_busy_timeout)
+        )
+        ready = False
+        cancelled = False
+        try:
+            await self._run_writer_entry_phase(
+                deadline,
+                lambda: connection.run_sync(
+                    lambda _: set_sqlite_writer_busy_timeout(raw, 0)
+                ),
+            )
+            info = connection.info
+            info[SQLITE_WRITER_DISPATCH] = _SQLiteWriterDispatch(
+                owner, owner.cancelling(), lambda: self._require_writer_entry(deadline)
+            )
+            try:
+                await self._run_writer_entry_phase(deadline, connection.begin)
+            finally:
+                info.pop(SQLITE_WRITER_DISPATCH)
+            ready = True
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            try:
+                await complete(
+                    self._restore_sqlite_writer(connection, raw, previous, ready)
+                )
+            except WRITER_ENTRY_NATIVE_ERRORS:
+                if not cancelled:
+                    raise
+
+    async def _restore_sqlite_writer(
+        self,
+        connection: AsyncConnection,
+        raw: DBAPIConnection,
+        previous: int,
+        ready: bool,
+    ) -> None:
+        def restore(_: Connection) -> None:
+            if not ready:
+                raw.rollback()
+            set_sqlite_writer_busy_timeout(raw, previous)
+
+        try:
+            await connection.run_sync(restore)
+        except WRITER_ENTRY_NATIVE_ERRORS:
+            try:
+                if ready:
+                    await connection.run_sync(lambda _: raw.rollback())
+            finally:
+                await self._discard_writer_entry(connection)
+            raise
+
+    async def _discard_writer_entry(self, connection: AsyncConnection) -> None:
+        try:
+            await connection.invalidate()
+        except (asyncio.CancelledError, *WRITER_ENTRY_NATIVE_ERRORS):
+            if not connection.invalidated:
+                if self.dialect is Dialect.POSTGRESQL:
+                    self._snapshot_admission.fence()
+                else:
+                    self._sqlite_writer_usable = False
+            raise
+
+    async def _release_sqlite_writer_entry(
+        self, connection: AsyncConnection, *, cancelled: bool
+    ) -> None:
+        try:
+            await complete(connection.close())
+        except (asyncio.CancelledError, *WRITER_ENTRY_NATIVE_ERRORS):
+            try:
+                if not connection.closed:
+                    await complete(self._discard_writer_entry(connection))
+            except (asyncio.CancelledError, *WRITER_ENTRY_NATIVE_ERRORS):
+                if not cancelled:
+                    raise
+            if not cancelled:
+                raise
+
+    async def _rollback_writer_entry(
+        self, connection: AsyncConnection, cause: BaseException
+    ) -> None:
+        async def rollback_or_discard() -> None:
+            try:
+                await connection.rollback()
+            except WRITER_ENTRY_NATIVE_ERRORS:
+                await self._discard_writer_entry(connection)
+                raise
+
+        try:
+            await complete(rollback_or_discard())
+        except WRITER_ENTRY_NATIVE_ERRORS:
+            if not isinstance(cause, asyncio.CancelledError):
+                raise
+
     @asynccontextmanager
     async def _unit(
         self,
@@ -838,13 +1136,20 @@ class Database:
         transactional: bool = True,
         *,
         deadline: float | None = None,
+        admission: _WriterAdmission | None = None,
     ) -> AsyncGenerator[AsyncConnection, None]:
         self._refuse_when_closed()
-        connection = await self._checkout(engine, deadline)
+        connection = (
+            await self._checkout(engine, deadline)
+            if admission is None
+            else await self._checkout_writer_before(admission.deadline)
+        )
         cancelled = False
         try:
             self._require_snapshot_current(deadline)
-            if transactional:
+            if admission is not None:
+                await self._prepare_writer_entry(connection, admission.deadline)
+            elif transactional:
                 await self._run_snapshot_phase(deadline, connection.begin)
             try:
                 yield connection
@@ -852,14 +1157,29 @@ class Database:
                 if transactional:
                     await self._run_snapshot_phase(deadline, connection.commit)
             except BaseException as error:
+                if admission is not None and not admission.handed_off:
+                    raise
                 await self._rollback_unit(connection, deadline, error)
                 self._record_rollback(error)
                 raise
-        except asyncio.CancelledError:
-            cancelled = True
+        except BaseException as error:
+            cancelled = isinstance(error, asyncio.CancelledError)
+            if admission is not None and not admission.handed_off:
+                await self._rollback_writer_entry(connection, error)
             raise
         finally:
-            await self._release_unit(engine, connection, deadline, cancelled)
+            before_handoff = admission is not None and not admission.handed_off
+            if before_handoff and engine is not self._reader:
+                await self._release_sqlite_writer_entry(connection, cancelled=cancelled)
+            else:
+                await self._release_unit(
+                    engine,
+                    connection,
+                    verify_generation=deadline is not None
+                    or (admission is not None and engine is self._reader),
+                    preserve_cancellation=cancelled
+                    and (deadline is not None or before_handoff),
+                )
         if deadline is not None:
             self._snapshot_admission.require_current(engine, deadline)
 
@@ -890,18 +1210,19 @@ class Database:
         self,
         engine: AsyncEngine,
         connection: AsyncConnection,
-        deadline: float | None,
-        cancelled: bool,
+        *,
+        verify_generation: bool,
+        preserve_cancellation: bool,
     ) -> None:
         try:
-            if deadline is not None:
+            if verify_generation:
                 await complete(self._snapshot_admission.release_snapshot(connection))
             elif engine is self._reader:
                 await complete(self._snapshot_admission.release(connection))
             else:
                 await complete(connection.close())
         except (asyncio.CancelledError, *SNAPSHOT_NATIVE_ERRORS):
-            if deadline is None or not cancelled:
+            if not preserve_cancellation:
                 raise
             if not connection.closed:
                 self._snapshot_admission.fence()
