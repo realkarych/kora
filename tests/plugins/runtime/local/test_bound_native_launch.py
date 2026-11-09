@@ -49,6 +49,8 @@ from tests.plugins.runtime.local.frames_support import (
 __all__ = ["kora_capture"]
 
 CUTOFF = ORIGIN_NS + 100
+PROVIDER_ROLES = frozenset({"app", "exec"})
+APP_ROLE = frozenset({"app"})
 
 
 @dataclass
@@ -141,6 +143,15 @@ def native_inputs(tmp_path: Path) -> Generator[NativeInputs]:
 def check_binding_refusal(error: KoraProtocolError) -> None:
     assert error.code == "launch_rejected"
     assert error.message == "the bound native launch inputs are invalid"
+    assert not error.retryable
+    assert error.details == {}
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def check_slot_refusal(error: KoraProtocolError) -> None:
+    assert error.code == "launch_rejected"
+    assert error.message == "the bound native role is unavailable"
     assert not error.retryable
     assert error.details == {}
     assert error.__cause__ is None
@@ -351,7 +362,7 @@ async def test_bound_context_rejects_legacy_and_malformed_roles_before_acquisiti
     )
     input_path = native_inputs.checkout.path
     placements: dict[Placement, Path] = {"harness_input": input_path}
-    context = BoundNativeLaunchContext(owner, placements)
+    context = BoundNativeLaunchContext(owner, placements, provider_roles=PROVIDER_ROLES)
     placements.clear()
     legacy = NoLaunches()
 
@@ -385,7 +396,7 @@ async def test_bound_context_maps_preflight_deadline_without_private_context(
         clock=clock,
         cutoff_ns=ORIGIN_NS + 6,
     )
-    context = BoundNativeLaunchContext(owner, {})
+    context = BoundNativeLaunchContext(owner, {}, provider_roles=PROVIDER_ROLES)
 
     with pytest.raises(KoraProtocolError) as expired:
         await context.start_bound("app")
@@ -418,7 +429,7 @@ async def test_bound_context_keeps_expired_slot_refusal_without_consumption(
         clock=clock,
         cutoff_ns=cutoff,
     )
-    context = BoundNativeLaunchContext(owner, {})
+    context = BoundNativeLaunchContext(owner, {}, provider_roles=PROVIDER_ROLES)
     clock.expired_at = cutoff
 
     with pytest.raises(KoraProtocolError) as refused:
@@ -454,7 +465,7 @@ async def test_bound_context_borrows_narrow_real_stdio(
         clock=clock,
         cutoff_ns=clock.monotonic_ns() + 10_000_000_000,
     )
-    context = BoundNativeLaunchContext(owner, {})
+    context = BoundNativeLaunchContext(owner, {}, provider_roles=PROVIDER_ROLES)
     try:
         async with asyncio.timeout(10):
             started = await context.start_bound("app")
@@ -477,3 +488,131 @@ async def test_bound_context_borrows_narrow_real_stdio(
     assert not hasattr(started.writer, "close")
     assert len(owner.gates) == 1
     assert owner.gates[0].closed
+
+
+@pytest.mark.parametrize("roles", [frozenset(), frozenset({"app", "missing"})])
+@pytest.mark.asyncio
+async def test_bound_context_refuses_invalid_provider_roles(
+    native_inputs: NativeInputs, kora_capture: Capture, roles: frozenset[str]
+) -> None:
+    owner = native_inputs.acquire_owner(
+        native_inputs.bind(kora_capture), native_inputs.roles
+    )
+
+    with pytest.raises(KoraProtocolError) as refused:
+        BoundNativeLaunchContext(owner, {}, provider_roles=roles)
+
+    check_binding_refusal(refused.value)
+    assert owner.gates == ()
+    assert not owner.stopped
+
+
+@pytest.mark.asyncio
+async def test_hidden_bound_role_refuses_before_secret_materialization(
+    native_inputs: NativeInputs, kora_capture: Capture
+) -> None:
+    owner = native_inputs.acquire_owner(
+        native_inputs.bind(kora_capture), native_inputs.roles
+    )
+    context = BoundNativeLaunchContext(owner, {}, provider_roles=APP_ROLE)
+    kora_capture.scope.release()
+
+    with pytest.raises(KoraProtocolError) as refused:
+        await context.start_bound("exec")
+
+    check_slot_refusal(refused.value)
+    assert owner.gates == ()
+    assert not owner.stopped
+    assert owner.failure is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_starts_bound_role_hidden_from_provider(
+    native_inputs: NativeInputs, kora_capture: Capture
+) -> None:
+    clock = SystemClock()
+    owner = native_inputs.acquire_owner(
+        native_inputs.bind(kora_capture),
+        native_inputs.roles,
+        clock=clock,
+        cutoff_ns=clock.monotonic_ns() + 10_000_000_000,
+    )
+    context = BoundNativeLaunchContext(owner, {}, provider_roles=APP_ROLE)
+
+    try:
+        async with asyncio.timeout(10):
+            with pytest.raises(KoraProtocolError) as refused:
+                await context.start_bound("exec")
+            before = owner.gates
+            reader, writer = await owner.start_role_stdio("exec")
+            result = await reader.readline()
+    finally:
+        owner.stop()
+        for gate in owner.gates:
+            await close_gated(gate, clock.monotonic_ns() + 5_000_000_000, clock)
+
+    check_slot_refusal(refused.value)
+    assert before == ()
+    assert result.startswith(b"Python ")
+    assert len(owner.gates) == 1
+    assert owner.gates[0].closed
+    assert writer.is_closing()
+
+
+@pytest.mark.asyncio
+async def test_bound_owner_fences_pending_private_stream_with_live_app(
+    native_inputs: NativeInputs, kora_capture: Capture
+) -> None:
+    roles = native_inputs.roles.copy()
+    app = roles["app"]
+    roles["app"] = replace(
+        app, argv=(app.argv[0], "-c", "import sys; sys.stdin.buffer.read()")
+    )
+    clock = SystemClock()
+    owner = native_inputs.acquire_owner(
+        native_inputs.bind(kora_capture),
+        roles,
+        clock=clock,
+        cutoff_ns=clock.monotonic_ns() + 10_000_000_000,
+    )
+    context = BoundNativeLaunchContext(owner, {}, provider_roles=APP_ROLE)
+    entered = asyncio.Event()
+
+    async def start_private() -> None:
+        entered.set()
+        await owner.start_role_stdio("exec")
+
+    try:
+        async with asyncio.timeout(10):
+            app_stream = await context.start_bound("app")
+            pending = asyncio.create_task(start_private())
+            try:
+                await entered.wait()
+                registered = owner.gates
+                assert len(registered) == 2
+                assert not pending.done()
+                assert all(gate.registration is not None for gate in registered)
+                with pytest.raises(KoraProtocolError) as competing:
+                    await owner.start_role_stdio("exec")
+                remained_open = not owner.stopped and owner.gates == registered
+                owner.stop()
+                with pytest.raises(ChannelError) as fenced:
+                    await pending
+            finally:
+                if not pending.done():
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+    finally:
+        owner.stop()
+        for gate in owner.gates:
+            await close_gated(gate, clock.monotonic_ns() + 5_000_000_000, clock)
+    async with asyncio.timeout(5):
+        app_eof = await app_stream.reader.read(1)
+
+    check_slot_refusal(competing.value)
+    assert remained_open
+    assert fenced.value.reason is ChannelFailure.CLOSED
+    assert owner.failure is None
+    assert owner.gates == registered
+    assert all(gate.closed for gate in registered)
+    assert app_eof == b""

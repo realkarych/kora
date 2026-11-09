@@ -56,9 +56,17 @@ class _Refusal(StrEnum):
 
 class BoundNativeLaunchContext:
     def __init__(
-        self, owner: BoundNativeLaunch, placements: Mapping[Placement, Path]
+        self,
+        owner: BoundNativeLaunch,
+        placements: Mapping[Placement, Path],
+        *,
+        provider_roles: frozenset[str],
     ) -> None:
+        visible = frozenset(provider_roles)
+        if not visible or not visible.issubset(owner.roles):
+            raise _public_error(_Refusal.INVALID)
         self._owner = owner
+        self._provider_roles = visible
         self.placements: Mapping[Placement, Path] = MappingProxyType(dict(placements))
 
     async def allocate(self, inputs: LaunchInputs) -> Launch:
@@ -69,11 +77,10 @@ class BoundNativeLaunchContext:
     async def start_bound(self, role: str) -> NativeLaunch:
         if type(role) is not str:
             raise _public_error(_Refusal.INVALID)
+        if role not in self._provider_roles:
+            raise _public_error(_Refusal.UNAVAILABLE)
         try:
-            gate = self._owner.start(role)
-            await gate.prepare()
-            await gate.acknowledge()
-            reader, writer = gate.borrow_stdio()
+            reader, writer = await self._owner.start_role_stdio(role)
         except BoundCheckoutError as error:
             reason = (
                 _Refusal.DEADLINE

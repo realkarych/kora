@@ -210,6 +210,10 @@ class BoundNativeLaunch:
         return self._stdio_limit
 
     @property
+    def roles(self) -> frozenset[str]:
+        return frozenset(self._inputs)
+
+    @property
     def stopped(self) -> bool:
         return self._slots.stopped
 
@@ -229,6 +233,12 @@ class BoundNativeLaunch:
         if _current_loop() is not self._loop:
             raise ChannelError(ChannelFailure.CLOSED)
         self._fence.stop()
+
+    async def start_role_stdio(self, role: str) -> StdioStreams:
+        gate = self.start(role)
+        await gate.prepare()
+        await gate.acknowledge()
+        return gate.borrow_stdio()
 
     def start(self, role: str) -> BoundNativeGate:
         if _current_loop() is not self._loop:

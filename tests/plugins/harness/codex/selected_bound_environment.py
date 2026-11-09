@@ -4,6 +4,7 @@ import resource
 import shutil
 import signal
 import socket
+import stat
 import sys
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager, nullcontext
@@ -15,6 +16,7 @@ from typing import Literal
 from kora.plugins.harness.codex.launch_configuration import (
     PROVIDER_KEY,
     CodexLaunchInputs,
+    ExecutorTransport,
     LaunchConfigurationError,
     LaunchConfigurationFailure,
     NativeProcessInputs,
@@ -78,6 +80,7 @@ BoundCase = Literal[
     "context-legacy-live",
     "context-legacy-released",
     "context-cancel",
+    "private-executor",
     "path",
     "grant",
     "reserved",
@@ -104,7 +107,11 @@ BoundCase = Literal[
 ]
 BoundRole = Literal["app", "exec"]
 CONTEXT_LEGACY_CASES = frozenset({"context-legacy-live", "context-legacy-released"})
-CONTEXT_CASES = CONTEXT_LEGACY_CASES | {"context-ready", "context-cancel"}
+CONTEXT_CASES = CONTEXT_LEGACY_CASES | {
+    "context-ready",
+    "context-cancel",
+    "private-executor",
+}
 PHASE_REFUSALS = frozenset(
     {"phase-failure", "phase-cancellation", "phase-entry-expiry", "phase-resume-expiry"}
 )
@@ -142,6 +149,8 @@ TEXT_NAME = "KORA_BOUND_AUTHORED_TEXT"
 TEXT_VALUE = "bound-environment-authored-text"
 WORKLOAD_HANDLE_NAME = "KORA_BOUND_AUTHORED_SECRET"
 WORKLOAD_HANDLE_VALUE = "bound-environment-authored-secret"
+MAX_STARTUP_ENTRIES = 128
+MAX_STARTUP_BYTES = 16 * 1024 * 1024
 
 
 class BoundEnvironmentError(ValueError):
@@ -446,6 +455,22 @@ class BoundEnvironmentProbe:
         ):
             raise BoundEnvironmentError("selected_native_context_legacy_effect")
 
+    async def verify_private_context_refusal(self, launch: BoundLaunch) -> None:
+        context = launch.context
+        if context is None or not isinstance(context, NativeLaunchContext):
+            raise BoundEnvironmentError("selected_native_context_missing")
+        try:
+            await context.start_bound(self.role_name("exec"))
+        except KoraProtocolError as error:
+            if not slot_refusal(error):
+                raise BoundEnvironmentError(
+                    "selected_native_private_role_error"
+                ) from None
+        else:
+            raise BoundEnvironmentError("selected_native_private_role_exposed")
+        if launch.native.gates or launch.native.stopped:
+            raise BoundEnvironmentError("selected_native_private_role_effect")
+
     async def start_context_role(
         self, launch: BoundLaunch, role: BoundRole
     ) -> tuple[NativeLaunch, SelectedGatedApp]:
@@ -638,6 +663,20 @@ class BoundEnvironmentProbe:
         if failed:
             raise BoundEnvironmentError("selected_bound_configuration_cleanup_failed")
 
+    def verify_live_configurations(self, launch: BoundLaunch) -> None:
+        cutoff_ns = self._cutoff_ns
+        if cutoff_ns is None:
+            raise BoundEnvironmentError("selected_bound_cutoff_missing")
+        for role, recipe in native_roles(launch.inputs):
+            try:
+                self._configurations[role].verify(
+                    role_directories(recipe), cutoff_ns, launch.clock
+                )
+            except BoundRoleConfigurationError:
+                raise BoundEnvironmentError(
+                    "selected_bound_live_configuration_changed"
+                ) from None
+
     def remove_workspace(self, root: Path) -> None:
         owner = self._configuration_root
         if owner is None:
@@ -728,7 +767,7 @@ class BoundEnvironmentProbe:
         workspace: Path,
         binary: Path,
         port: int,
-        bearer: str,
+        bearer: str | None,
         key: str,
         deadline: float,
         frame_limit: int,
@@ -775,6 +814,11 @@ class BoundEnvironmentProbe:
                 bash=bash.path,
                 port=port,
                 bearer=bearer,
+                executor_transport=(
+                    ExecutorTransport.PRIVATE_STDIO
+                    if self.case == "private-executor"
+                    else ExecutorTransport.DIRECT_WEBSOCKET
+                ),
                 workload_names=workload.keys(),
                 workload_secret_names=authored.keys(),
             )
@@ -877,7 +921,15 @@ class BoundEnvironmentProbe:
             clock,
             {**common, **inputs.app_server.environment, PROVIDER_KEY: key},
             {**common, **inputs.exec_server.environment},
-            BoundNativeLaunchContext(native, {})
+            BoundNativeLaunchContext(
+                native,
+                {},
+                provider_roles=(
+                    frozenset({self.role_name("app")})
+                    if self.case == "private-executor"
+                    else native.roles
+                ),
+            )
             if self.case in CONTEXT_CASES
             else None,
         )
@@ -904,6 +956,36 @@ def native_roles(
     inputs: CodexLaunchInputs,
 ) -> tuple[tuple[BoundRole, NativeProcessInputs], ...]:
     return (("app", inputs.app_server), ("exec", inputs.exec_server))
+
+
+def verify_startup_files(root: Path, key: bytes) -> None:
+    entries_left = MAX_STARTUP_ENTRIES
+    bytes_left = MAX_STARTUP_BYTES
+    for _, directories, files, parent in os.fwalk(root):
+        entries_left -= len(directories) + len(files)
+        if entries_left < 0:
+            raise BoundEnvironmentError("selected_native_startup_entries_limit")
+        for name in (*directories, *files):
+            if key in os.fsencode(name):
+                raise BoundEnvironmentError("selected_native_startup_key_in_path")
+        for name in directories:
+            mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
+            if not stat.S_ISDIR(mode):
+                raise BoundEnvironmentError("selected_native_startup_unexpected_path")
+        for name in files:
+            mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
+            if stat.S_ISSOCK(mode):
+                continue
+            if not stat.S_ISREG(mode):
+                raise BoundEnvironmentError("selected_native_startup_unexpected_path")
+            descriptor = os.open(
+                name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+            )
+            with os.fdopen(descriptor, "rb") as source:
+                contents = source.read(bytes_left + 1)
+            if key in contents or len(contents) > bytes_left:
+                raise BoundEnvironmentError("selected_native_startup_file_rejected")
+            bytes_left -= len(contents)
 
 
 @contextmanager

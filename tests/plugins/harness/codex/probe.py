@@ -36,6 +36,8 @@ from kora.plugins.harness.codex.app_server_rpc import (
     Notification,
     RpcError,
     RpcFailure,
+    decode_object,
+    encode_frame,
 )
 from kora.plugins.harness.codex.app_server_session import AppServerTurnSession
 from kora.plugins.harness.codex.app_server_startup import (
@@ -4046,6 +4048,122 @@ async def run_selected_gated(name: str) -> None:
         raise ProbeFailure(str(error)) from None
 
 
+async def initialize_private_executor(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    writer.write(
+        encode_frame(
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {"clientName": "codex-environment", "resumeSessionId": None},
+            },
+            MAX_FRAME_BYTES,
+        )
+    )
+    await writer.drain()
+    frame = await reader.readline()
+    reply = decode_object(frame) if frame.endswith(b"\n") else None
+    require(
+        reply is not None
+        and type(reply.get("id")) is int
+        and reply["id"] == 1
+        and isinstance(reply.get("result"), dict)
+        and "error" not in reply,
+        "selected_private_executor_initialize_reply",
+    )
+    writer.write(encode_frame({"method": "initialized"}, MAX_FRAME_BYTES))
+    await writer.drain()
+
+
+async def run_selected_private_executor(bound: "BoundEnvironmentProbe") -> None:
+    from tests.plugins.harness.codex.selected_bound_environment import (
+        verify_startup_files,
+    )
+    from tests.plugins.harness.codex.selected_gated_stdio import (
+        SelectedGatedApp,
+        parent_sockets,
+    )
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + TURN_SECONDS
+    with selected_launch_workspace(bound) as root:
+        workspace = root / "workspace :@"
+        workspace.mkdir(mode=0o700)
+        launch = None
+        app = None
+        executor = None
+        try:
+            async with asyncio.timeout_at(deadline):
+                launch = bound.prepare(
+                    root,
+                    workspace,
+                    Path(CODEX),
+                    1,
+                    None,
+                    SYNTHETIC_BEARER,
+                    deadline,
+                    MAX_FRAME_BYTES,
+                )
+                if launch is None:
+                    raise ProbeFailure("selected_private_executor_binding_refused")
+                await bound.verify_private_context_refusal(launch)
+                previous = parent_sockets()
+                reader, writer = await launch.native.start_role_stdio(
+                    bound.role_name("exec")
+                )
+                (gate,) = launch.native.gates
+                executor = SelectedGatedApp.observe_started(
+                    gate, launch.clock, previous
+                )
+                await initialize_private_executor(reader, writer)
+                app_stream, app = await bound.start_context_role(launch, "app")
+                rpc = AppServerRpc(
+                    app_stream.reader,
+                    app_stream.writer,
+                    clock=loop.time,
+                    next_request_id=lambda: secrets.randbits(63),
+                    max_frame_bytes=MAX_FRAME_BYTES,
+                    max_messages=MAX_MESSAGES,
+                )
+                app_home = Path(launch.inputs.app_server.environment["CODEX_HOME"])
+                await initialize_app_server(
+                    rpc,
+                    startup_identity("selected-startup-ready", app_home, bound=True),
+                    deadline=deadline,
+                )
+                app.verify_bound_pair(
+                    executor, launch.expected_app, launch.expected_executor
+                )
+                app.verify_executable(launch.executable, launch.inputs.app_server.argv)
+                executor.verify_executable(
+                    launch.executable, launch.inputs.exec_server.argv
+                )
+                app.verify_checkout(launch.checkout.anchor)
+                executor.verify_checkout(launch.checkout.anchor)
+                bound.verify_live_configurations(launch)
+        finally:
+            if launch is not None:
+                launch.native.stop()
+                await launch.close(
+                    loop.time() + CLEANUP_SECONDS,
+                    (app, executor),
+                    natural_app_refusal=False,
+                )
+            bound.close_inputs()
+            for observation in (app, executor):
+                if observation is not None:
+                    observation.verify_revoked()
+            bound.settled = True
+        verify_startup_files(root, SYNTHETIC_BEARER.encode())
+        require(
+            bound.starts == 2 and bound.unix_sockets == 8 and bound.cwd_opens == 0,
+            "selected_private_executor_owner_witness",
+        )
+        diagnostic("INFO", "probe.selected_private_executor_verified", bound.case)
+        diagnostic("INFO", "probe.selected_children_reaped", bound.case)
+
+
 async def run_selected_bound(name: str) -> None:
     from kora.conformance.common import CONFORMANCE_COMPONENT, utc_now
     from kora.observability import LoggingSettings, configure_process
@@ -4064,6 +4182,7 @@ async def run_selected_bound(name: str) -> None:
         "context-legacy-live",
         "context-legacy-released",
         "context-cancel",
+        "private-executor",
         "path",
         "grant",
         "reserved",
@@ -4100,11 +4219,16 @@ async def run_selected_bound(name: str) -> None:
     )
     bound.install_witness()
     try:
-        await run_selected_launch(
-            "selected-bound-bash" if name == "bash-live" else "selected-startup-ready",
-            gated_stdio=True,
-            bound=bound,
-        )
+        if name == "private-executor":
+            await run_selected_private_executor(bound)
+        else:
+            await run_selected_launch(
+                "selected-bound-bash"
+                if name == "bash-live"
+                else "selected-startup-ready",
+                gated_stdio=True,
+                bound=bound,
+            )
     except (ChannelError, ProcessError, GatedObservationError, BoundEnvironmentError):
         raise ProbeFailure("selected_bound_native_observation_failed") from None
     finally:
