@@ -796,6 +796,8 @@ On 2026-11-10 the project owner accepted the [PostgreSQL schema fence](https://g
 
 The [narrow metadata foundation](https://github.com/realkarych/kora/issues/861) adds the relation and its exact scoped lookup on a caller-owned snapshot. SQLite uses a covering graph/version index and checks native field types before transferring admission values. PostgreSQL reads only the scope keys and the fixed-width witness fields. The migration preserves historical values and creates no witnesses for existing versions. Publication, authenticated representation and restore verification, and the combined physical loader remain pending.
 
+The [narrow relation restriction](https://github.com/realkarych/kora/issues/1262) binds SQLite scope and witness queries to the main database and PostgreSQL queries to the named parent relations. Scope refusal precedes witness access. The caller still verifies the actual PostgreSQL relation identity and its stable resolution across the coherent snapshot before relying on the result.
+
 The [SQLite layout observation](https://github.com/realkarych/kora/issues/1112) checks the ordinary 17-column rowid layout of `main.graph_version` and returns its supported page size and encoding on a healthy managed writer. It inspects the trusted migration-owned catalog without reading graph rows. The caller must abort on refusal before any dependent write or commit. The publisher must bind the observation to the same writer and actual main relation with stable schema, and independently verify its fixed value domains, storage bounds and authentic admission record. Restore and publication qualification remain separate.
 
 #### Graph version digest inputs

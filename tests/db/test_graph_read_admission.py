@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 from alembic import command
-from sqlalchemy import Connection, event, func, insert, inspect, select, update
+from sqlalchemy import Connection, event, func, insert, inspect, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.util import await_
@@ -344,6 +344,192 @@ async def test_graph_admission_uses_only_narrow_scope_on_a_wide_version(
     else:
         assert type(toast_size) is int
         assert toast_size > 0
+
+
+async def install_sqlite_decoys(
+    connection: AsyncConnection, original: Scope, foreign: Scope, other: Scope
+) -> None:
+    for statement in (
+        "CREATE TEMP TABLE graph AS SELECT id, namespace_id FROM main.graph",
+        "CREATE TEMP TABLE graph_version AS "
+        "SELECT id, graph_id FROM main.graph_version",
+        f"CREATE INDEX temp.{GRAPH_VERSION_SCOPE_INDEX} "
+        "ON graph_version (graph_id, id)",
+        "CREATE TEMP TABLE graph_version_read_admission AS "
+        "SELECT * FROM main.graph_version_read_admission WHERE 0",
+    ):
+        await connection.exec_driver_sql(statement)
+    await connection.execute(
+        text("INSERT INTO temp.graph (id, namespace_id) VALUES (:graph, :namespace)"),
+        {"graph": original.graph_id, "namespace": foreign.namespace_id},
+    )
+    await connection.execute(
+        text("INSERT INTO temp.graph_version (id, graph_id) VALUES (:version, :graph)"),
+        {"version": original.version_id, "graph": other.graph_id},
+    )
+
+
+async def install_postgres_decoys(
+    connection: AsyncConnection, original: Scope, foreign: Scope, other: Scope
+) -> None:
+    for statement in (
+        "CREATE TABLE graph_child () INHERITS (graph)",
+        "CREATE TABLE graph_version_child () INHERITS (graph_version)",
+        "CREATE TABLE admission_child () INHERITS (graph_version_read_admission)",
+    ):
+        await connection.exec_driver_sql(statement)
+    await connection.execute(
+        text("INSERT INTO graph_child SELECT * FROM ONLY graph WHERE id = :graph"),
+        {"graph": original.graph_id},
+    )
+    await connection.execute(
+        text("UPDATE ONLY graph_child SET namespace_id = :namespace"),
+        {"namespace": foreign.namespace_id},
+    )
+    await connection.execute(
+        text(
+            "INSERT INTO graph_version_child SELECT * FROM ONLY graph_version "
+            "WHERE id = :version"
+        ),
+        {"version": original.version_id},
+    )
+    await connection.execute(
+        text("UPDATE ONLY graph_version_child SET graph_id = :graph"),
+        {"graph": other.graph_id},
+    )
+
+
+async def insert_decoy_witnesses(
+    connection: AsyncConnection, dialect: Dialect, original: Scope, missing: Scope
+) -> None:
+    statement = (
+        text(
+            "INSERT INTO temp.graph_version_read_admission VALUES (:version, 1, 97, 51)"
+        )
+        if dialect is Dialect.SQLITE
+        else text("INSERT INTO admission_child VALUES (:version, 1, 97, 51)")
+    )
+    for scope in (original, missing):
+        await connection.execute(statement, {"version": scope.version_id})
+
+
+async def assert_original_admission_with_decoys(
+    connection: AsyncConnection,
+    dialect: Dialect,
+    original: Scope,
+    foreign: Scope,
+    other: Scope,
+    missing: Scope,
+) -> None:
+    ordinary_scope = text(
+        "SELECT v.id FROM graph g JOIN graph_version v ON v.graph_id = g.id "
+        "WHERE g.namespace_id = :namespace AND g.id = :graph AND v.id = :version"
+    )
+    ordinary_witness = text(
+        "SELECT db_input_bytes FROM graph_version_read_admission "
+        "WHERE graph_version_id = :version ORDER BY db_input_bytes"
+    )
+
+    ordinary_scopes: list[object] = []
+    decoy_results: list[GraphVersionReadAdmission | None] = []
+    scope_queries: list[list[tuple[str, tuple[object, ...]]]] = []
+    for scope in (foreign, other):
+        ordinary_scopes.append(
+            (
+                await connection.execute(
+                    ordinary_scope,
+                    {
+                        "namespace": scope.namespace_id,
+                        "graph": scope.graph_id,
+                        "version": scope.version_id,
+                    },
+                )
+            ).scalar_one()
+        )
+        with executed_queries(connection) as queries:
+            decoy_results.append(await read_admission(connection, scope))
+        scope_queries.append(queries)
+    ordinary_widths: list[object] = list(
+        (
+            await connection.execute(ordinary_witness, {"version": original.version_id})
+        ).scalars()
+    )
+    ordinary_missing: object = (
+        await connection.execute(ordinary_witness, {"version": missing.version_id})
+    ).scalar_one()
+    actual = await read_admission(connection, original)
+    absent = await read_admission(connection, missing)
+    native = (
+        await connection.execute(
+            graph_version_admission_statement(
+                dialect,
+                original.version_id,
+                ADMISSION.db_input_bytes,
+                ADMISSION.resource_transport_bytes,
+            )
+        )
+    ).one()
+
+    assert ordinary_scopes == [original.version_id, original.version_id]
+    assert ordinary_widths == ([97] if dialect is Dialect.SQLITE else [97, 101])
+    assert ordinary_missing == 97
+    assert decoy_results == [None, None]
+    for queries in scope_queries:
+        [(statement, _)] = queries
+        assert "graph_version_read_admission" not in statement
+    assert actual == ADMISSION
+    assert absent is None
+    assert tuple(native) == (
+        None,
+        ADMISSION.db_input_bytes,
+        ADMISSION.resource_transport_bytes,
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_admission_binds_scope_and_witness_to_original_relations(
+    database: Database,
+) -> None:
+    dialect = database.dialect
+    ledger = ConnectionLedger(database)
+
+    async with database.transaction() as writer:
+        seeder = Seeder(writer)
+        namespace = await seeder.namespace()
+        foreign_namespace = await seeder.namespace("foreign")
+        graph_id = await seeder.graph(namespace)
+        other_graph = await seeder.graph(namespace, "other")
+        version = await seeder.graph_version(graph_id)
+        witnessless = await seeder.graph_version(graph_id, 2)
+        original = Scope(namespace, graph_id, version)
+        foreign = Scope(foreign_namespace, graph_id, version)
+        other = Scope(namespace, other_graph, version)
+        missing = Scope(namespace, graph_id, witnessless)
+        await insert_admission(writer, version)
+        if dialect is Dialect.SQLITE:
+            await install_sqlite_decoys(writer, original, foreign, other)
+            try:
+                await insert_decoy_witnesses(writer, dialect, original, missing)
+                await assert_original_admission_with_decoys(
+                    writer, dialect, original, foreign, other, missing
+                )
+            finally:
+                for statement in (
+                    "DROP TABLE temp.graph_version_read_admission",
+                    "DROP TABLE temp.graph_version",
+                    "DROP TABLE temp.graph",
+                ):
+                    await writer.exec_driver_sql(statement)
+        else:
+            await install_postgres_decoys(writer, original, foreign, other)
+            await insert_decoy_witnesses(writer, dialect, original, missing)
+    if dialect is Dialect.POSTGRESQL:
+        async with database.read_snapshot() as reader:
+            await assert_original_admission_with_decoys(
+                reader, dialect, original, foreign, other, missing
+            )
+
+    assert ledger.outstanding == database.units_in_flight() == 0
 
 
 async def upgrade_predecessor(database: Database) -> None:
