@@ -25,10 +25,10 @@ SQLITE_RELATIONS = text(
     (SELECT CAST(:stage_id AS TEXT) AS stage_id) AS selected
     LEFT JOIN main.graph_deployment_stage_promotion_intent AS intent
         INDEXED BY sqlite_autoindex_graph_deployment_stage_promotion_intent_1
-        ON intent.stage_id = selected.stage_id
+        ON intent.stage_id COLLATE BINARY = selected.stage_id
     LEFT JOIN main.graph_deployment_stage_promotion_settlement AS settlement
         INDEXED BY sqlite_autoindex_graph_deployment_stage_promotion_settlement_1
-        ON settlement.stage_id = selected.stage_id
+        ON settlement.stage_id COLLATE BINARY = selected.stage_id
     """
 )
 POSTGRES_RELATIONS = text(

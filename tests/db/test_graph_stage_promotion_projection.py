@@ -220,6 +220,61 @@ async def test_promotion_document_projection_uses_both_exact_native_keys(
             assert plan.count("Index Cond: (stage_id = ") == 2
 
 
+@pytest.mark.asyncio
+async def test_promotion_document_projection_never_matches_a_cased_variant(
+    database: Database,
+) -> None:
+    sqlite = database.dialect is Dialect.SQLITE
+    async with database.transaction() as connection:
+        selected = await seed_stage(connection, "selected")
+        await connection.execute(
+            INTENT_INSERT, selected.request("selected", BOUNDARY_BYTES)
+        )
+        if sqlite:
+            await connection.exec_driver_sql(
+                "DROP TABLE graph_deployment_stage_promotion_settlement"
+            )
+            await connection.exec_driver_sql(
+                "CREATE TABLE graph_deployment_stage_promotion_settlement ("
+                "stage_id TEXT COLLATE NOCASE NOT NULL, "
+                "observation_bytes BLOB NOT NULL, "
+                "PRIMARY KEY (stage_id COLLATE BINARY))"
+            )
+        else:
+            await connection.exec_driver_sql(
+                "ALTER TABLE graph_deployment_stage_promotion_settlement "
+                "DROP CONSTRAINT ck_promotion_settlement_stage_id_domain, "
+                "DROP CONSTRAINT fk_promotion_settlement_intent"
+            )
+        variant = selected.stage_id.lower()
+        assert variant != selected.stage_id
+        await connection.execute(
+            SETTLEMENT_INSERT,
+            {"stage_id": variant, "observation_bytes": b"foreign settlement"},
+        )
+
+    plan = ""
+    async with database.read_snapshot() as connection:
+        with executed_queries(connection) as queries:
+            exact = await projected(
+                connection, selected.stage_id, MAX_PROMOTION_PAIR_BYTES
+            )
+        if sqlite:
+            [(statement, arguments)] = queries
+            result = await connection.exec_driver_sql(
+                "EXPLAIN QUERY PLAN " + statement, arguments
+            )
+            try:
+                plan = "\n".join(str(tuple(row)) for row in result)
+            finally:
+                result.close()
+
+    assert exact == (True, False, WIDTH, None, BOUNDARY_BYTES, None)
+    if sqlite:
+        for relation in (INTENT_TABLE, SETTLEMENT_TABLE):
+            assert f"USING INDEX sqlite_autoindex_{relation}_1 (stage_id=?)" in plan
+
+
 @pytest.mark.parametrize(
     ("dialect", "stage_id", "allowance"),
     [
