@@ -17,6 +17,7 @@ from kora.plugins.harness.codex.app_server_rpc import (
     rpc_integer,
 )
 from kora.plugins.harness.codex.launch_configuration import CODEX_VERSION
+from tests.plugins.harness.codex.selected_executor_peer import ExecutorPeerWitness
 
 GuardKind = Literal["bash", "patch"]
 REFUSAL = "kora fixture withheld the executor effect"
@@ -100,12 +101,14 @@ class ExecutorGuard:
         self._admitted = False
         self._closed = False
         self._active: web.WebSocketResponse | None = None
+        self._peer_witness: ExecutorPeerWitness | None = None
         self._pump: asyncio.Task[None] | None = None
         self._process_id: str | None = None
         self.failure: str | None = None
         self.attempted = 0
         self.forwarded = 0
         self.withheld = 0
+        self.native_frames = 0
         app = web.Application()
         app.router.add_get("/", self._handle)
         logger = logging.Logger("executor_fixture", logging.WARNING)
@@ -123,6 +126,11 @@ class ExecutorGuard:
                 return f"ws://127.0.0.1:{port}"
             case _:
                 raise GuardFailure("executor fixture listener identity mismatch")
+
+    def bind_peer(self, witness: ExecutorPeerWitness) -> None:
+        if self._peer_witness is not None or self._closed or self._admitted:
+            raise GuardFailure("executor fixture peer binding unavailable")
+        self._peer_witness = witness
 
     def set_thread(self, thread: str) -> None:
         if self._thread is not None or self._closed:
@@ -339,6 +347,7 @@ class ExecutorGuard:
         ):
             raise GuardFailure("executor fixture cannot forward frame")
         self._backend_writer.write(data)
+        self.native_frames += 1
         if effect:
             self.forwarded += 1
         await self._backend_writer.drain()
@@ -419,6 +428,11 @@ class ExecutorGuard:
             or not ws.can_prepare(request).ok
         ):
             return web.Response(status=400)
+        if self._peer_witness is not None and (
+            not self._peer_witness.admits(request)
+            or asyncio.get_running_loop().time() >= self._deadline
+        ):
+            return web.Response(status=403)
         self._admitted = True
         try:
             async with asyncio.timeout_at(self._deadline):

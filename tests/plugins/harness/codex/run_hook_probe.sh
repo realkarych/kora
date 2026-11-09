@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-native-context|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-bound-configuration|1:--check-selected-bound-bash|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-selected-executor-guard|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-gated-stdio|1:--check-selected-native-context|1:--check-selected-bound-environment|1:--check-selected-bound-slots|1:--check-selected-bound-fence|1:--check-selected-bound-installation|1:--check-selected-bound-checkout|1:--check-selected-bound-configuration|1:--check-selected-bound-bash|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-selected-executor-guard|1:--check-selected-executor-peer|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-native-context|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-bound-configuration|--check-selected-bound-bash|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-selected-executor-guard|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-gated-stdio|--check-selected-native-context|--check-selected-bound-environment|--check-selected-bound-slots|--check-selected-bound-fence|--check-selected-bound-installation|--check-selected-bound-checkout|--check-selected-bound-configuration|--check-selected-bound-bash|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-selected-executor-guard|--check-selected-executor-peer|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
         exit 2
         ;;
 esac
@@ -137,7 +137,7 @@ probe_context() {
     fi
     if [ "$variant" = selected-executor-guard ]; then
         set -- "$@" -C "$reservation" linux-packages \
-            -C "$probe_dir" guarded_executor.py selected_executor_guard.py
+            -C "$probe_dir" guarded_executor.py selected_executor_guard.py selected_executor_peer.py
     fi
     case "$variant" in
         selected-gated-*)
@@ -175,6 +175,18 @@ run_variant() {
     wait "$attach_pid" || status=$?
     attach_pid=
     return "$status"
+}
+
+run_guard_case() {
+    guard_status=0
+    run_variant selected-executor-guard "$1" >"$reservation/guard.log" 2>&1 || guard_status=$?
+    if grep -Fq 'kora-executor-guard-malformed-header-canary' "$reservation/guard.log"; then
+        printf '%s\n' '{"level":"ERROR","event":"probe.executor_guard_http_payload_logged"}' >&2
+        exit 1
+    fi
+    cat "$reservation/guard.log"
+    [ "$guard_status" -eq 0 ] || exit "$guard_status"
+    grep -Fq '"event":"probe.executor_guard_http_error"' "$reservation/guard.log"
 }
 
 trap 'cleanup "$?"' EXIT
@@ -525,17 +537,14 @@ case "${1:-}" in
             release_container
         done
         for probe_case in bash-allow bash-deny bash-error bash-timeout patch-allow patch-deny patch-error patch-timeout patch-staged-timeout; do
-            guard_status=0
-            run_variant selected-executor-guard "$probe_case" >"$reservation/guard.log" 2>&1 || guard_status=$?
-            if grep -Fq 'kora-executor-guard-malformed-header-canary' "$reservation/guard.log"; then
-                printf '%s\n' '{"level":"ERROR","event":"probe.executor_guard_http_payload_logged"}' >&2
-                exit 1
-            fi
-            cat "$reservation/guard.log"
-            [ "$guard_status" -eq 0 ] || exit "$guard_status"
-            grep -Fq '"event":"probe.executor_guard_http_error"' "$reservation/guard.log"
+            run_guard_case "$probe_case"
             release_container
         done
+        ;;
+    --check-selected-executor-peer)
+        prepare_locked_probe codex-probe
+        run_guard_case peer-bash-allow
+        release_container
         ;;
     --check-app-server-rpc)
         run_variant default --client-complete

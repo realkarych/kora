@@ -33,6 +33,7 @@ from tests.plugins.harness.codex.guarded_executor import (
     verify_non_upgrade_refused,
     verify_upgrade_refused,
 )
+from tests.plugins.harness.codex.selected_executor_peer import ExecutorPeerWitness
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
     SELECTED_HOOK_CASES,
@@ -211,7 +212,7 @@ def verify_marker(scenario: Scenario, root: Path, workspace: Path) -> None:
         )
 
 
-async def run_guard(root: Path, scenario: Scenario) -> None:
+async def run_guard(root: Path, scenario: Scenario, *, witness_peer: bool) -> None:
     probe.CONTROL.mkdir(mode=0o700)
     (probe.CONTROL / "decision").write_text(scenario.case)
     (probe.CONTROL / "executor-guard").touch()
@@ -230,6 +231,7 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
     app: asyncio.subprocess.Process | None = None
     backend: asyncio.subprocess.Process | None = None
     guard: ExecutorGuard | None = None
+    peer: ExecutorPeerWitness | None = None
     timeout_watcher: asyncio.Task[None] | None = None
     with ExitStack() as owned:
         try:
@@ -290,6 +292,20 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
                 environment = materialize_native_inputs(recipe.app_server)
                 environment["CODEX_API_KEY"] = probe.SYNTHETIC_BEARER
                 app = await spawn(recipe.app_server.argv, workspace, environment)
+                if witness_peer:
+                    app_pidfd = probe.open_child_pidfd(app.pid)
+                    owned.callback(os.close, app_pidfd)
+                    peer = ExecutorPeerWitness(app.pid, app_pidfd)
+                    guard.bind_peer(peer)
+                    await verify_upgrade_refused(endpoint, token, 403)
+                    probe.require(
+                        peer.decoy_refused == 1
+                        and peer.admitted
+                        == peer.unavailable
+                        == guard.native_frames
+                        == 0,
+                        "guard_decoy_peer_not_distinguished",
+                    )
                 reader, writer = stdio(app)
                 rpc = AppServerRpc(
                     reader,
@@ -368,6 +384,12 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
                     "guard_hook_receipt_identity_mismatch",
                 )
                 verify_marker(scenario, root, workspace)
+                if peer is not None:
+                    probe.require(
+                        peer.admitted == peer.decoy_refused == 1
+                        and peer.unavailable == 0,
+                        "guard_selected_peer_not_distinguished",
+                    )
                 probe.diagnostic(
                     "INFO", "probe.selected_executor_guard_verified", scenario.case
                 )
@@ -385,13 +407,26 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
                     fixture, server, app, backend, cleanup_deadline
                 )
 
+        if peer is not None:
+            probe.require(
+                peer.sockets_closed() and loop.time() < cleanup_deadline,
+                "guard_peer_sockets_open",
+            )
+            probe.diagnostic(
+                "INFO", "probe.selected_executor_peer_verified", scenario.case
+            )
+
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in SCENARIOS:
+    if len(sys.argv) != 2:
+        return 2
+    witness_peer = sys.argv[1] == "peer-bash-allow"
+    scenario = SCENARIOS.get("bash-allow" if witness_peer else sys.argv[1])
+    if scenario is None:
         return 2
     try:
         with TemporaryDirectory(prefix="kora-codex-guard-", dir="/tmp") as scratch:
-            asyncio.run(run_guard(Path(scratch), SCENARIOS[sys.argv[1]]))
+            asyncio.run(run_guard(Path(scratch), scenario, witness_peer=witness_peer))
     except probe.ProbeFailure as error:
         probe.diagnostic("ERROR", "probe.selected_executor_guard_failed", str(error))
         return 1

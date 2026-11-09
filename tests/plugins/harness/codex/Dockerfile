@@ -59,7 +59,7 @@ COPY selected_shell_patch.py /usr/local/lib/python3.11/site-packages/tests/plugi
 
 FROM selected-hook-failures AS selected-executor-guard
 COPY linux-packages /usr/local/lib/python3.11/site-packages/
-COPY probe.py guarded_executor.py selected_executor_guard.py /usr/local/lib/python3.11/site-packages/tests/plugins/harness/codex/
+COPY probe.py guarded_executor.py selected_executor_guard.py selected_executor_peer.py /usr/local/lib/python3.11/site-packages/tests/plugins/harness/codex/
 ENTRYPOINT ["/usr/local/bin/python3", "-I", "-m", "tests.plugins.harness.codex.selected_executor_guard"]
 
 FROM shell-controls AS missing-managed-hook
