@@ -31,7 +31,6 @@ from kora.db.graph_preparation_reads import (
 from kora.db.graph_stage_promotion_custody_v1 import MAX_PROMOTION_DOCUMENT_BYTES_V1
 from kora.db.graph_stage_promotion_intent_reads import (
     GraphStagePromotionIntentScalars,
-    PromotionIntentScalarsRejected,
     read_graph_stage_promotion_intent_scalars,
     read_intent_text_width_factor,
 )
@@ -44,6 +43,7 @@ from kora.db.graph_stage_promotion_projection import (
     PromotionDocumentProjectionRejected,
     graph_stage_promotion_document_statement,
 )
+from kora.db.maintenance import PromotionIntentScalarsRejected
 from kora.db.transactions import raise_private_metadata_error
 
 MAX_PROMOTION_SNAPSHOT_BYTES: int = MAX_STAGE_OCCURRENCES * MAX_PROMOTION_PAIR_BYTES

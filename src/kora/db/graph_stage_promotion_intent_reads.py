@@ -1,8 +1,6 @@
-import sqlite3
 from dataclasses import dataclass
-from typing import cast
+from functools import partial
 
-from aiosqlite import Connection as SQLiteDriver
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import TextClause
@@ -13,19 +11,16 @@ from kora.db.graph_deployment_stage_reads import (
     STORE_ID_WIDTH,
     GraphStage,
 )
-from kora.db.graph_stage_promotion_custody_v1 import INTENT_TABLE
 from kora.db.identifiers import is_identifier
+from kora.db.maintenance import (
+    PROMOTION_INTENT_TEXT_WIDTHS,
+    PromotionIntentScalarsRejected,
+    observe_sqlite_promotion_intent,
+    require_promotion_intent_width,
+)
 from kora.db.types import POSTGRESQL, SQLITE
 
 SQLITE_ENCODING: TextClause = text("PRAGMA main.encoding")
-SQLITE_METADATA: str = """
-SELECT rowid, ?, typeof(store_id), typeof(payload_digest),
-       typeof(operation_id), typeof(request_digest),
-       typeof(fence_incarnation), typeof(content_generation)
-  FROM main.graph_deployment_stage_promotion_intent
-       INDEXED BY sqlite_autoindex_graph_deployment_stage_promotion_intent_1
- WHERE stage_id COLLATE BINARY = ?
-"""
 SQLITE_SCALARS: TextClause = text(
     """
 SELECT store_id, payload_digest, fence_incarnation,
@@ -52,19 +47,6 @@ SELECT store_id, payload_digest, fence_incarnation,
 """
 )
 
-TEXT_WIDTHS: tuple[tuple[str, int, int], ...] = (
-    ("store_id", 1, STORE_ID_WIDTH),
-    ("payload_digest", PAYLOAD_DIGEST_WIDTH, PAYLOAD_DIGEST_WIDTH),
-    ("operation_id", 1, STORE_ID_WIDTH),
-    ("request_digest", PAYLOAD_DIGEST_WIDTH, PAYLOAD_DIGEST_WIDTH),
-)
-SQLITE_STORAGE: tuple[str, ...] = ("text", "text", "text", "text", "integer", "integer")
-
-
-class PromotionIntentScalarsRejected(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__("graph stage promotion intent scalars rejected")
-
 
 @dataclass(frozen=True, slots=True, repr=False)
 class GraphStagePromotionIntentScalars:
@@ -74,36 +56,6 @@ class GraphStagePromotionIntentScalars:
     operation_id: str
     request_digest: str
     content_generation: int
-
-
-def _require_width(width: object, lower: int, upper: int, factor: int) -> None:
-    if (
-        type(width) is not int
-        or not lower * factor <= width <= upper * factor
-        or width % factor
-    ):
-        raise PromotionIntentScalarsRejected()
-
-
-class _SQLiteWidthRow:
-    __slots__ = ()
-
-    def __init__(self, cursor: sqlite3.Cursor, row: tuple[object, ...]) -> None:
-        if len(row) != 2 + len(SQLITE_STORAGE):
-            raise PromotionIntentScalarsRejected()
-        rowid, factor, *storage = row
-        if (
-            type(rowid) is not int
-            or type(factor) is not int
-            or factor not in (1, 2)
-            or tuple(storage) != SQLITE_STORAGE
-        ):
-            raise PromotionIntentScalarsRejected()
-        for name, lower, upper in TEXT_WIDTHS:
-            with cursor.connection.blobopen(
-                INTENT_TABLE, name, rowid, readonly=True, name="main"
-            ) as value:
-                _require_width(len(value), lower, upper, factor)
 
 
 async def read_intent_text_width_factor(connection: AsyncConnection) -> int:
@@ -125,24 +77,9 @@ async def _sqlite_intent_present(
     connection: AsyncConnection, stage_id: str, width_factor: int, deadline: float
 ) -> bool:
     async def observe() -> bool:
-        require_snapshot_time(deadline)
-        if connection.invalidated:
-            raise PromotionIntentScalarsRejected()
-        raw = await connection.get_raw_connection()
-        driver: object = raw.driver_connection
-        if not isinstance(driver, SQLiteDriver) or not driver.in_transaction:
-            raise PromotionIntentScalarsRejected()
-        async with driver.cursor() as cursor:
-            cursor.row_factory = _SQLiteWidthRow
-            require_snapshot_time(deadline)
-            await cursor.execute(SQLITE_METADATA, (width_factor, stage_id))
-            require_snapshot_time(deadline)
-            value = cast(object, await cursor.fetchone())
-        if value is None:
-            return False
-        if type(value) is not _SQLiteWidthRow:
-            raise PromotionIntentScalarsRejected()
-        return True
+        return await observe_sqlite_promotion_intent(
+            connection, stage_id, width_factor, partial(require_snapshot_time, deadline)
+        )
 
     return await start_snapshot_phase(observe, nothing)
 
@@ -162,10 +99,10 @@ async def _postgres_intent_present(connection: AsyncConnection, stage_id: str) -
     row = await _selected_row(connection, POSTGRES_METADATA, stage_id)
     if row is None:
         return False
-    if len(row) != len(TEXT_WIDTHS):
+    if len(row) != len(PROMOTION_INTENT_TEXT_WIDTHS):
         raise PromotionIntentScalarsRejected()
-    for width, (_, lower, upper) in zip(row, TEXT_WIDTHS, strict=True):
-        _require_width(width, lower, upper, 1)
+    for width, (_, lower, upper) in zip(row, PROMOTION_INTENT_TEXT_WIDTHS, strict=True):
+        require_promotion_intent_width(width, lower, upper, 1)
     return True
 
 
