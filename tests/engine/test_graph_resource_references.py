@@ -11,8 +11,13 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import insert, select
 
 from kora.db.connection import Database, Dialect
+from kora.db.graph_resource_owner_reads import (
+    AcquiredGraphResourceOwners,
+    NativeOwnerRow,
+)
 from kora.db.graph_resource_transport import graph_resource_binary_projection
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected, ObjectReader
+from kora.db.identifiers import encode
 from kora.db.migrations import upgrade_database
 from kora.db.reads import graph_version_by_number
 from kora.db.tables import graph_version
@@ -21,12 +26,15 @@ from kora.engine.graph_command_manifests import (
     build_declared_command_manifests,
 )
 from kora.engine.graph_resource_references import (
+    CheckedNativeGraphResourceReferences,
     GraphResourceOwner,
     GraphResourceReferenceLimits,
     GraphResourceReferences,
     GraphResourceScope,
     NativeGraphResourceTransport,
+    NativeOwnerState,
     NativeResourceEncoding,
+    PreparedGraphResourceReferences,
     build_graph_resource_references,
     check_graph_resource_references,
 )
@@ -716,3 +724,205 @@ async def test_native_physical_references_match_sqlite_utf16(
         await verify_native_references(database, encoding)
     finally:
         await database.close()
+
+
+NATIVE_SCOPE = GraphResourceScope(encode(1), encode(2), encode(3))
+
+
+def native_owner_row(
+    owner: GraphResourceOwner,
+    ordinal: int,
+    state: NativeOwnerState,
+    encoding: NativeResourceEncoding,
+) -> NativeOwnerRow:
+    reference = owner.reference
+    return (
+        ordinal,
+        reference.total_size,
+        owner.path[2].encode(encoding) if len(owner.path) == 5 else None,
+        owner.path[-1].encode(encoding),
+        owner.name.encode(encoding),
+        reference.address.storage_identity.store_id.encode(encoding),
+        reference.address.payload_digest.encode(encoding),
+        reference.object_incarnation.encode(encoding),
+        state.encode(encoding),
+    )
+
+
+def native_owner_case(
+    encoding: NativeResourceEncoding,
+) -> tuple[
+    str,
+    JsonObject,
+    PreparedGraphResourceReferences,
+    NativeGraphResourceTransport,
+    tuple[NativeOwnerRow, NativeOwnerRow],
+]:
+    name = "é𐐀.sh"
+    config = authored_manifest([resource(name)])
+    ir = canonical(command_document(config, config))
+    owners = (
+        GraphResourceOwner(NATIVE_SCOPE, ROOT, name, content(incarnation=MARKER)),
+        GraphResourceOwner(NATIVE_SCOPE, BODY, name, content(incarnation="body-owner")),
+    )
+    built = build_graph_resource_references(ir, NATIVE_SCOPE, owners, limits=LIMITS)
+    first, second = built.owners
+    return (
+        ir,
+        declared(ir),
+        built,
+        NativeGraphResourceTransport(built.text.encode(encoding), encoding),
+        (
+            native_owner_row(first, 0, "expiring", encoding),
+            native_owner_row(second, 1, "missing", encoding),
+        ),
+    )
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16le", "utf-16be"])
+def test_native_owner_reconciliation_keeps_canonical_state_vector(
+    encoding: NativeResourceEncoding,
+) -> None:
+    ir, logical, built, wire, rows = native_owner_case(encoding)
+    batch = AcquiredGraphResourceOwners(NATIVE_SCOPE.version_id, rows)
+
+    checked = check_graph_resource_references(
+        ir, logical, wire, NATIVE_SCOPE, batch, limits=LIMITS
+    )
+    legacy = check_graph_resource_references(
+        ir,
+        logical,
+        ObjectReader(built.text).object(),
+        NATIVE_SCOPE,
+        tuple(reversed(built.owners)),
+        limits=LIMITS,
+    )
+
+    assert type(checked) is CheckedNativeGraphResourceReferences
+    assert checked.owner_states == ("expiring", "missing")
+    assert checked.text == legacy.text == built.text
+    assert type(legacy) is GraphResourceReferences
+    assert MARKER not in repr(checked)
+    with pytest.raises(TypeError, match="require explicit access"):
+        pickle.dumps(checked)
+    with pytest.raises(ValueError, match="not iterable"):
+        jsonable_encoder(checked)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "version",
+        "tuple-order",
+        "canonical-order",
+        "row-shape",
+        "ordinal-type",
+        "file-type",
+        "batch-type",
+        "metadata-width",
+        "missing",
+        "extra",
+        "duplicate",
+        "store",
+        "incarnation",
+        "model",
+        "state",
+        "codec",
+    ],
+)
+def test_native_owner_reconciliation_refuses_inconsistent_evidence(case: str) -> None:
+    ir, logical, _, wire, (first, second) = native_owner_case("utf-8")
+    rows: tuple[NativeOwnerRow, ...] = (first, second)
+    version = NATIVE_SCOPE.version_id
+    limits = LIMITS
+    if case == "version":
+        version = encode(4)
+    elif case == "tuple-order":
+        rows = (second, first)
+    elif case == "canonical-order":
+        rows = ((0, *second[1:]), (1, *first[1:]))
+    elif case == "row-shape":
+        rows = (cast(NativeOwnerRow, first[:-1]), second)
+    elif case == "ordinal-type":
+        rows = ((False, *first[1:]), second)
+    elif case == "file-type":
+        rows = (
+            cast(NativeOwnerRow, (*first[:4], bytearray(first[4]), *first[5:])),
+            second,
+        )
+    elif case == "batch-type":
+        rows = cast("tuple[NativeOwnerRow, ...]", [first, second])
+    elif case == "metadata-width":
+        rows = ((*first[:5], b"x" * 257, *first[6:]), second)
+        limits = replace(LIMITS, source_bytes=len(wire.payload) + len(rows))
+    elif case == "missing":
+        rows = (first,)
+    elif case == "extra":
+        rows = (first, second, (2, *first[1:]))
+    elif case == "duplicate":
+        rows = (first, (1, *first[1:]))
+    elif case == "store":
+        rows = ((*first[:5], b"Another-store", *first[6:]), second)
+    elif case == "incarnation":
+        rows = ((*first[:7], b"Another-incarnation", first[-1]), second)
+    elif case == "model":
+        rows = ((*first[:5], b"invalid " + MARKER.encode(), *first[6:]), second)
+    elif case == "state":
+        rows = ((*first[:-1], b"present!"), second)
+    else:
+        wire = NativeGraphResourceTransport(wire.payload, "utf-16le")
+    batch = AcquiredGraphResourceOwners(version, rows)
+
+    with pytest.raises(GraphValueRejected) as refusal:
+        check_graph_resource_references(
+            ir, logical, wire, NATIVE_SCOPE, batch, limits=limits
+        )
+
+    assert_refused(refusal.value, GraphValueFailure.INVALID)
+    frames = {
+        frame.f_code.co_name: frame.f_locals
+        for frame, _ in walk_tb(refusal.value.__traceback__)
+    }
+    assert set(frames["check_graph_resource_references"]) == {"limits", "result"}
+    assert "_decode_native_owner" not in frames
+
+
+def native_owner_admission_units(
+    wire: NativeGraphResourceTransport, rows: tuple[NativeOwnerRow, ...]
+) -> dict[str, int]:
+    vector_units = 4 + 4 * len(rows)
+    source = len(wire.payload) + len(rows)
+    scratch = 22 * len(wire.payload) + vector_units
+    work = 30 * len(wire.payload) + len(rows) + vector_units
+    for row in rows:
+        native_bytes = sum(len(cell) for cell in row if type(cell) is bytes)
+        metadata = 256 + 2 * (len(row[5]) + len(row[6]) + len(row[7]))
+        retained = 16 + 4 * native_bytes + 9 * metadata
+        source += native_bytes
+        scratch += retained
+        work += native_bytes + retained + 4 * native_bytes + 12 * metadata
+    return {"source_bytes": source, "scratch": scratch, "work": work}
+
+
+@pytest.mark.parametrize("dimension", ["source_bytes", "scratch", "work"])
+def test_native_owner_admission_charges_prior_wire_and_rows_before_decoding(
+    dimension: str,
+) -> None:
+    ir, logical, _, wire, (first, second) = native_owner_case("utf-8")
+    rows = (first, (*second[:4], b"\xff", *second[5:]))
+    batch = AcquiredGraphResourceOwners(NATIVE_SCOPE.version_id, rows)
+    units = native_owner_admission_units(wire, rows)[dimension]
+    exact = replace(LIMITS, **{dimension: units})
+    short = replace(LIMITS, **{dimension: units - 1})
+
+    with pytest.raises(GraphValueRejected) as invalid:
+        check_graph_resource_references(
+            ir, logical, wire, NATIVE_SCOPE, batch, limits=exact
+        )
+    with pytest.raises(GraphValueRejected) as budget:
+        check_graph_resource_references(
+            ir, logical, wire, NATIVE_SCOPE, batch, limits=short
+        )
+
+    assert_refused(invalid.value, GraphValueFailure.INVALID)
+    assert_refused(budget.value, GraphValueFailure.BUDGET)
