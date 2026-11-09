@@ -1,5 +1,6 @@
 import asyncio
 import os
+from collections.abc import Awaitable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -13,14 +14,19 @@ from kora.db.connection import (
     Database,
     DatabaseClosedError,
     DatabaseSettings,
+    DatabaseSnapshotFailure,
+    DatabaseSnapshotRejected,
     Dialect,
     PostgreSQLDurabilityError,
 )
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
+    REFUSAL_DEADLINE_SECONDS,
     ConnectionLedger,
     narrow_settings,
+    until,
 )
+from tests.db.test_sqlite_writer_entry import sqlite_driver
 from tests.support.databases import (
     RYUK_VARIABLE,
     TEMPLATE_DATABASE,
@@ -194,6 +200,139 @@ async def test_postgres_entry_refuses_weak_session_then_reuses_the_backend(
     assert ledger.opened == ledger.closed == (1 if postgres else 2)
     assert ledger.outstanding == ledger.closed_while_checked_out == 0
     assert database.units_in_flight() == 0
+
+
+SnapshotProbe = tuple[object, tuple[object, ...], list[object]]
+
+
+async def read_probe_snapshot(database: Database, deadline: float) -> SnapshotProbe:
+    async with database.read_snapshot(deadline=deadline) as reader:
+        raw = await reader.get_raw_connection()
+        if database.dialect is Dialect.POSTGRESQL:
+            result = await reader.exec_driver_sql(
+                "SELECT current_setting('transaction_isolation'), "
+                "current_setting('transaction_read_only'), "
+                "current_setting('synchronous_commit')"
+            )
+        else:
+            result = await reader.exec_driver_sql("PRAGMA query_only")
+        mode: tuple[object, ...] = tuple(result.one())
+        rows: list[object] = list((await reader.execute(text(READ_PROBE))).scalars())
+        return raw.driver_connection, mode, rows
+
+
+@pytest.mark.asyncio
+async def test_timed_snapshot_composes_with_native_durable_writer_entry(
+    empty_database_settings: DatabaseSettings,
+) -> None:
+    settings = narrow_settings(empty_database_settings, pool_size=1)
+    postgres = settings.dialect is Dialect.POSTGRESQL
+    database = Database(
+        settings,
+        require_postgresql_wal_settings=postgres,
+        require_sqlite_full_sync=not postgres,
+    )
+    ledger = ConnectionLedger(database)
+    engine = database.writer_engine.sync_engine
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    drivers: list[object] = []
+    writes: list[int] = []
+
+    def hold(connection: Connection) -> None:
+        drivers.append(connection.connection.driver_connection)
+        entered.set()
+        await_(release.wait())
+
+    def hold_postgres(
+        connection: Connection, cursor: object, statement: str, *args: object
+    ) -> None:
+        if statement == POSTGRESQL_WAL_SETTINGS_QUERY.text:
+            hold(connection)
+
+    async def write() -> None:
+        async with database.transaction() as writer:
+            writes.append(7)
+            await writer.execute(text(INSERT_PROBE))
+
+    observer = "after_cursor_execute" if postgres else "begin"
+    callback = hold_postgres if postgres else hold
+    expired: asyncio.Task[SnapshotProbe] | None = None
+    successor: asyncio.Task[SnapshotProbe] | None = None
+    writer_task: asyncio.Task[None] | None = None
+    observation: SnapshotProbe | None = None
+
+    try:
+        async with database.transaction() as writer:
+            await writer.execute(text(CREATE_PROBE))
+        if postgres:
+            await set_session_commit_mode(database, "off")
+        event.listen(engine, observer, callback)
+        base_checkouts = ledger.checkouts
+        writer_task = asyncio.create_task(write())
+
+        try:
+            await asyncio.wait_for(entered.wait(), CONDITION_DEADLINE_SECONDS)
+            driver = drivers[0]
+            loop = asyncio.get_running_loop()
+            if postgres:
+                expired = asyncio.create_task(
+                    read_probe_snapshot(
+                        database, loop.time() + REFUSAL_DEADLINE_SECONDS
+                    )
+                )
+                await until(lambda: database.units_in_flight() == 2)
+                done, _ = await asyncio.wait(
+                    {expired}, timeout=CONDITION_DEADLINE_SECONDS
+                )
+                assert done == {expired}
+                with pytest.raises(DatabaseSnapshotRejected) as refused:
+                    await expired
+                assert refused.value.reason is DatabaseSnapshotFailure.DEADLINE
+                assert ledger.checkouts == base_checkouts + 1
+                successor = asyncio.create_task(
+                    read_probe_snapshot(
+                        database, loop.time() + CONDITION_DEADLINE_SECONDS
+                    )
+                )
+                await until(lambda: database.units_in_flight() == 2)
+                assert not successor.done()
+                assert postgres_driver(driver).is_in_transaction()
+            else:
+                observation = await read_probe_snapshot(
+                    database, loop.time() + CONDITION_DEADLINE_SECONDS
+                )
+                assert observation[0] is not driver
+                assert sqlite_driver(driver).in_transaction
+            assert ledger.outstanding == 1
+            assert writes == []
+        finally:
+            release.set()
+        if successor is not None:
+            with pytest.raises(PostgreSQLDurabilityError):
+                await asyncio.wait_for(writer_task, CONDITION_DEADLINE_SECONDS)
+            observation = await asyncio.wait_for(successor, CONDITION_DEADLINE_SECONDS)
+            assert observation[0] is driver
+            assert not postgres_driver(driver).is_in_transaction()
+        else:
+            await asyncio.wait_for(writer_task, CONDITION_DEADLINE_SECONDS)
+    finally:
+        tasks: list[Awaitable[object]] = [
+            task for task in (writer_task, expired, successor) if task is not None
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if event.contains(engine, observer, callback):
+            event.remove(engine, observer, callback)
+        await database.close()
+
+    assert observation is not None
+    _, mode, rows = observation
+    assert mode == (("repeatable read", "on", "off") if postgres else (1,))
+    assert rows == []
+    assert writes == ([] if postgres else [7])
+    assert ledger.checkouts == base_checkouts + 2
+    assert ledger.opened == ledger.closed == (1 if postgres else 2)
+    assert ledger.outstanding == database.units_in_flight() == 0
 
 
 @pytest.mark.parametrize("interrupt", ["cancel", "close"])
