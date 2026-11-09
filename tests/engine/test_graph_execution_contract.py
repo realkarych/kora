@@ -15,6 +15,7 @@ from kora.db.graph_version_reads import AcquiredGraphVersion, acquire_graph_vers
 from kora.db.reads import graph_version_by_number
 from kora.db.tables import graph_version
 from kora.engine.graph_execution_contract import (
+    CheckedExecutionContract,
     ExecutionContractReadLimits,
     ParameterSchemaReadLimits,
     check_detached_execution_contract,
@@ -37,6 +38,13 @@ from kora.engine.parameter_schema_references import (
     ParameterSchemaPosition,
     resolve_parameter_reference,
     schema_member,
+)
+from kora.engine.run_materialization import (
+    InitialNode,
+    MaterializationFailure,
+    MaterializationRejected,
+    PreparedRunMaterialization,
+    prepare_run_materialization,
 )
 from kora.ir.json import JsonObject
 from tests.db.closing import ConnectionLedger
@@ -76,6 +84,10 @@ NO_SCHEMA_WORK = replace(SCHEMA_LIMITS, work=0)
 NO_SELECTION_WORK = replace(SCHEMA_LIMITS, selection_work=0)
 
 
+class NonNativeIdentifier(str):
+    __slots__ = ()
+
+
 def complete_inputs(
     scope: GraphResourceScope,
     *,
@@ -84,10 +96,16 @@ def complete_inputs(
     second_command: bool = False,
     parameter_reads: bool = False,
     parameter_reference: bool = False,
+    graph_settings: JsonObject | None = None,
+    runtime_settings: JsonObject | None = None,
 ) -> tuple[JsonObject, JsonObject, JsonObject, tuple[GraphResourceOwner, ...]]:
     raw = output_document("command")
     graph = child(raw, "graph")
     graph["params"] = {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
+    if graph_settings is not None:
+        graph.update(graph_settings)
+    if runtime_settings is not None:
+        child(raw, "runtime").update(runtime_settings)
     nodes = child(graph, "nodes")
     command = child(nodes, "producer")
     agent = child(output_document("agent"), "graph", "nodes", "producer")
@@ -499,6 +517,8 @@ def test_complete_reader_parameter_paths_preserve_the_checked_identity() -> None
         paths.__init__((MARKER,), ())
     with pytest.raises(AttributeError, match="immutable"):
         checked.__init__(scope, pin, MARKER, MARKER, checked.resources, paths)
+    with pytest.raises(TypeError, match="requires the complete checking reader"):
+        CheckedExecutionContract(scope, pin, MARKER, MARKER, checked.resources, paths)
     with pytest.raises(TypeError, match="require explicit access") as pickling:
         pickle.dumps(paths)
     with pytest.raises(ValueError, match="not iterable") as encoding:
@@ -545,6 +565,169 @@ async def insert_case(
             **seeder.stamps(),
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_run_materialization_keeps_the_exact_saved_root_inventory(
+    database: Database,
+) -> None:
+    ledger = ConnectionLedger(database)
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        namespace = await seeder.namespace()
+        graph = await seeder.graph(namespace)
+        old_scope = GraphResourceScope(namespace, graph, seeder.new_id())
+        new_scope = GraphResourceScope(namespace, graph, seeder.new_id())
+    producer = child(output_document("command"), "graph", "nodes", "producer")
+    newer_producer = child(output_document("command"), "graph", "nodes", "producer")
+    old_raw, old_envelope, old_refs, old_owners = complete_inputs(
+        old_scope,
+        resources=False,
+        graph_settings={
+            "nodes": {
+                "wrapper": {
+                    "kind": "subgraph",
+                    "config": {"body": "body"},
+                    "trigger_rule": "all_done",
+                },
+                "producer": producer,
+            },
+            "subgraphs": {
+                "body": {
+                    "nodes": {
+                        "nested_only": {"kind": "timer", "config": {"duration": "1s"}}
+                    }
+                }
+            },
+        },
+        runtime_settings={"limits": {"timeout": "001h"}},
+    )
+    new_raw, new_envelope, new_refs, new_owners = complete_inputs(
+        new_scope,
+        resources=False,
+        graph_settings={
+            "nodes": {
+                "later": {"kind": "timer", "config": {"duration": "2s"}},
+                "producer": newer_producer,
+            }
+        },
+    )
+    old_prepared, old_pin = prepared_case(old_raw, old_envelope, old_scope)
+    new_prepared, new_pin = prepared_case(new_raw, new_envelope, new_scope)
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        await insert_case(seeder, old_scope, 1, old_prepared, old_refs)
+        await insert_case(seeder, new_scope, 2, new_prepared, new_refs)
+    async with database.read_transaction() as connection:
+        old = await acquire_graph_version(
+            connection,
+            namespace,
+            graph,
+            old_scope.version_id,
+            max_encoded_bytes=LIMITS.identity.max_encoded_bytes,
+        )
+        new = await acquire_graph_version(
+            connection,
+            namespace,
+            graph,
+            new_scope.version_id,
+            max_encoded_bytes=LIMITS.identity.max_encoded_bytes,
+        )
+        native_old = await graph_version_by_number(connection, namespace, graph, 1)
+        native_new = await graph_version_by_number(connection, namespace, graph, 2)
+    assert old is not None
+    assert new is not None
+    assert native_old is not None
+    assert native_new is not None
+    old_checked = check_detached_execution_contract(
+        old,
+        old_pin,
+        old_scope,
+        native_old.resources,
+        old_owners,
+        limits=LIMITS,
+    )
+    new_checked = check_detached_execution_contract(
+        new,
+        new_pin,
+        new_scope,
+        native_new.resources,
+        new_owners,
+        limits=LIMITS,
+    )
+    before = ledger.checkouts
+    exact_bytes = len(old_checked.canonical_ir)
+
+    previous = prepare_run_materialization(
+        old_checked,
+        max_ir_bytes=exact_bytes,
+        max_top_level_nodes=4,
+    )
+    later = prepare_run_materialization(
+        new_checked,
+        max_ir_bytes=len(new_checked.canonical_ir),
+        max_top_level_nodes=4,
+    )
+    with pytest.raises(MaterializationRejected) as bytes_refusal:
+        prepare_run_materialization(
+            old_checked,
+            max_ir_bytes=exact_bytes - 1,
+            max_top_level_nodes=4,
+        )
+    with pytest.raises(MaterializationRejected) as nodes_refusal:
+        prepare_run_materialization(
+            old_checked,
+            max_ir_bytes=exact_bytes,
+            max_top_level_nodes=3,
+        )
+    with pytest.raises(AttributeError, match="immutable"):
+        previous.nodes = later.nodes
+    with pytest.raises(AttributeError, match="immutable"):
+        delattr(previous, "timeout")
+    with pytest.raises(TypeError, match="requires checked preparation"):
+        PreparedRunMaterialization(
+            object(), (MARKER, MARKER, MARKER, MARKER), later.nodes, None
+        )
+    with pytest.raises(TypeError, match="requires explicit access"):
+        pickle.dumps(previous)
+    with pytest.raises(ValueError, match="not iterable"):
+        jsonable_encoder(previous)
+
+    assert previous.nodes == (
+        InitialNode("wrapper", "subgraph", "all_done"),
+        InitialNode("producer", "command", "all_success"),
+        InitialNode("agent", "agent", "all_success"),
+        InitialNode("approval", "human_input", "all_success"),
+    )
+    assert later.nodes == (
+        InitialNode("later", "timer", "all_success"),
+        *previous.nodes[1:],
+    )
+    assert previous.timeout == "001h"
+    assert later.timeout is None
+    assert previous.matches(old_scope, old_pin)
+    assert later.matches(new_scope, new_pin)
+    assert not previous.matches(replace(old_scope, namespace_id=MARKER), old_pin)
+    assert not previous.matches(
+        replace(old_scope, graph_id=MARKER), replace(old_pin, graph_id=MARKER)
+    )
+    assert not previous.matches(
+        new_scope, replace(old_pin, version_id=new_scope.version_id)
+    )
+    assert not previous.matches(
+        old_scope, replace(old_pin, execution_contract_digest=MARKER)
+    )
+    assert not previous.matches(
+        old_scope, replace(old_pin, graph_id=NonNativeIdentifier(graph))
+    )
+    assert "wrapper" not in repr(previous)
+    assert (
+        bytes_refusal.value.reason
+        is nodes_refusal.value.reason
+        is MaterializationFailure.CAPACITY
+    )
+    assert ledger.checkouts == before
+    assert ledger.outstanding == database.units_in_flight() == 0
 
 
 @pytest.mark.asyncio

@@ -48,6 +48,7 @@ MEMBERS = (
 NATIVE_TRANSPORT_COPIES = 4
 CANONICAL_PAIR_COPIES = 4
 DECIMAL_READ_WRITE_PASSES = 2
+_CHECKED_EXECUTION_CONTRACT = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,11 +104,17 @@ class CheckedExecutionContract:
         resources: GraphResourceReferences,
         parameter_paths: ParameterProjectionPaths,
         parameter_schema: ParameterSchemaArena | None = None,
+        *,
+        issuer: object = None,
     ) -> None:
         if hasattr(self, "_namespace_id"):
             del self, scope, pin, canonical_ir, canonical_contract, resources
-            del parameter_paths, parameter_schema
+            del parameter_paths, parameter_schema, issuer
             raise AttributeError("checked execution contract is immutable")
+        if issuer is not _CHECKED_EXECUTION_CONTRACT:
+            del self, scope, pin, canonical_ir, canonical_contract, resources
+            del parameter_paths, parameter_schema, issuer
+            raise TypeError("execution contract requires the complete checking reader")
         object.__setattr__(self, "_namespace_id", scope.namespace_id)
         object.__setattr__(self, "_graph_id", scope.graph_id)
         object.__setattr__(self, "_version_id", scope.version_id)
@@ -327,6 +334,7 @@ def _checked_result(
             resources,
             paths,
             parameter_schema,
+            issuer=_CHECKED_EXECUTION_CONTRACT,
         )
     except GraphValueRejected as rejected:
         rejected.__traceback__ = None
