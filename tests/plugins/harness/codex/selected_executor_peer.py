@@ -89,13 +89,16 @@ def connected_inode(rows: list[list[bytes]], local: bytes, remote: bytes) -> int
 
 def owns_socket(pid: int, inode: int) -> bool:
     socket_name = f"socket:[{inode}]"
+    owned = False
     with os.scandir(f"/proc/{pid}/fd") as entries:
-        descriptors = list(islice(entries, MAX_DESCRIPTORS + 1))
-        if len(descriptors) > MAX_DESCRIPTORS:
-            raise PeerObservationError(
-                "relay peer descriptor view exceeds fixture bounds"
-            )
-        return socket_name in [os.readlink(entry.path) for entry in descriptors]
+        for index, entry in enumerate(islice(entries, MAX_DESCRIPTORS + 1)):
+            if index == MAX_DESCRIPTORS:
+                raise PeerObservationError(
+                    "relay peer descriptor view exceeds fixture bounds"
+                )
+            target = os.readlink(entry.path)
+            owned = owned or target == socket_name
+    return owned
 
 
 class ExecutorPeerWitness:

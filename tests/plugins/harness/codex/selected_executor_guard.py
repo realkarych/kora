@@ -299,11 +299,11 @@ async def run_guard(root: Path, scenario: Scenario, *, witness_peer: bool) -> No
                     guard.bind_peer(peer)
                     await verify_upgrade_refused(endpoint, token, 403)
                     probe.require(
+                        peer.unavailable == 0, "guard_peer_observation_unavailable"
+                    )
+                    probe.require(
                         peer.decoy_refused == 1
-                        and peer.admitted
-                        == peer.unavailable
-                        == guard.native_frames
-                        == 0,
+                        and peer.admitted == guard.native_frames == 0,
                         "guard_decoy_peer_not_distinguished",
                     )
                 reader, writer = stdio(app)
