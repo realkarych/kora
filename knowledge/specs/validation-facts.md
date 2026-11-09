@@ -196,17 +196,20 @@ The owner-selected [first Codex execution profile](codex-execution-profile.md),
 recorded under [#769](https://github.com/realkarych/kora/issues/769) on
 2026-11-05, uses API-key authentication and one app-server plus one selected
 native exec-server under the existing runtime/runner lifecycle owner. Both
-roles share the admitted candidate filesystem/workspace/policy binding;
-the native connection capability covers the exposed RPC surface, including
-process, filesystem and outbound HTTP requests/streams, under the existing
-candidate network and credential controls.
+roles share the admitted candidate filesystem/workspace/policy binding.
+The first Linux production direction under [#1220](https://github.com/realkarych/kora/issues/1220)
+uses a runtime-owned relay between the attested app-server peer and the
+private native executor stream. It admits one root turn per attempt.
 Identity-preserving live reconnect or attempt failure and actual owner-bounded
 listener/session/descendant closure remain implementing obligations.
 
 The profile decision supplies no native receiver, complete inventory,
-construction, declaration or consumer activation. This section's separate
-availability, effect-free inspection, real-source/co-landing, configured
-selection, conservative coverage and platform evidence gates are unchanged.
+construction, declaration or consumer activation. The operative coverage and
+refusal rules in sections 7–10 still apply. #549 owns a separate admission
+amendment for any independently established impossible native subagent
+context. That fact would require the exact qualified configured profile and
+a separate effect-free source. The real-source, selection and platform gates
+remain applicable.
 ChatGPT account/OAuth support is deferred under
 [#770](https://github.com/realkarych/kora/issues/770) until the first API-key
 adapter is integrated and qualified through the common runner.
