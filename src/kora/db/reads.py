@@ -9,6 +9,8 @@ from sqlalchemy import (
     Executable,
     Exists,
     Table,
+    Text,
+    cast,
     exists,
     func,
     select,
@@ -192,7 +194,10 @@ TOKEN_COLUMNS: RowColumns = columns_of(api_token, fields(TokenRow))
 WORKER_COLUMNS: RowColumns = columns_of(worker, fields(WorkerRow))
 GRAPH_COLUMNS: RowColumns = columns_of(graph, fields(GraphRow))
 GRAPH_VERSION_COLUMNS: RowColumns = columns_of(graph_version, fields(GraphVersionRow))
-RUN_COLUMNS: RowColumns = columns_of(run, fields(RunRow))
+RUN_COLUMNS: tuple[Column[object] | ColumnElement[str], ...] = tuple(
+    cast(column, Text).label(column.name) if column.name == "target_key" else column
+    for column in columns_of(run, fields(RunRow))
+)
 NODE_INSTANCE_COLUMNS: RowColumns = columns_of(node_instance, fields(NodeInstanceRow))
 EVENT_COLUMNS: RowColumns = columns_of(event, fields(EventRow))
 

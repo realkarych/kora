@@ -81,14 +81,20 @@ class CollatedText(TypeDecorator[str]):
     impl = String
     cache_ok = True
 
-    def __init__(self, length: int) -> None:
+    def __init__(self, length: int, postgresql_length: int | None = None) -> None:
         super().__init__(length)
         self.length = length
+        self.postgresql_length = postgresql_length
 
     def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[str]:
         if dialect.name == POSTGRESQL:
+            length = (
+                self.length
+                if self.postgresql_length is None
+                else self.postgresql_length
+            )
             return dialect.type_descriptor(
-                String(self.length, collation=BYTE_ORDER_COLLATION)
+                String(length, collation=BYTE_ORDER_COLLATION)
             )
         return dialect.type_descriptor(String(self.length))
 
@@ -101,8 +107,10 @@ class CollatedText(TypeDecorator[str]):
         return value
 
 
-def collated_text(length: int) -> TypeEngine[str]:
-    return CollatedText(length)
+def collated_text(
+    length: int, *, postgresql_length: int | None = None
+) -> TypeEngine[str]:
+    return CollatedText(length, postgresql_length=postgresql_length)
 
 
 def normalise_timestamp(value: datetime) -> datetime:

@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     Text,
+    cast,
     insert,
     select,
     table,
@@ -423,9 +424,17 @@ def predecessor_snapshot(
     rows: dict[str, tuple[dict[str, object], ...]] = {}
     for table_name, names in columns.items():
         source = table(table_name, *(ColumnClause[object](name) for name in names))
+        selected = tuple(
+            cast(column, Text).label(column.name)
+            if table_name == "run" and column.name == "target_key"
+            else column
+            for column in source.c
+        )
         rows[table_name] = tuple(
             dict(row)
-            for row in connection.execute(select(source).order_by(*source.c)).mappings()
+            for row in connection.execute(
+                select(*selected).order_by(*source.c)
+            ).mappings()
         )
     return PredecessorHistory(columns, rows)
 

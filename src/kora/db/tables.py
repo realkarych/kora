@@ -406,7 +406,9 @@ run: Table = Table(
     reference("graph_version_id", "graph_version.id"),
     reference("rerun_of_run_id", "run.id", nullable=True),
     Column("idempotency_key", name(), nullable=False),
-    Column("target_key", name(), nullable=True),
+    Column(
+        "target_key", collated_text(NAME_LENGTH, postgresql_length=256), nullable=True
+    ),
     timestamp("target_held_since", nullable=True),
     document("params"),
     document("cel_params_projection"),

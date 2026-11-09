@@ -42,7 +42,12 @@ def render_item(
         return False
     autogen_context.imports.add(f"import {TYPES_MODULE}")
     if isinstance(obj, CollatedText):
-        return f"{TYPES_MODULE}.CollatedText({obj.length})"
+        length = (
+            f", postgresql_length={obj.postgresql_length}"
+            if obj.postgresql_length is not None
+            else ""
+        )
+        return f"{TYPES_MODULE}.CollatedText({obj.length}{length})"
     return f"{TYPES_MODULE}.{type(obj).__name__}()"
 
 

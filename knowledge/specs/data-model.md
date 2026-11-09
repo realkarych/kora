@@ -99,6 +99,12 @@ The initial schema creates fields/indexes before grants exist. Populated upgrade
 
 ## 3. Identifiers and keys
 
+The PostgreSQL `run.target_key` column stores up to 256 characters with
+`COLLATE "C"`. SQLite keeps the existing text affinity. Target binding validates
+the same ASCII grammar on both databases. The forward-only widening preserves
+existing keys and the namespace/target index. Restoring an earlier database
+version requires a compatible backup.
+
 - All primary keys are ULIDs with a type prefix in the API (`run_01J…`, `att_01J…`, `art_01J…`), sortable by creation time.
 - `run.idempotency_key`: supplied by the caller (`Idempotency-Key` header, CLI `--idempotency-key`) or derived: cron → `cron:<graph_version>:<fire time>`, webhook → the delivery id, graph trigger → `<parent run id>:<event>`. Unique per `graph_id`; a duplicate returns the existing run (NFR-2.2).
 - `run.target_key` (FR-6.11, [ADR-0014](../../docs/decisions/0014-target-identity.md), [ADR-0019](../../docs/decisions/0019-immutable-run-target-identity.md)): the optional namespace-scoped business identity, indexed on `(namespace_id, target_key)`, matching `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$`. Equality is exact and case-sensitive; it is never a template variable. A valid present parameter binds at run creation; an absent optional parameter leaves the run unbound and an invalid present one is validation failure. An output source binds at successful atomic acceptance of its complete result (section 12). Once non-null, the key never changes or clears. The first `run.target_bound` event records its parameter name or exact artifact version and selector; same-key rediscovery writes no second binding event. `run.target_held_since` is separate: admission acquires it under the bound key, ordinary settled release clears only the hold, and retry must reacquire the same key. Terminal runs retain unresolved holds under ADR-0017. Delivery (`idempotency_key`), target and attempt remain distinct.

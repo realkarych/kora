@@ -17,8 +17,17 @@ from kora.db.graph_publication_ordinal_v1 import (
     SQLITE_ORDINAL_INVALID,
     SQLITE_ORDINAL_VALID,
 )
-from kora.db.migrations import current_revision, upgrade_database, upgrade_to_head
-from kora.db.migrations.environment import alembic_config
+from kora.db.migrations import (
+    MigrationReport,
+    current_revision,
+    upgrade_database,
+    upgrade_to_head,
+)
+from kora.db.migrations.environment import (
+    alembic_config,
+    bound_lock_waits,
+    pending_steps,
+)
 from kora.db.tables import (
     graph_deployment_stage_promotion_intent,
     graph_deployment_stage_promotion_settlement,
@@ -67,6 +76,26 @@ BASE_READ_OPS = {
 
 def upgrade_predecessor(connection: Connection) -> None:
     command.upgrade(alembic_config(connection), PREDECESSOR)
+
+
+def upgrade_ordinal_revision(connection: Connection) -> MigrationReport:
+    bound_lock_waits(connection)
+    config = alembic_config(connection)
+    predecessor = current_revision(connection)
+    steps = pending_steps(config, predecessor, REVISION)
+    if connection.dialect.name == str(Dialect.POSTGRESQL):
+        connection.commit()
+    command.upgrade(config, REVISION)
+    return MigrationReport(connection.dialect.name, predecessor, REVISION, steps)
+
+
+async def upgrade_ordinal(settings: DatabaseSettings) -> MigrationReport:
+    owner = Database(settings)
+    try:
+        async with owner.migration_connection() as connection:
+            return await connection.run_sync(upgrade_ordinal_revision)
+    finally:
+        await owner.close()
 
 
 def downgrade_to_predecessor(connection: Connection) -> None:
@@ -182,8 +211,8 @@ async def test_graph_ordinal_migration_preserves_rows_and_unique_identity(
             original_custody = await custody_rows(writer)
         before = await history(database)
 
-        report = await upgrade_database(empty_database_settings)
-        again = await upgrade_database(empty_database_settings)
+        report = await upgrade_ordinal(empty_database_settings)
+        again = await upgrade_ordinal(empty_database_settings)
         with pytest.raises(
             RuntimeError, match="ordinal migration cannot be downgraded"
         ):
@@ -204,7 +233,11 @@ async def test_graph_ordinal_migration_preserves_rows_and_unique_identity(
             REVISION,
             1,
         )
-        assert again.steps == 0
+        assert (again.from_revision, again.to_revision, again.steps) == (
+            REVISION,
+            REVISION,
+            0,
+        )
         assert revision == REVISION
         assert before == after
         assert retained_custody == original_custody
@@ -353,7 +386,11 @@ async def test_sqlite_ordinal_migration_rolls_back_first_index_on_second_conflic
         assert released
         assert revision == PREDECESSOR
         assert retained_indexes & INDEXES == {ORDINAL_INVALID_INDEX}
-        assert recovered.to_revision == REVISION
+        assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
+            PREDECESSOR,
+            "0018",
+            2,
+        )
         assert before == after
         assert failed_custody == recovered_custody == original_custody
         assert observed == 6
