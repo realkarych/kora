@@ -1,6 +1,8 @@
 import enum
+import hashlib
+import hmac
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Never, Protocol, Self, runtime_checkable
 
 from sqlalchemy import Executable, and_, case, func, select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -22,6 +24,8 @@ from kora.engine.start_records import (
 )
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 from kora.protocols.authentication import Principal
+
+_MANUAL_START_CANDIDATE = object()
 
 CHECKED: EventSpec = CATALOG.register(
     EventSpec(
@@ -78,10 +82,68 @@ class StartReplay:
     response: StartOutcome | None = None
 
 
-@dataclass(frozen=True, slots=True)
 class ManualStartCandidate:
-    replay: StartReplay
-    version_id: str | None = None
+    __slots__ = (
+        "_outcome",
+        "_response",
+        "_request_digest",
+        "_key_digest",
+        "version_id",
+    )
+    _outcome: ReplayOutcome
+    _response: StartOutcome | None
+    _request_digest: str | None
+    _key_digest: bytes | None
+    version_id: str | None
+
+    def __new__(
+        cls,
+        issuer: object,
+        replay: StartReplay,
+        version_id: str | None = None,
+        request_digest: str | None = None,
+        key_digest: bytes | None = None,
+    ) -> Self:
+        if issuer is not _MANUAL_START_CANDIDATE:
+            del issuer, replay, version_id, request_digest, key_digest
+            raise TypeError("manual start candidate requires a checked replay read")
+        candidate = super().__new__(cls)
+        response = None if replay.response is None else replay.response.model_copy()
+        object.__setattr__(candidate, "_outcome", replay.outcome)
+        object.__setattr__(candidate, "_response", response)
+        object.__setattr__(candidate, "version_id", version_id)
+        object.__setattr__(candidate, "_request_digest", request_digest)
+        object.__setattr__(candidate, "_key_digest", key_digest)
+        return candidate
+
+    @property
+    def replay(self) -> StartReplay:
+        response = self._response
+        return StartReplay(
+            self._outcome, None if response is None else response.model_copy()
+        )
+
+    def is_new_for(self, request_digest: str, key: str) -> bool:
+        if (
+            self._outcome is not ReplayOutcome.ABSENT
+            or self._response is not None
+            or self._request_digest != request_digest
+            or self._key_digest is None
+        ):
+            return False
+        require_key(key)
+        return hmac.compare_digest(self._key_digest, _receipt_key_digest(key))
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        del self, value
+        raise AttributeError("manual start candidate is immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        del self
+        raise AttributeError("manual start candidate is immutable")
+
+    def __getstate__(self) -> Never:
+        raise TypeError("manual start candidate requires explicit access")
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +173,10 @@ def require_key(key: str) -> None:
         or any(char == "\u0000" or 0xD800 <= ord(char) <= 0xDFFF for char in key)
     ):
         raise StartRecordRejected()
+
+
+def _receipt_key_digest(key: str) -> bytes:
+    return hashlib.sha256(key.encode("utf-8")).digest()
 
 
 def _may_replay(principal: Principal, identity: ManualStartIdentity) -> bool:
@@ -329,16 +395,37 @@ async def read_manual_start_candidate(
     request: PreparedManualStartRequest,
     key: str,
 ) -> ManualStartCandidate:
+    if type(request) is not PreparedManualStartRequest:
+        del request, key, principal
+        raise_safe(StartRecordRejected())
     identity, version_id = request.identity, request.graph_version_id
     del request
-    replay = await replay_manual_start(connection, principal, identity, key)
+    try:
+        replay = await replay_manual_start(connection, principal, identity, key)
+    except StartRecordRejected:
+        del key, principal
+        raise_safe(StartRecordRejected())
+    except StartReadFailed:
+        del key, principal
+        raise_safe(StartReadFailed())
     if replay.outcome is not ReplayOutcome.ABSENT:
-        return ManualStartCandidate(replay)
+        return ManualStartCandidate(_MANUAL_START_CANDIDATE, replay)
+    key_digest = _receipt_key_digest(key)
     del key, principal
-    candidate = await _read_candidate_version(connection, identity, version_id)
-    diagnostics = current_diagnostics()
-    if diagnostics is not None:
-        diagnostics.logger(COMPONENT).emit(
-            CANDIDATE_CHECKED, outcome="missing" if candidate is None else "selected"
+    try:
+        candidate = await _read_candidate_version(connection, identity, version_id)
+        diagnostics = current_diagnostics()
+        if diagnostics is not None:
+            diagnostics.logger(COMPONENT).emit(
+                CANDIDATE_CHECKED,
+                outcome="missing" if candidate is None else "selected",
+            )
+        return ManualStartCandidate(
+            _MANUAL_START_CANDIDATE,
+            replay,
+            candidate,
+            identity.request_digest,
+            key_digest,
         )
-    return ManualStartCandidate(replay, candidate)
+    finally:
+        del key_digest

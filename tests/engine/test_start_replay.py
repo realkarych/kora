@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+from traceback import walk_tb
 
 import pytest
 from sqlalchemy import delete, event, text, update
@@ -23,7 +24,6 @@ from kora.engine.start_records import (
     start_receipt_document,
 )
 from kora.engine.start_replay import (
-    ManualStartCandidate,
     ReplayOutcome,
     StartReadFailed,
     StartReplay,
@@ -153,20 +153,26 @@ async def test_manual_start_candidate_preserves_replay_precedence(
                     )
                 result = None
             else:
+                key = "" if ending == "denied" else KEY
                 result = await read_manual_start_candidate(
-                    connection, principal, request, KEY
+                    connection, principal, request, key
                 )
 
-    if ending in ("accepted", "skipped"):
-        assert result == ManualStartCandidate(
-            StartReplay(ReplayOutcome.MATCHED, scenario.receipt.response)
-        )
-    elif ending == "changed":
-        assert result == ManualStartCandidate(StartReplay(ReplayOutcome.MISMATCHED))
-    elif ending == "denied":
-        assert result == ManualStartCandidate(StartReplay(ReplayOutcome.REFUSED))
-    else:
+    if ending == "corrupt":
         assert result is None
+    else:
+        assert result is not None
+        assert result.version_id is None
+        assert not result.is_new_for(request.identity.request_digest, KEY)
+        if ending in ("accepted", "skipped"):
+            assert result.replay == StartReplay(
+                ReplayOutcome.MATCHED, scenario.receipt.response
+            )
+            assert result.replay.response is not result.replay.response
+        elif ending == "changed":
+            assert result.replay == StartReplay(ReplayOutcome.MISMATCHED)
+        else:
+            assert result.replay == StartReplay(ReplayOutcome.REFUSED)
     assert len(statements) == (0 if ending == "denied" else 1)
     assert all("FROM inbound_event" in statement for statement in statements)
 
@@ -191,7 +197,9 @@ async def test_manual_start_candidate_uses_only_scoped_scalar_reads(
             )
     after = await scenario.snapshot()
 
-    assert result == ManualStartCandidate(StartReplay(ReplayOutcome.ABSENT), newest)
+    assert result.replay == StartReplay(ReplayOutcome.ABSENT)
+    assert result.version_id == newest
+    assert result.is_new_for(request.identity.request_digest, NEW_KEY)
     assert len(statements) == 2
     assert statements[0].startswith("SELECT inbound_event.start_outcome")
     candidate = statements[1]
@@ -265,6 +273,13 @@ async def test_manual_start_candidate_refuses_malformed_winning_version(
         assert native_row == (None,)
     assert str(refused.value) == "the manual start record is invalid"
     assert refused.value.__cause__ is None
+    frames = {
+        frame.f_code.co_name: frame.f_locals
+        for frame, _ in walk_tb(refused.value.__traceback__)
+    }
+    assert {"key", "key_digest", "request", "principal"}.isdisjoint(
+        frames["read_manual_start_candidate"]
+    )
     assert refused.value.__context__ is None
     assert database.units_in_flight() == 0
 
@@ -297,11 +312,14 @@ async def test_manual_start_candidate_observes_the_owned_snapshot(
         )
 
     assert prior == StartReplay(ReplayOutcome.ABSENT)
-    assert frozen == ManualStartCandidate(prior, scenario.version_id)
-    assert replayed == ManualStartCandidate(
-        StartReplay(ReplayOutcome.MATCHED, scenario.receipt.response)
+    assert frozen.replay == prior
+    assert frozen.version_id == scenario.version_id
+    assert replayed.replay == StartReplay(
+        ReplayOutcome.MATCHED, scenario.receipt.response
     )
-    assert fresh == ManualStartCandidate(prior, newest)
+    assert replayed.version_id is None
+    assert fresh.replay == prior
+    assert fresh.version_id == newest
     assert database.units_in_flight() == 0
     assert ledger.outstanding == 0
 

@@ -4,11 +4,12 @@ from enum import Enum
 
 from pydantic import MISSING
 
-from kora.cel.cost import DATA_DEPTH
+from kora.cel.cost import DATA_DEPTH, BoundError
 from kora.cel.diagnostics import DiagnosticError
 from kora.cel.meter import Meter
 from kora.cel.paths import Field
 from kora.cel.projection import (
+    Cutter,
     Key,
     PathSet,
     ProjectionStep,
@@ -18,6 +19,7 @@ from kora.cel.projection import (
 )
 from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import CheckedCelSite, FieldPath
+from kora.ir.json import JsonObject
 from kora.ir.topology import (
     AgentNode,
     CommandNode,
@@ -36,6 +38,7 @@ ASCII_BUCKET_UNITS = 8
 class ProjectionFailure(Enum):
     CAPACITY = "capacity"
     ROUTE = "route"
+    DATA = "data"
 
 
 class ProjectionRejected(Exception):
@@ -221,3 +224,26 @@ def compose_graph_projection_paths(
         PathSet.from_trie(params, admission),
         {path: PathSet.from_trie(trie, admission) for path, trie in outputs.items()},
     )
+
+
+def prepare_parameter_cut_paths(
+    whole: tuple[str, ...], presence: tuple[str, ...], admission: ProjectionAdmission
+) -> Trie:
+    admission.reserve(STRUCTURE_UNIT_BYTES)
+    plan = Trie()
+    for take_whole, paths in ((True, whole), (False, presence)):
+        for path in paths:
+            plan.insert(admission.parsed_path(path), take_whole, admission)
+    return plan
+
+
+def cut_parameter_value(
+    value: JsonObject, plan: Trie, admission: ProjectionAdmission
+) -> JsonObject:
+    try:
+        cut = Cutter(admission).cut(value, plan)
+    except BoundError:
+        raise ProjectionRejected(ProjectionFailure.DATA) from None
+    if not isinstance(cut, dict):
+        raise ProjectionRejected(ProjectionFailure.ROUTE)
+    return cut
