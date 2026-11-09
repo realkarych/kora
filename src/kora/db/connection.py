@@ -235,9 +235,8 @@ def configure_full_sync_reader(
 
 
 def begin_immediately(connection: Connection) -> None:
-    cursor = connection.connection.cursor()
-    cursor.execute(BEGIN_IMMEDIATE)
-    cursor.close()
+    with closing(connection.connection.cursor()) as cursor:
+        cursor.execute(BEGIN_IMMEDIATE)
 
 
 @contextmanager

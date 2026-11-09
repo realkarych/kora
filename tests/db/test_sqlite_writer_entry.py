@@ -1,10 +1,13 @@
 import asyncio
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
+from traceback import walk_tb
 
 import pytest
 from aiosqlite import Connection as SQLiteDriverConnection
+from aiosqlite import Cursor as SQLiteCursor
 from sqlalchemy import Connection, event, text
 from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.exc import OperationalError
@@ -30,6 +33,83 @@ def sqlite_driver(candidate: object) -> SQLiteDriverConnection:
 async def writer_driver(connection: AsyncConnection) -> SQLiteDriverConnection:
     raw = await connection.get_raw_connection()
     return sqlite_driver(raw.driver_connection)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_writer_closes_retained_cursor_when_native_begin_is_busy(
+    tmp_path: Path,
+) -> None:
+    database = Database(sqlite_settings(tmp_path / "metadata.db"))
+    ledger = ConnectionLedger(database)
+    body_ran = False
+    try:
+        async with database.transaction() as writer:
+            await writer.execute(text("CREATE TABLE probe (id INTEGER)"))
+        async with database.writer_engine.connect() as connection:
+            driver = await writer_driver(connection)
+            async with driver.execute("PRAGMA busy_timeout") as cursor:
+                prior: object = await cursor.fetchone()
+            assert prior == (5000,)
+            async with driver.execute("PRAGMA busy_timeout=0"):
+                pass
+            async with driver.execute("PRAGMA busy_timeout") as cursor:
+                assert await cursor.fetchone() == (0,)
+
+        try:
+            with closing(
+                sqlite3.connect(
+                    database.settings.sqlite_path, timeout=0, isolation_level=None
+                )
+            ) as blocker:
+                with closing(blocker.execute("BEGIN IMMEDIATE")):
+                    pass
+
+                with pytest.raises(sqlite3.OperationalError) as refused:
+                    async with database.transaction():
+                        body_ran = True
+                native = refused.value
+                assert native.sqlite_errorcode == sqlite3.SQLITE_BUSY
+                failed_cursor = next(
+                    frame.f_locals.get("self")
+                    for frame, _ in walk_tb(native.__traceback__)
+                    if frame.f_code is SQLiteCursor.execute.__code__
+                )
+                assert isinstance(failed_cursor, SQLiteCursor)
+                try:
+                    await failed_cursor.fetchone()
+                except sqlite3.ProgrammingError as error:
+                    cursor_closed = str(error) == "Cannot operate on a closed cursor."
+                else:
+                    cursor_closed = False
+                    await failed_cursor.close()
+
+                assert blocker.in_transaction
+                assert not driver.in_transaction
+                assert ledger.outstanding == database.units_in_flight() == 0
+                assert database.writer_is_free()
+                blocker.rollback()
+        finally:
+            async with database.writer_engine.connect() as connection:
+                assert await writer_driver(connection) is driver
+                async with driver.execute("PRAGMA busy_timeout=5000"):
+                    pass
+                async with driver.execute("PRAGMA busy_timeout") as cursor:
+                    assert await cursor.fetchone() == prior
+
+        async with database.transaction() as recovered:
+            assert await writer_driver(recovered) is driver
+            await recovered.execute(text("INSERT INTO probe VALUES (7)"))
+            saved = await recovered.scalar(text("SELECT id FROM probe"))
+    finally:
+        await database.close()
+
+    assert cursor_closed
+    assert not body_ran
+    assert saved == 7
+    assert ledger.opened == ledger.closed == 1
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert database.writer_is_free()
+    assert sqlite_companions(database) == []
 
 
 @pytest.mark.parametrize(
