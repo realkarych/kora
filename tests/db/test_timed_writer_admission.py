@@ -1,7 +1,7 @@
 import asyncio
 import json
 import sqlite3
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -51,7 +51,7 @@ READ_PROBE: str = "SELECT id FROM writer_entry_probe"
 @asynccontextmanager
 async def open_timed_database(
     database_settings: DatabaseSettings,
-) -> AsyncIterator[Database]:
+) -> AsyncGenerator[Database, None]:
     settings = narrow_settings(database_settings, pool_size=1)
     database = Database(
         settings,
