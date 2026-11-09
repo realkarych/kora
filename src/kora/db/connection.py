@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import AsyncAdaptedQueuePool, Pool, StaticPool
-from sqlalchemy.pool.base import ConnectionPoolEntry
+from sqlalchemy.pool.base import ConnectionPoolEntry, PoolProxiedConnection
 from sqlalchemy.sql.elements import TextClause
 
 from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
@@ -323,15 +323,21 @@ def read_sqlite_busy_timeout(cursor: DBAPICursor) -> int:
     return value
 
 
-def sqlite_writer_busy_timeout(connection: Connection) -> tuple[DBAPIConnection, int]:
-    raw = connection.connection.dbapi_connection
-    if raw is None:
+def sqlite_writer_busy_timeout(
+    connection: Connection,
+) -> tuple[PoolProxiedConnection, int]:
+    raw = connection.connection
+    if not raw.is_valid:
         raise SQLiteSynchronizationError("SQLite writer checkout is unavailable")
     with closing(raw.cursor()) as cursor:
         return raw, read_sqlite_busy_timeout(cursor)
 
 
-def set_sqlite_writer_busy_timeout(raw: DBAPIConnection, milliseconds: int) -> None:
+def set_sqlite_writer_busy_timeout(
+    raw: PoolProxiedConnection, milliseconds: int
+) -> None:
+    if not raw.is_valid:
+        raise SQLiteSynchronizationError("SQLite writer checkout is unavailable")
     with closing(raw.cursor()) as cursor:
         cursor.execute(f"PRAGMA busy_timeout={milliseconds}")
         if read_sqlite_busy_timeout(cursor) != milliseconds:
@@ -1068,12 +1074,12 @@ class Database:
     async def _restore_sqlite_writer(
         self,
         connection: AsyncConnection,
-        raw: DBAPIConnection,
+        raw: PoolProxiedConnection,
         previous: int,
         ready: bool,
     ) -> None:
         def restore(_: Connection) -> None:
-            if not ready:
+            if not ready and raw.is_valid:
                 raw.rollback()
             set_sqlite_writer_busy_timeout(raw, previous)
 
@@ -1081,7 +1087,7 @@ class Database:
             await connection.run_sync(restore)
         except WRITER_ENTRY_NATIVE_ERRORS:
             try:
-                if ready:
+                if ready and raw.is_valid:
                     await connection.run_sync(lambda _: raw.rollback())
             finally:
                 await self._discard_writer_entry(connection)
