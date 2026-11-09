@@ -34,9 +34,9 @@ SQLITE_RELATIONS = text(
 POSTGRES_RELATIONS = text(
     """
     (SELECT CAST(:stage_id AS pg_catalog.text) AS stage_id) AS selected
-    LEFT JOIN graph_deployment_stage_promotion_intent AS intent
+    LEFT JOIN ONLY graph_deployment_stage_promotion_intent AS intent
         ON intent.stage_id OPERATOR(pg_catalog.=) selected.stage_id
-    LEFT JOIN graph_deployment_stage_promotion_settlement AS settlement
+    LEFT JOIN ONLY graph_deployment_stage_promotion_settlement AS settlement
         ON settlement.stage_id OPERATOR(pg_catalog.=) selected.stage_id
     """
 )

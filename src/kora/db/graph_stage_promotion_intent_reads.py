@@ -34,7 +34,7 @@ POSTGRES_METADATA: TextClause = text(
     """
 SELECT pg_catalog.octet_length(store_id), pg_catalog.octet_length(payload_digest),
        pg_catalog.octet_length(operation_id), pg_catalog.octet_length(request_digest)
-  FROM graph_deployment_stage_promotion_intent
+  FROM ONLY graph_deployment_stage_promotion_intent
  WHERE stage_id OPERATOR(pg_catalog.=) CAST(:stage_id AS pg_catalog.text)
 """
 )
@@ -42,7 +42,7 @@ POSTGRES_SCALARS: TextClause = text(
     """
 SELECT store_id, payload_digest, fence_incarnation,
        operation_id, request_digest, content_generation
-  FROM graph_deployment_stage_promotion_intent
+  FROM ONLY graph_deployment_stage_promotion_intent
  WHERE stage_id OPERATOR(pg_catalog.=) CAST(:stage_id AS pg_catalog.text)
 """
 )
