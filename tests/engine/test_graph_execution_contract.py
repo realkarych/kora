@@ -2,18 +2,19 @@ import gc
 import json
 import pickle
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from traceback import walk_tb
 from typing import Literal, cast
 
 import pytest
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 
 from kora.db.connection import Database
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected, ObjectReader
 from kora.db.graph_version_reads import AcquiredGraphVersion, acquire_graph_version
 from kora.db.reads import graph_version_by_number
-from kora.db.tables import graph_version
+from kora.db.tables import attempt, graph_version, node_instance
 from kora.engine.graph_execution_contract import (
     CheckedExecutionContract,
     ExecutionContractReadLimits,
@@ -44,11 +45,12 @@ from kora.engine.run_materialization import (
     MaterializationFailure,
     MaterializationRejected,
     PreparedRunMaterialization,
+    prepare_initial_node_rows,
     prepare_run_materialization,
 )
 from kora.ir.json import JsonObject
 from tests.db.closing import ConnectionLedger
-from tests.db.seed import DIGEST, Seeder
+from tests.db.seed import DIGEST, START, Seeder
 from tests.engine.graph_output_cases import child, output_document
 from tests.engine.graph_projection_cases import PROJECTION_LIMITS, projection_inputs
 from tests.engine.test_graph_command_manifests import authored_manifest, resource
@@ -733,6 +735,178 @@ async def test_run_materialization_keeps_the_exact_saved_root_inventory(
         is MaterializationFailure.CAPACITY
     )
     assert ledger.checkouts == before
+    assert ledger.outstanding == database.units_in_flight() == 0
+
+
+class OutOfRangeOffset(tzinfo):
+    def utcoffset(self, dt: datetime | None) -> timedelta:
+        return timedelta(days=1)
+
+
+@pytest.mark.asyncio
+async def test_initial_node_rows_bind_the_exact_saved_graph_and_native_state(
+    database: Database,
+) -> None:
+    ledger = ConnectionLedger(database)
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        namespace_id = await seeder.namespace()
+        graph_id = await seeder.graph(namespace_id)
+        scope = GraphResourceScope(namespace_id, graph_id, seeder.new_id())
+    producer = child(output_document("command"), "graph", "nodes", "producer")
+    raw, envelope, refs, owners = complete_inputs(
+        scope,
+        resources=False,
+        graph_settings={
+            "nodes": {
+                "wrapper": {
+                    "kind": "subgraph",
+                    "config": {"body": "body"},
+                    "trigger_rule": "all_done",
+                },
+                "producer": producer,
+            },
+            "subgraphs": {
+                "body": {
+                    "nodes": {
+                        "nested_only": {"kind": "timer", "config": {"duration": "1s"}}
+                    }
+                }
+            },
+        },
+    )
+    prepared, pin = prepared_case(raw, envelope, scope)
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        await insert_case(seeder, scope, 1, prepared, refs)
+        run_id = await seeder.run(namespace_id, graph_id, scope.version_id, "pending")
+        ids = tuple(seeder.new_id() for _ in range(4))
+    async with database.read_transaction() as connection:
+        acquired = await acquire_graph_version(
+            connection,
+            namespace_id,
+            graph_id,
+            scope.version_id,
+            max_encoded_bytes=LIMITS.identity.max_encoded_bytes,
+        )
+        native = await graph_version_by_number(connection, namespace_id, graph_id, 1)
+    assert acquired is not None
+    assert native is not None
+    checked = check_detached_execution_contract(
+        acquired, pin, scope, native.resources, owners, limits=LIMITS
+    )
+    materialization = prepare_run_materialization(
+        checked, max_ir_bytes=len(checked.canonical_ir), max_top_level_nodes=4
+    )
+    unissued = object.__new__(PreparedRunMaterialization)
+    checkouts = ledger.checkouts
+    local = timezone(timedelta(hours=5, minutes=30))
+    aware_stamp = START.astimezone(local)
+    overflow = datetime.min.replace(tzinfo=local)
+    invalid_cases = (
+        (scope, pin, run_id, ids[:-1], aware_stamp),
+        (scope, pin, run_id, (*ids, MARKER), aware_stamp),
+        (scope, pin, run_id, (ids[0], *ids[:-1]), aware_stamp),
+        (scope, pin, run_id, (MARKER, *ids[1:]), aware_stamp),
+        (scope, pin, run_id, (run_id, *ids[1:]), aware_stamp),
+        (scope, pin, run_id, (scope.version_id, *ids[1:]), aware_stamp),
+        (scope, pin, MARKER, ids, aware_stamp),
+        (
+            scope,
+            replace(pin, execution_contract_digest=MARKER),
+            run_id,
+            ids,
+            aware_stamp,
+        ),
+        (replace(scope, namespace_id=MARKER), pin, run_id, ids, aware_stamp),
+        (scope, pin, run_id, ids, aware_stamp.replace(tzinfo=None)),
+        (scope, pin, run_id, ids, overflow),
+        (scope, pin, run_id, ids, START.replace(tzinfo=OutOfRangeOffset())),
+        (scope, pin, run_id, ids, datetime(999, 1, 1, tzinfo=UTC)),
+    )
+
+    rows = prepare_initial_node_rows(
+        materialization, scope, pin, run_id, ids, aware_stamp
+    )
+    for (
+        selected_scope,
+        selected_pin,
+        selected_run,
+        selected_ids,
+        selected_time,
+    ) in invalid_cases:
+        with pytest.raises(MaterializationRejected) as rejected:
+            prepare_initial_node_rows(
+                materialization,
+                selected_scope,
+                selected_pin,
+                selected_run,
+                selected_ids,
+                selected_time,
+            )
+        assert rejected.value.reason is MaterializationFailure.BINDING
+        assert rejected.value.__context__ is rejected.value.__cause__ is None
+        assert [
+            set(frame.f_locals)
+            for frame, _ in walk_tb(rejected.value.__traceback__)
+            if frame.f_code.co_name == "prepare_initial_node_rows"
+        ] == [set()]
+    with pytest.raises(MaterializationRejected) as unissued_refusal:
+        prepare_initial_node_rows(unissued, scope, pin, run_id, ids, aware_stamp)
+    assert ledger.checkouts == checkouts
+    assert [row["id"] for row in rows] == list(ids)
+    assert len({id(row["consumed_versions"]) for row in rows}) == len(rows)
+    async with database.transaction() as connection:
+        observed_before = (await connection.execute(select(node_instance.c.id))).all()
+        await connection.execute(insert(node_instance), rows)
+        result = await connection.execute(
+            select(node_instance).order_by(node_instance.c.id)
+        )
+        stored = tuple(dict(row) for row in result.mappings())
+        physical_attempts = (await connection.execute(select(attempt.c.id))).all()
+        null_selections = (
+            (
+                await connection.execute(
+                    select(node_instance.c.id)
+                    .where(node_instance.c.branch_selection.is_(None))
+                    .order_by(node_instance.c.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        await connection.rollback()
+    async with database.read_transaction() as connection:
+        remaining = (await connection.execute(select(node_instance.c.id))).all()
+
+    assert observed_before == physical_attempts == remaining == []
+    assert unissued_refusal.value.reason is MaterializationFailure.BINDING
+    assert [row["id"] for row in stored] == list(ids)
+    assert list(null_selections) == list(ids)
+    assert [(row["node_path"], row["kind"], row["trigger_rule"]) for row in stored] == [
+        ("wrapper", "subgraph", "all_done"),
+        ("producer", "command", "all_success"),
+        ("agent", "agent", "all_success"),
+        ("approval", "human_input", "all_success"),
+    ]
+    for row in stored:
+        assert row["run_id"] == run_id
+        assert row["status"] == "pending"
+        assert row["subgraph_attempt"] == 1
+        assert row["top_level"] is True
+        assert row["consumed_versions"] == {}
+        assert row["attempt_count"] == 0
+        assert row["created_at"] == row["updated_at"] == START
+        assert all(
+            row[field] is None
+            for field in (
+                "current_attempt_id",
+                "branch_selection",
+                "started_at",
+                "deadline_expired_at",
+                "provider_wait_deadline",
+            )
+        )
     assert ledger.outstanding == database.units_in_flight() == 0
 
 

@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import StrEnum
 from typing import NamedTuple, Never, Self
 
@@ -5,6 +6,8 @@ from pydantic import MISSING
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected, TextBudget
+from kora.db.identifiers import is_identifier
+from kora.db.types import normalise_timestamp
 from kora.engine.graph_execution_contract import CheckedExecutionContract
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_types import read_document
@@ -166,3 +169,72 @@ def prepare_run_materialization(
         return result
     del checked, max_ir_bytes, max_top_level_nodes, diagnostics
     raise_safe(MaterializationRejected(result))
+
+
+def _valid_initial_identities(
+    scope: GraphResourceScope, run_id: str, node_ids: tuple[str, ...], count: int
+) -> bool:
+    if type(node_ids) is not tuple or len(node_ids) != count:
+        return False
+    reserved = {scope.namespace_id, scope.graph_id, scope.version_id}
+    if type(run_id) is not str or not is_identifier(run_id) or run_id in reserved:
+        return False
+    reserved.add(run_id)
+    for node_id in node_ids:
+        if (
+            type(node_id) is not str
+            or not is_identifier(node_id)
+            or node_id in reserved
+        ):
+            return False
+        reserved.add(node_id)
+    return True
+
+
+def prepare_initial_node_rows(
+    materialization: PreparedRunMaterialization,
+    scope: GraphResourceScope,
+    pin: GraphVersionPin,
+    run_id: str,
+    node_ids: tuple[str, ...],
+    at: datetime,
+) -> list[dict[str, object]]:
+    stamp = None
+    if (
+        type(materialization) is PreparedRunMaterialization
+        and hasattr(materialization, "nodes")
+        and materialization.matches(scope, pin)
+        and _valid_initial_identities(
+            scope, run_id, node_ids, len(materialization.nodes)
+        )
+        and type(at) is datetime
+    ):
+        try:
+            stamp = normalise_timestamp(at)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if stamp is None or stamp.year < 1000:
+        del materialization, scope, pin, run_id, node_ids, at, stamp
+        raise_safe(MaterializationRejected(MaterializationFailure.BINDING))
+    return [
+        {
+            "id": node_id,
+            "run_id": run_id,
+            "node_path": node.path,
+            "kind": node.kind,
+            "status": "pending",
+            "trigger_rule": node.trigger_rule,
+            "subgraph_attempt": 1,
+            "top_level": True,
+            "consumed_versions": {},
+            "current_attempt_id": None,
+            "branch_selection": None,
+            "attempt_count": 0,
+            "started_at": None,
+            "deadline_expired_at": None,
+            "provider_wait_deadline": None,
+            "created_at": stamp,
+            "updated_at": stamp,
+        }
+        for node, node_id in zip(materialization.nodes, node_ids, strict=True)
+    ]

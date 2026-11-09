@@ -39,6 +39,8 @@ The detached initial-materialization helper ([#1238](https://github.com/realkary
 
 The [pinned manual overlap preparation](https://github.com/realkarych/kora/issues/1245) uses the same checked IR view. It keeps the explicit manual policy or resolves an omission to `allow`. Before applying the policy, the promotion writer verifies that the saved manual header agrees with this exact pinned view under its existing locks.
 
+The [initial node parameter renderer](https://github.com/realkarych/kora/issues/1248) checks the issued scope and pin, exact allocated identities and the transition's representable timestamp. It prepares the bounded root inventory as independent pending insertion rows with empty inputs, no attempts and no clocks. The atomic writer owns their insertion under the original locks with the run transition and event.
+
 Promotion still requires the exact live run and checked pin, the matching timeout, current authority and the pending and overlap checks under the ordered locks. For a manual start, the writer also checks its recognized [manual run header and receipt](data-model.md#manual-run-header-and-timeline). The writer owns the complete state change, clock, event and node writes.
 
 **Run finish and outcome** (data-model section 4). Pass 8 finishes a `running` run under the run lock once every top-level instance is finished for the run. A pending run never finishes through this rule.
