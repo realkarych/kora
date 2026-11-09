@@ -104,6 +104,9 @@ class PreparedManualStartRequest:
     def allow_unenforced_secrets(self) -> bool:
         return self._allow_unenforced_secrets
 
+    def parameter_bytes(self) -> bytes:
+        return self._parameter_bytes
+
     def parameters(self) -> JsonObject:
         decoded: object = json.loads(self._parameter_bytes)
         if type(decoded) is not dict:
