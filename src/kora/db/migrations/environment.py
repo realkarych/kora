@@ -8,11 +8,15 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Column, Connection, func, select
+from sqlalchemy import Column, Connection
 from sqlalchemy.schema import SchemaItem
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
-from kora.db.connection import MIGRATION_LEASE
+from kora.db.connection import (
+    MIGRATION_LEASE,
+    MIGRATION_LOCK_TIMEOUT,
+    POSTGRESQL_MIGRATION_TIMEOUT_QUERY,
+)
 from kora.db.graph_publication_digest_v1 import INVALID_ID_INDEX
 from kora.db.graph_publication_ordinal_v1 import (
     ORDINAL_INVALID_INDEX,
@@ -29,8 +33,6 @@ from kora.db.types import POSTGRESQL, SQLITE
 MIGRATIONS_DIRECTORY: Path = Path(__file__).resolve().parent
 HEAD: str = "head"
 CONNECTION_ATTRIBUTE: str = "connection"
-LOCK_TIMEOUT: str = "5s"
-LOCK_TIMEOUT_SETTING: str = "lock_timeout"
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,8 @@ def pending_steps(config: Config, from_revision: str | None, head: str) -> int:
 def bound_lock_waits(connection: Connection) -> None:
     if connection.dialect.name == POSTGRESQL:
         connection.execute(
-            select(func.set_config(LOCK_TIMEOUT_SETTING, LOCK_TIMEOUT, True))
+            POSTGRESQL_MIGRATION_TIMEOUT_QUERY,
+            {"value": MIGRATION_LOCK_TIMEOUT, "local": True},
         )
 
 

@@ -73,6 +73,11 @@ BEGIN_IMMEDIATE: str = "BEGIN IMMEDIATE"
 SQLITE_WRITER_DISPATCH: str = "kora_sqlite_writer_dispatch"
 MIGRATION_LOCK_ID: int = 213_0002
 MIGRATION_LEASE: str = "kora_migration_lease"
+MIGRATION_LOCK_TIMEOUT: str = "5s"
+POSTGRESQL_MIGRATION_TIMEOUT_QUERY: TextClause = text(
+    "SELECT pg_catalog.set_config("
+    "'lock_timeout', CAST(:value AS pg_catalog.text), CAST(:local AS pg_catalog.bool))"
+)
 POSTGRESQL_WAL_SETTINGS_QUERY: TextClause = text(
     "SELECT pg_catalog.current_setting('fsync'), "
     "pg_catalog.current_setting('full_page_writes'), "
@@ -868,9 +873,13 @@ class Database:
             self._refuse_when_closed()
 
     async def _lock_migration(self, connection: AsyncConnection) -> None:
-        await connection.execute(text("SELECT set_config('lock_timeout', '5s', false)"))
         await connection.execute(
-            text("SELECT pg_advisory_lock(:key)"), {"key": MIGRATION_LOCK_ID}
+            POSTGRESQL_MIGRATION_TIMEOUT_QUERY,
+            {"value": MIGRATION_LOCK_TIMEOUT, "local": False},
+        )
+        await connection.execute(
+            text("SELECT pg_catalog.pg_advisory_lock(CAST(:key AS pg_catalog.int8))"),
+            {"key": MIGRATION_LOCK_ID},
         )
         await connection.commit()
 
@@ -881,11 +890,12 @@ class Database:
         if connection.invalidated:
             return
         await connection.execute(
-            text("SELECT pg_advisory_unlock(:key)"), {"key": MIGRATION_LOCK_ID}
+            text("SELECT pg_catalog.pg_advisory_unlock(CAST(:key AS pg_catalog.int8))"),
+            {"key": MIGRATION_LOCK_ID},
         )
         await connection.execute(
-            text("SELECT set_config('lock_timeout', :value, false)"),
-            {"value": previous_timeout},
+            POSTGRESQL_MIGRATION_TIMEOUT_QUERY,
+            {"value": previous_timeout, "local": False},
         )
         await connection.commit()
         connection.info.pop(MIGRATION_LEASE, None)

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.util import await_
 
 from kora.db.connection import (
+    MIGRATION_LOCK_ID,
     POSTGRESQL_WAL_SETTINGS_QUERY,
     Database,
     DatabaseClosedError,
@@ -16,7 +17,11 @@ from kora.db.connection import (
     Dialect,
     PostgreSQLDurabilityError,
 )
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import (
+    current_revision,
+    upgrade_database,
+    upgrade_with_diagnostics,
+)
 from kora.db.migrations.environment import alembic_config, head_revision
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import (
@@ -40,6 +45,14 @@ READ_STATE = text(
     "(SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory')"
 )
 
+MIGRATION_NATIVE_STATE = text(
+    "SELECT pg_catalog.pg_backend_pid(), pg_catalog.current_setting('lock_timeout'), "
+    "(SELECT count(*) FROM pg_catalog.pg_locks "
+    "WHERE pid = pg_catalog.pg_backend_pid() AND locktype = 'advisory' "
+    "AND classid = 0 AND objid = CAST(:key AS pg_catalog.oid) AND objsubid = 1 "
+    "AND mode = 'ExclusiveLock' AND granted)"
+)
+
 
 def guarded_database(settings: DatabaseSettings) -> Database:
     postgres = settings.dialect is Dialect.POSTGRESQL
@@ -51,8 +64,14 @@ def guarded_database(settings: DatabaseSettings) -> Database:
 
 
 @asynccontextmanager
-async def owned_database(settings: DatabaseSettings) -> AsyncGenerator[Database, None]:
-    database = guarded_database(settings)
+async def owned_database(
+    settings: DatabaseSettings, *, guarded: bool = True
+) -> AsyncGenerator[Database, None]:
+    database = (
+        guarded_database(settings)
+        if guarded
+        else Database(narrow_settings(settings, pool_size=1))
+    )
     ledger = ConnectionLedger(database)
     try:
         yield database
@@ -263,6 +282,81 @@ async def test_opted_in_migration_upgrades_the_existing_history(
     assert report.from_revision is None
     assert report.steps >= 12
     assert report.to_revision == current == expected
+
+
+@pytest.mark.asyncio
+async def test_migration_dispatches_exact_native_lease_operations(
+    empty_database_settings: DatabaseSettings,
+) -> None:
+    dispatches: list[tuple[str, object]] = []
+    key = {"key": MIGRATION_LOCK_ID}
+
+    def observe_dispatch(
+        connection: Connection,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        *arguments: object,
+    ) -> None:
+        if any(
+            name in statement
+            for name in ("set_config(", "pg_advisory_lock(", "pg_advisory_unlock(")
+        ):
+            dispatches.append((statement, parameters))
+
+    async with owned_database(empty_database_settings, guarded=False) as database:
+        if database.dialect is Dialect.SQLITE:
+            async with database.migration_connection() as writer:
+                report = await writer.run_sync(upgrade_with_diagnostics)
+            assert report.from_revision is None
+            assert report.steps > 0
+            return
+
+        async with database.transaction() as writer:
+            await writer.exec_driver_sql("SET SESSION lock_timeout = '2s'")
+            original = tuple((await writer.execute(MIGRATION_NATIVE_STATE, key)).one())
+        engine = database.writer_engine.sync_engine
+        event.listen(engine, "after_cursor_execute", observe_dispatch)
+
+        try:
+            async with database.migration_connection() as writer:
+                acquired = tuple(
+                    (await writer.execute(MIGRATION_NATIVE_STATE, key)).one()
+                )
+                report = await writer.run_sync(upgrade_with_diagnostics)
+                upgraded = tuple(
+                    (await writer.execute(MIGRATION_NATIVE_STATE, key)).one()
+                )
+            async with database.read_transaction() as reader:
+                restored = tuple(
+                    (await reader.execute(MIGRATION_NATIVE_STATE, key)).one()
+                )
+        finally:
+            event.remove(engine, "after_cursor_execute", observe_dispatch)
+
+    setting = (
+        "SELECT pg_catalog.set_config('lock_timeout', "
+        "CAST($1 AS pg_catalog.text), CAST($2 AS pg_catalog.bool))"
+    )
+    assert report.from_revision is None
+    assert report.steps > 0
+    assert original[1:] == ("2s", 0)
+    assert acquired == upgraded == (original[0], "5s", 1)
+    assert restored == original
+    assert dispatches == [
+        (setting, ("5s", False)),
+        (
+            "SELECT pg_catalog.pg_advisory_lock(CAST($1 AS pg_catalog.int8))",
+            (MIGRATION_LOCK_ID,),
+        ),
+        (setting, ("5s", True)),
+        (setting, ("5s", True)),
+        (
+            "SELECT pg_catalog.pg_advisory_unlock(CAST($1 AS pg_catalog.int8))",
+            (MIGRATION_LOCK_ID,),
+        ),
+        (setting, ("2s", False)),
+    ]
 
 
 @pytest.mark.asyncio
