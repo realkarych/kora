@@ -52,6 +52,33 @@ SELECT NOT EXISTS (
     WHERE type = 'trigger' AND tbl_name COLLATE NOCASE IN (SELECT name FROM targets)
 )
 """)
+PUBLICATION_FOREIGN_KEY_CHECK: TextClause = text("""
+WITH targets(name) AS (
+    VALUES ('graph'), ('graph_version'), ('graph_version_read_admission'),
+           ('graph_version_resource_owner'), ('graph_deployment_preparation'),
+           ('idempotency_record'), ('event')
+)
+SELECT CASE
+    WHEN EXISTS (
+        SELECT 1 FROM main.sqlite_schema
+        WHERE name COLLATE NOCASE IN ('pragma_foreign_keys', 'pragma_foreign_key_list')
+    ) THEN 0
+    WHEN EXISTS (
+        SELECT 1 FROM main.pragma_foreign_keys() AS enforcement
+        WHERE typeof(enforcement.foreign_keys) = 'integer'
+          AND enforcement.foreign_keys = 1
+    ) THEN NOT EXISTS (
+        SELECT 1 FROM main.sqlite_schema AS child
+        CROSS JOIN main.pragma_foreign_key_list(child.name, 'main') AS native
+        WHERE child.type = 'table'
+          AND (child.name COLLATE NOCASE IN (SELECT name FROM targets)
+               OR native."table" COLLATE NOCASE IN (SELECT name FROM targets))
+          AND (native.on_update IS NOT 'NO ACTION'
+               OR native.on_delete IS NOT 'NO ACTION')
+    )
+    ELSE 0
+END
+""")
 
 
 class PromotionIntentScalarsRejected(RuntimeError):
@@ -143,6 +170,11 @@ class SQLitePublicationTriggerObservation(Enum):
     REFUSED = "refused"
 
 
+class SQLitePublicationForeignKeyObservation(Enum):
+    VERIFIED = "verified"
+    REFUSED = "refused"
+
+
 def _active_sqlite_driver(connection: Connection) -> SQLiteDriver | None:
     if connection.closed or connection.invalidated:
         return None
@@ -155,29 +187,55 @@ def _active_sqlite_driver(connection: Connection) -> SQLiteDriver | None:
         return None
 
 
-async def observe_sqlite_publication_triggers(
-    connection: AsyncConnection,
-) -> SQLitePublicationTriggerObservation:
+async def _verify_sqlite_publication_catalog(
+    connection: AsyncConnection, statement: TextClause
+) -> bool:
     if connection.dialect.name != SQLITE:
-        return SQLitePublicationTriggerObservation.REFUSED
+        return False
     try:
         writer = writer_transaction(connection)
         original = await connection.run_sync(_active_sqlite_driver)
         if original is None:
-            return SQLitePublicationTriggerObservation.REFUSED
-        verified: object = await connection.scalar(PUBLICATION_TRIGGER_CHECK)
+            return False
+        verified: object = await connection.scalar(statement)
         writer.require_active()
         if (
             type(verified) is int
             and verified == 1
             and await connection.run_sync(_active_sqlite_driver) is original
         ):
-            return SQLitePublicationTriggerObservation.VERIFIED
+            return True
     except (WriterTransactionError, SQLAlchemyError):
-        return SQLitePublicationTriggerObservation.REFUSED
+        return False
     except CancelledError as error:
         error.__traceback__ = None
         error.__cause__ = None
         error.__context__ = None
         raise
-    return SQLitePublicationTriggerObservation.REFUSED
+    return False
+
+
+async def observe_sqlite_publication_triggers(
+    connection: AsyncConnection,
+) -> SQLitePublicationTriggerObservation:
+    verified = await _verify_sqlite_publication_catalog(
+        connection, PUBLICATION_TRIGGER_CHECK
+    )
+    return (
+        SQLitePublicationTriggerObservation.VERIFIED
+        if verified
+        else SQLitePublicationTriggerObservation.REFUSED
+    )
+
+
+async def observe_sqlite_publication_foreign_keys(
+    connection: AsyncConnection,
+) -> SQLitePublicationForeignKeyObservation:
+    verified = await _verify_sqlite_publication_catalog(
+        connection, PUBLICATION_FOREIGN_KEY_CHECK
+    )
+    return (
+        SQLitePublicationForeignKeyObservation.VERIFIED
+        if verified
+        else SQLitePublicationForeignKeyObservation.REFUSED
+    )
