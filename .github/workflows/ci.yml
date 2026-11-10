@@ -333,6 +333,11 @@ jobs:
             esac
             if test "$KORA_SCAFFOLD_OS" = ubuntu-24.04 && test "$KORA_SCAFFOLD_LANE" = remainder && test "$name" != engine; then
               for path in "${engine[@]}"; do
+                for index in "${!arguments[@]}"; do
+                  if test "${arguments[$index]}" = "$path"; then
+                    unset "arguments[$index]"
+                  fi
+                done
                 arguments+=("--ignore=$path")
               done
             fi

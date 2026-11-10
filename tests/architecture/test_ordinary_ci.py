@@ -396,7 +396,8 @@ def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
             "-o",
             "pipefail",
             "-c",
-            launch_prefix + '\n  printf "%s\n" "$name"\ndone\n',
+            launch_prefix
+            + '\n  printf "%s\\0" "$name" "${arguments[@]}"\n  printf "\\n"\ndone\n',
         ],
         cwd=tmp_path,
         env=environment,
@@ -415,7 +416,19 @@ def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
 
     children = EXPECTED_ORDINARY.get((system, lane), ())
     assert result.returncode == (0 if children else 1)
-    assert tuple(result.stdout.decode().splitlines()) == children
+    groups = tuple(
+        line.removesuffix("\0").split("\0")
+        for line in result.stdout.decode().splitlines()
+    )
+    assert tuple(name for name, *_ in groups) == children
+    if lane == "remainder" and children:
+        schema_resources = "tests/ir/test_type_schema_resources.py"
+        owners = tuple(
+            name for name, *arguments in groups if schema_resources in arguments
+        )
+        assert owners == (
+            ("engine",) if system == "ubuntu-24.04" else ("measurements",)
+        )
     assert outer.returncode == (0 if children or lane == "storage" else 1)
     assert (outer.stdout == b"admitted") is bool(children or lane == "storage")
 
