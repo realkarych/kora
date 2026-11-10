@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy.sql.elements import TextClause
 
+from kora.api.graph_publication_metadata import prepare_graph_publication_metadata
 from kora.api.graph_publication_saved import (
     SAVED_LOCATOR,
     graph_publication_saved_statement,
@@ -38,8 +39,8 @@ from kora.db.connection import Database, Dialect
 from kora.db.identifiers import encode
 from kora.db.migrations import upgrade_database
 from kora.db.tables import graph_version, graph_version_read_admission
-from kora.db.types import JsonObject, canonical_json
 from kora.engine.graph_resource_references import GraphResourceScope
+from tests.api.test_graph_publication_metadata import personal_principal
 from tests.api.test_graph_publication_values import (
     PRIVATE_WIRE,
     checked_attachment,
@@ -51,8 +52,8 @@ from tests.db.test_graph_read_admission import executed_queries
 from tests.support.databases import sqlite_settings
 
 STAMP = datetime(2026, 11, 10, 9, 8, 7, 654321, tzinfo=UTC)
-ACTOR = "publication-部署"
-RESOLVED: JsonObject = {"café": "a" * 64}
+ACTOR = "publication-owner"
+RESOLVED = {"café": "a" * 64}
 JSONB_SEMANTIC_MATCH = text("""
 SELECT CAST(CAST(:original AS pg_catalog.text) AS pg_catalog.jsonb)
        OPERATOR(pg_catalog.=)
@@ -114,10 +115,12 @@ async def compare_fresh_graph_row(database: Database) -> None:
         candidate, limits=publication_limits(candidate)
     )
     fixed = payloads.fixed_values(dialect, number=1, source_digest="f" * 64, at=STAMP)
-    metadata = {
-        RESOLVED_DIGESTS_PARAMETER: canonical_json(RESOLVED),
-        DEPLOYED_BY_PARAMETER: ACTOR,
-    }
+    metadata = prepare_graph_publication_metadata(
+        dialect,
+        personal_principal(ACTOR),
+        tuple(RESOLVED.items()),
+        max_metadata_bytes=256,
+    ).parameters()
     values = graph_publication_bind_expressions(dialect)
     proposed = graph_version.insert().values(fixed).values(values)
     inserts: dict[str, str] = payloads.parameters()
@@ -155,7 +158,7 @@ async def compare_fresh_graph_row(database: Database) -> None:
         RESOLVED_DIGESTS_PARAMETER: metadata[RESOLVED_DIGESTS_PARAMETER].replace(
             "a" * 64, "b" * 64
         ),
-        DEPLOYED_BY_PARAMETER: ACTOR.replace("署", "書"),
+        DEPLOYED_BY_PARAMETER: ACTOR + "-部署",
     }
 
     async with database.transaction() as writer:
@@ -205,6 +208,25 @@ async def compare_fresh_graph_row(database: Database) -> None:
                     )
                 ).one()
             )
+        raw_actor = "publication-部署"
+        await writer.execute(
+            graph_version.update()
+            .where(graph_version.c.id == scope.version_id)
+            .values(deployed_by=raw_actor)
+        )
+        raw_locator = await writer.scalar(
+            select(locator_column)
+            .select_from(graph_version)
+            .where(graph_version.c.id == scope.version_id)
+        )
+        raw_expected = expected | {SAVED_LOCATOR: raw_locator}
+        raw_match = await writer.scalar(
+            compare, raw_expected | {DEPLOYED_BY_PARAMETER: raw_actor}
+        )
+        raw_mismatch = await writer.scalar(
+            compare,
+            raw_expected | {DEPLOYED_BY_PARAMETER: raw_actor.replace("署", "書")},
+        )
         await writer.rollback()
     async with database.read_transaction() as reader:
         versions: object = await reader.scalar(
@@ -220,6 +242,8 @@ async def compare_fresh_graph_row(database: Database) -> None:
     assert type(marker[0]) is (int if sqlite else bool)
     assert missing is None
     assert rejected == [0 if sqlite else False] * 17
+    assert raw_match == (1 if sqlite else True)
+    assert raw_mismatch == (0 if sqlite else False)
     assert native_refusal == (0 if sqlite else False)
     assert blob == (("blob", 1) if sqlite else None)
     assert isinstance(compiled, SQLCompiler)

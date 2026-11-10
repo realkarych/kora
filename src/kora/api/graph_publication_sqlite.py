@@ -4,13 +4,13 @@ from dataclasses import dataclass
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from kora.api.graph_publication_metadata import PreparedGraphPublicationMetadata
 from kora.api.graph_publication_values import (
-    DEPLOYED_BY_PARAMETER,
-    RESOLVED_DIGESTS_PARAMETER,
     PreparedGraphPublicationBinds,
     sqlite_graph_publication_record_measurement_statement,
 )
 from kora.cel_eval.errors import raise_safe
+from kora.db.connection import Dialect
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.db.sqlite_graph_version_bounds import (
     SQLiteGraphVersionFootprint,
@@ -24,7 +24,6 @@ from kora.db.transactions import (
     writer_transaction,
 )
 from kora.db.types import SQLITE
-from kora.ir.text import utf8_length
 
 
 class SQLiteGraphPublicationMeasurementUnavailable(RuntimeError):
@@ -38,55 +37,28 @@ class SQLiteGraphPublicationMeasurement:
     resource_transport_bytes: int
 
 
-def _admit_metadata(resolved_digests_json: str, deployed_by: str, limit: int) -> None:
-    if type(resolved_digests_json) is not str or type(deployed_by) is not str:
-        raise GraphValueRejected(GraphValueFailure.INVALID)
-    if (
-        type(limit) is not int
-        or limit <= 0
-        or len(resolved_digests_json) + len(deployed_by) > limit
-    ):
-        raise GraphValueRejected(GraphValueFailure.BUDGET)
-    if (
-        not resolved_digests_json
-        or not deployed_by
-        or "\x00" in resolved_digests_json
-        or "\x00" in deployed_by
-    ):
-        raise GraphValueRejected(GraphValueFailure.INVALID)
-    resolved_bytes = utf8_length(resolved_digests_json)
-    actor_bytes = utf8_length(deployed_by)
-    if resolved_bytes is None or actor_bytes is None:
-        raise GraphValueRejected(GraphValueFailure.INVALID)
-    if resolved_bytes + actor_bytes > limit:
-        raise GraphValueRejected(GraphValueFailure.BUDGET)
-
-
 async def observe_sqlite_graph_publication(
     connection: AsyncConnection,
     binds: PreparedGraphPublicationBinds,
-    resolved_digests_json: str,
-    deployed_by: str,
-    *,
-    max_metadata_bytes: int,
+    metadata: PreparedGraphPublicationMetadata,
 ) -> SQLiteGraphPublicationMeasurement:
     parameters: dict[str, str] | None = None
     lease: WriterTransaction | None = None
     sizes: tuple[int, ...] | None = None
     try:
-        if type(binds) is not PreparedGraphPublicationBinds:
+        if (
+            type(binds) is not PreparedGraphPublicationBinds
+            or type(metadata) is not PreparedGraphPublicationMetadata
+            or metadata.dialect is not Dialect.SQLITE
+        ):
             raise GraphValueRejected(GraphValueFailure.INVALID)
-        _admit_metadata(resolved_digests_json, deployed_by, max_metadata_bytes)
         if connection.dialect.name != SQLITE:
             raise SQLiteGraphPublicationMeasurementUnavailable()
         lease = writer_transaction(connection)
         layout = await read_sqlite_graph_version_layout(connection)
         if layout is None:
             raise SQLiteGraphPublicationMeasurementUnavailable()
-        parameters = binds.parameters() | {
-            RESOLVED_DIGESTS_PARAMETER: resolved_digests_json,
-            DEPLOYED_BY_PARAMETER: deployed_by,
-        }
+        parameters = binds.parameters() | metadata.parameters()
         try:
             result = await connection.execute(
                 sqlite_graph_publication_record_measurement_statement(), parameters
@@ -128,9 +100,7 @@ async def observe_sqlite_graph_publication(
         del (
             connection,
             binds,
-            resolved_digests_json,
-            deployed_by,
-            max_metadata_bytes,
+            metadata,
             parameters,
             lease,
             sizes,

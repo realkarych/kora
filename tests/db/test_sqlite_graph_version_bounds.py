@@ -8,10 +8,9 @@ import pytest
 from sqlalchemy import Text, bindparam
 from sqlalchemy.sql.compiler import SQLCompiler
 
+from kora.api.graph_publication_metadata import prepare_graph_publication_metadata
 from kora.api.graph_publication_sqlite import observe_sqlite_graph_publication
 from kora.api.graph_publication_values import (
-    DEPLOYED_BY_PARAMETER,
-    RESOLVED_DIGESTS_PARAMETER,
     PreparedGraphPublicationBinds,
     graph_publication_bind_expressions,
     prepare_graph_publication_binds,
@@ -27,7 +26,8 @@ from kora.db.sqlite_graph_version_bounds import (
     bound_sqlite_graph_version_record,
 )
 from kora.db.tables import graph_version
-from kora.db.types import JsonObject, canonical_json
+from kora.db.types import canonical_json
+from tests.api.test_graph_publication_metadata import personal_principal
 from tests.api.test_graph_publication_values import (
     checked_attachment,
     publication_limits,
@@ -227,13 +227,17 @@ async def test_sqlite_graph_record_bound_covers_actual_migrated_file(
     database = Database(settings)
     ledger = ConnectionLedger(database)
     binds = record_publication_binds[int(with_files)]
-    resolved: JsonObject = {"café": "digest"}
-    resolved_json = canonical_json(resolved)
-    owner = "部署 😀"
-    parameters = binds.parameters() | {
-        RESOLVED_DIGESTS_PARAMETER: resolved_json,
-        DEPLOYED_BY_PARAMETER: owner,
-    }
+    resolved = (("café", "digest 😀"),)
+    resolved_json = canonical_json(dict(resolved))
+    principal = personal_principal("physical-record-owner")
+    owner = principal.owner
+    metadata = prepare_graph_publication_metadata(
+        database.dialect,
+        principal,
+        resolved,
+        max_metadata_bytes=len(resolved_json.encode()) + len(owner.encode()),
+    )
+    parameters = binds.parameters() | metadata.parameters()
     widths = SQLiteGraphVersionWidths(
         len(binds.ir_json.encode(encoding)),
         len(binds.execution_json.encode(encoding)),
@@ -244,7 +248,6 @@ async def test_sqlite_graph_record_bound_covers_actual_migrated_file(
     expected = bound_sqlite_graph_version_record(
         widths, encoding=encoding.lower(), page_size=page_size
     )
-    max_metadata_bytes = len(resolved_json.encode()) + len(owner.encode())
 
     try:
         async with database.transaction() as writer:
@@ -259,9 +262,7 @@ async def test_sqlite_graph_record_bound_covers_actual_migrated_file(
                 observed = await observe_sqlite_graph_publication(
                     writer,
                     binds,
-                    resolved_json,
-                    owner,
-                    max_metadata_bytes=max_metadata_bytes,
+                    metadata,
                 )
             observation_checkouts = ledger.checkouts
             seeder = Seeder(writer)

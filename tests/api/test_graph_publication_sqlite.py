@@ -7,6 +7,10 @@ from typing import cast
 import pytest
 from sqlalchemy import event, text
 
+from kora.api.graph_publication_metadata import (
+    PreparedGraphPublicationMetadata,
+    prepare_graph_publication_metadata,
+)
 from kora.api.graph_publication_sqlite import (
     SQLiteGraphPublicationMeasurementUnavailable,
     observe_sqlite_graph_publication,
@@ -22,6 +26,7 @@ from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.db.migrations import upgrade_database
 from kora.db.types import canonical_json
 from kora.observability import Level, LoggingSettings
+from tests.api.test_graph_publication_metadata import personal_principal
 from tests.api.test_graph_publication_values import (
     PRIVATE_WIRE,
     checked_attachment,
@@ -33,9 +38,9 @@ from tests.db.test_graph_read_admission import executed_queries
 from tests.db.test_sqlite_writer_entry import writer_driver
 from tests.support.databases import sqlite_settings
 
-RESOLVED = canonical_json({"clé": "private-resolved-width-1229"})
-ACTOR = "private-deployer-width-1229😀"
-METADATA_BYTES = len(RESOLVED.encode()) + len(ACTOR.encode())
+RESOLVED = (("clé", "private-resolved-width-1229"),)
+ACTOR = "private-deployer-width-1229"
+METADATA_BYTES = len(canonical_json(dict(RESOLVED)).encode()) + len(ACTOR.encode())
 CREATE_CANARY = text("CREATE TABLE publication_canary (value INTEGER)")
 INSERT_CANARY = text("INSERT INTO publication_canary VALUES (7)")
 READ_CANARY = text("SELECT value FROM publication_canary")
@@ -50,9 +55,21 @@ def measurement_binds() -> PreparedGraphPublicationBinds:
     )
 
 
+@pytest.fixture(scope="module")
+def measurement_metadata() -> PreparedGraphPublicationMetadata:
+    return prepare_graph_publication_metadata(
+        Dialect.SQLITE,
+        personal_principal(ACTOR),
+        RESOLVED,
+        max_metadata_bytes=METADATA_BYTES,
+    )
+
+
 @pytest.mark.asyncio
 async def test_sqlite_publication_measurement_requires_the_current_sqlite_writer(
-    database: Database, measurement_binds: PreparedGraphPublicationBinds
+    database: Database,
+    measurement_binds: PreparedGraphPublicationBinds,
+    measurement_metadata: PreparedGraphPublicationMetadata,
 ) -> None:
     connection_unit = (
         database.read_snapshot()
@@ -69,9 +86,7 @@ async def test_sqlite_publication_measurement_requires_the_current_sqlite_writer
             await observe_sqlite_graph_publication(
                 connection,
                 measurement_binds,
-                RESOLVED,
-                ACTOR,
-                max_metadata_bytes=METADATA_BYTES,
+                measurement_metadata,
             )
 
     assert queries == []
@@ -79,53 +94,46 @@ async def test_sqlite_publication_measurement_requires_the_current_sqlite_writer
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("resolved", "actor", "limit", "reason"),
-    [
-        (RESOLVED, ACTOR, METADATA_BYTES - 1, GraphValueFailure.BUDGET),
-        (RESOLVED, ACTOR, 1, GraphValueFailure.BUDGET),
-        (
-            RESOLVED,
-            ACTOR,
-            cast(int, cast(object, "private-invalid-metadata-limit")),
-            GraphValueFailure.BUDGET,
-        ),
-        ("", ACTOR, METADATA_BYTES, GraphValueFailure.INVALID),
-        (RESOLVED, "\x00", METADATA_BYTES, GraphValueFailure.INVALID),
-        (RESOLVED, "\ud800", METADATA_BYTES, GraphValueFailure.INVALID),
-    ],
-)
-async def test_sqlite_publication_measurement_refuses_metadata_before_sql(
+@pytest.mark.parametrize("foreign_dialect", [True, False])
+async def test_sqlite_publication_measurement_refuses_unprepared_metadata_before_sql(
     database: Database,
     measurement_binds: PreparedGraphPublicationBinds,
-    resolved: str,
-    actor: str,
-    limit: int,
-    reason: GraphValueFailure,
+    foreign_dialect: bool,
 ) -> None:
     ledger = ConnectionLedger(database)
+    metadata = (
+        prepare_graph_publication_metadata(
+            Dialect.POSTGRESQL,
+            personal_principal(ACTOR),
+            RESOLVED,
+            max_metadata_bytes=METADATA_BYTES,
+        )
+        if foreign_dialect
+        else cast(PreparedGraphPublicationMetadata, cast(object, {"owner": ACTOR}))
+    )
 
     async with database.transaction() as writer:
         with (
             executed_queries(writer) as queries,
             pytest.raises(GraphValueRejected) as refused,
         ):
-            await observe_sqlite_graph_publication(
-                writer, measurement_binds, resolved, actor, max_metadata_bytes=limit
-            )
+            await observe_sqlite_graph_publication(writer, measurement_binds, metadata)
 
-    assert refused.value.reason is reason
+    assert refused.value.reason is GraphValueFailure.INVALID
     assert queries == []
     for frame, _ in walk_tb(refused.value.__traceback__):
         if frame.f_code.co_name == "observe_sqlite_graph_publication":
-            assert "max_metadata_bytes" not in frame.f_locals
+            assert "metadata" not in frame.f_locals
     assert ledger.outstanding == database.units_in_flight() == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["layout", "measurement", "cancel"])
 async def test_sqlite_publication_measurement_refusal_and_cancellation_release_writer(
-    tmp_path: Path, measurement_binds: PreparedGraphPublicationBinds, mode: str
+    tmp_path: Path,
+    measurement_binds: PreparedGraphPublicationBinds,
+    measurement_metadata: PreparedGraphPublicationMetadata,
+    mode: str,
 ) -> None:
     settings = sqlite_settings(tmp_path / "publication.db")
     await upgrade_database(settings)
@@ -173,9 +181,7 @@ async def test_sqlite_publication_measurement_refusal_and_cancellation_release_w
                 await observe_sqlite_graph_publication(
                     writer,
                     measurement_binds,
-                    RESOLVED,
-                    ACTOR,
-                    max_metadata_bytes=METADATA_BYTES,
+                    measurement_metadata,
                 )
             finally:
                 if mode == "measurement":
@@ -216,9 +222,7 @@ async def test_sqlite_publication_measurement_refusal_and_cancellation_release_w
             recovered = await observe_sqlite_graph_publication(
                 writer,
                 measurement_binds,
-                RESOLVED,
-                ACTOR,
-                max_metadata_bytes=METADATA_BYTES,
+                measurement_metadata,
             )
     finally:
         await database.close()
@@ -233,8 +237,7 @@ async def test_sqlite_publication_measurement_refusal_and_cancellation_release_w
         if frame.f_code.co_name == "observe_sqlite_graph_publication":
             assert {
                 "binds",
-                "resolved_digests_json",
-                "deployed_by",
+                "metadata",
                 "parameters",
                 "lease",
             }.isdisjoint(frame.f_locals)
