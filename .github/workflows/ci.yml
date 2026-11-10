@@ -241,7 +241,8 @@ jobs:
             if bash -e -o pipefail <<'KORA_ORDINARY_SCRIPT' > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
           read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"
           case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
-            ubuntu-24.04:conformance|macos-15:conformance) names=(first second third) ;;
+            ubuntu-24.04:conformance) names=(first second third) ;;
+            macos-15:conformance) names=(first second third surface) ;;
             ubuntu-24.04:remainder) names=(measurements other engine) ;;
             macos-15:remainder) names=(measurements integration other) ;;
             ubuntu-24.04:integration) names=(integration surface) ;;
@@ -336,10 +337,14 @@ jobs:
               surface) arguments=("${surface[@]}") ;;
               *) exit 1 ;;
             esac
-            if test "$KORA_SCAFFOLD_OS" = ubuntu-24.04 && test "$KORA_SCAFFOLD_LANE" = integration && test "$name" = integration; then
-              for path in "${surface[@]}"; do
-                arguments+=("--ignore=$path")
-              done
+            if test "$name" = integration; then
+              case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
+                ubuntu-24.04:integration|macos-15:remainder)
+                  for path in "${surface[@]}"; do
+                    arguments+=("--ignore=$path")
+                  done
+                  ;;
+              esac
             fi
             if test "$KORA_SCAFFOLD_OS" = ubuntu-24.04 && test "$KORA_SCAFFOLD_LANE" = remainder && test "$name" != engine; then
               for path in "${engine[@]}"; do

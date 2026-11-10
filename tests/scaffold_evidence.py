@@ -29,7 +29,7 @@ LANE_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
         "local-runtime": (),
     },
     "macos-15": {
-        "conformance": ("first", "second", "third"),
+        "conformance": ("first", "second", "third", "surface"),
         "remainder": ("measurements", "integration", "other"),
         "storage": (),
         "local-runtime": (),

@@ -106,7 +106,7 @@ EXPECTED_ORDINARY = {
     ("ubuntu-24.04", "conformance"): ("first", "second", "third"),
     ("ubuntu-24.04", "remainder"): ("measurements", "other", "engine"),
     ("ubuntu-24.04", "integration"): ("integration", "surface"),
-    ("macos-15", "conformance"): ("first", "second", "third"),
+    ("macos-15", "conformance"): ("first", "second", "third", "surface"),
     ("macos-15", "remainder"): ("measurements", "integration", "other"),
 }
 
@@ -337,9 +337,11 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         "surface": surface,
     }
     macos = {
-        **{name: cohorts[name] for name in (*placed, "integration")},
+        **{name: cohorts[name] for name in placed},
         "measurements": cohorts["measurements"],
         "other": cohorts["other"],
+        "integration": cohorts["integration"] - surface,
+        "surface": surface,
     }
 
     assert all(cohorts.values())
@@ -372,9 +374,8 @@ def test_shards_partition_every_inventory_group() -> None:
         if system == "ubuntu-24.04":
             assert sorted(children) == sorted(COHORTS)
         else:
-            assert sorted((*children, "engine", "surface")) == sorted(COHORTS)
+            assert sorted((*children, "engine")) == sorted(COHORTS)
             assert "engine" not in children
-            assert "surface" not in children
 
 
 @pytest.mark.parametrize(
@@ -444,21 +445,23 @@ def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
         assert owners == (
             ("engine",) if system == "ubuntu-24.04" else ("measurements",)
         )
-    if (system, lane) == ("ubuntu-24.04", "integration"):
-        integration_arguments = next(
-            arguments for name, *arguments in groups if name == "integration"
-        )
+    if (system, lane) in {
+        ("ubuntu-24.04", "integration"),
+        ("macos-15", "conformance"),
+    }:
         for path in SURFACE_MODULES:
             assert tuple(name for name, *arguments in groups if path in arguments) == (
                 "surface",
             )
-            assert f"--ignore={path}" in integration_arguments
-    if (system, lane) == ("macos-15", "remainder"):
+    if (system, lane) in {
+        ("ubuntu-24.04", "integration"),
+        ("macos-15", "remainder"),
+    }:
+        integration_arguments = next(
+            arguments for name, *arguments in groups if name == "integration"
+        )
         for path in SURFACE_MODULES:
-            assert all(
-                path not in arguments and f"--ignore={path}" not in arguments
-                for _, *arguments in groups
-            )
+            assert f"--ignore={path}" in integration_arguments
     assert outer.returncode == (0 if children or lane == "storage" else 1)
     assert (outer.stdout == b"admitted") is bool(children or lane == "storage")
 

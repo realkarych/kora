@@ -42,4 +42,6 @@ JUnit case time for the two longest integration files, not a portable benchmark:
 | `tests/cli/test_conformance.py` | 202.7 s | 213.0 s |
 | `tests/api/test_graph_execution_preparation.py` | 88.8 s | 78.4 s |
 
-Those two files are the Linux `surface` group. The rest of `tests/api`, `tests/cli` and `tests/ir/test_structured_schema_string_lengths.py` stay in the integration group, which ignores the two files on Linux. macOS still runs both files inside its one integration process. The sums motivate the split. They do not demonstrate the resulting wall clock, and they add no numerical gate.
+Those two files are the Linux `surface` group. The rest of `tests/api`, `tests/cli` and `tests/ir/test_structured_schema_string_lengths.py` stay in the integration group, which ignores the two files on Linux.
+
+The same 512 integration tests show why macOS cannot keep both files in remainder. On [42766494419](https://github.com/realkarych/kora/actions/runs/42766494419) the macOS integration cohort took 370.1 s. On [42789487696](https://github.com/realkarych/kora/actions/runs/42789487696) it took 530.7 s and the remainder job was cancelled at 604 s, after a 536 s test step. On [42791568563](https://github.com/realkarych/kora/actions/runs/42791568563) the two files were 206.5 s and 78.5 s of that cohort. macOS conformance runs them as its fourth group, and macOS remainder ignores them. These observations are diagnostic. They add no numerical gate.

@@ -102,7 +102,6 @@ def lane_files(root: Path, lane: str, operating_system: str) -> None:
         }
         if operating_system == "macos-15" and lane == "remainder":
             assigned["measurements"] = (groups["measurements"], groups["engine"])
-            assigned["integration"] = (groups["integration"], groups["surface"])
         for name, nodes in assigned.items():
             write_junit(root / f"{name}.xml", identities(nodes))
             (root / f"{name}.log").write_text("1 passed\n")
