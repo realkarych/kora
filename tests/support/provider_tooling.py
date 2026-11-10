@@ -6,12 +6,16 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import sysconfig
+import tempfile
+import time
 import tomllib
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,10 +25,12 @@ from packaging.utils import canonicalize_name
 from pydantic import BaseModel, Field
 
 from kora.ir.json import JsonObject
+from scripts.ci.mutation_process import ClosureFailure, Stop, execute
 from tests.support.observability import ProcessResult
 
 REPOSITORY: Path = Path(__file__).resolve().parents[2]
 FIXTURE: Path = REPOSITORY / "tests" / "fixtures" / "provider_tooling"
+CORE_WHEEL_BUILD_SECONDS = 120
 
 
 class ProjectDependencies(BaseModel):
@@ -188,11 +194,101 @@ def create_virtual_environment(directory: Path) -> Path:
     return directory / "bin" / "python"
 
 
-def build_core_wheel(output: Path) -> Path:
-    build_wheel(
-        REPOSITORY, output, environment={**os.environ, "KORA_BUILD_OFFLINE": "1"}
+@contextmanager
+def core_wheel_workspace() -> Generator[Path]:
+    root = Path(tempfile.mkdtemp(prefix="kora-core-wheel-"))
+    settled = True
+    try:
+        yield root
+    except ClosureFailure:
+        settled = False
+        raise
+    finally:
+        if settled:
+            shutil.rmtree(root)
+
+
+@contextmanager
+def core_wheel_build_stop() -> Generator[Stop]:
+    stop = Stop()
+    signals = (signal.SIGINT, signal.SIGTERM)
+    previous = [(number, signal.getsignal(number)) for number in signals]
+    if any(handler is None for _, handler in previous):
+        raise RuntimeError("core wheel build requires restorable signal handlers")
+    try:
+        for number in signals:
+            signal.signal(number, stop.receive)
+        yield stop
+    finally:
+        for number, handler in previous:
+            signal.signal(number, handler)
+
+
+def require_core_wheel_build_current(deadline: float, stop: Stop) -> None:
+    if stop.requested:
+        raise KeyboardInterrupt
+    if time.monotonic() >= deadline:
+        raise TimeoutError("core wheel build exceeded its deadline")
+
+
+def run_core_wheel_build(
+    arguments: list[str],
+    root: Path,
+    variables: dict[str, str],
+    deadline: float,
+    stop: Stop,
+) -> None:
+    result = execute(
+        arguments,
+        root,
+        deadline,
+        stop,
+        variables=variables,
+        limit=None,
+        stderr_only=True,
     )
-    return next(output.glob("kora-*.whl"))
+    require_core_wheel_build_current(deadline, stop)
+    if result.reason != "completed" or result.code != 0:
+        stderr = result.output.decode(errors="replace")
+        raise ValueError(
+            f"core wheel build failed ({result.reason}, {result.code})\n{stderr}"
+        )
+
+
+def core_wheel_artifact(output: Path, pattern: str) -> Path:
+    artifacts = tuple(output.glob(pattern))
+    if len(artifacts) != 1 or artifacts[0].is_symlink() or not artifacts[0].is_file():
+        raise ValueError("core wheel build did not produce one regular artifact")
+    return artifacts[0]
+
+
+def build_core_wheel(output: Path) -> Path:
+    deadline = time.monotonic() + CORE_WHEEL_BUILD_SECONDS
+    with core_wheel_build_stop() as stop:
+        temporary = output / "temporary"
+        temporary.mkdir()
+        variables = {**os.environ, "KORA_BUILD_OFFLINE": "1", "TMPDIR": str(temporary)}
+        arguments = [
+            "uv",
+            "build",
+            "--offline",
+            "--no-build-isolation",
+            "--python",
+            sys.executable,
+            "--out-dir",
+            str(output),
+        ]
+        run_core_wheel_build(
+            [*arguments, "--sdist", str(REPOSITORY)], output, variables, deadline, stop
+        )
+        archive = core_wheel_artifact(output, "kora-*.tar.gz")
+        run_core_wheel_build(
+            [*arguments, "--wheel", str(archive)], output, variables, deadline, stop
+        )
+        wheel = core_wheel_artifact(output, "kora-*.whl")
+        require_core_wheel_build_current(deadline, stop)
+    require_core_wheel_build_current(deadline, stop)
+    return wheel
 
 
 def copy_core_wheel(core_wheel: Path, wheelhouse: Path) -> Path:

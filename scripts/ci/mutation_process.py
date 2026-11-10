@@ -134,9 +134,10 @@ def execute(
     stop: Stop,
     *,
     variables: dict[str, str] | None = None,
-    limit: int = MAX_OUTPUT,
+    limit: int | None = MAX_OUTPUT,
     workspace: Path | None = None,
     workspace_limit: int = MAX_WORK,
+    stderr_only: bool = False,
 ) -> Execution:
     if stop.requested or time.monotonic() >= deadline:
         return Execution(-1, b"", "interrupted" if stop.requested else "timeout")
@@ -145,17 +146,18 @@ def execute(
         cwd=root,
         env=variables or environment(root),
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL if stderr_only else subprocess.PIPE,
+        stderr=subprocess.PIPE if stderr_only else subprocess.STDOUT,
         start_new_session=True,
     )
+    captured = process.stderr if stderr_only else process.stdout
     output = bytearray()
     reason = "completed"
     try:
-        if process.stdout is None:
+        if captured is None:
             raise RuntimeError("missing child output")
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(captured, selectors.EVENT_READ)
             while selector.get_map() or not exited(process):
                 if (
                     workspace is not None
@@ -171,7 +173,7 @@ def execute(
                     chunk = os.read(key.fd, 65536)
                     if not chunk:
                         selector.unregister(key.fd)
-                    elif len(output) + len(chunk) > limit:
+                    elif limit is not None and len(output) + len(chunk) > limit:
                         reason = "output_limit"
                         break
                     else:
@@ -182,6 +184,6 @@ def execute(
         try:
             terminate(process)
         finally:
-            if process.stdout is not None:
-                process.stdout.close()
+            if captured is not None:
+                captured.close()
     return Execution(process.returncode, bytes(output), reason)

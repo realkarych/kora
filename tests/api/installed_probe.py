@@ -1,5 +1,6 @@
 import asyncio
 import importlib.metadata
+import importlib.resources
 import os
 import sys
 from collections.abc import Iterator
@@ -21,6 +22,11 @@ from kora.protocols.time import SystemClock
 async def exercise(root: Path, environment: Path) -> None:
     assert kora.__file__ is not None
     assert Path(kora.__file__).is_relative_to(environment)
+    installed = importlib.resources.files("kora")
+    assert installed.joinpath("api", "static", "index.html").is_file()
+    assert installed.joinpath(
+        "ir", "artifact_schemas", "AgentSession.schema.json"
+    ).is_file()
     names = {item.metadata["Name"] for item in importlib.metadata.distributions()}
     assert {"httpx", "httpcore", "certifi", "anyio"} <= names
     assert {

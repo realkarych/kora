@@ -41,10 +41,11 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 
 @pytest.fixture(scope="session")
-def core_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    from tests.support.provider_tooling import build_core_wheel
+def core_wheel() -> Iterator[Path]:
+    from tests.support.provider_tooling import build_core_wheel, core_wheel_workspace
 
-    return build_core_wheel(tmp_path_factory.mktemp("core-wheel"))
+    with core_wheel_workspace() as output:
+        yield build_core_wheel(output)
 
 
 @pytest.fixture(scope="session")

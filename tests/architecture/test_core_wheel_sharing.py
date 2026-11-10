@@ -77,3 +77,43 @@ def test_core_wheel_is_built_once_per_session_and_installed_per_module() -> None
         assert "core_wheel" in {argument.arg for argument in consumer.args.args}
         assert "copy_core_wheel" in called_names(consumer)
     assert "install_tooling" in called_names(installed)
+
+
+def test_core_wheel_uses_the_private_archive_and_tooling_remains_direct() -> None:
+    tooling = functions("tests/support/provider_tooling.py")
+    fixture = functions("tests/conftest.py")["core_wheel"]
+    core = tooling["build_core_wheel"]
+
+    builds = [
+        tuple(ast.unparse(argument) for argument in node.args)
+        for node in ast.walk(core)
+        if isinstance(node, ast.Call) and call_name(node) == "run_core_wheel_build"
+    ]
+    common = next(
+        ast.unparse(node.value)
+        for node in ast.walk(core)
+        if isinstance(node, ast.Assign)
+        and any(ast.unparse(target) == "arguments" for target in node.targets)
+    )
+    direct = next(
+        ast.unparse(node.args[0])
+        for node in ast.walk(tooling["build_wheel"])
+        if isinstance(node, ast.Call) and call_name(node) == "run_setup"
+    )
+
+    shared_inputs = ("output", "variables", "deadline", "stop")
+    assert builds == [
+        ("[*arguments, '--sdist', str(REPOSITORY)]", *shared_inputs),
+        ("[*arguments, '--wheel', str(archive)]", *shared_inputs),
+    ]
+    build_prefix = (
+        "['uv', 'build', '--offline', '--no-build-isolation', "
+        "'--python', sys.executable"
+    )
+    assert common == build_prefix + ", '--out-dir', str(output)]"
+    assert (
+        direct == build_prefix + ", '--wheel', '--out-dir', str(output), str(source)]"
+    )
+    assert "core_wheel_workspace" in called_names(fixture)
+    assert "build_wheel" not in called_names(core)
+    assert "build_wheel" in called_names(tooling["build_fixture_wheel"])
