@@ -14,6 +14,7 @@ from kora.api.graph_deployment_attachment import (
 )
 from kora.cel_eval.errors import raise_safe
 from kora.db.connection import Dialect
+from kora.db.graph_read_admission import GraphVersionReadAdmission
 from kora.db.graph_resource_transport import graph_resource_binary_projection
 from kora.db.graph_value_json import (
     GraphValueFailure,
@@ -21,6 +22,7 @@ from kora.db.graph_value_json import (
     TextBudget,
     quoted,
 )
+from kora.db.graph_version_reads import MAX_SQL_LENGTH
 from kora.db.identifiers import is_identifier
 from kora.db.types import DIGEST_LENGTH, normalise_timestamp
 from kora.engine.graph_resource_references import GraphResourceReferences
@@ -92,6 +94,31 @@ class PreparedGraphPublicationBinds:
             RESOURCE_PARAMETER: self.resources_json,
         }
 
+    def _has_valid_scope(self) -> bool:
+        return all(type(value) is str and is_identifier(value) for value in self._scope)
+
+    def admission_values(
+        self, admission: GraphVersionReadAdmission
+    ) -> dict[str, str | int]:
+        if (
+            not self._has_valid_scope()
+            or type(admission) is not GraphVersionReadAdmission
+            or not all(
+                type(value) is int and 0 < value <= MAX_SQL_LENGTH
+                for value in (
+                    admission.db_input_bytes,
+                    admission.resource_transport_bytes,
+                )
+            )
+        ):
+            del self, admission
+            raise_safe(GraphValueRejected(GraphValueFailure.INVALID))
+        return {
+            "graph_version_id": self._scope[2],
+            "db_input_bytes": admission.db_input_bytes,
+            "resource_transport_bytes": admission.resource_transport_bytes,
+        }
+
     def fixed_values(
         self, dialect: Dialect, *, number: int, source_digest: str, at: datetime
     ) -> dict[str, str | int | datetime]:
@@ -110,9 +137,7 @@ class PreparedGraphPublicationBinds:
             or not 0 < number <= ordinal_limit
             or stamp is None
             or stamp.year < 1000
-            or not all(
-                type(value) is str and is_identifier(value) for value in self._scope
-            )
+            or not self._has_valid_scope()
             or not all(
                 type(value) is str and SHA256_TEXT.fullmatch(value) is not None
                 for value in (

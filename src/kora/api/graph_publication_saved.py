@@ -159,6 +159,35 @@ RETURNING ctid::pg_catalog.text
 """)
 
 
+_SQLITE_ADMISSION_INSERT = text("""
+INSERT OR ABORT INTO main.graph_version_read_admission (
+    graph_version_id, format_version, db_input_bytes, resource_transport_bytes
+) VALUES (:graph_version_id, 1, :db_input_bytes, :resource_transport_bytes)
+RETURNING 1
+""")
+
+_POSTGRESQL_ADMISSION_INSERT = text("""
+INSERT INTO graph_version_read_admission (
+    graph_version_id, format_version, db_input_bytes, resource_transport_bytes
+) VALUES (
+    CAST(:graph_version_id AS pg_catalog.text),
+    1::pg_catalog.int4,
+    CAST(:db_input_bytes AS pg_catalog.int8),
+    CAST(:resource_transport_bytes AS pg_catalog.int8)
+)
+RETURNING 1::pg_catalog.int4
+""")
+
+
+def graph_publication_admission_statement(dialect: Dialect) -> TextClause:
+    if dialect is Dialect.SQLITE:
+        return _SQLITE_ADMISSION_INSERT
+    if dialect is Dialect.POSTGRESQL:
+        return _POSTGRESQL_ADMISSION_INSERT
+    del dialect
+    raise_safe(GraphValueRejected(GraphValueFailure.INVALID))
+
+
 def graph_publication_insert_statement(dialect: Dialect) -> TextClause:
     if dialect is Dialect.SQLITE:
         return _SQLITE_INSERT
