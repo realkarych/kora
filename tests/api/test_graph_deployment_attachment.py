@@ -129,7 +129,7 @@ def exact_attachment_limits(
     resources = READ_LIMITS.resources
     logical = resources.logical
     fixed = (
-        32
+        36
         + len(prepared.groups) * (4 * (256 + 71) + 16)
         + len(owners) * (4 + 8 * MAX_STORAGE_METADATA)
     )

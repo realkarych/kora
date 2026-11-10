@@ -37,7 +37,7 @@ from kora.protocols.storage_models import (
 
 IDENTIFIER_WIDTH = 256
 STORAGE_DIGEST_WIDTH = len("sha256:") + DIGEST_LENGTH
-ATTACHMENT_SLOTS = 32
+ATTACHMENT_SLOTS = 36
 REFERENCE_SNAPSHOT_UNITS = 8 * MAX_STORAGE_METADATA
 GROUP_DESCRIPTOR_UNITS = 4 * (IDENTIFIER_WIDTH + STORAGE_DIGEST_WIDTH) + 16
 ORDINAL_UNITS = 4
@@ -53,8 +53,9 @@ class GraphDeploymentAttachmentLimits:
 
 
 class AttachedGraphDeployment(PreparedExecutionContract):
-    __slots__ = ("_issuer",)
+    __slots__ = ("_issuer", "scope_ids")
     _issuer: object
+    scope_ids: tuple[str, str, str]
 
     def __init__(
         self,
@@ -75,6 +76,9 @@ class AttachedGraphDeployment(PreparedExecutionContract):
             physical.owners,
         )
         object.__setattr__(self, "_issuer", issuer)
+        object.__setattr__(
+            self, "scope_ids", (scope.namespace_id, scope.graph_id, scope.version_id)
+        )
 
 
 def is_checked_graph_attachment(

@@ -1,19 +1,28 @@
+import asyncio
 import json
 import math
 import pickle
+import sqlite3
+from contextlib import closing
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from traceback import walk_tb
 from typing import cast
 
 import pytest
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import Text, bindparam, func, select
+from sqlalchemy import Text, bindparam, func, select, text
 
 from kora.api.graph_deployment_attachment import (
     AttachedGraphDeployment,
     attach_graph_deployment_references,
 )
-from kora.api.graph_execution_preparation import PreparedExecutionContract
+from kora.api.graph_execution_preparation import (
+    PreparedExecutionContract,
+    PreparedGraphDeploymentInputs,
+    PreparedLogicalExecutionContract,
+)
 from kora.api.graph_publication_values import (
     GraphPublicationBindLimits,
     graph_publication_bind_expressions,
@@ -27,8 +36,12 @@ from kora.db.graph_value_json import (
     TextBudget,
     render_object,
 )
+from kora.db.identifiers import encode
+from kora.db.migrations import upgrade_database
 from kora.db.reads import graph_version_by_number
+from kora.db.sqlite_graph_version_bounds import FIXED_ASCII_CHARACTERS
 from kora.db.tables import graph_version
+from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_version_identity import (
     GraphVersionPin,
     read_graph_version_identity,
@@ -43,15 +56,18 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
 from tests.db.test_graph_read_admission import executed_queries
 from tests.engine.test_graph_resource_references import SCOPE, assert_refused
+from tests.support.databases import sqlite_settings
 
 PRIVATE_WIRE = "private-wire-572"
 SQL_LOOKALIKE = PRIVATE_WIRE + " '); SELECT graph_version; \"\\"
 ENCODED_TEXT = "\x00😀"
 
 
-def checked_attachment(*, with_files: bool) -> AttachedGraphDeployment:
+def checked_attachment(
+    *, with_files: bool, scope: GraphResourceScope = SCOPE
+) -> AttachedGraphDeployment:
     ir_text, files, owners = (
-        attachment_inputs(SCOPE) if with_files else (deployment_source(()), (), ())
+        attachment_inputs(scope) if with_files else (deployment_source(()), (), ())
     )
     raw = ObjectReader(ir_text).object()
     raw["x-bind"] = SQL_LOOKALIKE if with_files else PRIVATE_WIRE + "-empty"
@@ -59,7 +75,7 @@ def checked_attachment(*, with_files: bool) -> AttachedGraphDeployment:
     ir_text = render_object(raw, TextBudget(READ_LIMITS.identity.max_encoded_bytes))
     prepared = prepare_inputs(ir_text, files)
     return attach_graph_deployment_references(
-        prepared, SCOPE, owners, limits=ATTACH_LIMITS
+        prepared, scope, owners, limits=ATTACH_LIMITS
     )
 
 
@@ -79,10 +95,11 @@ def publication_limits(
         for value in (candidate.canonical_ir, candidate.canonical_contract)
     )
     assert exact < outer + resource
+    retained_scope = 4 * sum(map(len, candidate.scope_ids))
     return GraphPublicationBindLimits(
         exact,
-        inner + resource + outer + 32,
-        8 * inner + 2 * resource + 2 * outer + 32,
+        inner + resource + outer + 32 + retained_scope,
+        8 * inner + 2 * resource + 2 * outer + 32 + retained_scope,
     )
 
 
@@ -165,6 +182,219 @@ def test_publication_bind_values_admit_exact_bytes_and_protect_private_state(
             if frame.f_code.co_name == operation
         ]
         assert frames == [{}]
+
+
+FIXED_STAMP = datetime(2026, 11, 10, 12, 34, 56, 123456, timezone(timedelta(hours=3)))
+SOURCE_DIGEST = "a" * 64
+SQLITE_FIXED_STORAGE = text(
+    "SELECT typeof(number), typeof(value_encoding_version), deployed_at, created_at, "
+    "updated_at, length(CAST(id || graph_id || ir_digest || source_digest || "
+    "execution_contract_digest || deployment_digest || deployed_at || created_at || "
+    "updated_at || status AS BLOB)) FROM main.graph_version WHERE id = :version"
+)
+
+
+async def assert_fixed_publication_insert(
+    database: Database, sqlite_width: int
+) -> None:
+    ledger = ConnectionLedger(database)
+    dialect = database.dialect
+    sqlite = dialect is Dialect.SQLITE
+    maximum = (1 << (63 if sqlite else 31)) - 1
+    async with database.transaction() as writer:
+        seeder = Seeder(writer)
+        namespace_id = await seeder.namespace()
+        scope = GraphResourceScope(
+            namespace_id, await seeder.graph(namespace_id), seeder.new_id()
+        )
+    candidate = await asyncio.to_thread(
+        checked_attachment, with_files=False, scope=scope
+    )
+    payloads = prepare_graph_publication_binds(
+        candidate, limits=publication_limits(candidate)
+    )
+    fixed = payloads.fixed_values(
+        dialect, number=maximum, source_digest=SOURCE_DIGEST, at=FIXED_STAMP
+    )
+    fields = graph_version.c
+    insert = (
+        graph_version.insert()
+        .values(graph_publication_bind_expressions(dialect))
+        .values(fixed)
+        .values(resolved_digests={}, deployed_by="publication-owner")
+    )
+    projection = select(
+        fields.id,
+        fields.graph_id,
+        fields.number,
+        fields.ir_digest,
+        fields.source_digest,
+        fields.execution_contract_digest,
+        fields.deployment_digest,
+        fields.deployed_at,
+        fields.created_at,
+        fields.updated_at,
+        fields.status,
+        fields.value_encoding_version,
+        fields.ir,
+        fields.execution_contract,
+        fields.resources,
+    ).where(fields.id == scope.version_id)
+    native_sqlite: tuple[object, ...] | None = None
+
+    async with database.transaction() as writer:
+        await writer.execute(insert, payloads.parameters())
+        observed: tuple[object, ...] = tuple((await writer.execute(projection)).one())
+        if sqlite:
+            native_sqlite = tuple(
+                (
+                    await writer.execute(
+                        SQLITE_FIXED_STORAGE, {"version": scope.version_id}
+                    )
+                ).one()
+            )
+        await writer.rollback()
+    async with database.read_transaction() as reader:
+        remaining = (await reader.execute(projection)).one_or_none()
+
+    stamp = FIXED_STAMP.astimezone(UTC)
+    assert observed == (
+        scope.version_id,
+        scope.graph_id,
+        maximum,
+        candidate.digests.ir_digest,
+        SOURCE_DIGEST,
+        candidate.digests.execution_contract_digest,
+        candidate.digests.deployment_digest,
+        stamp,
+        stamp,
+        stamp,
+        "active",
+        1,
+        candidate.canonical_ir,
+        candidate.canonical_contract,
+        ObjectReader(candidate.resources.text).object(),
+    )
+    if sqlite:
+        raw = "2026-11-10T09:34:56.123456+00:00"
+        assert native_sqlite == (
+            "integer",
+            "integer",
+            raw,
+            raw,
+            raw,
+            410 * sqlite_width,
+        )
+        assert 410 <= FIXED_ASCII_CHARACTERS
+    assert remaining is None
+    assert ledger.outstanding == database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_fixed_publication_binds_own_the_inserted_native_row(
+    database: Database,
+) -> None:
+    await assert_fixed_publication_insert(database, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["UTF-16le", "UTF-16be"])
+async def test_fixed_publication_fields_keep_native_utf16_width(
+    tmp_path: Path, encoding: str
+) -> None:
+    path = tmp_path / "fixed-width.db"
+    with closing(sqlite3.connect(path)) as native:
+        native.execute(f"PRAGMA encoding = '{encoding}'")
+        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
+        native.execute("DROP TABLE encoding_seed")
+        native.commit()
+    settings = sqlite_settings(path)
+    await upgrade_database(settings)
+    database = Database(settings)
+    try:
+        await assert_fixed_publication_insert(database, 2)
+    finally:
+        await database.close()
+
+
+def test_fixed_publication_refuses_unrepresentable_values_without_private_state() -> (
+    None
+):
+    scope = GraphResourceScope(encode(1), encode(2), encode(3))
+    candidate = checked_attachment(with_files=False, scope=scope)
+    non_native_scope = checked_attachment(with_files=False)
+    bad_identity = PreparedLogicalExecutionContract(
+        candidate.canonical_ir,
+        candidate.canonical_contract,
+        replace(candidate.digests, execution_contract_digest=PRIVATE_WIRE),
+    )
+    bad_hash = attach_graph_deployment_references(
+        PreparedGraphDeploymentInputs(bad_identity, ()), scope, (), limits=ATTACH_LIMITS
+    )
+    payloads, invalid_scope, invalid_hash = (
+        prepare_graph_publication_binds(item, limits=publication_limits(item))
+        for item in (candidate, non_native_scope, bad_hash)
+    )
+    bad_utc = datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1)))
+    invalid = (
+        (payloads, Dialect.SQLITE, 1 << 63, SOURCE_DIGEST, FIXED_STAMP),
+        (payloads, Dialect.POSTGRESQL, 1 << 31, SOURCE_DIGEST, FIXED_STAMP),
+        (payloads, Dialect.SQLITE, 0, SOURCE_DIGEST, FIXED_STAMP),
+        (payloads, Dialect.SQLITE, True, SOURCE_DIGEST, FIXED_STAMP),
+        (payloads, Dialect.SQLITE, 1, PRIVATE_WIRE, FIXED_STAMP),
+        (payloads, Dialect.SQLITE, 1, "A" * 64, FIXED_STAMP),
+        (
+            payloads,
+            Dialect.POSTGRESQL,
+            1,
+            SOURCE_DIGEST,
+            FIXED_STAMP.replace(tzinfo=None),
+        ),
+        (payloads, Dialect.SQLITE, 1, SOURCE_DIGEST, FIXED_STAMP.replace(year=999)),
+        (payloads, Dialect.SQLITE, 1, SOURCE_DIGEST, bad_utc),
+        (invalid_scope, Dialect.SQLITE, 1, SOURCE_DIGEST, FIXED_STAMP),
+        (invalid_hash, Dialect.POSTGRESQL, 1, SOURCE_DIGEST, FIXED_STAMP),
+    )
+    rejected: list[GraphValueRejected] = []
+
+    for prepared, dialect, number, digest, at in invalid:
+        with pytest.raises(GraphValueRejected) as refusal:
+            prepared.fixed_values(dialect, number=number, source_digest=digest, at=at)
+        rejected.append(refusal.value)
+
+    for error in rejected:
+        assert_refused(error, GraphValueFailure.INVALID)
+        frames = [
+            frame.f_locals
+            for frame, _ in walk_tb(error.__traceback__)
+            if frame.f_code.co_name == "fixed_values"
+        ]
+        assert frames == [{}]
+        assert PRIVATE_WIRE not in repr(error)
+
+
+def test_publication_retains_the_issued_scope_when_visible_scope_changes() -> None:
+    original = GraphResourceScope(encode(1), encode(2), encode(3))
+    candidate = checked_attachment(with_files=False, scope=original)
+    replacement = [encode(4), encode(5), encode(6)]
+    limits = publication_limits(candidate)
+
+    candidate.scope.__init__(*replacement)
+    with pytest.raises(GraphValueRejected) as refusal:
+        prepare_graph_publication_binds(candidate, limits=limits)
+    candidate.scope.__init__(
+        original.namespace_id, original.graph_id, original.version_id
+    )
+    prepared = prepare_graph_publication_binds(candidate, limits=limits)
+    candidate.scope.__init__(*replacement)
+    fixed = prepared.fixed_values(
+        Dialect.SQLITE, number=1, source_digest=SOURCE_DIGEST, at=FIXED_STAMP
+    )
+
+    assert_private_bind_refusal(refusal.value, GraphValueFailure.INVALID)
+    assert candidate.scope.graph_id == replacement[1]
+    assert fixed["id"] == original.version_id
+    assert fixed["graph_id"] == original.graph_id
 
 
 @pytest.mark.asyncio
