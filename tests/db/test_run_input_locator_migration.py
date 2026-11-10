@@ -150,10 +150,16 @@ async def test_run_input_locators_exclude_noncanonical_historical_keys(
         native.execute("CREATE TABLE encoding_seed (value INTEGER)")
         native.execute("DROP TABLE encoding_seed")
         native.commit()
+    width_fitting_nul = (
+        encode(20) + "\x00" + "X" * 25
+        if encoding == "UTF-8"
+        else encode(20)[:-1] + "\x00"
+    )
     bad_keys = (
         "0" * WIDE,
         b"0" * WIDE,
-        encode(20)[:-1] + "\x00",
+        encode(25).encode(),
+        width_fitting_nul,
         encode(30).lower(),
         "8" + encode(20)[1:],
     )
