@@ -38,6 +38,7 @@ from kora.engine.graph_resource_references import (
 from kora.protocols.storage_models import MAX_STORAGE_METADATA, ContentRef
 from tests.api.test_graph_execution_preparation import (
     DEPLOYMENT_LIMITS,
+    DEPLOYMENT_SELECTORS,
     DEPLOYMENT_STORE,
     LIMITS,
     MARKER,
@@ -115,6 +116,7 @@ def prepare_inputs(
                 ir_text,
                 files,
                 evaluator,
+                selectors=DEPLOYMENT_SELECTORS,
                 storage_identity=DEPLOYMENT_STORE if files else None,
                 limits=DEPLOYMENT_LIMITS,
             )
@@ -179,6 +181,7 @@ def nonempty_preparation() -> tuple[
                 ir_text,
                 files,
                 evaluator,
+                selectors=DEPLOYMENT_SELECTORS,
                 storage_identity=DEPLOYMENT_STORE,
                 limits=DEPLOYMENT_LIMITS,
             )

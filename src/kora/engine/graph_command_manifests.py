@@ -27,6 +27,7 @@ INTERPRETATION = "kora.command-resources.v1"
 EMPTY_DIGEST = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 MAX_FILES = 64
 MAX_CONTENT_BYTES = 1_048_576
+MAX_GRAPH_SELECTOR_CHARS = 64
 SHA256_FIXED_WORK = 256
 STORE_IDENTIFIER: TypeAdapter[str] = TypeAdapter(Identifier)
 _ABSENT = object()
@@ -37,6 +38,13 @@ class CommandManifestLimits:
     ir_bytes: int
     scratch: int
     work: int
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class GraphDeploymentSelectors:
+    authorized_namespace_name: str
+    route_graph: str
+    request_graph: str
 
 
 class DeclaredCommandManifests:
@@ -261,9 +269,31 @@ def _resource_manifest(
     return digest, files
 
 
-def _derive(text: str, admission: ManifestAdmission) -> JsonObject:
+def _check_deployment_selectors(
+    document: GraphDocument,
+    selectors: GraphDeploymentSelectors,
+    work: TextBudget,
+) -> None:
+    graph = document.graph
+    work.reserve(1 + 2 * len(graph.id) + len(graph.namespace))
+    if (
+        graph.id != selectors.route_graph
+        or graph.id != selectors.request_graph
+        or graph.namespace != selectors.authorized_namespace_name
+    ):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+
+
+def _derive(
+    text: str,
+    admission: ManifestAdmission,
+    *,
+    selectors: GraphDeploymentSelectors | None = None,
+) -> JsonObject:
     _admit_source(text, admission)
     document = read_document(text, admission.source)
+    if selectors is not None:
+        _check_deployment_selectors(document, selectors, admission.work)
     admission.keep(2)
     records: dict[bytes, JsonObject] = {}
     for path, config in _commands(document, admission):
@@ -391,9 +421,11 @@ def _verified_contents(
     ir_text: str,
     contents: tuple[CommandResourceContent, ...],
     admission: ManifestAdmission,
+    *,
+    selectors: GraphDeploymentSelectors | None = None,
 ) -> list[tuple[CommandResourceContent, str]]:
     total = _admit_contents(contents, admission)
-    expected = _derive(ir_text, admission)
+    expected = _derive(ir_text, admission, selectors=selectors)
     if len(contents) != admission.files:
         raise GraphValueRejected(GraphValueFailure.INVALID)
     pending = list(contents)
@@ -514,10 +546,24 @@ def _stage_groups_result(
     contents: tuple[CommandResourceContent, ...],
     storage_identity: StorageIdentity | None,
     limits: CommandManifestLimits,
+    selectors: GraphDeploymentSelectors | None,
 ) -> tuple[PreparedCommandStageGroup, ...] | GraphValueFailure:
     try:
         admission = ManifestAdmission(limits)
-        verified = _verified_contents(ir_text, contents, admission)
+        if selectors is not None and (
+            type(selectors) is not GraphDeploymentSelectors
+            or any(
+                type(value) is not str
+                or not 1 <= len(value) <= MAX_GRAPH_SELECTOR_CHARS
+                for value in (
+                    getattr(selectors, "authorized_namespace_name", None),
+                    getattr(selectors, "route_graph", None),
+                    getattr(selectors, "request_graph", None),
+                )
+            )
+        ):
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        verified = _verified_contents(ir_text, contents, admission, selectors=selectors)
         if not verified:
             return ()
         return _group_verified_contents(
@@ -533,9 +579,12 @@ def prepare_graph_command_stage_groups(
     *,
     storage_identity: StorageIdentity | None,
     limits: CommandManifestLimits,
+    selectors: GraphDeploymentSelectors | None = None,
 ) -> tuple[PreparedCommandStageGroup, ...]:
-    result = _stage_groups_result(ir_text, contents, storage_identity, limits)
+    result = _stage_groups_result(
+        ir_text, contents, storage_identity, limits, selectors
+    )
     if isinstance(result, tuple):
         return result
-    del ir_text, contents, storage_identity
+    del ir_text, contents, storage_identity, selectors
     raise_safe(GraphValueRejected(result))
