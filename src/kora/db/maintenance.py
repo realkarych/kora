@@ -1,13 +1,19 @@
 import sqlite3
+from asyncio import CancelledError
 from collections.abc import Callable
+from enum import Enum
 from typing import Protocol, cast, runtime_checkable
 
 from aiosqlite import Connection as SQLiteDriver
-from sqlalchemy import Connection
+from sqlalchemy import Connection, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.sql.elements import TextClause
 
 from kora.db.graph_deployment_stage_reads import PAYLOAD_DIGEST_WIDTH, STORE_ID_WIDTH
 from kora.db.graph_stage_promotion_custody_v1 import INTENT_TABLE
+from kora.db.transactions import WriterTransactionError, writer_transaction
+from kora.db.types import SQLITE
 
 _SQLITE_INTENT_METADATA: str = """
 SELECT rowid, ?, typeof(store_id), typeof(payload_digest),
@@ -31,6 +37,21 @@ _SQLITE_INTENT_STORAGE: tuple[str, ...] = (
     "integer",
     "integer",
 )
+
+PUBLICATION_TRIGGER_CHECK: TextClause = text("""
+WITH targets(name) AS (
+    VALUES ('graph'), ('graph_version'), ('graph_version_read_admission'),
+           ('graph_version_resource_owner'), ('graph_deployment_preparation'),
+           ('idempotency_record'), ('event')
+)
+SELECT NOT EXISTS (
+    SELECT 1 FROM main.sqlite_schema
+    WHERE type = 'trigger' AND tbl_name COLLATE NOCASE IN (SELECT name FROM targets)
+    UNION ALL
+    SELECT 1 FROM temp.sqlite_schema
+    WHERE type = 'trigger' AND tbl_name COLLATE NOCASE IN (SELECT name FROM targets)
+)
+""")
 
 
 class PromotionIntentScalarsRejected(RuntimeError):
@@ -115,3 +136,48 @@ def postgresql_transaction_active(connection: Connection) -> bool:
     if type(active) is not bool:
         raise PostgreSQLDurabilityError("PostgreSQL migration backend is unavailable")
     return active
+
+
+class SQLitePublicationTriggerObservation(Enum):
+    VERIFIED = "verified"
+    REFUSED = "refused"
+
+
+def _active_sqlite_driver(connection: Connection) -> SQLiteDriver | None:
+    if connection.closed or connection.invalidated:
+        return None
+    driver: object = connection.connection.driver_connection
+    if not isinstance(driver, SQLiteDriver):
+        return None
+    try:
+        return driver if driver.in_transaction else None
+    except ValueError:
+        return None
+
+
+async def observe_sqlite_publication_triggers(
+    connection: AsyncConnection,
+) -> SQLitePublicationTriggerObservation:
+    if connection.dialect.name != SQLITE:
+        return SQLitePublicationTriggerObservation.REFUSED
+    try:
+        writer = writer_transaction(connection)
+        original = await connection.run_sync(_active_sqlite_driver)
+        if original is None:
+            return SQLitePublicationTriggerObservation.REFUSED
+        verified: object = await connection.scalar(PUBLICATION_TRIGGER_CHECK)
+        writer.require_active()
+        if (
+            type(verified) is int
+            and verified == 1
+            and await connection.run_sync(_active_sqlite_driver) is original
+        ):
+            return SQLitePublicationTriggerObservation.VERIFIED
+    except (WriterTransactionError, SQLAlchemyError):
+        return SQLitePublicationTriggerObservation.REFUSED
+    except CancelledError as error:
+        error.__traceback__ = None
+        error.__cause__ = None
+        error.__context__ = None
+        raise
+    return SQLitePublicationTriggerObservation.REFUSED
