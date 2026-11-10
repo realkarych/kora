@@ -24,7 +24,7 @@ LANE_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
     "ubuntu-24.04": {
         "conformance": ("first", "second", "third"),
         "remainder": ("measurements", "other", "engine"),
-        "integration": ("integration",),
+        "integration": ("integration", "surface"),
         "storage": (),
         "local-runtime": (),
     },
@@ -43,6 +43,7 @@ COHORTS = (
     "other",
     "third",
     "engine",
+    "surface",
 )
 GENERAL_ARGUMENTS = (
     "--ignore=tests/plugins/storage",

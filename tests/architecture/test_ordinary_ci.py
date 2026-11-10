@@ -76,6 +76,10 @@ ENGINE_MODULES = (
     "tests/db/test_db_upgrade_process.py",
     "tests/db/test_attempt_deadline_migration.py",
 )
+SURFACE_MODULES = (
+    "tests/cli/test_conformance.py",
+    "tests/api/test_graph_execution_preparation.py",
+)
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
     "PREPARATION_OUTCOME",
@@ -101,7 +105,7 @@ LANE_OUTCOMES = {
 EXPECTED_ORDINARY = {
     ("ubuntu-24.04", "conformance"): ("first", "second", "third"),
     ("ubuntu-24.04", "remainder"): ("measurements", "other", "engine"),
-    ("ubuntu-24.04", "integration"): ("integration",),
+    ("ubuntu-24.04", "integration"): ("integration", "surface"),
     ("macos-15", "conformance"): ("first", "second", "third"),
     ("macos-15", "remainder"): ("measurements", "integration", "other"),
 }
@@ -287,6 +291,7 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     assert tuple(arrays["first"]) == FIRST_MODULES
     assert tuple(arrays["third"]) == THIRD_MODULES
     assert tuple(arrays["engine"]) == ENGINE_MODULES
+    assert tuple(arrays["surface"]) == SURFACE_MODULES
     assert IR_RESOURCE_MODULES & cohorts["measurements"] == {
         "tests/ir/test_type_schema_resources.py",
         "tests/ir/test_output_schema_resources.py",
@@ -321,23 +326,32 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         if not argument.startswith("-")
     )
     engine = cohorts["engine"]
-    shared = ("first", "second", "third", "integration")
+    surface = cohorts["surface"]
+    placed = ("first", "second", "third")
     ubuntu = {
-        **{name: cohorts[name] for name in shared},
+        **{name: cohorts[name] for name in placed},
         "measurements": cohorts["measurements"] - engine,
         "other": cohorts["other"] - engine,
         "engine": engine,
+        "integration": cohorts["integration"] - surface,
+        "surface": surface,
     }
     macos = {
-        **{name: cohorts[name] for name in shared},
+        **{name: cohorts[name] for name in (*placed, "integration")},
         "measurements": cohorts["measurements"],
         "other": cohorts["other"],
     }
 
     assert all(cohorts.values())
     assert engine <= cohorts["measurements"] | cohorts["other"]
+    assert surface <= cohorts["integration"]
     assert engine.isdisjoint(
-        frozenset[str]().union(*(cohorts[name] for name in shared))
+        frozenset[str]().union(*(cohorts[name] for name in (*placed, "integration")))
+    )
+    assert surface.isdisjoint(
+        frozenset[str]().union(
+            *(cohorts[name] for name in (*placed, "measurements", "other", "engine"))
+        )
     )
     assert sum(len(files) for files in ubuntu.values()) == len(general)
     assert frozenset[str]().union(*ubuntu.values()) == general
@@ -358,8 +372,9 @@ def test_shards_partition_every_inventory_group() -> None:
         if system == "ubuntu-24.04":
             assert sorted(children) == sorted(COHORTS)
         else:
-            assert sorted((*children, "engine")) == sorted(COHORTS)
+            assert sorted((*children, "engine", "surface")) == sorted(COHORTS)
             assert "engine" not in children
+            assert "surface" not in children
 
 
 @pytest.mark.parametrize(
@@ -429,6 +444,21 @@ def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
         assert owners == (
             ("engine",) if system == "ubuntu-24.04" else ("measurements",)
         )
+    if (system, lane) == ("ubuntu-24.04", "integration"):
+        integration_arguments = next(
+            arguments for name, *arguments in groups if name == "integration"
+        )
+        for path in SURFACE_MODULES:
+            assert tuple(name for name, *arguments in groups if path in arguments) == (
+                "surface",
+            )
+            assert f"--ignore={path}" in integration_arguments
+    if (system, lane) == ("macos-15", "remainder"):
+        for path in SURFACE_MODULES:
+            assert all(
+                path not in arguments and f"--ignore={path}" not in arguments
+                for _, *arguments in groups
+            )
     assert outer.returncode == (0 if children or lane == "storage" else 1)
     assert (outer.stdout == b"admitted") is bool(children or lane == "storage")
 

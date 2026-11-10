@@ -30,3 +30,16 @@ Storage detach failures on [42530361926](https://github.com/realkarych/kora/acti
 macOS scaffold jobs share two concurrency groups inside one workflow run: conformance with storage, and remainder with local-runtime. Each group runs one job and holds one pending job. Linux lanes use a distinct group per lane and interpreter, so they do not queue behind macOS. The ten-minute job deadline is unchanged. Queued time is not a new product limit.
 
 The third conformance group and the Linux `engine` group are concurrent children of the existing lanes. Fourteen lanes, both metadata databases and the evidence join stay in place.
+
+## Integration follow-up
+
+[42766494419](https://github.com/realkarych/kora/actions/runs/42766494419), head `1ca2d66f73f882ecdb09845bbaae7f2f81ce4aa7`, passed after that placement. Ubuntu 3.11 integration took 558 s, with a 528 s test step. Ubuntu 3.15 integration took 538 s, with a 516 s test step. Every other scaffold job on that run had at least 134 s left before the ten-minute deadline.
+
+JUnit case time for the two longest integration files, not a portable benchmark:
+
+| File | Ubuntu 3.11 | Ubuntu 3.15 |
+|---|---:|---:|
+| `tests/cli/test_conformance.py` | 202.7 s | 213.0 s |
+| `tests/api/test_graph_execution_preparation.py` | 88.8 s | 78.4 s |
+
+Those two files are the Linux `surface` group. The rest of `tests/api`, `tests/cli` and `tests/ir/test_structured_schema_string_lengths.py` stay in the integration group, which ignores the two files on Linux. macOS still runs both files inside its one integration process. The sums motivate the split. They do not demonstrate the resulting wall clock, and they add no numerical gate.
