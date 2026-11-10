@@ -68,6 +68,30 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
     for job in (execution, join):
         assert job["timeout-minutes"] == 10
         assert table(job["strategy"])["fail-fast"] is False
+    concurrency = table(execution["concurrency"])
+    assert concurrency["cancel-in-progress"] is False
+    assert concurrency["group"] == (
+        "scaffold-${{ github.run_id }}-${{ matrix.os == 'macos-15' && "
+        "(matrix.lane == 'conformance' || matrix.lane == 'storage') && 'macos-a' "
+        "|| matrix.os == 'macos-15' && 'macos-b' || format('{0}-{1}-{2}', "
+        "matrix.os, matrix.python, matrix.lane) }}"
+    )
+    slots: dict[str, int] = {}
+    for value in cast(list[object], execution_rows):
+        row = table(value)
+        if row["os"] == "macos-15" and row["lane"] in {"conformance", "storage"}:
+            name = "macos-a"
+        elif row["os"] == "macos-15":
+            name = "macos-b"
+        else:
+            name = f"{row['os']}-{row['python']}-{row['lane']}"
+        slots[name] = slots.get(name, 0) + 1
+    assert {key: count for key, count in slots.items() if key.startswith("macos")} == {
+        "macos-a": 2,
+        "macos-b": 2,
+    }
+    linux = {key: count for key, count in slots.items() if not key.startswith("macos")}
+    assert all(count == 1 for count in linux.values())
     entries = [table(value) for value in cast(list[object], execution["steps"])]
     for name, condition in (
         ("Install locked frontend dependencies", None),

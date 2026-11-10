@@ -29,6 +29,8 @@ GENERAL_NODES = (
     "tests/measurements/test_value.py::test_value",
     "tests/api/test_value.py::test_value[sqlite]",
     "tests/api_v2/test_other.py::test_value",
+    "tests/test_third.py::test_value",
+    "tests/test_engine.py::test_value",
 )
 STORAGE_NODES = ("tests/plugins/storage/test_value.py::test_value[sqlite]",)
 LOCAL_CONTRACT_NODES = (
@@ -94,8 +96,13 @@ def lane_files(root: Path, lane: str, operating_system: str) -> None:
     children = LANE_CHILDREN[operating_system][lane]
     if children:
         groups: dict[str, str] = dict(zip(COHORTS, selected, strict=True))
-        for name in children:
-            write_junit(root / f"{name}.xml", identities((groups[name],)))
+        assigned: dict[str, tuple[str, ...]] = {
+            name: (groups[name],) for name in children
+        }
+        if operating_system == "macos-15" and lane == "remainder":
+            assigned["measurements"] = (groups["measurements"], groups["engine"])
+        for name, nodes in assigned.items():
+            write_junit(root / f"{name}.xml", identities(nodes))
             (root / f"{name}.log").write_text("1 passed\n")
             (root / f"{name}.exit").write_text("0\n")
     else:
@@ -137,7 +144,7 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
     result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
     local = sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
-    assert result == {"environments": 3, "lanes": 14, "tests": 18 + local}
+    assert result == {"environments": 3, "lanes": 14, "tests": 24 + local}
 
 
 @pytest.mark.parametrize("operating_system", ["macos-26", "ubuntu-24.04"])

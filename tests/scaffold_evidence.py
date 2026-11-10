@@ -22,20 +22,28 @@ ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
 )
 LANE_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
     "ubuntu-24.04": {
-        "conformance": ("first", "second"),
-        "remainder": ("measurements", "other"),
+        "conformance": ("first", "second", "third"),
+        "remainder": ("measurements", "other", "engine"),
         "integration": ("integration",),
         "storage": (),
         "local-runtime": (),
     },
     "macos-15": {
-        "conformance": ("first", "second"),
+        "conformance": ("first", "second", "third"),
         "remainder": ("measurements", "integration", "other"),
         "storage": (),
         "local-runtime": (),
     },
 }
-COHORTS = ("first", "second", "measurements", "integration", "other")
+COHORTS = (
+    "first",
+    "second",
+    "measurements",
+    "integration",
+    "other",
+    "third",
+    "engine",
+)
 GENERAL_ARGUMENTS = (
     "--ignore=tests/plugins/storage",
     "--ignore=tests/conformance/test_artifact_storage_conformance.py",

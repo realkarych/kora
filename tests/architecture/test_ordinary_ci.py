@@ -37,7 +37,6 @@ INTEGRATION_SELECTION = (
 FIRST_MODULES = (
     "tests/architecture/test_ir_measurement_ci.py",
     "tests/architecture/test_no_suppression.py",
-    "tests/conformance/test_conformance_cases_detect_broken_providers.py",
     "tests/conformance/test_lifetime_helper_phases.py",
     "tests/conformance/test_lifetime_measurement_cohorts.py",
     "tests/conformance/test_lifetime_parent_exit.py",
@@ -46,8 +45,6 @@ FIRST_MODULES = (
     "tests/conformance/test_lifetime_rpc_concurrency.py",
     "tests/conformance/test_lifetime_services.py",
     "tests/conformance/test_local_process_lifetime.py",
-    "tests/conformance/test_parent_lifetime.py",
-    "tests/conformance/test_recovered_process_lifetime.py",
     "tests/ir/test_structured_schema_assertions.py",
     "tests/measurements/test_ir_measurement_evidence.py",
     "tests/ir/test_input_path_resources.py",
@@ -58,7 +55,26 @@ FIRST_MODULES = (
     "tests/ir/test_structured_schema_collection_predicates.py",
     "tests/engine/test_graph_outputs.py",
     "tests/engine/test_graph_native_outputs.py",
+)
+THIRD_MODULES = (
+    "tests/conformance/test_conformance_cases_detect_broken_providers.py",
+    "tests/conformance/test_parent_lifetime.py",
+    "tests/conformance/test_recovered_process_lifetime.py",
     "tests/engine/test_graph_projection_paths.py",
+    "tests/conformance/test_storage_case_runner.py",
+    "tests/conformance/test_lifetime_journal_recovery.py",
+)
+ENGINE_MODULES = (
+    "tests/engine/test_graph_execution_contract.py",
+    "tests/engine/test_start_parameter_cut.py",
+    "tests/browser/test_release_wait.py",
+    "tests/engine/test_graph_native_sources.py",
+    "tests/ir/test_tool_policy_resources.py",
+    "tests/ir/test_type_schema_resources.py",
+    "tests/db/test_pricing_migration.py",
+    "tests/db/test_attempt_outcome_migration.py",
+    "tests/db/test_db_upgrade_process.py",
+    "tests/db/test_attempt_deadline_migration.py",
 )
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
@@ -83,10 +99,10 @@ LANE_OUTCOMES = {
 
 
 EXPECTED_ORDINARY = {
-    ("ubuntu-24.04", "conformance"): ("first", "second"),
-    ("ubuntu-24.04", "remainder"): ("measurements", "other"),
+    ("ubuntu-24.04", "conformance"): ("first", "second", "third"),
+    ("ubuntu-24.04", "remainder"): ("measurements", "other", "engine"),
     ("ubuntu-24.04", "integration"): ("integration",),
-    ("macos-15", "conformance"): ("first", "second"),
+    ("macos-15", "conformance"): ("first", "second", "third"),
     ("macos-15", "remainder"): ("measurements", "integration", "other"),
 }
 
@@ -269,6 +285,8 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
 
     assert result.returncode == 0, result.stderr
     assert tuple(arrays["first"]) == FIRST_MODULES
+    assert tuple(arrays["third"]) == THIRD_MODULES
+    assert tuple(arrays["engine"]) == ENGINE_MODULES
     assert IR_RESOURCE_MODULES & cohorts["measurements"] == {
         "tests/ir/test_type_schema_resources.py",
         "tests/ir/test_output_schema_resources.py",
@@ -302,9 +320,29 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         for argument in values
         if not argument.startswith("-")
     )
+    engine = cohorts["engine"]
+    shared = ("first", "second", "third", "integration")
+    ubuntu = {
+        **{name: cohorts[name] for name in shared},
+        "measurements": cohorts["measurements"] - engine,
+        "other": cohorts["other"] - engine,
+        "engine": engine,
+    }
+    macos = {
+        **{name: cohorts[name] for name in shared},
+        "measurements": cohorts["measurements"],
+        "other": cohorts["other"],
+    }
+
     assert all(cohorts.values())
-    assert sum(len(files) for files in cohorts.values()) == len(general)
-    assert frozenset[str]().union(*cohorts.values()) == general
+    assert engine <= cohorts["measurements"] | cohorts["other"]
+    assert engine.isdisjoint(
+        frozenset[str]().union(*(cohorts[name] for name in shared))
+    )
+    assert sum(len(files) for files in ubuntu.values()) == len(general)
+    assert frozenset[str]().union(*ubuntu.values()) == general
+    assert sum(len(files) for files in macos.values()) == len(general)
+    assert frozenset[str]().union(*macos.values()) == general
 
 
 def test_shards_partition_every_inventory_group() -> None:
@@ -316,8 +354,12 @@ def test_shards_partition_every_inventory_group() -> None:
             for child in assigned
         ]
 
-        assert sorted(children) == sorted(COHORTS)
         assert len(children) == len(set(children))
+        if system == "ubuntu-24.04":
+            assert sorted(children) == sorted(COHORTS)
+        else:
+            assert sorted((*children, "engine")) == sorted(COHORTS)
+            assert "engine" not in children
 
 
 @pytest.mark.parametrize(
