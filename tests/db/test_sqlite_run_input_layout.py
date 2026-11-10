@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from aiosqlite import Connection as SQLiteDriver
+from aiosqlite import Cursor as SQLiteCursor
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.util import await_
@@ -113,6 +114,9 @@ async def test_run_input_layout_requires_the_native_read_snapshot(
     database: Database,
 ) -> None:
     ledger = ConnectionLedger(database)
+    unused = database.reader_engine.connect()
+    unused_result = await observe_sqlite_run_input_layout(unused)
+    unused_checkouts = ledger.checkouts
     async with database.read_transaction() as ordinary:
         with executed_queries(ordinary) as ordinary_queries:
             ordinary_result = await observe_sqlite_run_input_layout(ordinary)
@@ -126,7 +130,8 @@ async def test_run_input_layout_requires_the_native_read_snapshot(
             with executed_queries(reader) as nested_queries:
                 nested_result = await observe_sqlite_run_input_layout(reader)
 
-    assert ordinary_result is writer_result is nested_result is False
+    assert unused_result is ordinary_result is writer_result is nested_result is False
+    assert unused_checkouts == 0
     assert ordinary_queries == nested_queries == []
     assert snapshot_result is (database.dialect is Dialect.SQLITE)
     if database.dialect is Dialect.POSTGRESQL:
@@ -274,9 +279,12 @@ async def test_run_input_layout_native_denial_is_private_and_releases(
 
     try:
         clock = FakeClock()
-        with captured(
-            DB_COMPONENT, LoggingSettings(level=Level.DEBUG), "catalog", clock.now
-        ) as capture:
+        settings = LoggingSettings(
+            level=Level.DEBUG,
+            component_levels={DB_COMPONENT: Level.DEBUG},
+            third_party={"sqlalchemy": Level.DEBUG, "aiosqlite": Level.DEBUG},
+        )
+        with captured(DB_COMPONENT, settings, "catalog", clock.now) as capture:
             async with database.read_snapshot() as reader:
                 driver = await writer_driver(reader)
                 await driver.set_authorizer(deny_index_xinfo)
@@ -286,13 +294,15 @@ async def test_run_input_layout_native_denial_is_private_and_releases(
                     await driver.set_authorizer(None)
             async with database.read_snapshot() as reader:
                 recovered = await observe_sqlite_run_input_layout(reader)
-            diagnostics = str(capture.finish())
+            records = capture.finish()
+            diagnostics = capture.reader.data
 
         assert refused is False
         assert recovered is True
         assert denied == [INPUT_INDEX]
+        assert any(record["event"] == "thirdparty.record" for record in records)
         assert all(
-            value not in diagnostics
+            value.encode() not in diagnostics
             for value in (INPUT_INDEX, "not authorized", "Traceback", "PRAGMA")
         )
         assert ledger.outstanding == database.units_in_flight() == 0
@@ -340,11 +350,15 @@ async def test_run_input_layout_cancellation_keeps_entered_catalog_owner(
     resume = asyncio.Event()
     cancellation_delivered = asyncio.Event()
     handles: list[SQLiteDriver] = []
+    cursors: list[SQLiteCursor] = []
 
     def hold_xinfo(
         connection: object, cursor: object, statement: str, *arguments: object
     ) -> None:
         if statement == INDEX_XINFO[-1]:
+            native_cursor: object = getattr(cursor, "_cursor", None)
+            assert isinstance(native_cursor, SQLiteCursor)
+            cursors.append(native_cursor)
             entered.set()
             await_(resume.wait())
 
@@ -376,6 +390,8 @@ async def test_run_input_layout_cancellation_keeps_entered_catalog_owner(
             ) as failure:
                 await asyncio.wait_for(task, CONDITION_DEADLINE_SECONDS)
         ended = not handles[0].in_transaction
+        with pytest.raises(sqlite3.ProgrammingError, match="closed cursor"):
+            await cursors[0].fetchone()
         async with database.read_snapshot() as reader:
             recovered_driver = await writer_driver(reader)
             recovered = await observe_sqlite_run_input_layout(reader)

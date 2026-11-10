@@ -119,16 +119,17 @@ async def _catalog_rows(
 
 
 async def observe_sqlite_run_input_layout(connection: AsyncConnection) -> bool:
-    root = connection.get_transaction()
-    if (
-        connection.dialect.name != SQLITE
-        or root is None
-        or not root.is_active
-        or connection.in_nested_transaction()
-    ):
-        return False
+    root = None
     original = None
     try:
+        root = connection.get_transaction()
+        if (
+            connection.dialect.name != SQLITE
+            or root is None
+            or not root.is_active
+            or connection.in_nested_transaction()
+        ):
+            return False
         original = await connection.run_sync(active_sqlite_driver)
         if original is None:
             return False
