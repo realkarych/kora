@@ -175,7 +175,7 @@ class SQLitePublicationForeignKeyObservation(Enum):
     REFUSED = "refused"
 
 
-def _active_sqlite_driver(connection: Connection) -> SQLiteDriver | None:
+def active_sqlite_driver(connection: Connection) -> SQLiteDriver | None:
     if connection.closed or connection.invalidated:
         return None
     driver: object = connection.connection.driver_connection
@@ -194,7 +194,7 @@ async def _verify_sqlite_publication_catalog(
         return False
     try:
         writer = writer_transaction(connection)
-        original = await connection.run_sync(_active_sqlite_driver)
+        original = await connection.run_sync(active_sqlite_driver)
         if original is None:
             return False
         verified: object = await connection.scalar(statement)
@@ -202,7 +202,7 @@ async def _verify_sqlite_publication_catalog(
         if (
             type(verified) is int
             and verified == 1
-            and await connection.run_sync(_active_sqlite_driver) is original
+            and await connection.run_sync(active_sqlite_driver) is original
         ):
             return True
     except (WriterTransactionError, SQLAlchemyError):
