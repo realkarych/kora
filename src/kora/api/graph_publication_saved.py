@@ -113,6 +113,61 @@ WHERE v.ctid OPERATOR(pg_catalog.=)
 """)
 
 
+_SQLITE_INSERT = text("""
+INSERT INTO main.graph_version (
+    id, graph_id, number, ir, ir_digest, source_digest, execution_contract,
+    execution_contract_digest, deployment_digest, resolved_digests, resources,
+    deployed_by, deployed_at, status, created_at, updated_at, value_encoding_version
+) VALUES (
+    :id, :graph_id, :number, :publication_ir_json, :ir_digest, :source_digest,
+    :publication_execution_json, :execution_contract_digest, :deployment_digest,
+    :publication_resolved_digests_json, :publication_resources_json,
+    :publication_deployed_by, :deployed_at, :status, :created_at, :updated_at,
+    :value_encoding_version
+)
+RETURNING rowid
+""").bindparams(
+    *(bindparam(name, type_=UtcTimestamp(), required=True) for name in _TIMESTAMPS)
+)
+
+_POSTGRESQL_INSERT = text("""
+INSERT INTO graph_version (
+    id, graph_id, number, ir, ir_digest, source_digest, execution_contract,
+    execution_contract_digest, deployment_digest, resolved_digests, resources,
+    deployed_by, deployed_at, status, created_at, updated_at, value_encoding_version
+) VALUES (
+    CAST(:id AS pg_catalog.text),
+    CAST(:graph_id AS pg_catalog.text),
+    CAST(:number AS pg_catalog.int4),
+    CAST(CAST(:publication_ir_json AS pg_catalog.text) AS pg_catalog.jsonb),
+    CAST(:ir_digest AS pg_catalog.text),
+    CAST(:source_digest AS pg_catalog.text),
+    CAST(CAST(:publication_execution_json AS pg_catalog.text) AS pg_catalog.jsonb),
+    CAST(:execution_contract_digest AS pg_catalog.text),
+    CAST(:deployment_digest AS pg_catalog.text),
+    CAST(CAST(:publication_resolved_digests_json AS pg_catalog.text)
+        AS pg_catalog.jsonb),
+    CAST(CAST(:publication_resources_json AS pg_catalog.text) AS pg_catalog.jsonb),
+    CAST(:publication_deployed_by AS pg_catalog.text),
+    CAST(:deployed_at AS pg_catalog.timestamptz),
+    CAST(:status AS pg_catalog.text),
+    CAST(:created_at AS pg_catalog.timestamptz),
+    CAST(:updated_at AS pg_catalog.timestamptz),
+    CAST(:value_encoding_version AS pg_catalog.int4)
+)
+RETURNING ctid::pg_catalog.text
+""")
+
+
+def graph_publication_insert_statement(dialect: Dialect) -> TextClause:
+    if dialect is Dialect.SQLITE:
+        return _SQLITE_INSERT
+    if dialect is Dialect.POSTGRESQL:
+        return _POSTGRESQL_INSERT
+    del dialect
+    raise_safe(GraphValueRejected(GraphValueFailure.INVALID))
+
+
 def graph_publication_saved_statement(dialect: Dialect) -> TextClause:
     if dialect is Dialect.SQLITE:
         return _SQLITE
