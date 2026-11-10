@@ -95,11 +95,11 @@ _SHAPES: tuple[tuple[TextClause, CatalogRows], ...] = (
     (text("PRAGMA main.table_xinfo(run)"), _RUN_COLUMNS),
     (text("PRAGMA main.table_xinfo(run_inputs)"), _INPUT_COLUMNS),
     (
-        text(f"PRAGMA main.index_xinfo({SQLITE_RUN_LOCATOR_INDEX})"),
+        text("PRAGMA main.index_xinfo(ix_run_input_locator)"),
         ((0, 0, "id", 0, "BINARY", 1), _ROWID_SUFFIX),
     ),
     (
-        text(f"PRAGMA main.index_xinfo({SQLITE_RUN_INPUT_LOCATOR_INDEX})"),
+        text("PRAGMA main.index_xinfo(ix_run_inputs_locator)"),
         ((0, 0, "run_id", 0, "BINARY", 1), _ROWID_SUFFIX),
     ),
 )
