@@ -250,6 +250,35 @@ class GraphPublicationOrdinalReadFailed(LockError):
         super().__init__("the graph version number observation failed")
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class FirstGraphPublication:
+    graph_id: str
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class GraphPublicationCorrectionCandidate:
+    graph_id: str
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class GraphPublicationDigestCandidate:
+    version_id: str
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class GraphPublicationOrdinalObservation:
+    graph_id: str
+    highest: int | None
+
+
+GraphPublicationObservation = (
+    FirstGraphPublication
+    | GraphPublicationCorrectionCandidate
+    | GraphPublicationDigestCandidate
+    | GraphPublicationOrdinalObservation
+)
+
+
 def _postgres_lock_contended(dialect: str, error: SQLAlchemyError) -> bool:
     return (
         dialect == POSTGRESQL
@@ -851,6 +880,47 @@ class TransitionLocks:
         self._lease.require_active()
         self._usable = True
         return number
+
+    async def observe_graph_publication(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> GraphPublicationObservation:
+        original: GraphPreparationBinding | None = None
+        target: str | None = None
+        version_id: str | None = None
+        try:
+            self.require_graph_publication_scope(connection, binding, selected_graph_id)
+            original = replace(binding)
+            target = await self.read_graph_publication_target(
+                connection, original, selected_graph_id
+            )
+            if target != selected_graph_id:
+                if original.initial_graph_id is not None:
+                    raise_private_metadata_error(GraphPublicationTargetUnavailable())
+                if target is None:
+                    return FirstGraphPublication(selected_graph_id)
+                return GraphPublicationCorrectionCandidate(target)
+            version_id = await self.read_graph_publication_digest_match(
+                connection, original, selected_graph_id
+            )
+            if version_id is not None:
+                return GraphPublicationDigestCandidate(version_id)
+            highest = await self.read_graph_publication_ordinal(
+                connection, original, selected_graph_id
+            )
+            return GraphPublicationOrdinalObservation(selected_graph_id, highest)
+        finally:
+            del (
+                self,
+                connection,
+                binding,
+                selected_graph_id,
+                original,
+                target,
+                version_id,
+            )
 
     async def acquire_existing_storage_address(
         self, store_id: str, payload_digest: str
