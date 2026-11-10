@@ -12,6 +12,8 @@ The project owner accepted mandatory policy-coverage validation in trusted-repos
 
 The project owner accepted the complete tool-kind vocabulary and conservative whole-layer coverage rules on 2026-11-02 under [#636](https://github.com/realkarych/kora/issues/636). Section 9 adds the residual `other_tool` kind and preserves native evidence and consumer activation as prerequisites.
 
+The project owner accepted the [first Linux Codex policy admission amendment](../../docs/decisions/0009-target-repository-trust-boundary.md#first-linux-codex-policy-coverage-amendment) under [#1224](https://github.com/realkarych/kora/issues/1224). Sections 9 and 10 specify its separate subagent-context fact and activation requirements.
+
 ## 1. Scope and lifetime
 
 One validation invocation receives a detached immutable view of the facts from its selected configured harness and runtime instances. The view belongs to that invocation and the unchanged authored document being checked. It is not serialized, persisted, transferred between processes, cached across calls or reused for deployment/recovery authority. The #596 lifetime decision introduces no durable installation identity, database field, provider ABI member or public operation; section 6 separately specifies a future native accessor.
@@ -135,7 +137,7 @@ This decision resolves only the earlier trusted-mode coverage exception. Section
 
 Every ordinary tool call exposed or executed by the selected harness, whether or not it reaches the policy hook, belongs to one of five primary operation kinds: `shell`, `file_edit`, `mcp_tool`, `hosted_tool` or `other_tool`. Harness-internal actions that are not tool calls retain their existing repository-trust ownership. The new `other_tool` kind is the residual category for calls established not to belong to the first four, including local read/search and delegation-control calls. It is not a fallback classification for unknown names. The selected harness's native normalization and accepted policy semantics determine classification; a validator-maintained guess about a provider name does not.
 
-`subagent` remains an additional context requirement. A call made inside a subagent requires its primary operation kind and `subagent` coverage. A parent-session call that creates or controls a subagent remains an ordinary call in its own right. Every nonempty namespace or node policy layer requires `subagent` coverage conservatively; empty authored subagent configuration does not remove it. This decision introduces no native-absence exemption.
+`subagent` remains an additional context requirement. A call made inside a subagent requires its primary operation kind and `subagent` coverage. A parent-session call that creates or controls a subagent remains an ordinary call in its own right. Every effective nonempty namespace or node policy layer requires `subagent` coverage conservatively, subject to the selected Linux Codex rule below. Empty authored subagent configuration does not discharge this requirement.
 
 Required coverage is derived independently for each policy layer from its complete semantics. Every nonempty `allow` array conservatively requires all five primary kinds, as well as `subagent`, including when a pattern is a wildcard or its argument cannot match. For a deny-only layer, require every primary kind that its patterns may govern. Preserve existing name matching, MCP server shorthand and the different allow/deny edit-alias rules. Any file-edit requirement also requires `shell`, because the existing edit guards constrain shell calls. Arguments do not remove a name-level requirement. Existing protected-path checks retain their independently owned obligations, including the same shell guard; this decision supplies no new diagnostic origin for a protected-path refusal.
 
@@ -143,11 +145,19 @@ A pattern that cannot be soundly confined to a narrower set conservatively requi
 
 The exact existing harness-output exception remains outside ordinary policy evaluation only when all its established conditions hold. An ordinary call named `StructuredOutput`, including a subagent call not qualifying for that exception, does not disappear from coverage. The existing IR013 prohibition on an exact authored `StructuredOutput` policy name and wildcard behavior remain unchanged.
 
-Disabled or unsupported recognized tool surfaces do not erase existing coverage obligations. In particular, disabling Codex hosted search does not grant `hosted_tool` coverage. Under this conservative rule, its specified lack of hosted coverage rejects every nonempty allow array and any other policy requiring all primary kinds. Sufficiently covered deny-only policies remain possible. More precise admission based on impossible or independently blocked calls requires a separate explicit decision and real evidence; it is not inferred from an empty configured tool list.
+Disabled or unsupported recognized tool surfaces do not erase existing coverage obligations. In particular, disabling Codex hosted search does not grant `hosted_tool` coverage. Under this conservative rule, its specified lack of hosted coverage rejects every nonempty allow array and any other policy requiring all primary kinds. Deny-only policies for the selected first Linux Codex profile follow the scoped rule below. All primary-kind requirements retain the derivation above.
 
 A provider may declare `other_tool` covered only when its real-interface evidence establishes interception for the complete residual class under the selected supported version and configuration. Examples, a single read-tool test, fake declarations, the new type literal or a partial inventory do not establish that guarantee. Existing declarations do not gain the new kind automatically, and an absent kind is a known lack of coverage only when the declaration is complete under this contract. Legacy or incomplete declarations retain the accepted API010 disposition unless an established prerequisite failure owns that obligation.
 
 Complete declarations missing a required kind produce IR019 for the namespace layer and IR028 for the node layer. Another layer, an empty node policy, permission mode or repository-trust flag cannot waive the requirement. Malformed policy remains IR013. Otherwise-unreported unavailable or inconsistent required facts retain API010/500 without a partial public result; API011 remains limited to recognized transient dependency failures. Current authorization and permanent accepted/skipped replay keep their existing precedence.
+
+### Selected Linux Codex admission
+
+For the [first Linux Codex profile](codex-execution-profile.md), check each effective nonempty namespace and node tool-policy layer independently, including trusted defaults. Each layer must be deny-only. Its fully derived primary requirements must be confined to `shell` and `file_edit`, and the complete selected declaration must cover every required primary kind. Derive those requirements before applying the profile limit. An unconfined pattern retains all five primary requirements even with complete native classification. Nonempty allow arrays keep the conservative all-kind requirements and are outside the selected profile. Protected-path obligations retain their existing owners and checks.
+
+Discharge only the additional `subagent` context requirement, and only from the separate complete fact in section 10 for the exact configured profile. The fact supplies no member of `policy_coverage` and cannot waive primary-kind requirements, including a parent-session delegation-control call's own primary kind. Other profiles retain the conservative subagent requirement.
+
+Known policy and coverage failures retain their existing scope and disposition, including IR013, IR019 for namespace coverage and IR028 for node-only coverage. Apply section 7 to an otherwise-unreported required absence fact that is unavailable, incomplete or inconsistent. A finding in another layer or for an unrelated obligation does not resolve that absence obligation. An independently established saved-contract incompatibility retains its existing code when it owns the dependent obligation. Current authorization and matching accepted or skipped receipts retain their existing precedence.
 
 ### Representation and activation
 
@@ -167,7 +177,7 @@ Trusted server composition selects the exact provider-owned, validated immutable
 
 A profile bounds every allowed model, provider, mode, feature and override that can affect a declaration. A complete declaration covers every applicable branch of that profile. Reservations include every applicable reserved name or prefix across those branches. A kind enters the coverage set only if interception is established for that kind in every applicable branch that can exercise it. Section 9 governs disabled and unsupported tools. An unsupported or unverified branch cannot inherit completeness from a different selection. The pin and profile in this configuration describe the intended execution. The launch boundary independently verifies the actual binary and effective controls and refuses drift under its existing contracts.
 
-Receiver acquisition and both reads are synchronous and use only already-validated inputs and the provider's native definitions. They require no execution host or running event loop. They must neither start `app-server` or invoke `codex --version`, nor inspect the process environment, open files or sockets, read host or repository configuration, resolve secrets or allocate runtime resources.
+Receiver acquisition and declaration reads are synchronous and use only already-validated inputs and the provider's native definitions. They require no execution host or running event loop. They must neither start `app-server` or invoke `codex --version`, nor inspect the process environment, open files or sockets, read host or repository configuration, resolve secrets or allocate runtime resources.
 
 ### Separate native results
 
@@ -184,9 +194,15 @@ Launch must refuse workload `env` and `secret_env` names that match a reserved l
 
 A complete coverage set supports conclusions about both present and absent kinds. Native tool classification and normalization remain separately required. Evidence of a particular covered or uncovered call in an incomplete profile cannot establish the complete declaration or supply an uncovered-kind finding under IR019 or IR028. Section 9 governs required kinds and coveredness; section 7 governs unresolved required facts and inconsistent bindings.
 
+### Separately qualified subagent absence
+
+For the selected first Linux profile, the native owner supplies a separate fact that the subagent context is impossible. Its completeness binds the exact selected execution installation, platform, binary pin and full protected control profile. Independent native qualification makes real requests through the pinned interface, covers alternate native subagent producer routes and proves refusal before any child context is created or runs and before any covered effect. Blocking a producer's covered effects alone leaves context impossibility unproved. Qualification covers protected effective controls, including override and reload routes, and launch independently rechecks actual selection and effective controls. Partial observations and unsupported or unproved branches leave the fact unavailable for that profile.
+
+The fact is read effect-free from the already qualified native definitions under the same inspection boundary above. The server projects its semantic assertion and availability into the detached same-call view for the exact selection. This representation remains separate from reservations and `policy_coverage`. Its exact accessor and projection shape belong to the implementing plans.
+
 ### Projection and activation
 
-Server composition copies only the names or kinds into the immutable same-call view and binds each result to the invocation, namespace, agent site and exact configured selection. The projection preserves each result's availability and contains no credentials, environment values, raw configuration or provider objects. Sections 3, 4 and 7 govern consistency, execution authority and failure disposition.
+Server composition copies the reservation names, coverage kinds and separately qualified absence assertion into the immutable same-call view and binds each result to the invocation, namespace, agent site and exact configured selection. The projection preserves each result's availability and contains no credentials, environment values, raw configuration or provider objects. Sections 3, 4 and 7 govern consistency, execution authority and failure disposition.
 
 Work item 15 owns the real native source, shared launch-construction definitions and conformance for the selected version, platform and profile. The evidence matrix identifies the current complete Codex reservation and coverage declarations as unavailable. The real source and the launch definitions it relies on must land together. Work items 3 and 11 and [#549](https://github.com/realkarych/kora/issues/549) own configured selection and projection into validation. [#199](https://github.com/realkarych/kora/issues/199) owns session hosting, and [#593](https://github.com/realkarych/kora/issues/593) owns the saved contract and canonical start. This decision introduces no provider ABI member, public operation, persisted format or executable producer.
 
@@ -203,13 +219,22 @@ private native executor stream. It admits one root turn per attempt.
 Identity-preserving live reconnect or attempt failure and actual owner-bounded
 listener/session/descendant closure remain implementing obligations.
 
-The profile decision supplies no native receiver, complete inventory,
-construction, declaration or consumer activation. The operative coverage and
-refusal rules in sections 7–10 still apply. #549 owns a separate admission
-amendment for any independently established impossible native subagent
-context. That fact would require the exact qualified configured profile and
-a separate effect-free source. The real-source, selection and platform gates
-remain applicable.
+The design retains executable activation with the owning issues. #772
+owns protected native controls, exact absence qualification and the
+native declaration. #549 owns its configured acquisition, same-call
+projection and validation. #593
+owns canonical start, including saved/live selection revalidation before
+new effects and matching accepted/skipped receipt precedence.
+
+The implementing PRs exercise a seeded graph with applicable deny-only
+layers through validate, deploy and start after real qualification. They
+also cover a nonempty allow array in either layer, uncovered primary
+requirements, unresolved native classification, unavailable or mismatched
+absence, and stale saved/live selection. An unrelated scoped finding
+cannot mask an otherwise-unreported required absence fact. Independently
+established saved-contract incompatibility keeps its existing disposition.
+Deployment and start writer cases run on both metadata databases with
+public-surface parity and matching replay preserved.
 ChatGPT account/OAuth support is deferred under
 [#770](https://github.com/realkarych/kora/issues/770) until the first API-key
 adapter is integrated and qualified through the common runner.
