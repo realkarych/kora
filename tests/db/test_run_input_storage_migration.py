@@ -23,6 +23,7 @@ from tests.support.databases import sqlite_settings
 
 PREDECESSOR = "0019"
 REVISION = "0020"
+HEAD_REVISION = "0021"
 SENTINEL = "kora.run-inputs.v1"
 ADD_INPUT_ENCODING = "ALTER TABLE run ADD COLUMN input_encoding_version INTEGER"
 RUN_IDENTIFIER = re.compile(r"\b(?:run|run_inputs)\b", re.IGNORECASE)
@@ -192,12 +193,12 @@ async def test_run_input_migration_adds_only_empty_native_storage(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             PREDECESSOR,
-            REVISION,
-            1,
+            HEAD_REVISION,
+            2,
         )
         assert (repeated.from_revision, repeated.to_revision, repeated.steps) == (
-            REVISION,
-            REVISION,
+            HEAD_REVISION,
+            HEAD_REVISION,
             0,
         )
         assert after == before
@@ -218,9 +219,16 @@ async def test_run_input_migration_adds_only_empty_native_storage(
             for statement in observation.statements
             if RUN_IDENTIFIER.search(statement) is not None
         ]
-        assert len(scoped) == 2
         assert scoped[0] == ADD_INPUT_ENCODING
         assert scoped[1].startswith("CREATE TABLE run_inputs ")
+        expected_index_prefixes = (
+            ["CREATE INDEX ix_run_input_locator", "CREATE INDEX ix_run_inputs_locator"]
+            if database.dialect is Dialect.SQLITE
+            else []
+        )
+        assert [statement.split(" ON ", 1)[0] for statement in scoped[2:]] == (
+            expected_index_prefixes
+        )
         observation.assert_released()
     finally:
         await database.close()
@@ -234,7 +242,10 @@ async def test_run_input_migration_preserves_native_bytes_and_refuses_downgrade(
     downgrade = UpgradeObservation()
     try:
         _, run_id = await seed_predecessor(database)
-        await upgrade_database(empty_database_settings)
+        async with database.migration_connection() as connection:
+            await connection.run_sync(
+                lambda sync: command.upgrade(alembic_config(sync), REVISION)
+            )
         values = {"run_id": run_id, "cel_projection": PROJECTION, "params": PARAMETERS}
         async with database.transaction() as writer:
             await writer.execute(
@@ -414,8 +425,8 @@ async def test_run_input_migration_conflict_is_atomic_and_content_free(
             )
         )
         assert recovered.code == 0
-        assert recovered.stdout == b"0020\n"
-        assert recovered_revision == REVISION
+        assert recovered.stdout == b"0021\n"
+        assert recovered_revision == HEAD_REVISION
         assert events(recovered).count("db.migration.finished") == 1
     finally:
         await database.close()
@@ -472,8 +483,8 @@ async def test_run_input_migration_interruption_releases_native_resources(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             PREDECESSOR,
-            REVISION,
-            1,
+            HEAD_REVISION,
+            2,
         )
         observation.assert_released()
     finally:

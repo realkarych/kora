@@ -18,6 +18,10 @@ from kora.db.graph_publication_ordinal_v1 import (
     ORDINAL_INVALID_INDEX,
     ORDINAL_VALID_INDEX,
 )
+from kora.db.run_input_locator_v1 import (
+    SQLITE_RUN_INPUT_LOCATOR_INDEX,
+    SQLITE_RUN_LOCATOR_INDEX,
+)
 from kora.db.run_queue_index_v1 import POSTGRES_QUEUE_INDEX, SQLITE_QUEUE_INDEX
 from kora.db.tables import GRAPH_VERSION_SCOPE_INDEX, metadata
 from kora.db.types import POSTGRESQL, SQLITE
@@ -130,6 +134,8 @@ def include_schema_object(
             INVALID_ID_INDEX,
             ORDINAL_VALID_INDEX,
             ORDINAL_INVALID_INDEX,
+            SQLITE_RUN_LOCATOR_INDEX,
+            SQLITE_RUN_INPUT_LOCATOR_INDEX,
         )
         and not reflected
         and compare_to is None

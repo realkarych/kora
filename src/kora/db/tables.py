@@ -63,6 +63,12 @@ from kora.db.graph_version_resource_owner_v1 import (
 from kora.db.graph_version_resource_owner_v1 import (
     graph_version_resource_owner_elements_v1,
 )
+from kora.db.run_input_locator_v1 import (
+    SQLITE_RUN_INPUT_KEY,
+    SQLITE_RUN_INPUT_LOCATOR_INDEX,
+    SQLITE_RUN_KEY,
+    SQLITE_RUN_LOCATOR_INDEX,
+)
 from kora.db.run_inputs_v1 import TABLE_NAME as RUN_INPUTS_TABLE
 from kora.db.run_inputs_v1 import run_input_elements_v1
 from kora.db.run_queue_index_v1 import (
@@ -466,6 +472,17 @@ Index(
 ).ddl_if(dialect="sqlite")
 
 run_inputs: Table = Table(RUN_INPUTS_TABLE, metadata, *run_input_elements_v1())
+
+Index(
+    SQLITE_RUN_LOCATOR_INDEX,
+    run.c.id,
+    sqlite_where=literal_column(SQLITE_RUN_KEY),
+).ddl_if(dialect="sqlite")
+Index(
+    SQLITE_RUN_INPUT_LOCATOR_INDEX,
+    run_inputs.c.run_id,
+    sqlite_where=literal_column(SQLITE_RUN_INPUT_KEY),
+).ddl_if(dialect="sqlite")
 
 node_instance: Table = Table(
     "node_instance",
