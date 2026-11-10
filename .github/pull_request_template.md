@@ -19,7 +19,7 @@ For a business-logic change, record the complete diff’s added plus deleted han
 ## Labels
 
 - [ ] The PR and, when required, the issue it closes have exactly one matching primary `type:*` label, and their supplemental labels reflect their current scope and status, as defined in [AGENTS.md](https://github.com/realkarych/kora/blob/master/AGENTS.md#labels).
-- [ ] Saved GitHub labels have been verified; any deferred issue records a reason and revisit trigger. Labels do not replace owner approval of the plan.
+- [ ] Saved GitHub labels have been verified; any deferred issue records a reason and revisit trigger. Labels describe the work. Record the applicable approval basis in Verification.
 
 ## Acceptance criteria
 
@@ -31,7 +31,7 @@ For a business-logic change, record the complete diff’s added plus deleted han
 
 ## Verification
 
-Approved plan link and base revision:
+Base revision and plan link, if required. Record individual owner approval when required, explain why standing authorization applies, or state why a plan is not required:
 
 Final reviewed/tested revision and working-tree state:
 

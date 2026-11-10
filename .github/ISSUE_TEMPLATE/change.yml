@@ -21,7 +21,8 @@ body:
         Apply exactly one primary `type:*` label and any applicable supplemental labels
         according to [AGENTS.md](https://github.com/realkarych/kora/blob/master/AGENTS.md#labels).
         Agents must assign and verify the GitHub labels when creating or updating the issue.
-        Labels do not approve an implementation plan.
+        Labels describe the work. Follow the plan and approval rules in AGENTS.md,
+        including standing authorization where applicable.
   - type: textarea
     id: problem
     attributes:
