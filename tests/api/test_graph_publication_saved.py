@@ -420,3 +420,85 @@ async def test_sqlite_later_event_trigger_invalidates_the_saved_match(
     assert ledger.outstanding == database.units_in_flight() == 0
     assert database.writer_is_free()
     assert ledger.opened == ledger.closed > 0
+
+
+@pytest.mark.asyncio
+async def test_sqlite_graph_version_insert_aborts_a_schema_replacement_conflict(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    database = Database(copy_sqlite_template(sqlite_template, tmp_path / "conflict.db"))
+    ledger = ConnectionLedger(database)
+    insert = graph_publication_insert_statement(Dialect.SQLITE)
+    compare = graph_publication_saved_statement(Dialect.SQLITE)
+    definition = text(
+        "SELECT sql FROM main.sqlite_schema "
+        "WHERE type = 'table' AND name = 'graph_version'"
+    )
+    versions = select(graph_version.c.id)
+    admission_count = select(func.count()).select_from(graph_version_read_admission)
+    ordinal = "UNIQUE (graph_id, number)"
+    metadata = prepare_graph_publication_metadata(
+        Dialect.SQLITE, personal_principal(ACTOR), (), max_metadata_bytes=256
+    )
+    prepared: list[dict[str, str | int | datetime]] = []
+
+    try:
+        async with database.transaction() as writer:
+            seeder = Seeder(writer)
+            namespace_id = await seeder.namespace()
+            graph_id = await seeder.graph(namespace_id)
+            scopes = tuple(
+                GraphResourceScope(namespace_id, graph_id, seeder.new_id())
+                for _ in range(2)
+            )
+        for scope, digest in zip(scopes, ("a" * 64, "b" * 64), strict=True):
+            candidate = await asyncio.to_thread(
+                checked_attachment, with_files=False, scope=scope
+            )
+            payloads = prepare_graph_publication_binds(
+                candidate, limits=publication_limits(candidate)
+            )
+            fixed = payloads.fixed_values(
+                Dialect.SQLITE, number=1, source_digest=digest, at=STAMP
+            )
+            prepared.append(fixed | payloads.parameters() | metadata.parameters())
+        original, conflict = prepared
+
+        async with database.transaction() as writer:
+            migrated: object = await writer.scalar(definition)
+            assert type(migrated) is str
+            assert migrated.count(ordinal) == 1
+            await writer.exec_driver_sql(
+                "ALTER TABLE main.graph_version RENAME TO previous_graph_version"
+            )
+            await writer.exec_driver_sql(
+                migrated.replace(ordinal, ordinal + " ON CONFLICT REPLACE")
+            )
+            locator: object = await writer.scalar(insert, original)
+            with pytest.raises(IntegrityError) as refused:
+                await writer.scalar(insert, conflict)
+            matched: object = await writer.scalar(
+                compare, original | {SAVED_LOCATOR: locator}
+            )
+            surviving = (await writer.execute(versions)).scalars().all()
+            await writer.rollback()
+        async with database.transaction() as writer:
+            restored: object = await writer.scalar(definition)
+            remaining = (await writer.execute(versions)).all()
+            admissions: object = await writer.scalar(admission_count)
+    finally:
+        await database.close()
+
+    native: object = refused.value.orig
+    assert isinstance(native, sqlite3.IntegrityError)
+    assert native.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+    assert type(locator) is int
+    assert type(matched) is int
+    assert matched == 1
+    assert surviving == [scopes[0].version_id]
+    assert restored == migrated
+    assert remaining == []
+    assert admissions == 0
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert database.writer_is_free()
+    assert ledger.opened == ledger.closed > 0

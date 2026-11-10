@@ -114,7 +114,7 @@ WHERE v.ctid OPERATOR(pg_catalog.=)
 
 
 _SQLITE_INSERT = text("""
-INSERT INTO main.graph_version (
+INSERT OR ABORT INTO main.graph_version (
     id, graph_id, number, ir, ir_digest, source_digest, execution_contract,
     execution_contract_digest, deployment_digest, resolved_digests, resources,
     deployed_by, deployed_at, status, created_at, updated_at, value_encoding_version
