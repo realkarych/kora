@@ -56,7 +56,8 @@ prepare_service_session() {
   cat /proc/sys/kernel/random/boot_id > "$fixtures/service-session.boot"
   local deadline pid group session
   deadline=$((SECONDS + 10))
-  while test ! -S "$fixtures/service-session/control.sock"; do
+  while test ! -f "$fixtures/service-session/control.listening" ||
+        test ! -S "$fixtures/service-session/control.sock"; do
     test "$SECONDS" -lt "$deadline"
     case "$(systemctl show --property=ActiveState --value kora-local-runtime-session.service)" in
       active|activating) ;;

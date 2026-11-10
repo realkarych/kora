@@ -17,6 +17,7 @@ from kora.runner.registry import Running
 from tests.support.local_peers import until
 from tests.support.local_runners import reap_runners, short_directory
 from tests.support.local_runtime import prepared, runtime_context, state_root
+from tests.support.service_session import LISTENING_MARKER
 
 __all__ = ["kora_capture"]
 
@@ -53,6 +54,40 @@ def stop_user_unit(unit: str) -> None:
     assert state in ("inactive", "failed")
 
 
+@pytest.mark.parametrize("incumbent", ["socket", "marker"])
+def test_service_fixture_preserves_incumbent_path(incumbent: str) -> None:
+    with (
+        short_directory() as broker,
+        socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as existing,
+    ):
+        path = broker / "control.sock"
+        marker = broker / LISTENING_MARKER
+        inode: int | None = None
+        if incumbent == "socket":
+            existing.bind(str(path))
+            inode = path.lstat().st_ino
+        else:
+            marker.symlink_to(broker / "missing")
+
+        with pytest.raises(subprocess.CalledProcessError):
+            subprocess.run(
+                [sys.executable, "-m", "tests.support.service_session", str(broker)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=10,
+            )
+
+        if incumbent == "socket":
+            assert path.lstat().st_ino == inode
+            assert not os.path.lexists(marker)
+        else:
+            assert marker.is_symlink()
+            assert marker.readlink() == broker / "missing"
+            assert not os.path.lexists(path)
+
+
 @pytest.mark.asyncio
 async def test_service_fixture_owns_its_worker_and_preserves_runner(
     tmp_path: Path, kora_capture: Capture
@@ -72,7 +107,8 @@ async def test_service_fixture_owns_its_worker_and_preserves_runner(
                 stderr=subprocess.STDOUT,
             )
         try:
-            await until(lambda: (broker / "control.sock").exists())
+            await until(lambda: (broker / LISTENING_MARKER).is_file())
+            assert (broker / LISTENING_MARKER).stat().st_mode & 0o777 == 0o600
             worker = int(
                 await asyncio.to_thread(
                     session_request,
@@ -104,9 +140,10 @@ async def test_service_fixture_owns_its_worker_and_preserves_runner(
             assert reader.read(worker).state is IdentityState.ABSENT
             assert reader.read(entry.runner.pid).state is IdentityState.PRESENT
             assert not (broker / "control.sock").exists()
+            assert not (broker / LISTENING_MARKER).exists()
         finally:
             if process.poll() is None:
-                if (broker / "control.sock").exists():
+                if (broker / LISTENING_MARKER).is_file():
                     await asyncio.to_thread(session_request, broker, ("close",))
                 else:
                     process.terminate()
@@ -238,7 +275,9 @@ async def test_runner_survives_worker_service_restart(
         finally:
             if session_directory is None:
                 await asyncio.to_thread(stop_user_unit, unit)
-            elif not session_closed and (session_directory / "control.sock").exists():
+            elif (
+                not session_closed and (session_directory / LISTENING_MARKER).is_file()
+            ):
                 await asyncio.to_thread(session_request, session_directory, ("close",))
             reap_runners(root)
             if entry is not None:
@@ -389,7 +428,7 @@ async def test_service_fixture_termination_closes_worker_before_runner_sweep(
                 stderr=subprocess.STDOUT,
             )
         try:
-            await until(lambda: (broker / "control.sock").exists())
+            await until(lambda: (broker / LISTENING_MARKER).is_file())
             worker = int(
                 await asyncio.to_thread(
                     session_request,
@@ -408,9 +447,10 @@ async def test_service_fixture_termination_closes_worker_before_runner_sweep(
             assert result == 0
             assert reader.read(worker).state is IdentityState.ABSENT
             assert not (broker / "control.sock").exists()
+            assert not (broker / LISTENING_MARKER).exists()
         finally:
             if process.poll() is None:
-                if (broker / "control.sock").exists():
+                if (broker / LISTENING_MARKER).is_file():
                     await asyncio.to_thread(session_request, broker, ("close",))
                 else:
                     process.terminate()
