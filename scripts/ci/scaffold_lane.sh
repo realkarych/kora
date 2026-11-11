@@ -34,7 +34,7 @@ open_ordinary_output() {
 }
 
 preserve_ordinary_evidence() {
-  for name in first.log second.log third.log measurements.log integration.log surface.log other.log engine.log first.xml second.xml third.xml measurements.xml integration.xml surface.xml other.xml engine.xml first.exit second.exit third.exit measurements.exit integration.exit surface.exit other.exit engine.exit; do
+  for name in first.log second.log third.log measurements.log integration.log surface.log other.log graph.log engine.log first.xml second.xml third.xml measurements.xml integration.xml surface.xml other.xml graph.xml engine.xml first.exit second.exit third.exit measurements.exit integration.exit surface.exit other.exit graph.exit engine.exit; do
     if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
       cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
     fi

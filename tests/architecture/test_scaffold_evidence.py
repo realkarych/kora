@@ -33,6 +33,7 @@ GENERAL_NODES = (
     "tests/measurements/test_value.py::test_value",
     "tests/api/test_value.py::test_value[sqlite]",
     "tests/api_v2/test_other.py::test_value",
+    "tests/engine/test_graph.py::test_value",
     "tests/test_third.py::test_value",
     "tests/test_engine.py::test_value",
     "tests/cli/test_surface.py::test_value",
@@ -106,6 +107,7 @@ def lane_files(root: Path, lane: str, operating_system: str) -> None:
         }
         if operating_system == "macos-15" and lane == "remainder":
             assigned["measurements"] = (groups["measurements"], groups["engine"])
+            assigned["other"] = (groups["other"], groups["graph"])
         for name, nodes in assigned.items():
             write_junit(root / f"{name}.xml", identities(nodes))
             (root / f"{name}.log").write_text("1 passed\n")
@@ -149,7 +151,7 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
     result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
     local = sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
-    assert result == {"environments": 3, "lanes": 14, "tests": 27 + local}
+    assert result == {"environments": 3, "lanes": 14, "tests": 30 + local}
 
 
 @pytest.mark.parametrize("operating_system", ["macos-26", "ubuntu-24.04"])
@@ -514,7 +516,7 @@ def test_linux_pull_request_lanes_keep_unscheduled_neighbours(
     result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
     local = sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
-    assert result == {"environments": 3, "lanes": 14, "tests": 28 + local}
+    assert result == {"environments": 3, "lanes": 14, "tests": 31 + local}
 
 
 def test_macos_storage_receipt_requires_the_scheduled_ignores(tmp_path: Path) -> None:

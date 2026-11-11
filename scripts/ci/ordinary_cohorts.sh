@@ -7,7 +7,7 @@ select_groups() {
   case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
     ubuntu-24.04:conformance) names=(first second third) ;;
     macos-15:conformance) names=(first second third surface) ;;
-    ubuntu-24.04:remainder) names=(measurements other engine) ;;
+    ubuntu-24.04:remainder) names=(measurements other graph engine) ;;
     macos-15:remainder) names=(measurements integration other) ;;
     ubuntu-24.04:integration) names=(integration surface) ;;
     *) exit 1 ;;
@@ -51,6 +51,16 @@ select_groups() {
     tests/db/test_db_upgrade_process.py
     tests/db/test_attempt_deadline_migration.py
   )
+  graph=(
+    tests/engine
+    --ignore=tests/engine/test_graph_execution_contract.py
+    --ignore=tests/engine/test_graph_native_sources.py
+    --ignore=tests/engine/test_graph_native_outputs.py
+    --ignore=tests/engine/test_graph_output_inventory.py
+    --ignore=tests/engine/test_graph_outputs.py
+    --ignore=tests/engine/test_graph_projection_paths.py
+    --ignore=tests/engine/test_start_parameter_cut.py
+  )
   measurements=(
     tests/measurements
     --ignore=tests/measurements/test_ir_measurement_evidence.py
@@ -91,6 +101,7 @@ group_arguments() {
     other) arguments=("${other[@]}") ;;
     third) arguments=("${third[@]}") ;;
     engine) arguments=("${engine[@]}") ;;
+    graph) arguments=("${graph[@]}") ;;
     surface) arguments=("${surface[@]}") ;;
     *) exit 1 ;;
   esac
@@ -112,6 +123,9 @@ group_arguments() {
       done
       arguments+=("--ignore=$path")
     done
+  fi
+  if test "$KORA_SCAFFOLD_OS" = ubuntu-24.04 && test "$KORA_SCAFFOLD_LANE" = remainder && test "$name" = other; then
+    arguments+=("--ignore=tests/engine")
   fi
 }
 

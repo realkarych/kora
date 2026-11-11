@@ -23,7 +23,7 @@ ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
 LANE_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
     "ubuntu-24.04": {
         "conformance": ("first", "second", "third"),
-        "remainder": ("measurements", "other", "engine"),
+        "remainder": ("measurements", "other", "graph", "engine"),
         "integration": ("integration", "surface"),
         "storage": (),
         "local-runtime": (),
@@ -41,6 +41,7 @@ COHORTS = (
     "measurements",
     "integration",
     "other",
+    "graph",
     "third",
     "engine",
     "surface",
