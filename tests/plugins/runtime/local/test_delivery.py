@@ -31,10 +31,10 @@ from kora.plugins.runtime.local.channel import (
     read_error_envelope,
     workload_digest,
 )
-from kora.plugins.runtime.local.control import deliver_workload
 from kora.plugins.runtime.local.serving import FIRST_FRAME_NS, decoded_workload
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
+from kora.protocols.identity import Handle
 from kora.protocols.runtime import Workload
 from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.filesystem import read_private_file
@@ -718,7 +718,7 @@ class AwaitedAcceptance:
     live: DeliveryServer
     clock: StepClock
     decoder: GatedDecoder
-    delivering: asyncio.Task[None]
+    submitting: asyncio.Task[Handle]
 
 
 @asynccontextmanager
@@ -728,24 +728,14 @@ async def acceptance_awaited_during_decode(
     decoder = GatedDecoder()
     clock = StepClock()
     async with delivery_server(tmp_path, capture, clock=clock, decoder=decoder) as live:
-        delivering = asyncio.create_task(
-            deliver_workload(
-                live.entry.socket_path,
-                live.entry.runner,
-                live.work,
-                kernel_source(NativeIdentityReader()),
-                live.runtime.executor,
-                clock,
-                "delivery-1",
-            )
-        )
+        submitting = asyncio.create_task(live.runtime.submit(live.work, live.ctx))
         try:
             await until(decoder.entered.is_set)
             await until(lambda: acceptance_pending(clock))
-            yield AwaitedAcceptance(live, clock, decoder, delivering)
+            yield AwaitedAcceptance(live, clock, decoder, submitting)
         finally:
             decoder.release.set()
-            await asyncio.gather(delivering, return_exceptions=True)
+            await asyncio.gather(submitting, return_exceptions=True)
             await until(decoder.finished.is_set)
 
 
@@ -755,13 +745,14 @@ async def test_workload_acceptance_waits_for_decode_inside_its_budget(
     async with acceptance_awaited_during_decode(tmp_path, kora_capture) as awaited:
         awaited.clock.advance(ACCEPTANCE_PROGRESS_NS - 1)
         awaited.decoder.release.set()
-        await awaited.delivering
+        handle = await awaited.submitting
         status = await client(awaited.live.entry.socket_path, awaited.clock)
         try:
             observed = await asked_status(status, awaited.clock)
         finally:
             status.close()
 
+    assert handle.attempt_id == awaited.live.work.attempt_id
     assert observed.holds_workload
 
 
@@ -770,12 +761,10 @@ async def test_workload_acceptance_expires_at_its_budget_during_decode(
 ) -> None:
     async with acceptance_awaited_during_decode(tmp_path, kora_capture) as awaited:
         awaited.clock.advance(ACCEPTANCE_PROGRESS_NS)
-        with pytest.raises(ChannelError) as expired:
-            await awaited.delivering
-        decoding = not awaited.decoder.finished.is_set()
+        with pytest.raises(KoraProtocolError) as expired:
+            await awaited.submitting
 
-    assert expired.value.reason is ChannelFailure.DEADLINE
-    assert decoding
+    assert (expired.value.code, expired.value.retryable) == ("runner_unreachable", True)
 
 
 @pytest_asyncio.fixture(autouse=True)
