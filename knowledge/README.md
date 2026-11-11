@@ -8,7 +8,7 @@ This is the section-by-section reference behind [human-facing documentation](../
 
 The [separate raw-crash storage proposal](research/separate-raw-crash-storage-2026-11-06.md) records the diagnostic-only FSKit boundary, preserved state-root restrictions, qualification gaps and size/dependency blockers under #778. It is not an active storage contract or evidence of native support.
 
-The [installed VCS Git step timing record](research/installed-vcs-git-timing-2026-11-07.md) holds the source failures, timing format and reading rule for the hosted macOS preparation deadline under #887 and #895. It does not attribute the failure.
+The [installed VCS Git step timing record](research/installed-vcs-git-timing-2026-11-07.md) holds the source failures, timing format and reading rule for the hosted macOS preparation deadline under #887 and #895. It does not attribute the failure; the [Git selection record](research/installed-vcs-git-selection-2026-11-07.md) does. The [partial preparation record](research/installed-vcs-partial-preparation-2026-11-11.md) maps the failures cited in #1355 to their fixes and covers cleanup of a failed preparation's Git output.
 
 The [macOS eject refusal record](research/storage-pressure-eject-refusal-2026-11-06.md) holds the failure table, Apple source citations, decision and reading rule for refused storage-pressure fixture releases under #302 and #886.
 
