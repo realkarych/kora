@@ -806,12 +806,6 @@ class NativeIdentityReader:
         finally:
             ctypes.memset(buffer, 0, capacity)
 
-    def processes_carrying(
-        self, argv: tuple[str, ...], deadline_ns: int
-    ) -> tuple[int, ...] | None:
-        result = self.scan_processes_carrying(argv, deadline_ns)
-        return None if isinstance(result, ProcessScanFailure) else result
-
     def scan_processes_carrying(
         self, argv: tuple[str, ...], deadline_ns: int
     ) -> tuple[int, ...] | ProcessScanFailure:

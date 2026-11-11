@@ -1,6 +1,5 @@
 import asyncio
 import sqlite3
-from contextlib import closing
 from pathlib import Path
 from typing import Literal
 
@@ -24,7 +23,7 @@ from tests.db.closing import CONDITION_DEADLINE_SECONDS, ConnectionLedger
 from tests.db.test_graph_read_admission import executed_queries
 from tests.db.test_graph_value_migration import encoding_predecessor
 from tests.db.test_sqlite_writer_entry import writer_driver
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 PROBE_STATEMENTS = (TABLE_LAYOUT, XINFO_SHADOW, COLUMN_LAYOUT, PAGE_SIZE, ENCODING)
 CREATE_CANARY = text("CREATE TABLE layout_canary (value INTEGER)")
@@ -85,14 +84,9 @@ async def test_sqlite_graph_layout_requires_the_current_managed_writer(
 async def test_sqlite_graph_layout_observes_native_page_geometry_after_migration(
     tmp_path: Path, encoding: str, page_size: int, populated: bool
 ) -> None:
-    path = tmp_path / "graph-layout.db"
-    with closing(sqlite3.connect(path)) as native:
-        native.execute(f"PRAGMA page_size = {page_size}")
-        native.execute(f"PRAGMA encoding = '{encoding}'")
-        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        native.execute("DROP TABLE encoding_seed")
-        native.commit()
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(
+        tmp_path / "graph-layout.db", encoding, page_size
+    )
     database = Database(settings)
     ledger = ConnectionLedger(database)
 

@@ -41,6 +41,7 @@ READ_ACCESS = frozenset({"read", "none"})
 ALLOWED_WRITE_SCOPES = frozenset(
     {
         "codeql.yml:analyze:security-events",
+        "daily-lanes.yml:report:issues",
         "osv-scanner.yml:pull-request:security-events",
         "osv-scanner.yml:full-scan:security-events",
     }
@@ -58,8 +59,15 @@ UNTRUSTED_CONTEXT = re.compile(
 )
 SECRET_CONTEXT = re.compile(EXPRESSION + r"\b(?:secrets\.|github\.token\b)", re.S)
 ALLOWED_SECRET_SITES = frozenset(
-    {"mutation.yml:jobs:audit:steps:Audit the frozen master revision:env:GITHUB_TOKEN"}
+    {
+        "mutation.yml:jobs:audit:steps:"
+        "Audit the frozen master revision:env:GITHUB_TOKEN",
+        "daily-lanes.yml:jobs:report:steps:report:env:GITHUB_TOKEN",
+    }
 )
+ISSUE_WRITER_CONDITIONS = {
+    "daily-lanes.yml:report": "${{ always() && github.ref == 'refs/heads/master' }}",
+}
 PROTECTED_STATUS_NAMES = frozenset(
     {
         "Markdown lint",
@@ -98,16 +106,19 @@ GATE_JOBS = {
     "ci.yml:scaffold-tests": "scaffold-lane",
     "ci.yml:scaffold-evidence": "scaffold-evidence",
     "ci.yml:scaffold": "check",
-    "ci.yml:resource-measurements": "verify",
-    "ci.yml:provider-protocol-measurements": "verify",
-    "ci.yml:pricing-measurements": "verify",
-    "ci.yml:git-publication-measurements": "verify",
     "ci.yml:cel-producer": "verify",
     "ci.yml:cel-measurements": "cel-measurements",
     "ci.yml:browser": "browser",
     "conformance-lifetime.yml:qualification": "verify",
     "conformance-lifetime.yml:installed-qualification": "check",
     "conformance-lifetime.yml:lifetime-evidence": "check",
+    "daily-lanes.yml:resource-measurements": "verify",
+    "daily-lanes.yml:provider-protocol-measurements": "verify",
+    "daily-lanes.yml:pricing-measurements": "verify",
+    "daily-lanes.yml:git-publication-measurements": "verify",
+    "daily-lanes.yml:ir-evidence": "check",
+    "daily-lanes.yml:lifetime-tests": "check",
+    "daily-lanes.yml:storage-pressure-tests": "check",
     "storage.yml:storage-evidence": "check",
 }
 PROOF_ORIGINS = frozenset({"ci.yml:change-scope"})
@@ -184,6 +195,30 @@ def persisted_tokens(location: str, job: dict[str, object]) -> list[str]:
     ]
 
 
+def writes_issues(job: dict[str, object]) -> bool:
+    granted: object = job.get("permissions", {})
+    if isinstance(granted, dict):
+        return cast(dict[str, object], granted).get("issues") == "write"
+    return granted == "write-all"
+
+
+def issue_writers_beyond_master(workflows: Workflows) -> list[str]:
+    jobs = dict(jobs_of(workflows))
+    return [
+        *(
+            f"{location}: writes issues under {job.get('if')}"
+            for location, job in jobs.items()
+            if writes_issues(job)
+            and job.get("if") != ISSUE_WRITER_CONDITIONS.get(location)
+        ),
+        *(
+            f"{location}: missing issue writer"
+            for location in ISSUE_WRITER_CONDITIONS
+            if location not in jobs
+        ),
+    ]
+
+
 def excess_token_access(workflows: Workflows) -> list[str]:
     violations = [
         f"{name}: workflow permissions {document.get('permissions')}"
@@ -195,7 +230,7 @@ def excess_token_access(workflows: Workflows) -> list[str]:
         violations.extend(persisted_tokens(location, job))
         if "secrets" in job:
             violations.append(f"{location}: passes secrets")
-    return violations
+    return [*violations, *issue_writers_beyond_master(workflows)]
 
 
 def triggers(document: dict[str, object]) -> frozenset[str]:
@@ -731,6 +766,25 @@ def checkout_with_default_credentials(workflows: Workflows) -> None:
     del step_list(job_of(workflows, "codeql.yml", "analyze"))[0]["with"]
 
 
+def let_a_daily_lane_write_issues(workflows: Workflows) -> None:
+    job = job_of(workflows, "daily-lanes.yml", "lifetime-tests")
+    job["permissions"] = {"contents": "read", "issues": "write"}
+
+
+def report_issues_from_any_branch(workflows: Workflows) -> None:
+    job_of(workflows, "daily-lanes.yml", "report")["if"] = "${{ always() }}"
+
+
+def report_issues_from_master_or_any_branch(workflows: Workflows) -> None:
+    job = job_of(workflows, "daily-lanes.yml", "report")
+    job["if"] = "${{ always() || github.ref == 'refs/heads/master' }}"
+
+
+def report_issues_from_every_branch_but_master(workflows: Workflows) -> None:
+    job = job_of(workflows, "daily-lanes.yml", "report")
+    job["if"] = "${{ always() && !(github.ref == 'refs/heads/master') }}"
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -743,6 +797,10 @@ def checkout_with_default_credentials(workflows: Workflows) -> None:
         pass_secrets_to_a_reusable_workflow,
         persist_checkout_credentials,
         checkout_with_default_credentials,
+        let_a_daily_lane_write_issues,
+        report_issues_from_any_branch,
+        report_issues_from_master_or_any_branch,
+        report_issues_from_every_branch_but_master,
     ],
 )
 def test_permission_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
@@ -1024,7 +1082,7 @@ def drop_the_scaffold_proof_requirement(workflows: Workflows) -> None:
 
 
 def drop_a_producer_outcome_requirement(workflows: Workflows) -> None:
-    gate = step_list(job_of(workflows, "ci.yml", "pricing-measurements"))[-1]
+    gate = step_list(job_of(workflows, "daily-lanes.yml", "pricing-measurements"))[-1]
     rewrite_run(gate, "  PRICING_UPLOAD_OUTCOME=success \\\n", "")
 
 
@@ -1033,24 +1091,24 @@ def disable_a_gate(workflows: Workflows) -> None:
 
 
 def let_a_measurement_continue_on_error(workflows: Workflows) -> None:
-    job = job_of(workflows, "ci.yml", "resource-measurements")
+    job = job_of(workflows, "daily-lanes.yml", "resource-measurements")
     step = next(step for step in step_list(job) if step.get("id") == "measurement")
     step["continue-on-error"] = True
 
 
 def add_an_ungated_step(workflows: Workflows) -> None:
-    job = job_of(workflows, "ci.yml", "git-publication-measurements")
+    job = job_of(workflows, "daily-lanes.yml", "git-publication-measurements")
     steps = cast(list[object], job["steps"])
     steps.insert(len(steps) - 1, {"id": "extra_measurement", "run": "true"})
 
 
 def ignore_a_needed_job(workflows: Workflows) -> None:
     gate = step_list(job_of(workflows, "ci.yml", "cel-measurements"))[-1]
-    del table(gate["env"])["PRICING_RESULT"]
+    del table(gate["env"])["CEL_RESULT"]
 
 
 def publish_an_ungated_proof(workflows: Workflows) -> None:
-    job = job_of(workflows, "ci.yml", "ir-measurements")
+    job = job_of(workflows, "daily-lanes.yml", "ir-measurements")
     job["outputs"] = {"verified": "${{ steps.measurement.outcome == 'success' }}"}
 
 

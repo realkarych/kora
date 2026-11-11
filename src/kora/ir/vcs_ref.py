@@ -16,7 +16,8 @@ from pydantic.config import ExtraValues
 
 from kora.ir.data import detach_ir_data
 from kora.ir.diagnostics import ContractViolation
-from kora.ir.json import JsonObject, JsonValue
+from kora.ir.json import JsonObject
+from kora.ir.structured_output import same_descriptor
 from kora.ir.vcs_ref_json import (
     INVALID_SCALAR,
     MAX_JSON_BYTES,
@@ -382,30 +383,8 @@ _DESCRIPTOR: JsonObject = {
 }
 
 
-def same_revision_value(value: object, expected: JsonValue) -> bool:
-    if type(value) is not type(expected):
-        return False
-    if type(expected) is dict:
-        entries = cast("dict[str, object]", value)
-        shape = cast("JsonObject", expected)
-        if any(type(name) is not str for name in entries):
-            return False
-        return len(entries) == len(shape) and all(
-            name in entries and same_revision_value(entries[name], item)
-            for name, item in shape.items()
-        )
-    if type(expected) is list:
-        entries = cast("list[object]", value)
-        items = cast("list[JsonValue]", expected)
-        return len(entries) == len(items) and all(
-            same_revision_value(left, right)
-            for left, right in zip(entries, items, strict=True)
-        )
-    return value == expected
-
-
 def require_vcs_ref_revision(descriptor: object) -> None:
-    if not same_revision_value(descriptor, _DESCRIPTOR):
+    if not same_descriptor(descriptor, _DESCRIPTOR):
         refuse("VCS007")
 
 

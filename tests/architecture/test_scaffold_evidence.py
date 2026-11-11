@@ -13,10 +13,14 @@ from tests.scaffold_evidence import (
     ENVIRONMENTS,
     LANE_ARGUMENTS,
     LANE_CHILDREN,
+    SCHEDULED_LANES,
+    STORAGE_ARGUMENTS,
     collection_nodes,
+    lane_arguments,
     record_lane,
     required_host_fixtures,
     verify_scaffold,
+    verify_scheduled,
 )
 
 REVISION = "a" * 40
@@ -29,6 +33,7 @@ GENERAL_NODES = (
     "tests/measurements/test_value.py::test_value",
     "tests/api/test_value.py::test_value[sqlite]",
     "tests/api_v2/test_other.py::test_value",
+    "tests/engine/test_graph.py::test_value",
     "tests/test_third.py::test_value",
     "tests/test_engine.py::test_value",
     "tests/cli/test_surface.py::test_value",
@@ -102,6 +107,7 @@ def lane_files(root: Path, lane: str, operating_system: str) -> None:
         }
         if operating_system == "macos-15" and lane == "remainder":
             assigned["measurements"] = (groups["measurements"], groups["engine"])
+            assigned["other"] = (groups["other"], groups["graph"])
         for name, nodes in assigned.items():
             write_junit(root / f"{name}.xml", identities(nodes))
             (root / f"{name}.log").write_text("1 passed\n")
@@ -125,7 +131,7 @@ def complete_evidence(root: Path) -> None:
                 python,
                 databases,
                 lane,
-                LANE_ARGUMENTS[lane],
+                lane_arguments(operating_system, lane),
             )
 
 
@@ -145,7 +151,7 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
     result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
     local = sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
-    assert result == {"environments": 3, "lanes": 14, "tests": 27 + local}
+    assert result == {"environments": 3, "lanes": 14, "tests": 30 + local}
 
 
 @pytest.mark.parametrize("operating_system", ["macos-26", "ubuntu-24.04"])
@@ -449,3 +455,137 @@ def test_local_runtime_lane_requires_its_host_fixture_tests(
 
     with pytest.raises(EvidenceFailure, match=match):
         verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
+
+
+def add_storage_node(root: Path, operating_system: str, python: str, node: str) -> None:
+    conformance = root / f"scaffold-tests-{operating_system}-{python}-conformance"
+    storage = root / f"scaffold-tests-{operating_system}-{python}-storage"
+    (conformance / "complete.txt").write_text(
+        collection_text(
+            (*GENERAL_NODES, *STORAGE_NODES, node, *local_nodes(operating_system))
+        )
+    )
+    write_junit(storage / "junit.xml", identities((*STORAGE_NODES, node)))
+    rehash(conformance, ["complete.txt"])
+    rehash(storage, ["junit.xml"])
+
+
+@pytest.mark.parametrize(
+    ("operating_system", "python", "node"),
+    [
+        (
+            "ubuntu-24.04",
+            "3.15.0",
+            "tests/conformance/test_lifetime_transport.py::test_value",
+        ),
+        (
+            "macos-15",
+            "3.11.17",
+            "tests/conformance/test_lifetime_journal_recovery.py::Case::test_value",
+        ),
+        (
+            "macos-15",
+            "3.11.17",
+            "tests/plugins/storage/test_pressure_controller.py::test_value[sqlite]",
+        ),
+    ],
+)
+def test_scaffold_evidence_refuses_scheduled_modules_in_pull_request_lanes(
+    tmp_path: Path, operating_system: str, python: str, node: str
+) -> None:
+    complete_evidence(tmp_path)
+    add_storage_node(tmp_path, operating_system, python, node)
+
+    with pytest.raises(EvidenceFailure, match="contains scheduled modules"):
+        verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        "tests/plugins/storage/test_pressure_controller.py::test_value[sqlite]",
+        "tests/conformance/test_lifetime_transport_boundaries.py::test_value",
+    ],
+)
+def test_linux_pull_request_lanes_keep_unscheduled_neighbours(
+    tmp_path: Path, node: str
+) -> None:
+    complete_evidence(tmp_path)
+    add_storage_node(tmp_path, "ubuntu-24.04", "3.11.17", node)
+
+    result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
+
+    local = sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
+    assert result == {"environments": 3, "lanes": 14, "tests": 31 + local}
+
+
+def test_macos_storage_receipt_requires_the_scheduled_ignores(tmp_path: Path) -> None:
+    complete_evidence(tmp_path)
+    receipt = tmp_path / "scaffold-tests-macos-15-3.11.17-storage" / "receipt.json"
+    data = parse_json_object(json.loads(receipt.read_text()))
+    data["arguments"] = list(STORAGE_ARGUMENTS)
+    receipt.write_text(json.dumps(data))
+
+    with pytest.raises(EvidenceFailure, match="different pytest arguments"):
+        verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
+
+
+def scheduled_report(
+    path: Path, modules: tuple[str, ...], *extra: str
+) -> tuple[str, ...]:
+    nodes = (*(f"{module}::test_value" for module in modules), *extra)
+    write_junit(path, identities(nodes))
+    return nodes
+
+
+@pytest.mark.parametrize(("operating_system", "lane"), list(SCHEDULED_LANES))
+def test_scheduled_lane_evidence_accepts_every_passing_module(
+    tmp_path: Path, operating_system: str, lane: str
+) -> None:
+    modules = SCHEDULED_LANES[(operating_system, lane)]
+    report = tmp_path / "junit.xml"
+    nodes = scheduled_report(report, modules)
+
+    result = verify_scheduled(report, operating_system, lane)
+
+    assert result == {"modules": len(modules), "tests": len(nodes)}
+
+
+@pytest.mark.parametrize(
+    ("corruption", "match"),
+    [
+        ("missing module", "lacks a module"),
+        ("outside module", "outside its modules"),
+        ("neighbour module", "outside its modules"),
+        ("failed test", "did not pass"),
+        ("unknown lane", "unknown environment or lane"),
+    ],
+)
+def test_scheduled_lane_evidence_refuses_incomplete_or_foreign_execution(
+    tmp_path: Path, corruption: str, match: str
+) -> None:
+    modules = SCHEDULED_LANES[("ubuntu-24.04", "lifetime")]
+    report = tmp_path / "junit.xml"
+    lane = "lifetime"
+    if corruption == "missing module":
+        scheduled_report(report, modules[1:])
+    elif corruption == "outside module":
+        scheduled_report(report, modules, "tests/test_general.py::test_value")
+    elif corruption == "neighbour module":
+        scheduled_report(
+            report,
+            modules,
+            "tests/conformance/test_lifetime_transport_boundaries.py::test_value",
+        )
+    elif corruption == "failed test":
+        report.write_text(
+            '<testsuite><testcase classname="tests.conformance.'
+            'test_lifetime_resume" name="test_value"><failure/></testcase>'
+            "</testsuite>"
+        )
+    else:
+        scheduled_report(report, modules)
+        lane = "storage"
+
+    with pytest.raises(EvidenceFailure, match=match):
+        verify_scheduled(report, "ubuntu-24.04", lane)

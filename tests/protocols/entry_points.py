@@ -21,11 +21,11 @@ def implementation(configuration: object) -> object:
 
 
 def metadata_factory(
-    protocol: ProtocolName, name: str, version: str = "1.0"
+    protocol: ProtocolName, name: str
 ) -> Callable[[], ProviderMetadata]:
     def factory() -> ProviderMetadata:
         return ProviderMetadata(
-            protocol, name, implementation, {"type": "object"}, version
+            protocol, name, implementation, {"type": "object"}, "1.0"
         )
 
     return factory
@@ -42,16 +42,13 @@ def entry(
     name: str,
     load: Callable[[], object],
     module: str | None = "kora_loading_fixture.providers",
-    value: str | None = None,
-    distribution: str | None = DISTRIBUTION,
-    distribution_version: str | None = DISTRIBUTION_VERSION,
 ) -> ProviderEntry:
     return ProviderEntry(
         name=name,
-        value=value if value is not None else f"{module}:provider",
+        value=f"{module}:provider",
         module=module,
-        distribution=distribution,
-        distribution_version=distribution_version,
+        distribution=DISTRIBUTION,
+        distribution_version=DISTRIBUTION_VERSION,
         load=load,
     )
 

@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.executor.launcher import Ending, LaunchSpec, ProcessLauncher, StepLauncher
 from kora.plugins.runtime.local.services import (
     ServiceFinding,
@@ -32,8 +31,6 @@ from tests.support.service_tools import (
     ScriptedToolLauncher,
     ToolReply,
 )
-
-__all__ = ["kora_capture"]
 
 
 def unit_output(name: str, group: str, kill_mode: str = "process") -> bytes:

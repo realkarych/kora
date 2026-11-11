@@ -368,7 +368,7 @@ def test_vcs_ref_provider_entry_point(kora_capture: Capture) -> None:
 
 @pytest.mark.parametrize("sink", ["blocked", "broken"])
 def test_vcs_ref_provider_ignores_blocked_or_broken_diagnostics(sink: str) -> None:
-    arguments = ["-m", "tests.plugins.artifact_type.sink_probe", sink]
+    arguments = ["-m", "tests.plugins.artifact_type.sink_probe", "vcs_ref", sink]
 
     process = run_python(arguments, {})
 

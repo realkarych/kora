@@ -1,6 +1,4 @@
 import pickle
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -31,7 +29,7 @@ from tests.db.test_graph_version_resource_owner_migration import (
     seed_versions,
 )
 from tests.engine.test_graph_command_manifests import ZERO
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 PRIVATE_NAME = "assets/private-𐐀é.sh"
 OWNER_INDEX = "sqlite_autoindex_graph_version_resource_owner_1"
@@ -163,17 +161,7 @@ async def test_graph_owner_batch_exact_native_width_and_refusal(
 async def test_graph_owner_batch_preserves_sqlite_native_encoding(
     tmp_path: Path, encoding: str
 ) -> None:
-    path = tmp_path / "owners.db"
-    with closing(sqlite3.connect(path)) as raw:
-        raw.execute(
-            "PRAGMA encoding = 'UTF-16le'"
-            if encoding == "utf-16le"
-            else "PRAGMA encoding = 'UTF-16be'"
-        )
-        raw.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        raw.execute("DROP TABLE encoding_seed")
-        raw.commit()
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "owners.db", encoding)
     await upgrade_database(settings)
     database = Database(settings)
 

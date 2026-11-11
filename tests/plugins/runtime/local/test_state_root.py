@@ -9,7 +9,6 @@ import pytest
 from pydantic import ValidationError
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.runtime import (
     STATE_ROOT_LENGTH,
     LocalRuntime,
@@ -40,8 +39,6 @@ from tests.support.local_runtime import (
     runtime_context,
     state_root,
 )
-
-__all__ = ["kora_capture"]
 
 
 def symlinked(tmp_path: Path) -> Path:

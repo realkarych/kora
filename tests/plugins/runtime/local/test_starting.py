@@ -18,7 +18,6 @@ import pytest
 from pydantic import TypeAdapter
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.runtime import (
     STOP_MATCHES,
     LocalRuntime,
@@ -89,8 +88,6 @@ from tests.support.local_runtime import (
     unreadable,
 )
 from tests.support.retirement_evidence import retirement_failure_note
-
-__all__ = ["kora_capture"]
 
 Steer = TypeVar("Steer")
 NONCE = "a" * 32

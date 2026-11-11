@@ -5,7 +5,6 @@ from typing import NoReturn
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.bound_slots import BoundRoleSlots, RoleClaim
 from kora.plugins.runtime.local.environment import (
     BoundCandidateEnvironments,
@@ -19,8 +18,6 @@ from tests.plugins.runtime.local.frames_support import (
     StepClock,
     TickingClock,
 )
-
-__all__ = ["kora_capture"]
 
 
 def binding_for(workspace: Path, capture: Capture) -> BoundCandidateEnvironments:

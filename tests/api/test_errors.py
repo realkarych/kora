@@ -19,7 +19,6 @@ from kora.api.errors import (
     request_rejection,
     unauthenticated_error,
     validation_failure,
-    validation_result,
 )
 from kora.ir.diagnostic_collection import (
     MAX_DIAGNOSTIC_BYTES,
@@ -297,7 +296,7 @@ def test_count_overflow_discards_incomplete_validation() -> None:
 def test_validation_and_deployment_preserve_completed_diagnostics() -> None:
     collection = collected()
 
-    result = validation_result(collection)
+    result = ValidationResult.from_collection(collection)
     envelope = deployment_validation_error(collection, request_id=REQUEST_ID)
     detail_body = cast(
         "dict[str, object]", envelope.model_dump(mode="json")["error"]["details"]
@@ -322,7 +321,7 @@ def test_validation_and_deployment_preserve_completed_diagnostics() -> None:
 def test_omitted_errors_invalidate_an_empty_retained_collection() -> None:
     collection = DiagnosticCollection((), (), 1, 7)
 
-    result = validation_result(collection)
+    result = ValidationResult.from_collection(collection)
     envelope = deployment_validation_error(collection, request_id=REQUEST_ID)
 
     assert result.valid is False
@@ -338,7 +337,7 @@ def test_warning_only_validation_succeeds_and_cannot_refuse_deployment() -> None
     collector.add(Diagnostic(code="IR009", message="Configuration warning."), "warning")
     collection = collector.finish()
 
-    result = validation_result(collection)
+    result = ValidationResult.from_collection(collection)
 
     assert result.valid is True
     with pytest.raises(ValueError, match="requires an invalid collection"):
@@ -350,14 +349,14 @@ def test_invalid_omission_counts_are_refused(omitted: int) -> None:
     collection = DiagnosticCollection((), (), omitted, 0)
 
     with pytest.raises(ValidationError):
-        validation_result(collection)
+        ValidationResult.from_collection(collection)
 
 
 def test_aggregate_count_overflow_is_refused_at_wire_boundary() -> None:
     collection = DiagnosticCollection((), (), MAX_INTEGER, 1)
 
     with pytest.raises(ValidationError, match="supported range"):
-        validation_result(collection)
+        ValidationResult.from_collection(collection)
 
 
 def test_oversized_collection_is_refused_before_copying() -> None:
@@ -365,7 +364,7 @@ def test_oversized_collection_is_refused_before_copying() -> None:
     collection = DiagnosticCollection((finding,) * (MAX_DIAGNOSTICS + 1), (), 0, 0)
 
     with pytest.raises(ValueError, match="count limit"):
-        validation_result(collection)
+        ValidationResult.from_collection(collection)
 
 
 def test_diagnostic_byte_limit_is_enforced_for_manually_built_collection() -> None:
@@ -374,7 +373,7 @@ def test_diagnostic_byte_limit_is_enforced_for_manually_built_collection() -> No
     collection = DiagnosticCollection((finding,) * count, (), 0, 0)
 
     with pytest.raises(ValidationError, match="byte limit"):
-        validation_result(collection)
+        ValidationResult.from_collection(collection)
 
 
 @pytest.mark.parametrize("context", list(DependencyRetryContext))

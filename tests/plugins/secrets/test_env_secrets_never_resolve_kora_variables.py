@@ -4,11 +4,9 @@ from typing import Final
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import NAMESPACE_ID, kora_capture
+from kora.conformance.common import NAMESPACE_ID
 from kora.plugins.secrets.env import EnvSecretsConfiguration, EnvSecretsProvider
 from tests.plugins.secrets.env_support import resolve_code
-
-__all__ = ["kora_capture"]
 
 CONTROL: dict[str, str] = {
     "KORA_TOKEN": "control-plane-token-0042",

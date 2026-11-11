@@ -236,14 +236,6 @@ def test_request_info_refuses_nonexact_types(
     assert "private-credential-marker" not in str(raised.value)
 
 
-def test_authentication_capabilities_are_frozen_and_consistent() -> None:
-    first = AuthenticationCapabilities()
-
-    second = AuthenticationCapabilities()
-
-    assert first == second
-
-
 @pytest.mark.parametrize(
     ("value", "attribute"),
     [

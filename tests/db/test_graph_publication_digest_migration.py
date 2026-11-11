@@ -1,7 +1,5 @@
 import asyncio
-import sqlite3
 from collections.abc import Callable
-from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -35,7 +33,7 @@ from tests.db.test_graph_read_admission import executed_queries, sqlite_instruct
 from tests.engine.lock_support import DEADLINE
 from tests.engine.test_graph_publication_digest import OTHER_DIGEST, read_digest
 from tests.engine.test_graph_publication_target import seed_target
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 PREDECESSOR = "0013"
 REVISION = "0014"
@@ -185,12 +183,7 @@ async def insert_legacy_anomalies(
 async def test_migrated_sqlite_digest_lookup_never_loads_base_values(
     tmp_path: Path, encoding: str
 ) -> None:
-    settings = sqlite_settings(tmp_path / "digest.db")
-    with closing(sqlite3.connect(settings.sqlite_path)) as native:
-        native.execute(f"PRAGMA encoding = '{encoding}'")
-        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        native.execute("DROP TABLE encoding_seed")
-        native.commit()
+    settings = encoded_sqlite_settings(tmp_path / "digest.db", encoding)
     database = Database(settings)
     try:
         _, selected, version = await seed_predecessor(database, wide=True)

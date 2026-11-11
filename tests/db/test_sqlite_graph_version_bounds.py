@@ -36,7 +36,7 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
 from tests.db.test_graph_read_admission import executed_queries
 from tests.db.test_sqlite_graph_version_layout import PROBE_STATEMENTS
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 SMALL_WIDTHS = SQLiteGraphVersionWidths(2, 2, 2, 2, 0)
 RECORD_IMPLEMENTATION_MAX = 2_147_483_645
@@ -216,13 +216,7 @@ async def test_sqlite_graph_record_bound_covers_actual_migrated_file(
     with_files: bool,
 ) -> None:
     path = tmp_path / "record.db"
-    with closing(sqlite3.connect(path)) as native:
-        native.execute(f"PRAGMA page_size = {page_size}")
-        native.execute(f"PRAGMA encoding = '{encoding}'")
-        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        native.execute("DROP TABLE encoding_seed")
-        native.commit()
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(path, encoding, page_size)
     await upgrade_database(settings)
     database = Database(settings)
     ledger = ConnectionLedger(database)

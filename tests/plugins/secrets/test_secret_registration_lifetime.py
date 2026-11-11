@@ -2,15 +2,13 @@ import asyncio
 import dataclasses
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import context_for, kora_capture
+from kora.conformance.common import context_for
 from kora.conformance.secrets import masked_stream
 from kora.observability import ProcessDiagnostics
 from kora.observability.redaction import MASK
 from kora.plugins.secrets.env import EnvSecretsProvider
 from kora.protocols.secret_value import SecretScope, SecretValue
 from tests.plugins.secrets.env_support import provider as env_provider
-
-__all__ = ["kora_capture"]
 
 REFERENCE: str = "secret://env/CONF_TOKEN"
 VARIABLE: str = "CONF_TOKEN"

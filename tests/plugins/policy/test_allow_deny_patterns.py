@@ -7,7 +7,6 @@ import pytest
 from pydantic import ValidationError
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.conformance.policy import protected_requests
 from kora.ir.globs import Fuel
 from kora.ir.json import JsonObject, JsonValue
@@ -41,8 +40,6 @@ from tests.plugins.policy.policy_support import (
     shell,
     update_patch,
 )
-
-__all__ = ["kora_capture"]
 
 REFUSED_PATTERNS: Final[list[tuple[str, str]]] = [
     ("", "the tool pattern is malformed"),

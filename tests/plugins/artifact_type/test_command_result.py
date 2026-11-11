@@ -517,7 +517,7 @@ def test_command_result_provider_entry_point(kora_capture: Capture) -> None:
 def test_command_result_provider_ignores_blocked_or_broken_diagnostics(
     sink: str,
 ) -> None:
-    arguments = ["-m", "tests.plugins.artifact_type.command_result_sink_probe", sink]
+    arguments = ["-m", "tests.plugins.artifact_type.sink_probe", "command_result", sink]
 
     process = run_python(arguments, {})
 

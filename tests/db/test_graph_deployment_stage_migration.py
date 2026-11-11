@@ -1,5 +1,3 @@
-import sqlite3
-from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +24,7 @@ from kora.db.tables import (
     storage_address_fence,
 )
 from tests.db.seed import Seeder
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 PREDECESSOR: str = "0010"
 REVISION: str = "0011"
@@ -335,15 +333,7 @@ async def test_stage_native_domains_refuse_malformed_rows(database: Database) ->
 async def test_stage_native_text_domains_support_sqlite_utf16(
     tmp_path: Path, encoding: str, malformed: bytes
 ) -> None:
-    path = tmp_path / "utf16.db"
-    with closing(sqlite3.connect(path)) as seed:
-        seed.execute(
-            "PRAGMA encoding = 'UTF-16le'"
-            if encoding == "UTF-16le"
-            else "PRAGMA encoding = 'UTF-16be'"
-        )
-        seed.execute("CREATE TABLE encoding_anchor (id INTEGER)")
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "utf16.db", encoding)
     await upgrade_database(settings)
     database = Database(settings)
     try:

@@ -63,27 +63,21 @@ async def test_migration_reaches_head_and_matches_the_tables(
             )
     finally:
         await database.close()
+    rerun = await upgrade_database(empty_database_settings)
+
     assert (report.from_revision, report.to_revision, report.steps) == (
         None,
         HEAD_REVISION,
         21,
     )
+    assert (rerun.from_revision, rerun.to_revision, rerun.steps) == (
+        HEAD_REVISION,
+        HEAD_REVISION,
+        0,
+    )
     assert revision == HEAD_REVISION
     assert differences == []
     assert set(metadata.tables) <= set(table_names)
-
-
-@pytest.mark.asyncio
-async def test_migration_rerun_is_a_no_op(
-    empty_database_settings: DatabaseSettings,
-) -> None:
-    first = await upgrade_database(empty_database_settings)
-
-    second = await upgrade_database(empty_database_settings)
-
-    assert (first.steps, second.steps) == (21, 0)
-    assert second.from_revision == HEAD_REVISION
-    assert second.to_revision == HEAD_REVISION
 
 
 @pytest.mark.asyncio

@@ -84,26 +84,17 @@ def test_bridge_public_types_keep_other_suites_unloaded() -> None:
     assert json.loads(result.stdout) == []
 
 
-def test_fixed_lifetime_helper_imports_no_graph_models() -> None:
-    found = loaded(
-        "kora.conformance.io_helper",
+@pytest.mark.parametrize(
+    "prefixes",
+    [
         ("kora.ir.config", "kora.ir.topology", "kora.ir.document", "kora.ir.export"),
-    )
-
-    assert found == []
-
-
-def test_fixed_lifetime_helper_imports_no_provider_context_or_logging() -> None:
-    found = loaded(
-        "kora.conformance.io_helper",
         ("kora.protocols.common", "kora.observability", "structlog", "rich"),
-    )
-
-    assert found == []
-
-
-def test_fixed_lifetime_helper_imports_no_cel_checker() -> None:
-    found = loaded("kora.conformance.io_helper", ("kora.cel",))
+        ("kora.cel",),
+    ],
+    ids=["graph_models", "provider_context_or_logging", "cel_checker"],
+)
+def test_fixed_lifetime_helper_imports_stay_light(prefixes: tuple[str, ...]) -> None:
+    found = loaded("kora.conformance.io_helper", prefixes)
 
     assert found == []
 

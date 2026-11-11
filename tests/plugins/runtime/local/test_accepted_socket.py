@@ -8,7 +8,6 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.accepted_socket import accept_socket
 from kora.protocols.time import SystemClock
 from kora.runner.identity import NativeIdentityReader
@@ -16,8 +15,6 @@ from kora.runner.peers import kernel_source
 from tests.support.local_peers import served, until
 from tests.support.local_runners import short_directory
 from tests.support.local_runtime import open_descriptors
-
-__all__ = ["kora_capture"]
 
 
 class AcceptanceClock(SystemClock):

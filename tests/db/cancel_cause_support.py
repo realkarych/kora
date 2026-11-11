@@ -2,11 +2,19 @@ import asyncio
 import json
 from dataclasses import dataclass
 
+import pytest
 from alembic import command
 from sqlalchemy import Connection, MetaData, Table, event, inspect, select, text, update
 from sqlalchemy.util import await_
 
-from kora.db.connection import MIGRATION_LOCK_ID, Database, DatabaseSettings, Dialect
+from kora.db.connection import (
+    MIGRATION_LOCK_ID,
+    Database,
+    DatabaseClosedError,
+    DatabaseSettings,
+    Dialect,
+)
+from kora.db.migrations import upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt
 from tests.db.closing import ConnectionLedger
@@ -17,8 +25,6 @@ from tests.db.seed import (
     predecessor_snapshot,
     seed_predecessor,
 )
-
-VALIDATE_CAUSE: str = "ALTER TABLE attempt VALIDATE CONSTRAINT ck_attempt_cancel_cause"
 
 
 @dataclass(frozen=True)
@@ -181,9 +187,7 @@ class UpgradeStage:
             await_(self.release.wait())
 
 
-async def wait_for_validation(
-    database: Database, statement: str = VALIDATE_CAUSE
-) -> None:
+async def wait_for_validation(database: Database, statement: str) -> None:
     async with asyncio.timeout(4):
         while True:
             async with database.read_transaction() as connection:
@@ -197,6 +201,49 @@ async def wait_for_validation(
                 )
                 if waiting.scalar_one() == 1:
                     return
+
+
+async def interrupt_upgrade(
+    database: Database, settings: DatabaseSettings, stage: UpgradeStage, ending: str
+) -> None:
+    task = asyncio.create_task(upgrade_database(settings, stage.open))
+    try:
+        await asyncio.wait_for(stage.entered.wait(), 4)
+        if database.dialect is Dialect.POSTGRESQL and ending != "prepared-cancel":
+            async with database.transaction() as holder:
+                await holder.exec_driver_sql(
+                    "LOCK TABLE attempt IN SHARE UPDATE EXCLUSIVE MODE"
+                )
+                stage.release.set()
+                await wait_for_validation(database, stage.validation)
+                async with database.transaction() as progress:
+                    await progress.exec_driver_sql("UPDATE attempt SET status = status")
+                if ending == "shutdown":
+                    assert stage.database is not None
+                    await stage.database.close(deadline_seconds=0)
+                else:
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+            if ending == "shutdown":
+                with pytest.raises(DatabaseClosedError):
+                    await task
+        elif ending == "shutdown":
+            assert stage.database is not None
+            await stage.database.close(deadline_seconds=0)
+            stage.release.set()
+            with pytest.raises(DatabaseClosedError):
+                await task
+        else:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    finally:
+        stage.release.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
 
 async def migration_lock_count(database: Database) -> int:
