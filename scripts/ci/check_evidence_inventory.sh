@@ -35,10 +35,8 @@ check_lifetime_inventory() {
   done
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
-  case "$*" in
-    cel) check_cel_inventory ;;
-    lifetime) check_lifetime_inventory ;;
-    *) exit 1 ;;
-  esac
-fi
+case "$*" in
+  cel) check_cel_inventory ;;
+  lifetime) check_lifetime_inventory ;;
+  *) exit 1 ;;
+esac

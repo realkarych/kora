@@ -126,19 +126,17 @@ require_browser_checks() {
   fi
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
-  mode="${1:-}"
-  shift "$(($# > 0))"
-  case "$mode:$#" in
-    check:*) require_each "$@" ;;
-    verify:*)
-      require_each "$@"
-      printf 'verified=true\n' >> "$GITHUB_OUTPUT"
-      ;;
-    scaffold-lane:0) require_scaffold_lane ;;
-    scaffold-evidence:0) require_scaffold_evidence ;;
-    cel-measurements:0) require_cel_measurements ;;
-    browser:0) require_browser_checks ;;
-    *) exit 1 ;;
-  esac
-fi
+mode="${1:-}"
+shift "$(($# > 0))"
+case "$mode:$#" in
+  check:*) require_each "$@" ;;
+  verify:*)
+    require_each "$@"
+    printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+    ;;
+  scaffold-lane:0) require_scaffold_lane ;;
+  scaffold-evidence:0) require_scaffold_evidence ;;
+  cel-measurements:0) require_cel_measurements ;;
+  browser:0) require_browser_checks ;;
+  *) exit 1 ;;
+esac

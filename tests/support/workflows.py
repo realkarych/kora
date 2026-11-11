@@ -7,6 +7,9 @@ from ruamel.yaml import YAML
 
 WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 
+Workflows = dict[str, dict[str, object]]
+JobEntry = tuple[str, dict[str, object]]
+
 
 class YamlLoader(Protocol):
     def load(self, stream: Path) -> object: ...
@@ -29,6 +32,22 @@ def workflow_document(filename: str = "ci.yml") -> dict[str, object]:
 def workflow_names() -> tuple[str, ...]:
     paths = [*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")]
     return tuple(sorted(path.name for path in paths))
+
+
+def repository_workflows() -> Workflows:
+    return {name: workflow_document(name) for name in workflow_names()}
+
+
+def jobs_of(workflows: Workflows) -> list[JobEntry]:
+    return [
+        (f"{name}:{identity}", table(job))
+        for name, document in workflows.items()
+        for identity, job in table(document["jobs"]).items()
+    ]
+
+
+def job_of(workflows: Workflows, name: str, identity: str) -> dict[str, object]:
+    return table(table(workflows[name]["jobs"])[identity])
 
 
 def step_list(job: dict[str, object]) -> list[dict[str, object]]:

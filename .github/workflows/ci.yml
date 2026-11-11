@@ -347,6 +347,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Require verified scaffold evidence
+        if: ${{ always() }}
         env:
           EVIDENCE_RESULT: ${{ needs.scaffold-evidence.result }}
           EVIDENCE_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}

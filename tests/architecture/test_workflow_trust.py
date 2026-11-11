@@ -1,21 +1,28 @@
+import os
 import re
+import shlex
+import shutil
+import subprocess
 from collections.abc import Callable
+from pathlib import Path
 from typing import cast
 
 import pytest
 
 from tests.support.workflows import (
+    Workflows,
     action_name,
+    job_of,
+    jobs_of,
+    repository_workflows,
     step_list,
     table,
-    workflow_document,
-    workflow_names,
 )
 
-Workflows = dict[str, dict[str, object]]
 Mutation = Callable[[Workflows], None]
-JobEntry = tuple[str, dict[str, object]]
+Leaf = tuple[tuple[str, ...], object]
 
+ROOT = Path(__file__).resolve().parents[2]
 FULL_COMMIT_PIN = re.compile(
     r"[a-z0-9_.-]+/[a-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}"
 )
@@ -38,7 +45,21 @@ ALLOWED_WRITE_SCOPES = frozenset(
         "osv-scanner.yml:full-scan:security-events",
     }
 )
-PRIVILEGED_TRIGGERS = frozenset({"pull_request_target", "workflow_run"})
+ALLOWED_TRIGGERS = frozenset({"pull_request", "push", "schedule", "workflow_dispatch"})
+FORBIDDEN_ENVIRONMENT = re.compile(
+    r"PYTEST_[A-Z0-9_]*|PYTHONWARNINGS|PATH|BASH_ENV|ENV|GITHUB_PATH"
+    r"|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z0-9_]*"
+)
+EXPRESSION = r"\$\{\{(?:(?!\}\}).)*?"
+UNTRUSTED_CONTEXT = re.compile(
+    EXPRESSION + r"\b(?:github\.event\.|github\.event_name\b|github\.head_ref\b"
+    r"|inputs\.)",
+    re.S,
+)
+SECRET_CONTEXT = re.compile(EXPRESSION + r"\b(?:secrets\.|github\.token\b)", re.S)
+ALLOWED_SECRET_SITES = frozenset(
+    {"mutation.yml:jobs:audit:steps:Audit the frozen master revision:env:GITHUB_TOKEN"}
+)
 PROTECTED_STATUS_NAMES = frozenset(
     {
         "Markdown lint",
@@ -72,23 +93,33 @@ GATING_JOB_CONDITIONS = {
     "osv-scanner.yml:pull-request": "github.event_name == 'pull_request'",
     "storage.yml:storage-evidence": "${{ always() }}",
 }
+GATE_SCRIPT = "scripts/ci/require_outcomes.sh"
+GATE_JOBS = {
+    "ci.yml:scaffold-evidence": "scaffold-evidence",
+    "ci.yml:scaffold": "check",
+    "ci.yml:resource-measurements": "verify",
+    "ci.yml:provider-protocol-measurements": "verify",
+    "ci.yml:pricing-measurements": "verify",
+    "ci.yml:git-publication-measurements": "verify",
+    "ci.yml:cel-producer": "verify",
+    "ci.yml:cel-measurements": "cel-measurements",
+    "ci.yml:browser": "browser",
+    "conformance-lifetime.yml:qualification": "verify",
+    "conformance-lifetime.yml:installed-qualification": "check",
+    "conformance-lifetime.yml:lifetime-evidence": "check",
+    "storage.yml:storage-evidence": "check",
+}
+PROOF_ORIGINS = frozenset({"ci.yml:change-scope"})
+ALWAYS = "${{ always() }}"
+FLIPPED = {"success": "skipped", "true": "false", "false": "true"}
 UNREVIEWED_COMMIT = "0" * 40
-
-
-def repository_workflows() -> Workflows:
-    return {name: workflow_document(name) for name in workflow_names()}
-
-
-def jobs_of(workflows: Workflows) -> list[JobEntry]:
-    return [
-        (f"{name}:{identity}", table(job))
-        for name, document in workflows.items()
-        for identity, job in table(document["jobs"]).items()
-    ]
-
-
-def job_of(workflows: Workflows, name: str, identity: str) -> dict[str, object]:
-    return table(table(workflows[name]["jobs"])[identity])
+CLASSIFIER_PROGRAM = (
+    "import os\n\n"
+    'with open(os.environ["GITHUB_OUTPUT"], "a") as output:\n'
+    '    output.write("full={origin}\\n")\n'
+)
+CLASSIFIED_FROM_BASE = "full=base\nverified=true\n"
+CHECKOUT_AUTHENTICATION_INPUT = "token"
 
 
 def action_references(workflows: Workflows) -> list[tuple[str, str]]:
@@ -158,12 +189,80 @@ def triggers(document: dict[str, object]) -> frozenset[str]:
     return frozenset(table(value))
 
 
-def privileged_triggers(workflows: Workflows) -> list[str]:
+def unreviewed_triggers(workflows: Workflows) -> list[str]:
     return [
         f"{name}: {trigger}"
         for name, document in workflows.items()
-        for trigger in sorted(triggers(document) & PRIVILEGED_TRIGGERS)
+        for trigger in sorted(triggers(document) - ALLOWED_TRIGGERS)
     ]
+
+
+def item_name(entry: object, index: int) -> str:
+    if isinstance(entry, dict):
+        named = cast(dict[str, object], entry)
+        return str(named.get("id", named.get("name", index)))
+    return str(index)
+
+
+def leaves(value: object, path: tuple[str, ...]) -> list[Leaf]:
+    if isinstance(value, dict):
+        return [
+            leaf
+            for key, entry in cast(dict[str, object], value).items()
+            for leaf in leaves(entry, (*path, str(key)))
+        ]
+    if isinstance(value, list):
+        return [
+            leaf
+            for index, entry in enumerate(cast(list[object], value))
+            for leaf in leaves(entry, (*path, item_name(entry, index)))
+        ]
+    return [(path, value)]
+
+
+def workflow_leaves(workflows: Workflows) -> list[Leaf]:
+    return [
+        leaf
+        for name, document in workflows.items()
+        for leaf in leaves(document, (name,))
+    ]
+
+
+def environment_overrides(workflows: Workflows) -> list[str]:
+    return [
+        ":".join(path)
+        for path, _ in workflow_leaves(workflows)
+        if path[-1] == "env"
+        or (
+            len(path) > 1
+            and path[-2] == "env"
+            and FORBIDDEN_ENVIRONMENT.fullmatch(path[-1]) is not None
+        )
+    ]
+
+
+def secret_sites(workflows: Workflows) -> list[str]:
+    return [
+        ":".join(path)
+        for path, value in workflow_leaves(workflows)
+        if path[-1] != "run" and SECRET_CONTEXT.search(str(value)) is not None
+    ]
+
+
+def unsafe_interpolations(workflows: Workflows) -> list[str]:
+    in_scripts = [
+        ":".join(path)
+        for path, value in workflow_leaves(workflows)
+        if path[-1] == "run"
+        and (
+            UNTRUSTED_CONTEXT.search(str(value)) is not None
+            or SECRET_CONTEXT.search(str(value)) is not None
+        )
+    ]
+    unlisted = [
+        site for site in secret_sites(workflows) if site not in ALLOWED_SECRET_SITES
+    ]
+    return [*in_scripts, *unlisted]
 
 
 def status_names(job: dict[str, object]) -> list[str]:
@@ -180,26 +279,47 @@ def status_names(job: dict[str, object]) -> list[str]:
     return names
 
 
+def may_render_a_required_status(name: str) -> bool:
+    parts = re.split(r"\$\{\{.*?\}\}", name)
+    pattern = re.compile(".*".join(re.escape(part) for part in parts))
+    return "${{" in name and any(
+        pattern.fullmatch(required) for required in REQUIRED_STATUS_NAMES
+    )
+
+
+def needs_of(job: dict[str, object]) -> list[str]:
+    needs = job.get("needs", [])
+    if isinstance(needs, str):
+        return [needs]
+    return [str(need) for need in cast(list[object], needs)]
+
+
+def required_status_jobs(workflows: Workflows) -> dict[str, dict[str, object]]:
+    return {
+        location: job
+        for location, job in jobs_of(workflows)
+        if REQUIRED_STATUS_NAMES.intersection(status_names(job))
+    }
+
+
 def unguarded_required_statuses(workflows: Workflows) -> list[str]:
     produced = [
-        (location, job, name)
+        (location, name)
         for location, job in jobs_of(workflows)
         for name in status_names(job)
     ]
-    gating = {
-        location: job
-        for location, job, name in produced
-        if name in REQUIRED_STATUS_NAMES
-    }
-    counts = {
-        required: [name for _, _, name in produced].count(required)
-        for required in sorted(REQUIRED_STATUS_NAMES)
-    }
+    gating = required_status_jobs(workflows)
+    names = [name for _, name in produced]
     return [
         *(
-            f"{name}: produced {count} times"
-            for name, count in counts.items()
-            if count != 1
+            f"{required}: produced {names.count(required)} times"
+            for required in sorted(REQUIRED_STATUS_NAMES)
+            if names.count(required) != 1
+        ),
+        *(
+            f"{location}: unresolved name {name}"
+            for location, name in produced
+            if may_render_a_required_status(name)
         ),
         *(
             f"{location}: condition {job.get('if')}"
@@ -207,11 +327,232 @@ def unguarded_required_statuses(workflows: Workflows) -> list[str]:
             if job.get("if") != GATING_JOB_CONDITIONS.get(location)
         ),
         *(
+            f"{location}: needs without always()"
+            for location, job in gating.items()
+            if needs_of(job) and "always()" not in str(job.get("if", ""))
+        ),
+        *(
             f"{location}: continues on error"
             for location, job in gating.items()
             if "continue-on-error" in job
+            or any("continue-on-error" in step for step in step_list(job))
         ),
     ]
+
+
+def passing_value(expression: object) -> str:
+    inner = str(expression).removeprefix("${{").removesuffix("}}").strip()
+    if "==" in inner or "!=" in inner:
+        return "false"
+    if inner.endswith((".result", ".outcome")):
+        return "success"
+    if inner.endswith((".outputs.verified", ".outputs.full")):
+        return "true"
+    return ""
+
+
+def recorded(output: Path) -> str:
+    return output.read_text() if output.exists() else ""
+
+
+def run_gate(
+    gate: dict[str, object], values: dict[str, str], output: Path
+) -> subprocess.CompletedProcess[bytes]:
+    environment = {
+        name: value for name, value in os.environ.items() if name not in values
+    }
+    environment.update(values)
+    environment["GITHUB_OUTPUT"] = str(output)
+    return subprocess.run(
+        ["/bin/bash", "-e", "-c", str(gate.get("run", ""))],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+
+def misbehaving_gate(
+    location: str, job: dict[str, object], gate: dict[str, object], workspace: Path
+) -> list[str]:
+    passing = {
+        str(name): passing_value(value)
+        for name, value in table(gate.get("env", {})).items()
+    }
+    proof = "verified=true\n" if "verified" in table(job.get("outputs", {})) else ""
+    complete = workspace / f"{location}-complete"
+    violations: list[str] = []
+    if run_gate(gate, passing, complete).returncode != 0 or recorded(complete) != proof:
+        violations.append(f"{location}: refuses complete success")
+    for name, value in passing.items():
+        output = workspace / f"{location}-{name}"
+        flipped = {**passing, name: FLIPPED.get(value, "unexpected")}
+        if run_gate(gate, flipped, output).returncode == 0 or recorded(output):
+            violations.append(f"{location}: accepts a failed {name}")
+    return violations
+
+
+def ignored_inputs(
+    location: str, job: dict[str, object], gate: dict[str, object]
+) -> list[str]:
+    declared = " ".join(str(value) for value in table(gate.get("env", {})).values())
+    needs = needs_of(job) if "always()" in str(job.get("if", "")) else []
+    references = [
+        *(f"needs.{need}.result" for need in needs),
+        *(
+            f"steps.{step['id']}.outcome"
+            for step in step_list(job)
+            if "id" in step and step is not gate
+        ),
+    ]
+    return [
+        f"{location}: gate ignores {reference}"
+        for reference in references
+        if re.search(rf"(?<![\w.-]){re.escape(reference)}(?![\w-])", declared) is None
+    ]
+
+
+def unsound_gate(
+    location: str, mode: str, job: dict[str, object], workspace: Path
+) -> list[str]:
+    gate = step_list(job)[-1]
+    command = shlex.split(str(gate.get("run", "")).replace("\\\n", " "))
+    violations = [
+        *(
+            [f"{location}: gate runs {gate.get('if')}"]
+            if gate.get("if") != ALWAYS
+            else []
+        ),
+        *(
+            [f"{location}: gate runs {command[:3]}"]
+            if command[:3] != ["bash", GATE_SCRIPT, mode]
+            else []
+        ),
+        *(
+            [f"{location}: continues on error"]
+            if "continue-on-error" in job
+            or any("continue-on-error" in step for step in step_list(job))
+            else []
+        ),
+        *ignored_inputs(location, job, gate),
+    ]
+    return [*violations, *misbehaving_gate(location, job, gate, workspace)]
+
+
+def unsound_gates(workflows: Workflows, workspace: Path) -> list[str]:
+    jobs = dict(jobs_of(workflows))
+    required = required_status_jobs(workflows)
+    undeclared = [
+        f"{location}: proof or required status without a gate"
+        for location, job in jobs.items()
+        if location not in GATE_JOBS
+        and location not in PROOF_ORIGINS
+        and (
+            "verified" in table(job.get("outputs", {}))
+            or (location in required and "always()" in str(job.get("if", "")))
+        )
+    ]
+    missing = [f"{location}: missing" for location in GATE_JOBS if location not in jobs]
+    return [
+        *undeclared,
+        *missing,
+        *(
+            violation
+            for location, mode in GATE_JOBS.items()
+            if location in jobs
+            for violation in unsound_gate(location, mode, jobs[location], workspace)
+        ),
+    ]
+
+
+def git_environment(home: Path) -> dict[str, str]:
+    return {
+        **os.environ,
+        "HOME": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_AUTHOR_NAME": "Workflow Test",
+        "GIT_AUTHOR_EMAIL": "workflow@example.invalid",
+        "GIT_COMMITTER_NAME": "Workflow Test",
+        "GIT_COMMITTER_EMAIL": "workflow@example.invalid",
+    }
+
+
+def git_executable() -> str:
+    executable = shutil.which("git")
+    assert executable is not None
+    return executable
+
+
+def git(repository: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        [git_executable(), "-C", str(repository), *arguments],
+        env=git_environment(repository.parent),
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    return result.stdout.decode().strip()
+
+
+def commit_classifier(repository: Path, origin: str) -> str:
+    program = repository / "scripts/ci/editorial_scope.py"
+    program.parent.mkdir(parents=True, exist_ok=True)
+    program.write_text(CLASSIFIER_PROGRAM.format(origin=origin))
+    git(repository, "add", "scripts/ci/editorial_scope.py")
+    git(repository, "commit", "-q", "-m", origin)
+    return git(repository, "rev-parse", "HEAD")
+
+
+def classifier_repository(workspace: Path) -> tuple[Path, dict[str, str]]:
+    repository = workspace / "repository"
+    repository.mkdir()
+    git(repository, "init", "-q")
+    base = commit_classifier(repository, "base")
+    head = commit_classifier(repository, "head")
+    return repository, {
+        "github.event.pull_request.base.sha": base,
+        "github.event.pull_request.head.sha": head,
+        "github.event_name": "pull_request",
+    }
+
+
+def classifier_step(workflows: Workflows) -> dict[str, object]:
+    job = job_of(workflows, "ci.yml", "change-scope")
+    return next(step for step in step_list(job) if step.get("id") == "scope")
+
+
+def classification(workflows: Workflows, workspace: Path) -> str:
+    repository, context = classifier_repository(workspace)
+    step = classifier_step(workflows)
+    output = workspace / "classification"
+    declared = {
+        str(name): context.get(
+            str(value).removeprefix("${{").removesuffix("}}").strip(), ""
+        )
+        for name, value in table(step.get("env", {})).items()
+    }
+    subprocess.run(
+        ["/bin/bash", "-e", "-c", str(step.get("run", ""))],
+        cwd=repository,
+        env={
+            **git_environment(workspace),
+            **declared,
+            "GITHUB_OUTPUT": str(output),
+            "TMPDIR": str(workspace),
+        },
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    return recorded(output)
+
+
+def rewrite_run(step: dict[str, object], old: str, new: str) -> None:
+    run = str(step["run"])
+    assert old in run
+    step["run"] = run.replace(old, new)
 
 
 def unpin_checkout_to_a_tag(workflows: Workflows) -> None:
@@ -358,6 +699,14 @@ def follow_another_workflow_run(workflows: Workflows) -> None:
     }
 
 
+def answer_issue_comments(workflows: Workflows) -> None:
+    table(workflows["mutation.yml"]["on"])["issue_comment"] = {"types": ["created"]}
+
+
+def accept_repository_dispatch(workflows: Workflows) -> None:
+    table(workflows["conformance-lifetime.yml"]["on"])["repository_dispatch"] = None
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -365,23 +714,133 @@ def follow_another_workflow_run(workflows: Workflows) -> None:
         trigger_only_on_pull_request_target,
         list_pull_request_target,
         follow_another_workflow_run,
+        answer_issue_comments,
+        accept_repository_dispatch,
     ],
 )
 def test_trigger_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
     workflows = repository_workflows()
     mutation(workflows)
 
-    violations = privileged_triggers(workflows)
+    violations = unreviewed_triggers(workflows)
 
     assert violations
 
 
-def test_no_workflow_has_a_privileged_trigger() -> None:
+def test_workflows_use_only_reviewed_triggers() -> None:
     workflows = repository_workflows()
 
-    violations = privileged_triggers(workflows)
+    violations = unreviewed_triggers(workflows)
 
     assert violations == []
+
+
+def add_pytest_options_to_a_step(workflows: Workflows) -> None:
+    step = step_list(job_of(workflows, "ci.yml", "scaffold-tests"))[-1]
+    table(step["env"])["PYTEST_ADDOPTS"] = "--deselect=tests"
+
+
+def preload_a_library_for_a_job(workflows: Workflows) -> None:
+    table(job_of(workflows, "ci.yml", "cel-producer")["env"])["LD_PRELOAD"] = "x.so"
+
+
+def insert_a_library_for_a_workflow(workflows: Workflows) -> None:
+    workflows["codeql.yml"]["env"] = {"DYLD_INSERT_LIBRARIES": "x.dylib"}
+
+
+def source_a_shell_file_for_a_job(workflows: Workflows) -> None:
+    job_of(workflows, "storage.yml", "storage-evidence")["env"] = {"BASH_ENV": "x"}
+
+
+def compute_an_opaque_environment(workflows: Workflows) -> None:
+    job_of(workflows, "ci.yml", "markdown")["env"] = "${{ fromJSON(vars.OVERRIDES) }}"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        add_pytest_options_to_a_step,
+        preload_a_library_for_a_job,
+        insert_a_library_for_a_workflow,
+        source_a_shell_file_for_a_job,
+        compute_an_opaque_environment,
+    ],
+)
+def test_environment_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = environment_overrides(workflows)
+
+    assert violations
+
+
+def test_no_workflow_environment_overrides_tests_or_command_lookup() -> None:
+    workflows = repository_workflows()
+
+    violations = environment_overrides(workflows)
+
+    assert violations == []
+
+
+def echo_the_pull_request_title(workflows: Workflows) -> None:
+    step = step_list(job_of(workflows, "ci.yml", "links"))[-1]
+    step["run"] = f"{step['run']}\necho '${{{{ github.event.pull_request.title }}}}'"
+
+
+def check_out_the_head_branch_by_name(workflows: Workflows) -> None:
+    step = step_list(job_of(workflows, "ci.yml", "markdown"))[-1]
+    step["run"] = f"git switch ${{{{ github.head_ref }}}}\n{step['run']}"
+
+
+def interpolate_a_dispatch_input(workflows: Workflows) -> None:
+    step = step_list(job_of(workflows, "mutation.yml", "audit"))[-1]
+    step["run"] = f"{step['run']} ${{{{ inputs.report }}}}"
+
+
+def print_the_token(workflows: Workflows) -> None:
+    step = step_list(job_of(workflows, "gitleaks.yml", "scan"))[1]
+    step["run"] = "echo ${{ github.token }}"
+
+
+def pass_a_secret_through_the_environment(workflows: Workflows) -> None:
+    job_of(workflows, "ci.yml", "markdown")["env"] = {
+        "PUBLISH_TOKEN": "${{ secrets.PUBLISH_TOKEN }}"
+    }
+
+
+def hand_the_token_to_an_action(workflows: Workflows) -> None:
+    step = step_list(job_of(workflows, "codeql.yml", "analyze"))[0]
+    table(step["with"])[CHECKOUT_AUTHENTICATION_INPUT] = "${{ github.token }}"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        echo_the_pull_request_title,
+        check_out_the_head_branch_by_name,
+        interpolate_a_dispatch_input,
+        print_the_token,
+        pass_a_secret_through_the_environment,
+        hand_the_token_to_an_action,
+    ],
+)
+def test_interpolation_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = unsafe_interpolations(workflows)
+
+    assert violations
+
+
+def test_scripts_interpolate_no_untrusted_or_secret_context() -> None:
+    workflows = repository_workflows()
+
+    violations = unsafe_interpolations(workflows)
+
+    assert violations == []
+    assert set(secret_sites(workflows)) == ALLOWED_SECRET_SITES
 
 
 def rename_the_secret_scan(workflows: Workflows) -> None:
@@ -402,6 +861,16 @@ def duplicate_the_browser_status(workflows: Workflows) -> None:
     jobs["browser-copy"] = {**job_of(workflows, "ci.yml", "browser"), "if": "false"}
 
 
+def duplicate_a_scaffold_status_through_a_product_matrix(workflows: Workflows) -> None:
+    jobs = table(workflows["ci.yml"]["jobs"])
+    jobs["scaffold-copy"] = {
+        "name": "Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})",
+        "runs-on": "ubuntu-24.04",
+        "strategy": {"matrix": {"os": ["macos-15"], "python": ["3.11.17"]}},
+        "steps": [{"run": "true"}],
+    }
+
+
 def skip_the_browser_status_after_a_failed_need(workflows: Workflows) -> None:
     del job_of(workflows, "ci.yml", "browser")["if"]
 
@@ -414,6 +883,14 @@ def let_the_cel_status_continue_on_error(workflows: Workflows) -> None:
     job_of(workflows, "ci.yml", "cel-measurements")["continue-on-error"] = True
 
 
+def let_a_secret_scan_step_continue_on_error(workflows: Workflows) -> None:
+    step_list(job_of(workflows, "gitleaks.yml", "scan"))[2]["continue-on-error"] = True
+
+
+def make_markdown_lint_wait_for_another_job(workflows: Workflows) -> None:
+    job_of(workflows, "ci.yml", "markdown")["needs"] = ["change-scope"]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -421,9 +898,12 @@ def let_the_cel_status_continue_on_error(workflows: Workflows) -> None:
         drop_a_scaffold_join_row,
         drop_the_pull_request_dependency_scan,
         duplicate_the_browser_status,
+        duplicate_a_scaffold_status_through_a_product_matrix,
         skip_the_browser_status_after_a_failed_need,
         condition_the_secret_scan,
         let_the_cel_status_continue_on_error,
+        let_a_secret_scan_step_continue_on_error,
+        make_markdown_lint_wait_for_another_job,
     ],
 )
 def test_status_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
@@ -441,3 +921,121 @@ def test_protected_statuses_come_from_unconditional_gating_jobs() -> None:
     violations = unguarded_required_statuses(workflows)
 
     assert violations == []
+
+
+def replace_a_gate_with_success(workflows: Workflows) -> None:
+    step_list(job_of(workflows, "ci.yml", "scaffold"))[-1]["run"] = "exit 0"
+
+
+def drop_the_scaffold_proof_requirement(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "scaffold"))[-1]
+    rewrite_run(gate, " \\\n  EVIDENCE_VERIFIED=true", "")
+
+
+def drop_a_producer_outcome_requirement(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "pricing-measurements"))[-1]
+    rewrite_run(gate, "  PRICING_UPLOAD_OUTCOME=success \\\n", "")
+
+
+def disable_a_gate(workflows: Workflows) -> None:
+    step_list(job_of(workflows, "storage.yml", "storage-evidence"))[-1]["if"] = "false"
+
+
+def let_a_measurement_continue_on_error(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "resource-measurements")
+    step = next(step for step in step_list(job) if step.get("id") == "measurement")
+    step["continue-on-error"] = True
+
+
+def add_an_ungated_step(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "git-publication-measurements")
+    steps = cast(list[object], job["steps"])
+    steps.insert(len(steps) - 1, {"id": "extra_measurement", "run": "true"})
+
+
+def ignore_a_needed_job(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "cel-measurements"))[-1]
+    del table(gate["env"])["PRICING_RESULT"]
+
+
+def publish_an_ungated_proof(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "ir-measurements")
+    job["outputs"] = {"verified": "${{ steps.measurement.outcome == 'success' }}"}
+
+
+def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
+    job = job_of(workflows, "conformance-lifetime.yml", "lifetime-evidence")
+    job["needs"] = [*needs_of(job), "storage-probe"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        replace_a_gate_with_success,
+        drop_the_scaffold_proof_requirement,
+        drop_a_producer_outcome_requirement,
+        disable_a_gate,
+        let_a_measurement_continue_on_error,
+        add_an_ungated_step,
+        ignore_a_needed_job,
+        publish_an_ungated_proof,
+        wait_for_a_lifetime_shard_without_its_result,
+    ],
+)
+def test_gate_check_refuses_a_mutated_workflow(
+    tmp_path: Path, mutation: Mutation
+) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = unsound_gates(workflows, tmp_path)
+
+    assert violations
+
+
+def test_gates_require_every_need_and_step_and_fail_on_each_input(
+    tmp_path: Path,
+) -> None:
+    workflows = repository_workflows()
+
+    violations = unsound_gates(workflows, tmp_path)
+
+    assert violations == []
+
+
+def point_the_classifier_at_the_head(workflows: Workflows) -> None:
+    step = classifier_step(workflows)
+    table(step["env"])["KORA_BASE_REVISION"] = (
+        "${{ github.event.pull_request.head.sha }}"
+    )
+
+
+def run_the_classifier_from_the_checkout(workflows: Workflows) -> None:
+    rewrite_run(
+        classifier_step(workflows),
+        'git show "$KORA_BASE_REVISION:scripts/ci/editorial_scope.py"',
+        "cat scripts/ci/editorial_scope.py",
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [point_the_classifier_at_the_head, run_the_classifier_from_the_checkout],
+)
+def test_classifier_check_refuses_a_mutated_workflow(
+    tmp_path: Path, mutation: Mutation
+) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    output = classification(workflows, tmp_path)
+
+    assert output != CLASSIFIED_FROM_BASE
+
+
+def test_change_scope_runs_the_classifier_of_the_base_revision(tmp_path: Path) -> None:
+    workflows = repository_workflows()
+
+    output = classification(workflows, tmp_path)
+
+    assert output == CLASSIFIED_FROM_BASE
