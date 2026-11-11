@@ -21,11 +21,13 @@ from xml.parsers import expat
 from pydantic import TypeAdapter
 
 from scripts.ci.mutation_models import (
+    MAX_ENVIRONMENT,
     MAX_FILE,
     MAX_MUTANTS,
     MAX_OUTPUT,
     MAX_WORK,
     SCOPES,
+    UNINSTALLED_PACKAGES,
     Mutation,
     Outcome,
     Report,
@@ -113,6 +115,55 @@ def command(
     if result.reason != "completed" or result.code != 0:
         raise CommandFailure(result, arguments[0])
     return result.output
+
+
+def synchronize(
+    root: Path,
+    uv: str,
+    variables: dict[str, str],
+    deadline: float,
+    stop: Stop,
+    *,
+    offline: bool,
+) -> None:
+    sync = [
+        uv,
+        "sync",
+        "--python",
+        sys.executable,
+        "--frozen",
+        "--project",
+        str(ROOT),
+        *(f"--no-install-package={package}" for package in UNINSTALLED_PACKAGES),
+        "--group",
+        "mutation",
+        "--group",
+        "build",
+    ]
+    if offline:
+        sync.append("--offline")
+    bootstrap = sync[: sync.index("--group")] + ["--group", "build"]
+    if offline:
+        bootstrap.append("--offline")
+    command(
+        [*bootstrap, "--no-build", "--no-install-project"],
+        root,
+        deadline,
+        stop,
+        variables=variables,
+    )
+    command(
+        [*sync, "--no-build-isolation"],
+        root,
+        deadline,
+        stop,
+        variables=variables,
+    )
+
+
+def admit_environment(environment: Path) -> None:
+    if workspace_bytes(environment) > MAX_ENVIRONMENT:
+        raise ValueError("oversized dependency environment")
 
 
 def unpack(content: bytes, root: Path) -> None:
@@ -419,38 +470,7 @@ def audit(
                 .strip()
             )
             variables["UV_CACHE_DIR"] = cache
-            sync = [
-                uv,
-                "sync",
-                "--python",
-                sys.executable,
-                "--frozen",
-                "--project",
-                str(ROOT),
-                "--group",
-                "mutation",
-                "--group",
-                "build",
-            ]
-            if offline:
-                sync.append("--offline")
-            bootstrap = sync[: sync.index("--group")] + ["--group", "build"]
-            if offline:
-                bootstrap.append("--offline")
-            command(
-                [*bootstrap, "--no-build", "--no-install-project"],
-                root,
-                deadline,
-                stop,
-                variables=variables,
-            )
-            command(
-                [*sync, "--no-build-isolation"],
-                root,
-                deadline,
-                stop,
-                variables=variables,
-            )
+            synchronize(root, uv, variables, deadline, stop, offline=offline)
             command(
                 [
                     uv,
@@ -480,8 +500,7 @@ def audit(
                 deadline,
                 stop,
             )
-            if workspace_bytes(root / ".venv") > 256 * 1024 * 1024:
-                raise ValueError("oversized dependency environment")
+            admit_environment(root / ".venv")
             for scope in SCOPES:
                 if test_scope(root, scope, deadline, stop, 60) != "survived":
                     raise RuntimeError("audit baseline did not pass")

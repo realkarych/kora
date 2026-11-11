@@ -10,6 +10,8 @@ Cosmic Ray 8.7.0 is pinned in the optional `mutation` group. It provides enumera
 
 The dependency brings aiohttp, anybadge, attrs, click, decorator, exit-codes, gitpython, parso, rich, sqlalchemy, stevedore, toml and yattag, with their locked transitives. Existing runtime dependencies are unchanged. The pure-Python yattag dependency requires its legacy setuptools backend. Setuptools 84.2.1 is pinned in the build group. Installation first admits only locked wheels for that group without installing the project, then installs the optional mutation group with build isolation disabled. The backend runs from the admitted locked environment, with no separate unconstrained backend resolver. Existing ordinary wheel-only installations and native package build restrictions are unchanged. Lockfile generation uses the repository-pinned uv 0.13.1 rather than an older local executable that rewrites the lock format.
 
+Environment admission, checked 2026-11-11 under [#1345](https://github.com/realkarych/kora/issues/1345): #627 added `claude-agent-sdk==0.2.168` to the default `dev` group, and the audit's environment then exceeded its admission limit. The daily runs from 2026-11-02 through 2026-11-10 refused preparation and reported only `execution_failed`. The lock-pinned manylinux_2_17_x86_64 wheel unpacks to 268,495,840 bytes, above the 268,435,456-byte limit by itself; its bundled CLI binary is 255.5 MiB. On macOS arm64 the prepared environment measured 340.3 MiB with the SDK and 100.9 MiB without it. The audited scopes do not import the SDK, consistent with the [ADR-0028](../../docs/decisions/0028-optional-claude-sdk-stack.md) import boundary, so the audit installs the locked groups without that one package and keeps the limit unchanged. The `Mutation tooling` CI job prepares the same environment offline from its package cache on Linux and macOS and fails when admission is refused. The Linux environment size without the SDK is not separately recorded.
+
 ## Operating bounds
 
 | Resource | Limit and meaning |
@@ -22,7 +24,7 @@ The dependency brings aiohttp, anybadge, attrs, click, decorator, exit-codes, gi
 | Captured ordinary command output | 4 MiB; archive transfer has its separate 128 MiB bound |
 | Parsed state/native session file | 8 MiB |
 | Source and mutable working data | 128 MiB; monitored execution refuses over-limit work |
-| Locked dependency environment | Separate 256 MiB admission limit; excluded from mutable-state accounting |
+| Locked dependency environment | Separate 256 MiB admission limit; excluded from mutable-state accounting; omits the vendor Claude SDK |
 | Mutation inventory | At most 10,000 entries |
 | Hosted report retention | 14 days, activated under #455 |
 

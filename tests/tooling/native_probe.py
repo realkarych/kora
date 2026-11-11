@@ -1,14 +1,23 @@
+import os
+import shutil
 import sys
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scripts.ci.mutation_audit import ROOT, classify, command, inventory
+from scripts.ci.mutation_audit import (
+    ROOT,
+    admit_environment,
+    classify,
+    command,
+    inventory,
+    synchronize,
+)
 from scripts.ci.mutation_models import Report, ordered
-from scripts.ci.mutation_process import Stop, execute
+from scripts.ci.mutation_process import Stop, environment, execute
 
 
-def main() -> None:
+def probe_native_inventory() -> None:
     with TemporaryDirectory(prefix="mutation-native-") as temporary:
         root = Path(temporary)
         for name in ("src/kora/ir/pricing.py", "src/kora/cel/paths.py"):
@@ -70,6 +79,33 @@ def main() -> None:
 
         assert any(item.identity() == target.identity() for item in later)
         assert queue[1].identity() == target.identity()
+
+
+def probe_environment_admission() -> None:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise FileNotFoundError("environment admission requires uv")
+    stop = Stop()
+    deadline = time.monotonic() + 120
+    cache = (
+        command([uv, "cache", "dir"], ROOT, deadline, stop, variables=dict(os.environ))
+        .decode()
+        .strip()
+    )
+    with TemporaryDirectory(prefix="mutation-environment-") as temporary:
+        root = Path(temporary)
+        variables = environment(root)
+        variables["UV_PROJECT_ENVIRONMENT"] = str(root / ".venv")
+        variables["UV_CACHE_DIR"] = cache
+
+        synchronize(root, uv, variables, deadline, stop, offline=True)
+
+        admit_environment(root / ".venv")
+
+
+def main() -> None:
+    probe_native_inventory()
+    probe_environment_admission()
 
 
 if __name__ == "__main__":

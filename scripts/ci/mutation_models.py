@@ -8,7 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field
 MAX_FILE = 8 * 1024 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
 MAX_WORK = 128 * 1024 * 1024
+MAX_ENVIRONMENT = 256 * 1024 * 1024
 MAX_MUTANTS = 10_000
+UNINSTALLED_PACKAGES: tuple[str, ...] = ("claude-agent-sdk",)
 TOOL = "cosmic-ray==8.7.0"
 Outcome = Literal[
     "killed",
