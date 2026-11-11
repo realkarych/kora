@@ -31,12 +31,14 @@ from kora.runner.filesystem import DirectoryAnchor, FilesystemError
 from kora_tooling_fixture.owned_directory import (
     directory_identity,
     dispose_owned_directory,
+    dispose_partial_directory,
 )
 
 PREPARATION_ENTERED: Final[bytes] = b"prepare_entered\n"
 PREPARATION_COMPLETE: Final[bytes] = b"prepare_complete\n"
 MAX_PREPARATION_EVIDENCE: Final[int] = 512
 GIT_DEADLINE_SECONDS: Final[int] = 5
+INTERRUPTED_LINK_TARGET: Final[str] = "testing"
 HEARTBEAT_SECONDS: Final[float] = 0.05
 MAX_TIMING_MILLISECONDS: Final[int] = 999_999_999
 MAX_TRACE_PREFIX: Final[int] = 4096
@@ -58,6 +60,7 @@ class PreparationEvidence(BoundaryModel):
     device: StrictInt
     inode: StrictInt
     occupied_repository: Literal["remote", "gone"] | None = None
+    occupant: Literal["file", "link"] = "file"
     deadline_seconds: Annotated[StrictInt, Field(ge=0, le=GIT_DEADLINE_SECONDS)] = (
         GIT_DEADLINE_SECONDS
     )
@@ -250,6 +253,13 @@ def seed_repositories(
     return prepare_git("read_revision", "-C", "seed", "rev-parse", "HEAD")
 
 
+def occupy(destination: Path, occupant: Literal["file", "link"]) -> None:
+    if occupant == "link":
+        destination.symlink_to(INTERRUPTED_LINK_TARGET)
+    else:
+        destination.touch(mode=0o600, exist_ok=False)
+
+
 class ObservedLauncher(ProcessLauncher):
     def __init__(self) -> None:
         super().__init__()
@@ -352,11 +362,23 @@ class Adapter:
         self.root = root
         self.identity = directory_identity(anchor.descriptor)
         anchor.close()
+        with ExitStack() as partial:
+            partial.callback(dispose_partial_directory, root, self.identity)
+            self.seed(parsed, executable, evidence, observation)
+            partial.pop_all()
+        return self
+
+    def seed(
+        self,
+        parsed: GitConfiguration,
+        executable: str,
+        evidence: PreparationEvidence | None,
+        observation: PreparationObservation | None,
+    ) -> None:
+        assert self.root is not None
         if evidence is not None and evidence.occupied_repository is not None:
-            (root / f"{evidence.occupied_repository}.git").touch(
-                mode=0o600, exist_ok=False
-            )
-        revision = seed_repositories(executable, root, observation)
+            occupy(self.root / f"{evidence.occupied_repository}.git", evidence.occupant)
+        revision = seed_repositories(executable, self.root, observation)
         remote = VcsRemote(
             repo="local",
             revision=revision,
@@ -392,7 +414,6 @@ class Adapter:
         )
         if observation is not None:
             observation.append(PREPARATION_COMPLETE)
-        return self
 
     def bind_configuration(self, config: JsonObject) -> ConstructorArguments:
         return ConstructorArguments((configured_paths(config), self.launcher))

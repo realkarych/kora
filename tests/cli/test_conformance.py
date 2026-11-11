@@ -147,6 +147,7 @@ def vcs_preparation_probe(
     tmp_path: Path,
     *,
     occupied_repository: Literal["remote", "gone"] | None = None,
+    occupant: Literal["file", "link"] = "file",
     deadline_seconds: int | None = None,
 ) -> Generator[VcsPreparationProbe]:
     root = private_home(tmp_path / "vcs-observation").resolve(strict=True)
@@ -172,6 +173,7 @@ def vcs_preparation_probe(
                         "device": opened.st_dev,
                         "inode": opened.st_ino,
                         "occupied_repository": occupied_repository,
+                        "occupant": occupant,
                         **(
                             {}
                             if deadline_seconds is None
@@ -677,6 +679,40 @@ def test_installed_vcs_reports_git_preparation_refusal_without_exposing_inputs(
     assert not exposed
     assert preparation == ("prepare_entered", f"git_{expected_steps[-1]}_nonzero")
     assert timed_steps == expected_steps
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 1
+    assert outcome.outcome is OriginalOutcome.FAILED
+    assert outcome.reason == "refused"
+    assert outcome.completed == 0
+    assert outcome.expected == 13
+    assert outcome.cleanup is not None
+    assert outcome.cleanup.state is CleanupOutcome.CLOSED
+    assert outcome.cleanup.unresolved_count == 0
+    assert not list(home.rglob("journal"))
+
+
+def test_installed_vcs_disposes_partial_preparation_with_git_link(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    home = private_home(tmp_path / "home")
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(vcs_configuration(Path("vcs-private-link-canary"))))
+
+    with vcs_preparation_probe(
+        tmp_path, occupied_repository="remote", occupant="link"
+    ) as probe:
+        process = installed_conformance.run(
+            *conformance_arguments(
+                "vcs", "configured", config, "fixtures_vcs", probe.fixture_data
+            ),
+            environment={"HOME": str(home)},
+        )
+        preparation = probe.observed()
+        timed_steps = probe.timed_steps()
+
+    assert_undisclosed(process, b"vcs-private-link-canary", b"remote.git", b"git-trace")
+    assert preparation == ("prepare_entered", "git_init_remote_nonzero")
+    assert timed_steps == ("init_remote",)
     outcome = CommandResult.model_validate_json(process.stdout)
     assert process.code == 1
     assert outcome.outcome is OriginalOutcome.FAILED
