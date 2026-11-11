@@ -2,12 +2,16 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
+from urllib.parse import urlencode, urlsplit
 
 SERVER = "https://github.com"
+GITHUB_API = "https://api.github.com"
+LOOPBACK = "127.0.0.1"
 REPORTER = "github-actions[bot]"
 RESULTS = frozenset({"success", "failure", "cancelled", "skipped"})
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -71,8 +75,14 @@ class Failure:
     result: str
 
 
+@dataclass(frozen=True)
+class OpenIssue:
+    number: int
+    title: str
+
+
 class Tracker(Protocol):
-    def open_issues(self, title: str) -> tuple[int, ...]: ...
+    def open_issues(self) -> tuple[OpenIssue, ...]: ...
 
     def create(self, title: str, body: str) -> None: ...
 
@@ -138,8 +148,9 @@ def issue_body(failure: Failure, run: Run) -> str:
     return (
         "### Impact\n\n"
         "A lane of the scheduled `Daily master lanes` workflow did not pass on "
-        "master. Its tests or measurements no longer run on pull requests, so this "
-        "issue is the visible record of the failure until the lane passes again.\n\n"
+        "master. Its tests or measurements run once a day on master instead of on "
+        "every pull request. Under the `Keep master green` rule in `AGENTS.md`, this "
+        "open issue attributes the failure until the lane passes again.\n\n"
         "### Failed lane\n\n"
         f"{occurrence(failure, run)}\n"
         "### Next step\n\n"
@@ -155,10 +166,11 @@ def repeated_body(failure: Failure, run: Run) -> str:
 
 def report(environment: Mapping[str, str], tracker: Tracker) -> tuple[str, ...]:
     run = current_run(environment)
+    listed = tracker.open_issues()
     actions: list[str] = []
     for failure in failures(environment):
         title = issue_title(failure.lane)
-        existing = tracker.open_issues(title)
+        existing = [issue.number for issue in listed if issue.title == title]
         if existing:
             tracker.comment(min(existing), repeated_body(failure, run))
             actions.append(f"commented {failure.lane.job}")
@@ -185,71 +197,103 @@ def entries(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         raise ReportFailure("GitHub returned an unexpected issue listing")
     listed = cast(list[object], value)
-    if not all(isinstance(entry, dict) for entry in listed):
+    if len(listed) > PAGE_SIZE or not all(isinstance(entry, dict) for entry in listed):
         raise ReportFailure("GitHub returned an unexpected issue listing")
     return [cast(dict[str, object], entry) for entry in listed]
 
 
-def reporter_issue(entry: dict[str, object], title: str) -> int | None:
+def reporter_issue(entry: dict[str, object]) -> OpenIssue | None:
     author = entry.get("user")
     number = entry.get("number")
+    title = entry.get("title")
     if (
         "pull_request" in entry
-        or entry.get("title") != title
         or not isinstance(author, dict)
         or cast(dict[str, object], author).get("login") != REPORTER
         or not isinstance(number, int)
+        or isinstance(number, bool)
+        or number < 1
+        or not isinstance(title, str)
     ):
         return None
-    return number
+    return OpenIssue(number, title)
+
+
+def issue_api(base: str) -> tuple[bool, str]:
+    location = urlsplit(base)
+    if base == GITHUB_API:
+        return True, location.netloc
+    if (
+        location.scheme == "http"
+        and location.hostname == LOOPBACK
+        and location.port is not None
+        and base == f"http://{LOOPBACK}:{location.port}"
+    ):
+        return False, location.netloc
+    raise ReportFailure("the issue API must be GitHub or a loopback test server")
 
 
 class GitHubTracker:
-    def __init__(self, repository: str, token: str) -> None:
+    def __init__(self, repository: str, token: str, api: str = GITHUB_API) -> None:
+        self.secure, self.host = issue_api(api)
         self.repository = repository
         self.token = token
 
-    def request(self, method: str, path: str, payload: object) -> object:
-        data = None if payload is None else json.dumps(payload).encode()
-        request = urllib.request.Request(
-            f"https://api.github.com/repos/{self.repository}/{path}",
-            data=data,
-            method=method,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-                "User-Agent": "kora-daily-lanes",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        with urllib.request.build_opener(NoRedirect()).open(
-            request, timeout=30
-        ) as reply:
+    def request(self, method: str, target: str, payload: object) -> object:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": "kora-daily-lanes",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        data = None
+        if payload is not None:
+            data = json.dumps(payload).encode()
+            headers["Content-Type"] = "application/json"
+        path = f"repos/{self.repository}/{target}"
+        if self.secure:
+            request = urllib.request.Request(
+                f"https://{self.host}/{path}", data=data, method=method, headers=headers
+            )
+        else:
+            request = urllib.request.Request(
+                f"http://{self.host}/{path}", data=data, method=method, headers=headers
+            )
+        try:
+            reply = urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
+        except urllib.error.HTTPError as refusal:
+            refusal.close()
+            raise
+        with reply:
             encoded: bytes = reply.read(MAX_RESPONSE + 1)
         if len(encoded) > MAX_RESPONSE:
             raise ReportFailure("GitHub returned an oversized response")
         result: object = json.loads(encoded)
         return result
 
-    def open_issues(self, title: str) -> tuple[int, ...]:
-        found: list[int] = []
+    def open_issues(self) -> tuple[OpenIssue, ...]:
+        found: list[OpenIssue] = []
         for page in range(1, PAGES + 1):
-            listed = entries(
-                self.request(
-                    "GET",
-                    f"issues?state=open&per_page={PAGE_SIZE}&page={page}",
-                    None,
-                )
+            query = urlencode(
+                {
+                    "state": "open",
+                    "creator": REPORTER,
+                    "per_page": PAGE_SIZE,
+                    "page": page,
+                }
             )
+            listed = entries(self.request("GET", f"issues?{query}", None))
             found.extend(
-                number
+                issue
                 for entry in listed
-                if (number := reporter_issue(entry, title)) is not None
+                if (issue := reporter_issue(entry)) is not None
             )
             if len(listed) < PAGE_SIZE:
                 return tuple(found)
-        raise ReportFailure("open issues exceed the bounded listing")
+        raise ReportFailure(
+            f"open issues created by {REPORTER} exceed the bounded listing of "
+            f"{PAGES * PAGE_SIZE} issues"
+        )
 
     def create(self, title: str, body: str) -> None:
         self.request("POST", "issues", {"title": title, "body": body})

@@ -65,7 +65,9 @@ ALLOWED_SECRET_SITES = frozenset(
         "daily-lanes.yml:jobs:report:steps:report:env:GITHUB_TOKEN",
     }
 )
-MASTER_ONLY = "github.ref == 'refs/heads/master'"
+ISSUE_WRITER_CONDITIONS = {
+    "daily-lanes.yml:report": "${{ always() && github.ref == 'refs/heads/master' }}",
+}
 PROTECTED_STATUS_NAMES = frozenset(
     {
         "Markdown lint",
@@ -201,10 +203,19 @@ def writes_issues(job: dict[str, object]) -> bool:
 
 
 def issue_writers_beyond_master(workflows: Workflows) -> list[str]:
+    jobs = dict(jobs_of(workflows))
     return [
-        f"{location}: writes issues outside master"
-        for location, job in jobs_of(workflows)
-        if writes_issues(job) and MASTER_ONLY not in str(job.get("if", ""))
+        *(
+            f"{location}: writes issues under {job.get('if')}"
+            for location, job in jobs.items()
+            if writes_issues(job)
+            and job.get("if") != ISSUE_WRITER_CONDITIONS.get(location)
+        ),
+        *(
+            f"{location}: missing issue writer"
+            for location in ISSUE_WRITER_CONDITIONS
+            if location not in jobs
+        ),
     ]
 
 
@@ -764,6 +775,16 @@ def report_issues_from_any_branch(workflows: Workflows) -> None:
     job_of(workflows, "daily-lanes.yml", "report")["if"] = "${{ always() }}"
 
 
+def report_issues_from_master_or_any_branch(workflows: Workflows) -> None:
+    job = job_of(workflows, "daily-lanes.yml", "report")
+    job["if"] = "${{ always() || github.ref == 'refs/heads/master' }}"
+
+
+def report_issues_from_every_branch_but_master(workflows: Workflows) -> None:
+    job = job_of(workflows, "daily-lanes.yml", "report")
+    job["if"] = "${{ always() && !(github.ref == 'refs/heads/master') }}"
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -778,6 +799,8 @@ def report_issues_from_any_branch(workflows: Workflows) -> None:
         checkout_with_default_credentials,
         let_a_daily_lane_write_issues,
         report_issues_from_any_branch,
+        report_issues_from_master_or_any_branch,
+        report_issues_from_every_branch_but_master,
     ],
 )
 def test_permission_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:

@@ -9,6 +9,7 @@ from tests.architecture.test_ordinary_ci import selected_files
 from tests.scaffold_evidence import (
     ENVIRONMENTS,
     SCHEDULED_LANES,
+    SCHEDULED_LIFETIME_MODULES,
     SCHEDULED_MACOS_STORAGE_MODULES,
     STORAGE_ARGUMENTS,
     lane_arguments,
@@ -202,3 +203,19 @@ def test_measurement_jobs_run_only_in_the_daily_workflow() -> None:
     assert all(job in daily for job in MEASUREMENT_JOBS)
     assert all(job in pull_request for job in PULL_REQUEST_JOBS)
     assert all(job not in daily for job in PULL_REQUEST_JOBS)
+
+
+def test_pull_requests_that_edit_a_scheduled_input_run_the_daily_workflow() -> None:
+    expected = [
+        ".github/workflows/daily-lanes.yml",
+        "scripts/ci/scheduled_lanes.sh",
+        "scripts/ci/scheduled_report.py",
+        "tests/scaffold_evidence.py",
+        *SCHEDULED_LIFETIME_MODULES,
+        *SCHEDULED_MACOS_STORAGE_MODULES,
+    ]
+
+    trigger = table(table(repository_workflows()[DAILY]["on"])["pull_request"])
+
+    assert trigger["paths"] == expected
+    assert all((ROOT / path).is_file() for path in expected)

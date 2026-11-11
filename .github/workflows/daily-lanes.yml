@@ -8,6 +8,27 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - .github/workflows/daily-lanes.yml
+      - scripts/ci/scheduled_lanes.sh
+      - scripts/ci/scheduled_report.py
+      - tests/scaffold_evidence.py
+      - tests/conformance/test_lifetime_cleanup_controls.py
+      - tests/conformance/test_lifetime_direct_inputs.py
+      - tests/conformance/test_lifetime_helper_phases.py
+      - tests/conformance/test_lifetime_io_helper.py
+      - tests/conformance/test_lifetime_journal_recovery.py
+      - tests/conformance/test_lifetime_measurement_cohorts.py
+      - tests/conformance/test_lifetime_measurement_observer.py
+      - tests/conformance/test_lifetime_parent_exit.py
+      - tests/conformance/test_lifetime_pending_helpers.py
+      - tests/conformance/test_lifetime_recovery_claim.py
+      - tests/conformance/test_lifetime_recovery_ownership.py
+      - tests/conformance/test_lifetime_resume.py
+      - tests/conformance/test_lifetime_rpc_concurrency.py
+      - tests/conformance/test_lifetime_services.py
+      - tests/conformance/test_lifetime_transport.py
+      - tests/plugins/storage/test_pressure_controller.py
+      - tests/plugins/storage/test_pressure_image_creation.py
+      - tests/plugins/storage/test_pressure_native_release.py
 
 permissions:
   contents: read
@@ -860,7 +881,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Open or update one issue per failed lane
+      - name: List open lane issues and report each failed lane
         id: report
         env:
           GITHUB_TOKEN: ${{ github.token }}
