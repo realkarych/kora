@@ -213,10 +213,11 @@ jobs:
           UPLOAD_RESULT: ${{ steps.upload.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
-          test "$LINUX_RESULT" = success
-          test "$MACOS_RESULT" = success
-          test "$QUALIFICATION_RESULT" = success
-          test "$DOWNLOAD_RESULT" = success
-          test "$UNION_RESULT" = success
-          test "$UPLOAD_RESULT" = success
-          test "$WORKFLOW_CANCELLED" = false
+          bash scripts/ci/require_outcomes.sh check \
+            LINUX_RESULT=success \
+            MACOS_RESULT=success \
+            QUALIFICATION_RESULT=success \
+            DOWNLOAD_RESULT=success \
+            UNION_RESULT=success \
+            UPLOAD_RESULT=success \
+            WORKFLOW_CANCELLED=false

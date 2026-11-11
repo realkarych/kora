@@ -1,9 +1,11 @@
 import hashlib
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+
+import pytest
 
 from tests.support.workflows import action_name, workflow_document
 
@@ -28,6 +30,16 @@ SCANNING_JOBS = {
         "github.event_name != 'pull_request'",
         f"{SCANNER_WORKFLOWS}/osv-scanner-reusable.yml",
     ),
+}
+EXPECTED_SCANS: dict[str, tuple[object, ...]] = {
+    identity: (
+        condition,
+        workflow,
+        frozenset({"scan-args", "fail-on-vuln"}),
+        SCAN_ARGUMENTS,
+        True,
+    )
+    for identity, (condition, workflow) in SCANNING_JOBS.items()
 }
 UNSCANNED_DIRECTORIES = frozenset({".git", ".venv", "web/node_modules"})
 
@@ -96,21 +108,50 @@ def scan_configuration(value: object) -> tuple[object, ...]:
     )
 
 
+def scan_configurations(document: dict[str, object]) -> dict[str, tuple[object, ...]]:
+    jobs = as_table(document["jobs"])
+    return {identity: scan_configuration(job) for identity, job in jobs.items()}
+
+
+def scan_inputs(document: dict[str, object], identity: str) -> dict[str, object]:
+    return as_table(as_table(as_table(document["jobs"])[identity])["with"])
+
+
+def pass_a_configuration_file(document: dict[str, object]) -> None:
+    inputs = scan_inputs(document, "pull-request")
+    inputs["scan-args"] = f"{inputs['scan-args']}\n--config=osv-scanner.toml"
+
+
+def stop_failing_on_findings(document: dict[str, object]) -> None:
+    scan_inputs(document, "full-scan")["fail-on-vuln"] = False
+
+
+def drop_the_crate_lock(document: dict[str, object]) -> None:
+    inputs = scan_inputs(document, "full-scan")
+    inputs["scan-args"] = "\n".join(SCAN_ARGUMENTS[:2])
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [pass_a_configuration_file, stop_failing_on_findings, drop_the_crate_lock],
+)
+def test_osv_scan_check_refuses_a_mutated_workflow(
+    mutation: Callable[[dict[str, object]], None],
+) -> None:
+    document = workflow_document("osv-scanner.yml")
+    mutation(document)
+
+    scans = scan_configurations(document)
+
+    assert scans != EXPECTED_SCANS
+
+
 def test_osv_scans_pass_only_the_three_lockfiles_and_fail_on_findings() -> None:
-    jobs = as_table(workflow_document("osv-scanner.yml")["jobs"])
+    document = workflow_document("osv-scanner.yml")
 
-    scans = {identity: scan_configuration(job) for identity, job in jobs.items()}
+    scans = scan_configurations(document)
 
-    assert scans == {
-        identity: (
-            condition,
-            workflow,
-            frozenset({"scan-args", "fail-on-vuln"}),
-            SCAN_ARGUMENTS,
-            True,
-        )
-        for identity, (condition, workflow) in SCANNING_JOBS.items()
-    }
+    assert scans == EXPECTED_SCANS
 
 
 def test_osv_override_is_scoped_to_the_binding_root_crate() -> None:

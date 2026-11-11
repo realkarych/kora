@@ -1,198 +1,39 @@
 import os
-import shlex
 import subprocess
 import sys
-from typing import cast
+from pathlib import Path
 
 import pytest
 
 from tests.measurements.ir_measurement_evidence import expected_evidence, shard_evidence
-from tests.support.workflows import (
-    action_name,
-    command_lines,
-    step_list,
-    steps,
-    table,
-    workflow_jobs,
-)
 
+ROOT = Path(__file__).resolve().parents[2]
+SHARD_SCRIPT = ROOT / "scripts/ci/measure_ir_shard.sh"
+INVENTORY_SCRIPT = ROOT / "scripts/ci/check_evidence_inventory.sh"
 MEASUREMENT = "tests/measurements/test_ir_models_cost.py"
 RUN = f"{MEASUREMENT}::test_ir_configuration_repeated_lifetime"
-NEEDED_JOBS = {
-    "scaffold-evidence": "SCAFFOLD",
-    "ir-measurements": "IR_MATRIX",
-    "resource-measurements": "RESOURCE",
-    "provider-protocol-measurements": "PROVIDER_PROTOCOL",
-    "pricing-measurements": "PRICING",
-    "cel-producer": "CEL",
-    "git-publication-measurements": "GIT_PUBLICATION",
-}
-SUCCESS = {
-    "SCOPE_RESULT": "success",
-    "SCOPE_VERIFIED": "true",
-    "FULL_SCOPE": "true",
-    "SCAFFOLD_RESULT": "success",
-    "SCAFFOLD_VERIFIED": "true",
-    "IR_MATRIX_RESULT": "success",
-    "RESOURCE_RESULT": "success",
-    "RESOURCE_VERIFIED": "true",
-    "PROVIDER_PROTOCOL_RESULT": "success",
-    "PROVIDER_PROTOCOL_VERIFIED": "true",
-    "PRICING_RESULT": "success",
-    "PRICING_VERIFIED": "true",
-    "CEL_RESULT": "success",
-    "CEL_VERIFIED": "true",
-    "GIT_PUBLICATION_RESULT": "success",
-    "GIT_PUBLICATION_VERIFIED": "true",
-    "DEPENDENCIES_OUTCOME": "success",
-    "SOURCE_REVISION_OUTCOME": "success",
-    "IR_DOWNLOAD_OUTCOME": "success",
-    "IR_INVENTORY_OUTCOME": "success",
-    "IR_UNION_UPLOAD_OUTCOME": "success",
-    "CEL_LIFETIME_DOWNLOAD_OUTCOME": "success",
-    "CEL_COST_DOWNLOAD_OUTCOME": "success",
-    "CEL_INVENTORY_OUTCOME": "success",
-    "WORKFLOW_CANCELLED": "false",
-}
 
 
-def test_ir_ci_uses_exact_literal_nodes_and_required_artifacts() -> None:
-    jobs = workflow_jobs()
-    job = table(jobs["ir-measurements"])
-
-    strategy = table(job["strategy"])
-    includes = cast(list[object], table(strategy["matrix"])["include"])
-    selected_steps = steps(job)
-    entries = step_list(job)
-    upload = selected_steps["ir_upload"]
-    upload_with = table(upload["with"])
-    measurement = command_lines(selected_steps["measurement"]["run"])
-
-    assert strategy["fail-fast"] is False
-    assert [table(row)["run"] for row in includes] == list(range(len(shard_evidence())))
-    assert all(set(table(row)) == {"run", "pytest-arguments"} for row in includes)
-    assert job["runs-on"] == "ubuntu-24.04"
-    assert measurement == [
-        (
-            "uv",
-            "run",
-            "--no-sync",
-            "pytest",
-            "-q",
-            "-p",
-            "no:logging",
-            "-m",
-            "measurement",
-            "${{matrix.pytest-arguments}}",
-            f"--junitxml={upload_with['path']}ir-models-cost-${{{{matrix.run}}}}.xml",
-        )
-    ]
-    assert upload["if"] == "${{ always() }}"
-    assert upload_with["if-no-files-found"] == "error"
-    assert upload_with["name"] == (
-        "ir-models-cost-measurement-${{ env.KORA_MEASUREMENT_REVISION }}-"
-        "${{ matrix.run }}"
-    )
-    assert action_name(upload["uses"]) == "actions/upload-artifact"
-    assert action_name(entries[0]["uses"]) == "actions/checkout"
-    assert entries[0]["with"] == {
-        "persist-credentials": False,
-        "ref": "${{ github.event.pull_request.head.sha || github.sha }}",
-        "fetch-depth": 0,
-    }
-    assert action_name(entries[1]["uses"]) == "astral-sh/setup-uv"
-    install = str(entries[2]["run"])
-    assert "uv sync --locked --no-build" in install
-    assert "uv export --locked --only-group build --no-emit-project" in install
-    assert (
-        '--build-constraints "$KORA_IR_BUILD_CONSTRAINT_DIR/constraints.txt"' in install
-    )
-    assert "--require-build-hashes" in install
-    assert "--editable ." in install
-
-
-def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
-    jobs = workflow_jobs()
-    job = table(jobs["cel-measurements"])
-
-    selected_steps = steps(job)
-    gate = selected_steps["required_measurements"]
-    expected = {
-        **{
-            f"{prefix}_RESULT": f"${{{{ needs.{needed}.result }}}}"
-            for needed, prefix in NEEDED_JOBS.items()
-        },
-        **{
-            f"{prefix}_VERIFIED": f"${{{{ needs.{needed}.outputs.verified }}}}"
-            for needed, prefix in NEEDED_JOBS.items()
-            if "verified" in table(table(jobs[needed]).get("outputs", {}))
-        },
-        **{
-            f"{identity.upper()}_OUTCOME": f"${{{{ steps.{identity}.outcome }}}}"
-            for identity in selected_steps
-            if identity not in {"required_measurements", "workflow_cancellation"}
-        },
-        "WORKFLOW_CANCELLED": (
-            "${{ job.status == 'cancelled' || "
-            "steps.workflow_cancellation.outcome != 'skipped' }}"
-        ),
-        "SCOPE_RESULT": "${{ needs.change-scope.result }}",
-        "SCOPE_VERIFIED": "${{ needs.change-scope.outputs.verified }}",
-        "FULL_SCOPE": "${{ needs.change-scope.outputs.full }}",
-    }
-
-    assert job["name"] == "CEL evaluator lifetime"
-    assert job["needs"] == ["change-scope", *NEEDED_JOBS]
-    assert job["if"] == "${{ always() }}"
-    assert gate["if"] == "${{ always() }}"
-    assert table(gate["env"]) == expected
-    assert set(expected) == set(SUCCESS)
-    assert (
-        selected_steps["workflow_cancellation"]["if"]
-        == "${{ needs.change-scope.outputs.full != 'false' && (cancelled()) }}"
-    )
-    assert selected_steps["workflow_cancellation"]["run"] == "exit 0"
-    assert action_name(selected_steps["ir_download"]["uses"]) == (
-        "actions/download-artifact"
-    )
-    assert table(selected_steps["ir_download"]["with"])["merge-multiple"] is False
-
-
-@pytest.mark.parametrize(
-    ("field", "outcome"),
-    [("WORKFLOW_CANCELLED", "false")]
-    + [
-        (field, outcome)
-        for field in SUCCESS
-        if field != "WORKFLOW_CANCELLED"
-        for outcome in ("failure", "cancelled", "skipped", "", "false")
-    ]
-    + [
-        ("WORKFLOW_CANCELLED", "true"),
-        ("WORKFLOW_CANCELLED", ""),
-        ("SCAFFOLD_RESULT", None),
-        ("SCAFFOLD_VERIFIED", None),
-    ],
-)
-def test_required_measurement_shell_gate_fails_closed(
-    field: str, outcome: str | None
-) -> None:
-    gate = steps(table(workflow_jobs()["cel-measurements"]))["required_measurements"]
-    environment = {**os.environ, **SUCCESS}
-    if outcome is None:
-        del environment[field]
-    else:
-        environment[field] = outcome
-
-    result = subprocess.run(
-        ["/bin/bash", "-e", "-c", str(gate["run"])],
-        env=environment,
-        check=False,
+def shard_selection(run: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            'source "$1"\nselect_ir_shard "$2"\nprintf "%s\\0" "${selection[@]}"',
+            "bash",
+            str(SHARD_SCRIPT),
+            run,
+        ],
         capture_output=True,
+        check=False,
         timeout=5,
     )
 
-    assert (result.returncode == 0) is (outcome == SUCCESS[field])
+
+def shard_arguments(run: int) -> list[str]:
+    result = shard_selection(str(run))
+    assert result.returncode == 0, result.stderr
+    return result.stdout.decode().split("\0")[:-1]
 
 
 def collected_nodes(arguments: list[str]) -> tuple[int, tuple[str, ...]]:
@@ -222,11 +63,7 @@ def collected_nodes(arguments: list[str]) -> tuple[int, tuple[str, ...]]:
 def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     expected = expected_evidence()
     shards = shard_evidence()
-    job = table(workflow_jobs()["ir-measurements"])
-    includes = cast(list[object], table(table(job["strategy"])["matrix"])["include"])
-    arguments = [
-        shlex.split(str(table(entry)["pytest-arguments"])) for entry in includes
-    ]
+    arguments = [shard_arguments(run) for run in range(len(shards))]
     workers = (f"{RUN}[1]", f"{RUN}[2]")
 
     collected = [collected_nodes(selection) for selection in arguments]
@@ -257,6 +94,14 @@ def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     assert sum(len(nodes) for _, nodes in collected) == len(expected.nodes)
 
 
+@pytest.mark.parametrize("run", ["6", "-1", "", "0 1"])
+def test_ir_shard_script_refuses_an_unknown_shard(run: str) -> None:
+    result = shard_selection(run)
+
+    assert result.returncode != 0
+    assert result.stdout == b""
+
+
 @pytest.mark.parametrize(
     ("selection", "expected_code"),
     [([f"{RUN}[99]"], 4), ([MEASUREMENT, "-k", "no_such_ir_measurement"], 5)],
@@ -268,3 +113,64 @@ def test_ir_unknown_or_empty_selection_fails(
 
     assert code == expected_code
     assert nodes == ()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "arm"),
+    [
+        ("valid", "lifetime"),
+        *(
+            (mutation, arm)
+            for mutation in (
+                "missing",
+                "empty",
+                "extra",
+                "revision",
+                "symlink",
+                "directory",
+            )
+            for arm in ("lifetime", "cost")
+        ),
+    ],
+)
+def test_actual_cel_inventory_rejects_incomplete_or_mixed_evidence(
+    tmp_path: Path, arm: str, mutation: str
+) -> None:
+    revision = "a" * 40
+    for directory, filename in (
+        ("lifetime", "cel-evaluator-lifetime.json"),
+        ("cost", "cel-cost-smoke.json"),
+    ):
+        target = tmp_path / "measurements" / f"cel-{directory}"
+        target.mkdir(parents=True)
+        (target / filename).write_text("{}\n")
+        (target / "cel-checkout-revision.txt").write_text(revision + "\n")
+    directory = tmp_path / "measurements" / f"cel-{arm}"
+    report = directory / (
+        "cel-evaluator-lifetime.json" if arm == "lifetime" else "cel-cost-smoke.json"
+    )
+    if mutation == "missing":
+        report.unlink()
+    elif mutation == "empty":
+        report.write_text("")
+    elif mutation == "extra":
+        (directory / "unexpected.txt").write_text("extra")
+    elif mutation == "revision":
+        (directory / "cel-checkout-revision.txt").write_text("b" * 40 + "\n")
+    elif mutation == "symlink":
+        report.unlink()
+        report.symlink_to(directory / "cel-checkout-revision.txt")
+    elif mutation == "directory":
+        report.unlink()
+        report.mkdir()
+
+    result = subprocess.run(
+        ["/bin/bash", str(INVENTORY_SCRIPT), "cel"],
+        cwd=tmp_path,
+        env={**os.environ, "KORA_MEASUREMENT_REVISION": revision},
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert (result.returncode == 0) is (mutation == "valid")

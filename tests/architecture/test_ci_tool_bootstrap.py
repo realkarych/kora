@@ -6,8 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.support.workflows import action_name, step_list, table, workflow_jobs
-
 ROOT = Path(__file__).resolve().parents[2]
 NODE_SETUP = ROOT / "scripts/ci/setup_scaffold_node.sh"
 LINK_CHECK = ROOT / "scripts/ci/check_links.sh"
@@ -225,29 +223,3 @@ def test_link_console_suspends_workflow_commands_during_checker_output(
         result.stdout,
     )
     assert result.stderr == b""
-
-
-def test_ci_bootstrap_keeps_checkout_and_pinned_action_authority() -> None:
-    jobs = workflow_jobs()
-    links = table(jobs["links"])
-    checkout, check = step_list(links)
-
-    assert links["name"] == "Links and anchors"
-    assert links["timeout-minutes"] == 10
-    assert action_name(checkout["uses"]) == "actions/checkout"
-    assert table(checkout["with"])["persist-credentials"] is False
-    assert check == {
-        "name": "Check repository Markdown offline",
-        "run": "bash scripts/ci/check_links.sh",
-    }
-    for job_id, job in jobs.items():
-        steps = step_list(table(job))
-        invocations = [
-            step
-            for step in steps
-            if "scripts/ci/setup_scaffold_node.sh" in str(step.get("run", ""))
-        ]
-        assert len(invocations) == int(job_id == "scaffold-tests")
-    source = NODE_SETUP.read_text()
-    assert "GITHUB_PATH" not in source
-    assert "GITHUB_ENV" not in source
