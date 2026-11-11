@@ -95,6 +95,7 @@ GATING_JOB_CONDITIONS = {
 }
 GATE_SCRIPT = "scripts/ci/require_outcomes.sh"
 GATE_JOBS = {
+    "ci.yml:scaffold-tests": "scaffold-lane",
     "ci.yml:scaffold-evidence": "scaffold-evidence",
     "ci.yml:scaffold": "check",
     "ci.yml:resource-measurements": "verify",
@@ -111,7 +112,20 @@ GATE_JOBS = {
 }
 PROOF_ORIGINS = frozenset({"ci.yml:change-scope"})
 ALWAYS = "${{ always() }}"
-FLIPPED = {"success": "skipped", "true": "false", "false": "true"}
+FLIPPED = {"success": "skipped", "skipped": "success", "true": "false", "false": "true"}
+UNGATED_STEPS = {
+    "ci.yml:scaffold-tests:unit_collisions": (
+        "runs only on Linux local-runtime lanes, which the lane gate does not tell "
+        "apart from macOS lanes; its failure fails the lane job itself"
+    ),
+    "ci.yml:scaffold-tests:cohort_evidence": (
+        "copies cohort evidence that the shared Scaffold evidence job verifies; "
+        "its failure fails the lane job itself"
+    ),
+}
+MATRIX_REFERENCE = re.compile(r"matrix\.([\w-]+)")
+MATRIX_VALUE = re.compile(r"\$\{\{ matrix\.([\w-]+) \}\}")
+STEP_OUTCOME = re.compile(r"steps\.([\w-]+)\.outcome")
 UNREVIEWED_COMMIT = "0" * 40
 CLASSIFIER_PROGRAM = (
     "import os\n\n"
@@ -119,6 +133,10 @@ CLASSIFIER_PROGRAM = (
     '    output.write("full={origin}\\n")\n'
 )
 CLASSIFIED_FROM_BASE = "full=base\nverified=true\n"
+CLASSIFIER_OUTPUTS = {
+    "full": "${{ steps.scope.outputs.full }}",
+    "verified": "${{ steps.scope.outputs.verified }}",
+}
 CHECKOUT_AUTHENTICATION_INPUT = "token"
 
 
@@ -373,23 +391,71 @@ def run_gate(
     )
 
 
+def matrix_scenarios(job: dict[str, object]) -> list[dict[str, str]]:
+    conditions = " ".join(str(step.get("if", "")) for step in step_list(job))
+    keys = sorted(set(MATRIX_REFERENCE.findall(conditions)))
+    matrix = table(table(job.get("strategy", {})).get("matrix", {}))
+    rows = [table(row) for row in cast(list[object], matrix.get("include", []))]
+    scenarios: list[dict[str, str]] = []
+    for row in rows or [{}]:
+        scenario = {key: str(row.get(key, "")) for key in keys}
+        if scenario not in scenarios:
+            scenarios.append(scenario)
+    return scenarios
+
+
+def expected_outcome(step: dict[str, object], scenario: dict[str, str]) -> str:
+    condition = str(step.get("if", ""))
+    for key, value in scenario.items():
+        admitted = re.findall(rf"matrix\.{re.escape(key)} == '([^']*)'", condition)
+        if admitted and value not in admitted:
+            return "skipped"
+    return "success"
+
+
+def matrix_context(job: dict[str, object], scenario: dict[str, str]) -> dict[str, str]:
+    context: dict[str, str] = {}
+    for name, expression in table(job.get("env", {})).items():
+        reference = MATRIX_VALUE.fullmatch(str(expression))
+        if reference is not None and reference[1] in scenario:
+            context[str(name)] = scenario[reference[1]]
+    return context
+
+
+def passing_values(
+    job: dict[str, object], gate: dict[str, object], scenario: dict[str, str]
+) -> dict[str, str]:
+    steps = {str(step["id"]): step for step in step_list(job) if "id" in step}
+    values: dict[str, str] = {}
+    for name, expression in table(gate.get("env", {})).items():
+        inner = str(expression).removeprefix("${{").removesuffix("}}").strip()
+        outcome = STEP_OUTCOME.fullmatch(inner)
+        values[str(name)] = (
+            expected_outcome(steps[outcome[1]], scenario)
+            if outcome is not None and outcome[1] in steps
+            else passing_value(expression)
+        )
+    return values
+
+
 def misbehaving_gate(
     location: str, job: dict[str, object], gate: dict[str, object], workspace: Path
 ) -> list[str]:
-    passing = {
-        str(name): passing_value(value)
-        for name, value in table(gate.get("env", {})).items()
-    }
     proof = "verified=true\n" if "verified" in table(job.get("outputs", {})) else ""
-    complete = workspace / f"{location}-complete"
     violations: list[str] = []
-    if run_gate(gate, passing, complete).returncode != 0 or recorded(complete) != proof:
-        violations.append(f"{location}: refuses complete success")
-    for name, value in passing.items():
-        output = workspace / f"{location}-{name}"
-        flipped = {**passing, name: FLIPPED.get(value, "unexpected")}
-        if run_gate(gate, flipped, output).returncode == 0 or recorded(output):
-            violations.append(f"{location}: accepts a failed {name}")
+    for scenario in matrix_scenarios(job):
+        label = "-".join([location, *scenario.values()])
+        context = matrix_context(job, scenario)
+        passing = passing_values(job, gate, scenario)
+        complete = workspace / f"{label}-complete"
+        result = run_gate(gate, {**context, **passing}, complete)
+        if result.returncode != 0 or recorded(complete) != proof:
+            violations.append(f"{label}: refuses complete success")
+        for name, value in passing.items():
+            output = workspace / f"{label}-{name}"
+            flipped = {**context, **passing, name: FLIPPED.get(value, "unexpected")}
+            if run_gate(gate, flipped, output).returncode == 0 or recorded(output):
+                violations.append(f"{label}: accepts a failed {name}")
     return violations
 
 
@@ -403,7 +469,9 @@ def ignored_inputs(
         *(
             f"steps.{step['id']}.outcome"
             for step in step_list(job)
-            if "id" in step and step is not gate
+            if "id" in step
+            and step is not gate
+            and f"{location}:{step['id']}" not in UNGATED_STEPS
         ),
     ]
     return [
@@ -547,6 +615,29 @@ def classification(workflows: Workflows, workspace: Path) -> str:
         timeout=10,
     )
     return recorded(output)
+
+
+def classifier_violations(workflows: Workflows, workspace: Path) -> list[str]:
+    job = job_of(workflows, "ci.yml", "change-scope")
+    output = classification(workflows, workspace)
+    return [
+        *(
+            [f"ci.yml:change-scope: outputs {job.get('outputs')}"]
+            if job.get("outputs") != CLASSIFIER_OUTPUTS
+            else []
+        ),
+        *(["ci.yml:change-scope: conditional job"] if "if" in job else []),
+        *(
+            ["ci.yml:change-scope: conditional classifier"]
+            if "if" in classifier_step(workflows)
+            else []
+        ),
+        *(
+            [f"ci.yml:change-scope: classified {output!r}"]
+            if output != CLASSIFIED_FROM_BASE
+            else []
+        ),
+    ]
 
 
 def rewrite_run(step: dict[str, object], old: str, new: str) -> None:
@@ -963,6 +1054,21 @@ def publish_an_ungated_proof(workflows: Workflows) -> None:
     job["outputs"] = {"verified": "${{ steps.measurement.outcome == 'success' }}"}
 
 
+def replace_the_lane_gate_with_success(workflows: Workflows) -> None:
+    step_list(job_of(workflows, "ci.yml", "scaffold-tests"))[-1]["run"] = "exit 0"
+
+
+def drop_the_static_check_outcome(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "scaffold-tests"))[-1]
+    del table(gate["env"])["STATIC_OUTCOME"]
+
+
+def skip_the_static_checks(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "scaffold-tests")
+    step = next(step for step in step_list(job) if step.get("id") == "static_checks")
+    step["if"] = "false"
+
+
 def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
     job = job_of(workflows, "conformance-lifetime.yml", "lifetime-evidence")
     job["needs"] = [*needs_of(job), "storage-probe"]
@@ -980,6 +1086,9 @@ def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
         ignore_a_needed_job,
         publish_an_ungated_proof,
         wait_for_a_lifetime_shard_without_its_result,
+        replace_the_lane_gate_with_success,
+        drop_the_static_check_outcome,
+        skip_the_static_checks,
     ],
 )
 def test_gate_check_refuses_a_mutated_workflow(
@@ -1018,9 +1127,28 @@ def run_the_classifier_from_the_checkout(workflows: Workflows) -> None:
     )
 
 
+def publish_a_literal_editorial_scope(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "change-scope")
+    table(job["outputs"])["full"] = "false"
+
+
+def condition_the_classifier(workflows: Workflows) -> None:
+    classifier_step(workflows)["if"] = "github.event_name == 'pull_request'"
+
+
+def condition_the_scope_job(workflows: Workflows) -> None:
+    job_of(workflows, "ci.yml", "change-scope")["if"] = "github.actor != 'renovate'"
+
+
 @pytest.mark.parametrize(
     "mutation",
-    [point_the_classifier_at_the_head, run_the_classifier_from_the_checkout],
+    [
+        point_the_classifier_at_the_head,
+        run_the_classifier_from_the_checkout,
+        publish_a_literal_editorial_scope,
+        condition_the_classifier,
+        condition_the_scope_job,
+    ],
 )
 def test_classifier_check_refuses_a_mutated_workflow(
     tmp_path: Path, mutation: Mutation
@@ -1028,14 +1156,14 @@ def test_classifier_check_refuses_a_mutated_workflow(
     workflows = repository_workflows()
     mutation(workflows)
 
-    output = classification(workflows, tmp_path)
+    violations = classifier_violations(workflows, tmp_path)
 
-    assert output != CLASSIFIED_FROM_BASE
+    assert violations
 
 
 def test_change_scope_runs_the_classifier_of_the_base_revision(tmp_path: Path) -> None:
     workflows = repository_workflows()
 
-    output = classification(workflows, tmp_path)
+    violations = classifier_violations(workflows, tmp_path)
 
-    assert output == CLASSIFIED_FROM_BASE
+    assert violations == []
