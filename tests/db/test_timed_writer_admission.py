@@ -31,6 +31,7 @@ from kora.observability import Level, LoggingSettings
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     ConnectionLedger,
+    WriterCutoffLoop,
     narrow_settings,
     until,
 )
@@ -77,18 +78,6 @@ async def timed_database(
 async def enter(database: Database, deadline: float) -> None:
     async with database.transaction(admission_deadline=deadline) as writer:
         await writer.exec_driver_sql(INSERT_PROBE)
-
-
-class WriterCutoffLoop(asyncio.SelectorEventLoop):
-    def __init__(self) -> None:
-        super().__init__()
-        self._offset: float = 0.0
-
-    def time(self) -> float:
-        return super().time() + self._offset
-
-    def advance_to(self, deadline: float) -> None:
-        self._offset = max(self._offset, deadline - super().time())
 
 
 def test_admitted_writer_keeps_caller_lease_and_commits_after_cutoff(

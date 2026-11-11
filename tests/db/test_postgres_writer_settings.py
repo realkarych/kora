@@ -23,6 +23,7 @@ from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     REFUSAL_DEADLINE_SECONDS,
     ConnectionLedger,
+    WriterCutoffLoop,
     narrow_settings,
     until,
 )
@@ -41,7 +42,6 @@ CREATE_PROBE: str = "CREATE TABLE probe (id INTEGER)"
 INSERT_PROBE: str = "INSERT INTO probe VALUES (7)"
 READ_PROBE: str = "SELECT id FROM probe"
 SHOW_COMMIT: str = "SHOW synchronous_commit"
-TIMED_ENTRY_SECONDS: float = 0.5
 
 
 @runtime_checkable
@@ -507,11 +507,11 @@ def test_writer_entry_checks_native_durability_settings(
             )
 
 
-@pytest.mark.parametrize("local_mode", ["off", "remote_apply"])
-@pytest.mark.parametrize("timed_admission", [False, True])
-@pytest.mark.asyncio
-async def test_durable_writer_checks_transaction_local_mode_before_commit(
-    empty_database_settings: DatabaseSettings, local_mode: str, timed_admission: bool
+async def check_transaction_local_mode_before_commit(
+    empty_database_settings: DatabaseSettings,
+    local_mode: str,
+    timed_admission: bool,
+    cutoff_loop: WriterCutoffLoop,
 ) -> None:
     settings = narrow_settings(empty_database_settings, pool_size=1)
     postgres = settings.dialect is Dialect.POSTGRESQL
@@ -547,7 +547,7 @@ async def test_durable_writer_checks_transaction_local_mode_before_commit(
 
     async def stage_write() -> None:
         loop = asyncio.get_running_loop()
-        cutoff = loop.time() + TIMED_ENTRY_SECONDS if timed_admission else None
+        cutoff = loop.time() + CONDITION_DEADLINE_SECONDS if timed_admission else None
         elapsed = asyncio.Event()
         barrier = loop.call_at(cutoff, elapsed.set) if cutoff is not None else None
         try:
@@ -563,6 +563,7 @@ async def test_durable_writer_checks_transaction_local_mode_before_commit(
                     )
                 await writer.execute(text(INSERT_PROBE))
                 if cutoff is not None:
+                    cutoff_loop.advance_to(cutoff)
                     await asyncio.wait_for(elapsed.wait(), CONDITION_DEADLINE_SECONDS)
                     assert loop.time() >= cutoff
                     assert len(observations) == int(postgres)
@@ -620,6 +621,21 @@ async def test_durable_writer_checks_transaction_local_mode_before_commit(
     assert ledger.opened == ledger.closed == (1 if postgres else 2)
     assert ledger.outstanding == ledger.closed_while_checked_out == 0
     assert database.units_in_flight() == 0
+
+
+@pytest.mark.parametrize("local_mode", ["off", "remote_apply"])
+@pytest.mark.parametrize("timed_admission", [False, True])
+def test_durable_writer_checks_transaction_local_mode_before_commit(
+    empty_database_settings: DatabaseSettings, local_mode: str, timed_admission: bool
+) -> None:
+    loop = WriterCutoffLoop()
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        runner.run(
+            check_transaction_local_mode_before_commit(
+                empty_database_settings, local_mode, timed_admission, loop
+            )
+        )
 
 
 @pytest.mark.parametrize("interrupt", ["cancel", "close"])

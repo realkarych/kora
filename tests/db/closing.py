@@ -23,6 +23,18 @@ SQLITE_COMPANION_SUFFIXES: tuple[str, ...] = ("-wal", "-shm")
 CLOSED_BEFORE_FINISHING: str = "the database closed before the unit finished"
 
 
+class WriterCutoffLoop(asyncio.SelectorEventLoop):
+    def __init__(self) -> None:
+        super().__init__()
+        self._offset: float = 0.0
+
+    def time(self) -> float:
+        return super().time() + self._offset
+
+    def advance_to(self, deadline: float) -> None:
+        self._offset = max(self._offset, deadline - super().time())
+
+
 def narrow_settings(
     settings: DatabaseSettings, pool_size: int = NARROW_POOL_SIZE
 ) -> DatabaseSettings:
