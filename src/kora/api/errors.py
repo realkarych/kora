@@ -18,7 +18,6 @@ from kora.models.errors import (
     ConflictDetails,
     EmptyDetails,
     ValidationDetails,
-    ValidationResult,
 )
 from kora.protocols.errors import KoraProtocolError
 
@@ -178,10 +177,6 @@ def deployment_validation_error(
             request_id=request_id,
         )
     )
-
-
-def validation_result(collection: DiagnosticCollection) -> ValidationResult:
-    return ValidationResult.from_collection(collection)
 
 
 def lock_timeout_error(*, request_id: str) -> ApiErrorEnvelope:

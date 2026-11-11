@@ -62,8 +62,6 @@ if child == 0:
     result = reader.scan_processes_carrying(tuple(sys.orig_argv), deadline)
     assert result is ProcessScanFailure.READER_PROCESS_CHANGED
     sys.stdout.write(result.value + "\\n")
-    legacy = reader.processes_carrying(tuple(sys.orig_argv), deadline)
-    sys.stdout.write(str(legacy is None) + "\\n")
     late = guarded.carries(os.getpid(), tuple(sys.orig_argv), deadline)
     sys.stdout.write(late.value + "\\n")
     sys.stdout.flush()
@@ -132,7 +130,6 @@ async def forked_reader_is_unknown(tmp_path: Path, capture: Capture) -> None:
     assert completed.stdout.decode().splitlines() == [
         "unknown",
         "reader_process_changed",
-        "True",
         "unknown",
         "present",
     ]
@@ -303,12 +300,9 @@ async def own_vector_is_not_swept(tmp_path: Path, capture: Capture) -> None:
     own = tuple(sys.orig_argv)
 
     carried = reader.carries(os.getpid(), own)
-    swept = reader.processes_carrying(own, time.monotonic_ns() + 10**9)
     detailed = reader.scan_processes_carrying(own, time.monotonic_ns() + 10**9)
 
     assert carried is ArgumentMatch.EQUAL
-    assert swept is not None
-    assert os.getpid() not in swept
     assert isinstance(detailed, tuple)
     assert os.getpid() not in detailed
 

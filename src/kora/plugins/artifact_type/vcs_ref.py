@@ -9,8 +9,8 @@ from kora.ir.vcs_ref import (
     VcsRef,
     VcsRefValidationError,
     parse_vcs_ref,
-    require_vcs_ref_revision,
     summarize_vcs_ref,
+    vcs_ref_revision_descriptor,
 )
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.plugins.artifact_type.binding import matches_fixed
@@ -23,28 +23,6 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 
 CONFIG_SCHEMA: Final[JsonObject] = {"type": "object", "additionalProperties": False}
-SUPPORTED_DESCRIPTOR: Final[JsonObject] = {
-    "name": "VcsRef",
-    "builtin_revision": "1",
-    "schema": "urn:kora:artifact:VcsRef",
-    "parent": None,
-    "behavior": {
-        "validation": "kora.vcs-ref-validation.v1",
-        "digest_fields": "kora.json-payload.v1",
-        "summary": "kora.json-payload.v1",
-    },
-    "validation": {
-        "max_raw_json_bytes": 1048576,
-        "max_canonical_json_bytes": 1048576,
-        "max_changed_paths": 10000,
-        "max_changed_path_utf8_bytes": 524288,
-        "max_revision_characters": 255,
-        "max_principal_characters": 255,
-        "max_json_depth": 16,
-    },
-    "digest_selection": [""],
-    "schema_sha256": "6cb29467d126b9a5f324408568d6925795946dde67ba927244a844f3169a86a8",
-}
 COMPONENT: Final[str] = CATALOG.register_component("artifact_type.vcs_ref")
 OUTCOME: Final[EventSpec] = CATALOG.register(
     EventSpec(
@@ -87,16 +65,10 @@ def checked_binding(
     schema = cast("JsonObject", detach_ir_data(catalogued_schema))
     if not matches_fixed(binding.schema, schema):
         raise binding_error("schema")
-    if not matches_fixed(binding.revision_descriptor, SUPPORTED_DESCRIPTOR):
+    descriptor = vcs_ref_revision_descriptor()
+    if not matches_fixed(binding.revision_descriptor, descriptor):
         raise binding_error("revision_descriptor")
-    compatible = True
-    try:
-        require_vcs_ref_revision(SUPPORTED_DESCRIPTOR)
-    except VcsRefValidationError:
-        compatible = False
-    if not compatible:
-        raise binding_error("revision_descriptor")
-    return schema, deepcopy(SUPPORTED_DESCRIPTOR)
+    return schema, descriptor
 
 
 def parsed(payload: JsonValue) -> VcsRef | ContractViolation:
