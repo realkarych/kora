@@ -1,5 +1,7 @@
 import asyncio
-from collections.abc import Callable, Sequence
+import socket
+import threading
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -116,6 +118,27 @@ async def hold_reader(
 async def write(database: Database, name: str) -> None:
     async with database.transaction() as connection:
         await Seeder(connection).namespace(name)
+
+
+def unavailable_database(
+    settings: DatabaseSettings, directory: Path, reserved: socket.socket
+) -> Database:
+    if settings.dialect is Dialect.POSTGRESQL:
+        address = settings.url.set(host="127.0.0.1", port=reserved.getsockname()[1])
+        return Database(replace(settings, url=address))
+    unavailable = replace(
+        settings, url=settings.url.set(database=str(directory / "unavailable"))
+    )
+    database = Database(unavailable)
+    unavailable.sqlite_path.unlink()
+    unavailable.sqlite_path.mkdir()
+    return database
+
+
+def threads_started_since(
+    before: Collection[threading.Thread],
+) -> list[threading.Thread]:
+    return [thread for thread in threading.enumerate() if thread not in before]
 
 
 def failure_messages(results: Sequence[object]) -> list[str]:

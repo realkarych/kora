@@ -15,10 +15,12 @@ from collections.abc import (
 )
 from contextlib import AsyncExitStack, asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import Protocol, TypeVar, cast
 from weakref import ReferenceType, ref
 
+import aiosqlite
 from sqlalchemy import URL, Connection, event, make_url, text
 from sqlalchemy.engine.interfaces import DBAPIConnection, DBAPICursor, ExceptionContext
 from sqlalchemy.exc import ArgumentError, SQLAlchemyError
@@ -54,6 +56,7 @@ ACCEPTED_FORMS: str = (
 MEMORY_DATABASE: str = ":memory:"
 PRIVATE_FILE_MODE: int = 0o600
 SQLITE_BUSY_TIMEOUT_SECONDS: float = 5.0
+SQLITE_ITER_CHUNK_SIZE: int = 64
 SQLITE_SYNCHRONOUS_FULL: int = 2
 SQLITE_READERS: int = 4
 DEFAULT_POOL_SIZE: int = 5
@@ -360,13 +363,63 @@ def keep_connection_on_cancellation(context: ExceptionContext) -> None:
         context.is_disconnect = False
 
 
+async def wait_then_propagate_cancellation(pending: asyncio.Future[object]) -> None:
+    cancellation: asyncio.CancelledError | None = None
+    while not pending.done():
+        try:
+            await asyncio.wait({pending})
+        except asyncio.CancelledError as error:
+            cancellation = error
+    if cancellation is not None:
+        raise cancellation
+
+
+class StoppableDriver(Protocol):
+    def stop(self) -> asyncio.Future[object] | None: ...
+
+
+class SQLiteWorkerDriver(aiosqlite.Connection):
+    def __init__(self, connector: Callable[[], sqlite3.Connection]) -> None:
+        super().__init__(connector, SQLITE_ITER_CHUNK_SIZE)
+        self._thread.daemon = True
+        self._stopping: asyncio.Future[object] | None = None
+
+    def stop(self) -> asyncio.Future[object] | None:
+        self._stopping = cast(StoppableDriver, super()).stop()
+        return self._stopping
+
+    async def finish_stopping(self) -> None:
+        if self._stopping is None:
+            return
+        await wait_then_propagate_cancellation(self._stopping)
+        self._thread.join()
+
+
+async def open_sqlite_driver(
+    connector: Callable[[], sqlite3.Connection],
+) -> aiosqlite.Connection:
+    driver = SQLiteWorkerDriver(connector)
+    try:
+        return await driver
+    except BaseException:
+        await driver.finish_stopping()
+        raise
+
+
 def sqlite_engine(
     settings: DatabaseSettings, writer: bool, *, require_full_sync: bool = False
 ) -> AsyncEngine:
-    connect_args = {"timeout": SQLITE_BUSY_TIMEOUT_SECONDS, "isolation_level": None}
+    connector = partial(
+        sqlite3.connect,
+        os.path.abspath(settings.sqlite_path),
+        timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    creator = partial(open_sqlite_driver, connector)
     if writer:
         engine = create_async_engine(
-            settings.url, poolclass=StaticPool, connect_args=connect_args
+            settings.url, poolclass=StaticPool, async_creator=creator
         )
     else:
         engine = create_async_engine(
@@ -375,7 +428,7 @@ def sqlite_engine(
             pool_size=SQLITE_READERS,
             max_overflow=0,
             pool_timeout=settings.pool_timeout_seconds,
-            connect_args=connect_args,
+            async_creator=creator,
         )
     if require_full_sync:
         configure = configure_full_sync_writer if writer else configure_full_sync_reader

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import socket
+import threading
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -22,7 +23,11 @@ from kora.protocols.authentication import Principal, RequestInfo
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.loading import load_provider
 from kora.protocols.metadata import ProtocolName
-from tests.db.closing import ConnectionLedger
+from tests.db.closing import (
+    ConnectionLedger,
+    threads_started_since,
+    unavailable_database,
+)
 from tests.db.seed import START, Seeder
 from tests.plugins.authentication.support import AuthorityClock, seed_case
 from tests.support.event_loop import turn
@@ -344,22 +349,7 @@ async def test_real_database_connection_unavailability_is_not_bad_credentials(
 ) -> None:
     with socket.socket() as reserved:
         reserved.bind(("127.0.0.1", 0))
-        if database_settings.dialect is Dialect.POSTGRESQL:
-            settings = replace(
-                database_settings,
-                url=database_settings.url.set(
-                    host="127.0.0.1", port=reserved.getsockname()[1]
-                ),
-            )
-        else:
-            settings = replace(
-                database_settings,
-                url=database_settings.url.set(database=str(tmp_path / "unavailable")),
-            )
-        database = Database(settings)
-        if settings.dialect is Dialect.SQLITE:
-            settings.sqlite_path.unlink()
-            settings.sqlite_path.mkdir()
+        database = unavailable_database(database_settings, tmp_path, reserved)
         provider = StaticTokenAuthenticator({}, database)
         ledger = ConnectionLedger(database)
 
@@ -371,9 +361,11 @@ async def test_real_database_connection_unavailability_is_not_bad_credentials(
                 ),
                 provider.revoke("token-example", context_for(kora_capture)),
             ):
+                running = threading.enumerate()
                 with pytest.raises(KoraProtocolError) as raised:
                     await operation
                 assert_error(raised.value, "authentication_unavailable")
+                assert threads_started_since(running) == []
         finally:
             await database.close()
 

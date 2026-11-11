@@ -1,10 +1,16 @@
 import asyncio
+import socket
+import sqlite3
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+from aiosqlite import Connection as SQLiteDriverConnection
 from sqlalchemy import Connection, event, select, text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from sqlalchemy.util import await_
 
 from kora.conformance.capture import captured
@@ -23,12 +29,14 @@ from kora.db.connection import (
     DatabaseSettings,
     Dialect,
     Lifecycle,
+    open_sqlite_driver,
 )
 from kora.db.tables import namespace
 from kora.observability import Level, LoggingSettings
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import (
     CLOSED_BEFORE_FINISHING,
+    CONDITION_DEADLINE_SECONDS,
     REFUSAL_DEADLINE_SECONDS,
     ConnectionLedger,
     ShutdownDuringClose,
@@ -38,10 +46,13 @@ from tests.db.closing import (
     narrow_database,
     reached,
     sqlite_companions,
+    threads_started_since,
+    unavailable_database,
     until,
     write,
 )
 from tests.db.seed import FakeClock, Seeder
+from tests.support.event_loop import turn
 
 DB_EVENTS: frozenset[str] = frozenset(
     spec.name
@@ -634,3 +645,82 @@ async def test_close_is_shared_by_every_caller_and_survives_their_cancellation(
     assert ledger.closed == ledger.opened
     assert ledger.closed_while_checked_out == 0
     assert ledger.outstanding == 0
+
+
+UNAVAILABLE_CONNECTION_ERRORS: dict[Dialect, type[Exception]] = {
+    Dialect.SQLITE: DBAPIError,
+    Dialect.POSTGRESQL: OSError,
+}
+
+
+async def threads_left_by_failed_connection(
+    engine: AsyncEngine, expected: type[Exception]
+) -> list[threading.Thread]:
+    running = threading.enumerate()
+    with pytest.raises(expected):
+        await engine.connect()
+    return threads_started_since(running)
+
+
+@pytest.mark.asyncio
+async def test_failed_connection_attempt_returns_after_its_driver_thread_stops(
+    database_settings: DatabaseSettings, tmp_path: Path
+) -> None:
+    expected = UNAVAILABLE_CONNECTION_ERRORS[database_settings.dialect]
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        database = unavailable_database(database_settings, tmp_path, reserved)
+
+        try:
+            left = [
+                await threads_left_by_failed_connection(engine, expected)
+                for engine in (database.reader_engine, database.writer_engine)
+            ]
+        finally:
+            await database.close()
+
+    assert left == [[], []]
+
+
+class HeldConnector:
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.workers: list[threading.Thread] = []
+
+    def __call__(self) -> sqlite3.Connection:
+        self.workers.append(threading.current_thread())
+        self.entered.set()
+        self.release.wait(CONDITION_DEADLINE_SECONDS)
+        return sqlite3.connect(self.directory)
+
+
+async def cancel_twice_while_held(
+    attempt: asyncio.Future[SQLiteDriverConnection], connector: HeldConnector
+) -> bool:
+    try:
+        await until(connector.entered.is_set)
+        for _ in range(2):
+            attempt.cancel()
+            await turn()
+        return not attempt.done()
+    finally:
+        connector.release.set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sqlite_connect_returns_after_its_driver_thread_stops(
+    tmp_path: Path,
+) -> None:
+    connector = HeldConnector(tmp_path)
+    running = threading.enumerate()
+    attempt = asyncio.ensure_future(open_sqlite_driver(connector))
+
+    pending_while_held = await cancel_twice_while_held(attempt, connector)
+    with pytest.raises(asyncio.CancelledError):
+        await attempt
+
+    assert pending_while_held
+    assert [worker.daemon for worker in connector.workers] == [True]
+    assert threads_started_since(running) == []
