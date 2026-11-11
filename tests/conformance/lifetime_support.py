@@ -280,8 +280,8 @@ def stage_progress(progress: Progress) -> Generator[int]:
         loop = asyncio.get_running_loop()
 
         def received() -> None:
-            if os.read(reading, 64):
-                progress.advanced()
+            os.read(reading, 64)
+            progress.advanced()
 
         loop.add_reader(reading, received)
         try:

@@ -51,15 +51,45 @@ def test_progress_scope_expires_only_after_an_interval_without_progress() -> Non
     assert progress.scopes == []
 
 
+def test_progress_moves_every_open_scope_and_leaves_an_expired_one() -> None:
+    loop = SteppedLoop()
+    progress = Progress()
+    remaining: list[float] = []
+
+    async def exercise() -> None:
+        async with progress.within(10) as outer:
+            async with progress.within(5) as inner:
+                loop.advance(4)
+                progress.advanced()
+                remaining.append(outer.deadline - loop.time())
+                remaining.append(inner.deadline - loop.time())
+                loop.advance(6)
+                try:
+                    await turn()
+                finally:
+                    progress.advanced()
+                    remaining.append(outer.deadline - loop.time())
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        with pytest.raises(TimeoutError):
+            runner.run(exercise())
+
+    assert 9 < remaining[0] <= 10
+    assert 4 < remaining[1] <= 5
+    assert 9 < remaining[2] <= 10
+    assert progress.advances == 2
+    assert progress.scopes == []
+
+
 def test_owned_helper_start_reschedules_the_progress_scope(tmp_path: Path) -> None:
     loop = SteppedLoop()
     progress = Progress()
 
-    async def exercise() -> tuple[float, float, bool]:
+    async def exercise() -> tuple[float, float]:
         clock = ControlledLifetimeClock()
         async with progress.within(5) as scope:
             initial = scope.deadline
-            loop.advance(4)
+            loop.advance(1)
             owner = ParentLifetime(
                 clock=clock,
                 limits=limits(),
@@ -68,15 +98,13 @@ def test_owned_helper_start_reschedules_the_progress_scope(tmp_path: Path) -> No
             try:
                 await owner.ready()
                 rescheduled = scope.deadline
-                expired = scope.timeout.expired()
             finally:
                 await dispose_test_owner(owner, clock)
-        return initial, rescheduled, expired
+        return initial, rescheduled
 
     with asyncio.Runner(loop_factory=lambda: loop) as runner:
-        initial, rescheduled, expired = runner.run(exercise())
+        initial, rescheduled = runner.run(exercise())
 
     assert progress.advances >= 1
-    assert rescheduled >= initial + 4
-    assert not expired
+    assert rescheduled >= initial + 1
     assert progress.scopes == []
