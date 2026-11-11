@@ -5,6 +5,7 @@ import socket
 import ssl
 import sys
 import termios
+from asyncio.trsock import TransportSocket
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ Reader = asyncio.StreamReader
 Writer = asyncio.StreamWriter
 
 
-def unacknowledged_bytes(connection: socket.socket) -> int:
+def unacknowledged_bytes(connection: TransportSocket) -> int:
     if sys.platform == "darwin":
         return connection.getsockopt(socket.SOL_SOCKET, DARWIN_SO_NWRITE)
     queued = fcntl.ioctl(connection.fileno(), termios.TIOCOUTQ, bytes(4))
@@ -41,7 +42,7 @@ def unacknowledged_bytes(connection: socket.socket) -> int:
 
 async def delivered(writer: Writer) -> None:
     await writer.drain()
-    connection = cast(socket.socket, writer.get_extra_info("socket"))
+    connection = cast(TransportSocket, writer.get_extra_info("socket"))
     loop = asyncio.get_running_loop()
     deadline = loop.time() + BOUND
     while writer.transport.get_write_buffer_size() or unacknowledged_bytes(connection):
