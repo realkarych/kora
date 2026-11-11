@@ -752,7 +752,16 @@ async def test_installed_storage_stops_blocked_native_work_before_tree_release(
         )
 
 
-@pytest.mark.parametrize("mode", ["outside_link", "substitution", "auxiliary"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "outside_link",
+        "substitution",
+        "auxiliary",
+        "partial_links",
+        "partial_substitution",
+    ],
+)
 def test_installed_fixture_preserves_unowned_or_unsettled_store(
     installed_conformance: InstalledTooling, mode: str, tmp_path: Path
 ) -> None:

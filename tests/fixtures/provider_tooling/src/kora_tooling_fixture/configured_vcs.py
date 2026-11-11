@@ -364,7 +364,7 @@ class Adapter:
         anchor.close()
         with ExitStack() as partial:
             partial.callback(dispose_partial_directory, root, self.identity)
-            self.seed(parsed, executable, evidence, observation)
+            self.seed(parsed, executable, root, evidence, observation)
             partial.pop_all()
         return self
 
@@ -372,13 +372,13 @@ class Adapter:
         self,
         parsed: GitConfiguration,
         executable: str,
+        root: Path,
         evidence: PreparationEvidence | None,
         observation: PreparationObservation | None,
     ) -> None:
-        assert self.root is not None
         if evidence is not None and evidence.occupied_repository is not None:
-            occupy(self.root / f"{evidence.occupied_repository}.git", evidence.occupant)
-        revision = seed_repositories(executable, self.root, observation)
+            occupy(root / f"{evidence.occupied_repository}.git", evidence.occupant)
+        revision = seed_repositories(executable, root, observation)
         remote = VcsRemote(
             repo="local",
             revision=revision,

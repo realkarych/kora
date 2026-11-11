@@ -9,8 +9,10 @@ import pytest
 from kora.plugins.storage.local import LocalStorageConfiguration
 from kora_tooling_fixture.configured_storage import ConfiguredStorage, StoreReceivers
 from kora_tooling_fixture.owned_directory import (
+    Identity,
     directory_identity,
     dispose_owned_directory,
+    dispose_partial_directory,
 )
 
 
@@ -59,11 +61,59 @@ def filesystem_refusal(root: Path, mode: str) -> None:
         assert (external / "retained").read_bytes() == b"owned-content"
 
 
+def created_identity(root: Path) -> Identity:
+    root.mkdir(mode=0o700)
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return directory_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def outside_content(root: Path) -> Path:
+    outside = root.with_name("outside")
+    outside.mkdir(mode=0o700)
+    (outside / "kept").write_bytes(b"outside-content")
+    return outside
+
+
+def partial_disposal_spares_link_targets(root: Path) -> None:
+    identity = created_identity(root)
+    outside = outside_content(root)
+    (root / "directory-link").symlink_to(outside)
+    (root / "file-link").symlink_to(outside / "kept")
+    os.link(outside / "kept", root / "hard-link")
+
+    dispose_partial_directory(root, identity)
+
+    assert not os.path.lexists(root)
+    assert [path.name for path in outside.iterdir()] == ["kept"]
+    assert (outside / "kept").read_bytes() == b"outside-content"
+    assert (outside / "kept").stat().st_nlink == 1
+
+
+def partial_disposal_refuses_substitution(root: Path) -> None:
+    identity = created_identity(root)
+    root.rename(root.with_name("moved"))
+    root.mkdir(mode=0o700)
+    (root / "borrowed").write_bytes(b"borrowed-content")
+
+    with pytest.raises(AssertionError):
+        dispose_partial_directory(root, identity)
+
+    assert (root / "borrowed").read_bytes() == b"borrowed-content"
+    assert root.with_name("moved").is_dir()
+
+
 def main(mode: str) -> None:
     with TemporaryDirectory() as temporary:
         root = Path(temporary).resolve() / "store"
         if mode == "auxiliary":
             asyncio.run(unsettled_auxiliary(root))
+        elif mode == "partial_links":
+            partial_disposal_spares_link_targets(root)
+        elif mode == "partial_substitution":
+            partial_disposal_refuses_substitution(root)
         else:
             filesystem_refusal(root, mode)
 
