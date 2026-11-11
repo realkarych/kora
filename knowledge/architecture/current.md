@@ -160,7 +160,7 @@ Work-item numbers refer to the [implementation plan](../../docs/implementation-p
 
 ## 5. The walking skeleton and the first slice
 
-This section changes most often. It describes the owner decisions of 2026-11-11 in [#1356](https://github.com/realkarych/kora/issues/1356) and the skeleton plan under [#1357](https://github.com/realkarych/kora/issues/1357). [ADR-0001](../../docs/decisions/0001-own-control-plane.md), the [implementation plan](../../docs/implementation-plan.md) and the [first-slice contract](../specs/first-slice.md) remain the authority; the #1357 pull request, [#1387](https://github.com/realkarych/kora/pull/1387), records these decisions there, and once it merges this section only points to them.
+This section changes most often. It describes the owner decisions of 2026-11-11 in [#1356](https://github.com/realkarych/kora/issues/1356) and the skeleton plan under [#1357](https://github.com/realkarych/kora/issues/1357). [ADR-0001](../../docs/decisions/0001-own-control-plane.md), the [implementation plan](../../docs/implementation-plan.md) and the [first-slice contract](../specs/first-slice.md) remain the authority; the #1357 pull request, [#1387](https://github.com/realkarych/kora/pull/1387), records the #1357 decisions there, and once it merges this section only points to those documents for them.
 
 **The walking skeleton** is an intermediate milestone of the first slice, reached before the first-slice gates apply: one graph runs end to end on SQLite through kora's public surfaces, with deliberately simple implementations.
 
