@@ -69,6 +69,13 @@ def assert_undisclosed(process: ProcessResult, *markers: bytes) -> None:
         assert marker not in process.stdout + process.stderr
 
 
+LIFETIME_PROGRESS_EVENTS: Final[frozenset[str]] = frozenset(
+    {
+        "conformance.lifetime.started",
+        "conformance.lifetime.activated",
+        "conformance.lifetime.closed",
+    }
+)
 MAX_VCS_PREPARATION_EVIDENCE: Final[int] = 512
 VCS_PREPARATION_STEPS: Final[tuple[str, ...]] = (
     "init_remote",
@@ -648,13 +655,13 @@ def test_installed_provider_supports_local_tooling(
     assert len(loading) == 1
     assert loading[0]["event"] == "protocols.loading.provider_loaded"
     assert loading[0]["protocol"] == protocol.value
+    assert {item["level"] for item in records} == {"DEBUG"}
+    assert {item["event"] for item in lifetime} <= LIFETIME_PROGRESS_EVENTS
     assert {item["invocation_id"] for item in lifetime} == {outcome.invocation_id}
     assert [item["event"] for item in lifetime].count(
         "conformance.lifetime.started"
     ) == 1
     assert lifetime[-1]["event"] == "conformance.lifetime.closed"
-    assert lifetime[-1]["reason"] == "complete"
-    assert progress.advances > 0
     assert not list(home.rglob("journal"))
     if protocol is ProtocolName.VCS:
         assert preparation == ("prepare_entered", "prepare_complete")

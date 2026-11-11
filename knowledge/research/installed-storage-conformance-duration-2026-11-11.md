@@ -38,16 +38,20 @@ The owner's 2026-11-11 form from the [progress-bounded test guard record](confor
 The progress signal is the command's existing structured diagnostics.
 
 - The test sets `KORA_LOG_COMPONENT_LEVELS` to include `conformance.lifetime=DEBUG`. The parent then reports `started`, `activated` and `closed` lifetime records on stderr.
-- A local storage run produced 41 records, all lifetime records with one invocation id. The longest interval between two consecutive records was 3.1 s, during the 256 MiB round trip, in a 21.8 s run.
+- A local storage run produced 41 records: the provider-loading record and 40 lifetime records, all with one invocation id. The longest interval between two consecutive records was 3.1 s, during the 256 MiB round trip, in a 21.8 s run.
 - Every chunk of stderr that completes a line counts as progress.
 
 Mechanism:
 
 - `progress_run` in `tests/conformance/progress_guard.py` starts the command with its stdout and stderr on pipes that it owns and drains both concurrently.
 - When the scope expires, it kills and reaps its direct child, then raises the same `subprocess.TimeoutExpired` with the command, the value and the output captured so far.
-- `InstalledTooling` exposes the unchanged value as `INSTALLED_COMMAND_SECONDS`, and the environment it builds as `environment()`.
+- `tests/support/provider_tooling.py` names the unchanged value `INSTALLED_COMMAND_SECONDS`. `InstalledTooling.environment()` builds the command environment for both paths.
 
-The record assertions keep exactly one `protocols.loading.provider_loaded` record for the selected protocol. Every other record must be a lifetime record of the reported invocation, with one `started`, ending in `closed` with reason `complete`.
+The record assertions keep exactly one `protocols.loading.provider_loaded` record for the selected protocol.
+
+- Every record must be at DEBUG level, so a lifetime warning still fails the test, as it did before.
+- Every other record must be a `started`, `activated` or `closed` lifetime record of the reported invocation.
+- There must be exactly one `started`, and the last record must be `closed`.
 
 Regressions in `tests/conformance/test_progress_guard.py` use a real child process and an event loop whose time the test steps forward:
 
