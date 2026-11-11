@@ -17,6 +17,7 @@ from tests.client.support import (
     ProbeClient,
     Reader,
     Writer,
+    delivered,
     peer,
     read_request,
     reply,
@@ -36,7 +37,7 @@ async def test_client_releases_requests(stop: str) -> None:
         requests += 1
         if requests == 1:
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
-            await writer.drain()
+            await delivered(writer)
             started.set()
             assert await asyncio.wait_for(reader.read(), BOUND) == b""
             disconnected.set()
@@ -79,7 +80,7 @@ async def test_client_closes_pool_with_active_and_queued_requests() -> None:
         await read_request(reader)
         requests += 1
         writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
-        await writer.drain()
+        await delivered(writer)
         started.set()
         assert await asyncio.wait_for(reader.read(), BOUND) == b""
         disconnected.set()

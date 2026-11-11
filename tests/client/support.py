@@ -1,12 +1,16 @@
 import asyncio
+import fcntl
 import ipaddress
 import socket
 import ssl
+import sys
+import termios
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Final, cast
 
 import uvicorn
 from cryptography import x509
@@ -23,8 +27,26 @@ BOUND: float = 10.0
 CREDENTIAL: str = "private-http-client-credential"
 SCHEMA: bytes = b'{"openapi":"3.1.0","info":{"title":"kora","version":"1"},"paths":{}}'
 SCHEMA_REPLY: bytes = b"HTTP/1.1 200 OK"
+DARWIN_SO_NWRITE: Final[int] = 0x1024
 Reader = asyncio.StreamReader
 Writer = asyncio.StreamWriter
+
+
+def unacknowledged_bytes(connection: socket.socket) -> int:
+    if sys.platform == "darwin":
+        return connection.getsockopt(socket.SOL_SOCKET, DARWIN_SO_NWRITE)
+    queued = fcntl.ioctl(connection.fileno(), termios.TIOCOUTQ, bytes(4))
+    return int.from_bytes(queued, sys.byteorder)
+
+
+async def delivered(writer: Writer) -> None:
+    await writer.drain()
+    connection = cast(socket.socket, writer.get_extra_info("socket"))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + BOUND
+    while writer.transport.get_write_buffer_size() or unacknowledged_bytes(connection):
+        assert loop.time() < deadline, "the peer did not acknowledge the bytes"
+        await asyncio.sleep(0)
 
 
 class ProbeClient(KoraClient):
