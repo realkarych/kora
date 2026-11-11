@@ -682,6 +682,9 @@ async def test_failed_connection_attempt_returns_after_its_driver_thread_stops(
     assert left == [[], []]
 
 
+CANCELLATION_MESSAGES: tuple[str, ...] = ("first cancellation", "second cancellation")
+
+
 class HeldConnector:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
@@ -701,8 +704,8 @@ async def cancel_twice_while_held(
 ) -> bool:
     try:
         await until(connector.entered.is_set)
-        for _ in range(2):
-            attempt.cancel()
+        for message in CANCELLATION_MESSAGES:
+            attempt.cancel(message)
             await turn()
         return not attempt.done()
     finally:
@@ -718,9 +721,10 @@ async def test_cancelled_sqlite_connect_returns_after_its_driver_thread_stops(
     attempt = asyncio.ensure_future(open_sqlite_driver(connector))
 
     pending_while_held = await cancel_twice_while_held(attempt, connector)
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as cancelled:
         await attempt
 
     assert pending_while_held
+    assert cancelled.value.args == CANCELLATION_MESSAGES[-1:]
     assert [worker.daemon for worker in connector.workers] == [True]
     assert threads_started_since(running) == []

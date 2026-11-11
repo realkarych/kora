@@ -363,15 +363,16 @@ def keep_connection_on_cancellation(context: ExceptionContext) -> None:
         context.is_disconnect = False
 
 
-async def wait_then_propagate_cancellation(pending: asyncio.Future[object]) -> None:
+async def wait_holding_cancellation(
+    pending: asyncio.Future[object],
+) -> asyncio.CancelledError | None:
     cancellation: asyncio.CancelledError | None = None
     while not pending.done():
         try:
             await asyncio.wait({pending})
         except asyncio.CancelledError as error:
             cancellation = error
-    if cancellation is not None:
-        raise cancellation
+    return cancellation
 
 
 class StoppableDriver(Protocol):
@@ -391,8 +392,10 @@ class SQLiteWorkerDriver(aiosqlite.Connection):
     async def finish_stopping(self) -> None:
         if self._stopping is None:
             return
-        await wait_then_propagate_cancellation(self._stopping)
+        cancellation = await wait_holding_cancellation(self._stopping)
         self._thread.join()
+        if cancellation is not None:
+            raise cancellation
 
 
 async def open_sqlite_driver(
