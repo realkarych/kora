@@ -1,11 +1,13 @@
 set -eo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/scheduled_lanes.sh"
+
 select_groups() {
   read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"
   case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
     ubuntu-24.04:conformance) names=(first second third) ;;
     macos-15:conformance) names=(first second third surface) ;;
-    ubuntu-24.04:remainder) names=(measurements other engine) ;;
+    ubuntu-24.04:remainder) names=(measurements other graph engine) ;;
     macos-15:remainder) names=(measurements integration other) ;;
     ubuntu-24.04:integration) names=(integration surface) ;;
     *) exit 1 ;;
@@ -13,13 +15,6 @@ select_groups() {
   first=(
     tests/architecture/test_ir_measurement_ci.py
     tests/architecture/test_no_suppression.py
-    tests/conformance/test_lifetime_helper_phases.py
-    tests/conformance/test_lifetime_measurement_cohorts.py
-    tests/conformance/test_lifetime_parent_exit.py
-    tests/conformance/test_lifetime_pending_helpers.py
-    tests/conformance/test_lifetime_resume.py
-    tests/conformance/test_lifetime_rpc_concurrency.py
-    tests/conformance/test_lifetime_services.py
     tests/conformance/test_local_process_lifetime.py
     tests/ir/test_structured_schema_assertions.py
     tests/measurements/test_ir_measurement_evidence.py
@@ -38,11 +33,10 @@ select_groups() {
     tests/conformance/test_recovered_process_lifetime.py
     tests/engine/test_graph_projection_paths.py
     tests/conformance/test_storage_case_runner.py
-    tests/conformance/test_lifetime_journal_recovery.py
   )
   second=(tests/conformance tests/ir/test_inline_schema_resources.py tests/ir/test_fan_out_type_resources.py tests/ir/test_export_type_resources.py tests/ir/test_diagnostic_collection.py tests/ir/test_subgraph_interface_resources.py --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py)
   second+=(tests/ir/test_structured_schema_container_counts.py tests/plugins/artifact_type/test_agent_session.py)
-  for path in "${first[@]}" "${third[@]}"; do
+  for path in "${first[@]}" "${third[@]}" "${KORA_SCHEDULED_LIFETIME_MODULES[@]}"; do
     second+=("--ignore=$path")
   done
   engine=(
@@ -56,6 +50,16 @@ select_groups() {
     tests/db/test_attempt_outcome_migration.py
     tests/db/test_db_upgrade_process.py
     tests/db/test_attempt_deadline_migration.py
+  )
+  graph=(
+    tests/engine
+    --ignore=tests/engine/test_graph_execution_contract.py
+    --ignore=tests/engine/test_graph_native_sources.py
+    --ignore=tests/engine/test_graph_native_outputs.py
+    --ignore=tests/engine/test_graph_output_inventory.py
+    --ignore=tests/engine/test_graph_outputs.py
+    --ignore=tests/engine/test_graph_projection_paths.py
+    --ignore=tests/engine/test_start_parameter_cut.py
   )
   measurements=(
     tests/measurements
@@ -97,6 +101,7 @@ group_arguments() {
     other) arguments=("${other[@]}") ;;
     third) arguments=("${third[@]}") ;;
     engine) arguments=("${engine[@]}") ;;
+    graph) arguments=("${graph[@]}") ;;
     surface) arguments=("${surface[@]}") ;;
     *) exit 1 ;;
   esac
@@ -118,6 +123,9 @@ group_arguments() {
       done
       arguments+=("--ignore=$path")
     done
+  fi
+  if test "$KORA_SCAFFOLD_OS" = ubuntu-24.04 && test "$KORA_SCAFFOLD_LANE" = remainder && test "$name" = other; then
+    arguments+=("--ignore=tests/engine")
   fi
 }
 

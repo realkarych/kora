@@ -1,10 +1,29 @@
 set -eo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/scheduled_lanes.sh"
+
 admit_lane() {
   case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
     ubuntu-24.04:conformance|ubuntu-24.04:remainder|ubuntu-24.04:integration|ubuntu-24.04:storage|ubuntu-24.04:local-runtime) ;;
     macos-15:conformance|macos-15:remainder|macos-15:storage|macos-15:local-runtime) ;;
     *) exit 1 ;;
+  esac
+}
+
+complete_arguments() {
+  scheduled_ignores "$KORA_SCAFFOLD_OS"
+  KORA_COMPLETE_ARGUMENTS=(-m "not measurement" "${KORA_SCHEDULED_IGNORES[@]}")
+}
+
+lane_selection() {
+  KORA_SCAFFOLD_SELECTION=()
+  case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
+    ubuntu-24.04:local-runtime|macos-15:local-runtime) KORA_SCAFFOLD_SELECTION=(-m "not measurement") ;;
+    macos-15:storage)
+      for path in "${KORA_SCHEDULED_MACOS_STORAGE_MODULES[@]}"; do
+        KORA_SCAFFOLD_SELECTION+=("--ignore=$path")
+      done
+      ;;
   esac
 }
 
@@ -15,7 +34,7 @@ open_ordinary_output() {
 }
 
 preserve_ordinary_evidence() {
-  for name in first.log second.log third.log measurements.log integration.log surface.log other.log engine.log first.xml second.xml third.xml measurements.xml integration.xml surface.xml other.xml engine.xml first.exit second.exit third.exit measurements.exit integration.exit surface.exit other.exit engine.exit; do
+  for name in first.log second.log third.log measurements.log integration.log surface.log other.log graph.log engine.log first.xml second.xml third.xml measurements.xml integration.xml surface.xml other.xml graph.xml engine.xml first.exit second.exit third.exit measurements.exit integration.exit surface.exit other.exit graph.exit engine.exit; do
     if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
       cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
     fi
@@ -29,7 +48,8 @@ run_lane() {
   mkdir -p "$KORA_SCAFFOLD_DIRECTORY"
   read -r -a KORA_SCAFFOLD_ARGUMENTS <<< "$KORA_PYTEST_ARGUMENTS"
   if test "$KORA_SCAFFOLD_LANE" = conformance; then
-    if uv run --no-sync pytest --collect-only -q -m "not measurement" > "$KORA_SCAFFOLD_DIRECTORY/complete.txt" 2> "$KORA_SCAFFOLD_DIRECTORY/complete.stderr"; then
+    complete_arguments
+    if uv run --no-sync pytest --collect-only -q "${KORA_COMPLETE_ARGUMENTS[@]}" > "$KORA_SCAFFOLD_DIRECTORY/complete.txt" 2> "$KORA_SCAFFOLD_DIRECTORY/complete.stderr"; then
       printf '0\n' > "$KORA_SCAFFOLD_DIRECTORY/complete.exit"
     else
       KORA_EXIT="$?"
@@ -37,10 +57,9 @@ run_lane() {
       exit "$KORA_EXIT"
     fi
   fi
-  KORA_SCAFFOLD_SELECTION=()
+  lane_selection
   KORA_TEST_LAUNCH=()
   if test "$KORA_SCAFFOLD_LANE" = local-runtime; then
-    KORA_SCAFFOLD_SELECTION=(-m "not measurement")
     KORA_TEST_LAUNCH=(bash scripts/ci/run-local-runtime-tests.sh)
   fi
   KORA_EXIT=0

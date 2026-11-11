@@ -691,7 +691,12 @@ def test_structured_output_provider_entry_point(kora_capture: Capture) -> None:
 
 @pytest.mark.parametrize("sink", ["blocked", "broken"])
 def test_structured_output_provider_result_survives_unavailable_sink(sink: str) -> None:
-    arguments = ["-m", "tests.plugins.artifact_type.structured_output_sink_probe", sink]
+    arguments = [
+        "-m",
+        "tests.plugins.artifact_type.sink_probe",
+        "structured_output",
+        sink,
+    ]
 
     process = run_python(arguments, {})
 

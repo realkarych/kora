@@ -9,7 +9,11 @@ from typing import cast
 import pytest
 
 from tests.measurements.storage_evidence_common import EvidenceFailure, junit_nodes
-from tests.scaffold_evidence import COHORTS, GENERAL_ARGUMENTS
+from tests.scaffold_evidence import (
+    COHORTS,
+    GENERAL_ARGUMENTS,
+    SCHEDULED_LIFETIME_MODULES,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 COHORT_SCRIPT = ROOT / "scripts/ci/ordinary_cohorts.sh"
@@ -32,13 +36,6 @@ INTEGRATION_SELECTION = (
 FIRST_MODULES = (
     "tests/architecture/test_ir_measurement_ci.py",
     "tests/architecture/test_no_suppression.py",
-    "tests/conformance/test_lifetime_helper_phases.py",
-    "tests/conformance/test_lifetime_measurement_cohorts.py",
-    "tests/conformance/test_lifetime_parent_exit.py",
-    "tests/conformance/test_lifetime_pending_helpers.py",
-    "tests/conformance/test_lifetime_resume.py",
-    "tests/conformance/test_lifetime_rpc_concurrency.py",
-    "tests/conformance/test_lifetime_services.py",
     "tests/conformance/test_local_process_lifetime.py",
     "tests/ir/test_structured_schema_assertions.py",
     "tests/measurements/test_ir_measurement_evidence.py",
@@ -57,7 +54,6 @@ THIRD_MODULES = (
     "tests/conformance/test_recovered_process_lifetime.py",
     "tests/engine/test_graph_projection_paths.py",
     "tests/conformance/test_storage_case_runner.py",
-    "tests/conformance/test_lifetime_journal_recovery.py",
 )
 ENGINE_MODULES = (
     "tests/engine/test_graph_execution_contract.py",
@@ -79,7 +75,7 @@ SURFACE_MODULES = (
 
 EXPECTED_ORDINARY = {
     ("ubuntu-24.04", "conformance"): ("first", "second", "third"),
-    ("ubuntu-24.04", "remainder"): ("measurements", "other", "engine"),
+    ("ubuntu-24.04", "remainder"): ("measurements", "other", "graph", "engine"),
     ("ubuntu-24.04", "integration"): ("integration", "surface"),
     ("macos-15", "conformance"): ("first", "second", "third", "surface"),
     ("macos-15", "remainder"): ("measurements", "integration", "other"),
@@ -156,7 +152,8 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         for name in ("general", *COHORTS)
     }
     cohorts = {cohort: selected_files(arrays[cohort]) for cohort in COHORTS}
-    general = selected_files(arrays["general"])
+    scheduled = frozenset(SCHEDULED_LIFETIME_MODULES)
+    general = selected_files(arrays["general"]) - scheduled
 
     assert result.returncode == 0, result.stderr
     assert tuple(arrays["first"]) == FIRST_MODULES
@@ -197,12 +194,19 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         if not argument.startswith("-")
     )
     engine = cohorts["engine"]
+    graph = cohorts["graph"]
     surface = cohorts["surface"]
     placed = ("first", "second", "third")
+    placed_engine = {
+        path
+        for path in cohorts["first"] | cohorts["third"] | engine
+        if path.startswith("tests/engine/")
+    }
     ubuntu = {
         **{name: cohorts[name] for name in placed},
         "measurements": cohorts["measurements"] - engine,
-        "other": cohorts["other"] - engine,
+        "other": cohorts["other"] - engine - graph,
+        "graph": graph,
         "engine": engine,
         "integration": cohorts["integration"] - surface,
         "surface": surface,
@@ -216,14 +220,23 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     }
 
     assert all(cohorts.values())
+    assert scheduled <= selected_files(arrays["general"])
+    assert all(scheduled.isdisjoint(files) for files in cohorts.values())
     assert engine <= cohorts["measurements"] | cohorts["other"]
+    assert graph == selected_files(["tests/engine"]) - placed_engine
+    assert graph <= cohorts["other"]
     assert surface <= cohorts["integration"]
     assert engine.isdisjoint(
-        frozenset[str]().union(*(cohorts[name] for name in (*placed, "integration")))
+        frozenset[str]().union(
+            *(cohorts[name] for name in (*placed, "integration", "graph"))
+        )
     )
     assert surface.isdisjoint(
         frozenset[str]().union(
-            *(cohorts[name] for name in (*placed, "measurements", "other", "engine"))
+            *(
+                cohorts[name]
+                for name in (*placed, "measurements", "other", "graph", "engine")
+            )
         )
     )
     assert sum(len(files) for files in ubuntu.values()) == len(general)
@@ -245,8 +258,9 @@ def test_shards_partition_every_inventory_group() -> None:
         if system == "ubuntu-24.04":
             assert sorted(children) == sorted(COHORTS)
         else:
-            assert sorted((*children, "engine")) == sorted(COHORTS)
+            assert sorted((*children, "engine", "graph")) == sorted(COHORTS)
             assert "engine" not in children
+            assert "graph" not in children
 
 
 @pytest.mark.parametrize(
@@ -308,6 +322,16 @@ def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
         assert owners == (
             ("engine",) if system == "ubuntu-24.04" else ("measurements",)
         )
+    if (system, lane) == ("ubuntu-24.04", "remainder"):
+        other_arguments = next(
+            arguments for name, *arguments in groups if name == "other"
+        )
+        graph_arguments = next(
+            arguments for name, *arguments in groups if name == "graph"
+        )
+        assert "tests/engine" in graph_arguments
+        assert "--ignore=tests/engine" in other_arguments
+        assert "tests/engine" not in other_arguments
     if (system, lane) in {
         ("ubuntu-24.04", "integration"),
         ("macos-15", "conformance"),

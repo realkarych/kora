@@ -1,6 +1,4 @@
 import json
-import sqlite3
-from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -29,7 +27,7 @@ from kora.engine.graph_version_identity import (
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
 from tests.engine.test_graph_version_identity import LIMITS, insert_version, sample
-from tests.support.databases import DatabaseKind, sqlite_settings
+from tests.support.databases import DatabaseKind, encoded_sqlite_settings
 
 MARKER = "bounded-graph-transport"
 SQLITE_ENCODINGS = ("UTF-16le", "UTF-16be")
@@ -416,17 +414,7 @@ async def test_bounded_graph_version_acquisition_preserves_native_database_encod
         await verify_transport_encoding(database, "ascii")
         return
     for encoding in SQLITE_ENCODINGS:
-        path = tmp_path / (encoding + ".db")
-        with closing(sqlite3.connect(path)) as connection:
-            connection.execute(
-                "PRAGMA encoding = 'UTF-16le'"
-                if encoding == "UTF-16le"
-                else "PRAGMA encoding = 'UTF-16be'"
-            )
-            connection.execute("CREATE TABLE encoding_seed (value INTEGER)")
-            connection.execute("DROP TABLE encoding_seed")
-            connection.commit()
-        settings = sqlite_settings(path)
+        settings = encoded_sqlite_settings(tmp_path / (encoding + ".db"), encoding)
         await upgrade_database(settings)
         encoded = Database(settings)
         try:

@@ -89,13 +89,8 @@ class ObserveCall(BoundaryModel):
     resource_id: ResourceId | None
 
 
-class CloseCall(BoundaryModel):
-    verb: Literal["close"] = "close"
-    resource_id: ResourceId | None
-
-
 Call: TypeAlias = Annotated[
-    ReserveCall | AcquireCall | ProcessCall | AcknowledgeCall | ObserveCall | CloseCall,
+    ReserveCall | AcquireCall | ProcessCall | AcknowledgeCall | ObserveCall,
     Field(discriminator="verb"),
 ]
 CALL: TypeAdapter[Call] = TypeAdapter(Call)
@@ -262,8 +257,6 @@ class LifetimeClient:
                     if pending.sent:
                         continue
                     call = pending.call
-                    if isinstance(call, CloseCall):
-                        raise ChannelError(ChannelFailure.MALFORMED)
                     header = OrdinaryHeader(
                         request_id=request_id,
                         verb=call.verb,
@@ -763,7 +756,7 @@ class LifetimeEndpoint:
                         ),
                     )
                     call = CALL.validate_json(encoded)
-                    if call.verb != header.verb or isinstance(call, CloseCall):
+                    if call.verb != header.verb:
                         raise ChannelError(ChannelFailure.MALFORMED)
                     launch = None
                     consumed = len(encoded)
@@ -854,15 +847,13 @@ class LifetimeEndpoint:
             return await self.owner.acknowledge(
                 call.token, call.acquisition_operation_id, call.revision
             )
-        if isinstance(call, ObserveCall):
-            self._check_resource(call.resource_id)
-            observations = await self.owner.observe(call.resource_id)
-            return tuple(
-                observation
-                for observation in observations
-                if observation.resource_id in self.resources
-            )
-        raise LifetimeError(LifetimeReason.IDENTITY_MISMATCH)
+        self._check_resource(call.resource_id)
+        observations = await self.owner.observe(call.resource_id)
+        return tuple(
+            observation
+            for observation in observations
+            if observation.resource_id in self.resources
+        )
 
     async def _handle(
         self, pending: PendingCall, call: Call, launch: ProcessLaunch | None

@@ -8,12 +8,9 @@ from typing import Final, Literal
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.environment import candidate_environment
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope, SecretValue
-
-__all__ = ["kora_capture"]
 
 Owner = Literal["workload", "secrets", "credentials", "adapter"]
 OWNERS: Final[tuple[Owner, ...]] = ("workload", "secrets", "credentials", "adapter")

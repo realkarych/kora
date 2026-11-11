@@ -1,12 +1,10 @@
 import json
-import sqlite3
-from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, Field, TypeAdapter
-from sqlalchemy import insert, update
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, Dialect
@@ -17,15 +15,16 @@ from kora.db.graph_version_projection import (
 from kora.db.graph_version_reads import MAX_SQL_LENGTH
 from kora.db.migrations import upgrade_database
 from kora.db.tables import GRAPH_VERSION_SCOPE_INDEX, graph_version
+from kora.db.types import JsonObject
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
 from tests.db.test_graph_read_admission import executed_queries, sqlite_instructions
-from tests.support.databases import DatabaseKind, sqlite_settings
+from tests.support.databases import DatabaseKind, encoded_sqlite_settings
 
 IR_DIGEST = "1" * 64
 CONTRACT_DIGEST = "2" * 64
 DEPLOYMENT_DIGEST = "3" * 64
-RESOURCES = {"uri": "é"}
+RESOURCES: JsonObject = {"uri": "é"}
 SQLITE_FIELD_ORDINALS = (3, 4, 6, 7, 8, 10)
 SQLITE_COLUMN_TYPE_ONLY = 0x80
 SQLITE_COLUMN_LENGTH_ONLY = 0xC0
@@ -59,28 +58,18 @@ def expected_values(
 async def store(
     seeder: Seeder, graph: str, number: int, ir: str, *, marker: int | None = 1
 ) -> str:
-    version = seeder.new_id()
-    await seeder.connection.execute(
-        insert(graph_version).values(
-            id=version,
-            graph_id=graph,
-            number=number,
-            ir=ir,
-            ir_digest=IR_DIGEST,
-            source_digest=IR_DIGEST,
-            execution_contract="xyz",
-            execution_contract_digest=CONTRACT_DIGEST,
-            deployment_digest=DEPLOYMENT_DIGEST,
-            value_encoding_version=marker,
-            resolved_digests={},
-            resources=RESOURCES,
-            deployed_by="owner",
-            deployed_at=seeder.clock.now(),
-            status="active",
-            **seeder.stamps(),
-        )
+    return await seeder.graph_version(
+        graph,
+        number,
+        ir,
+        execution_contract="xyz",
+        value_encoding_version=marker,
+        ir_digest=IR_DIGEST,
+        source_digest=IR_DIGEST,
+        execution_contract_digest=CONTRACT_DIGEST,
+        deployment_digest=DEPLOYMENT_DIGEST,
+        resources=RESOURCES,
     )
-    return version
 
 
 async def project(
@@ -222,17 +211,7 @@ async def test_combined_graph_projection_transfers_only_the_exact_admitted_width
 async def test_combined_graph_projection_uses_sqlite_native_byte_widths(
     tmp_path: Path, encoding: SQLiteEncoding
 ) -> None:
-    path = tmp_path / "wide.db"
-    with closing(sqlite3.connect(path)) as raw:
-        raw.execute(
-            "PRAGMA encoding = 'UTF-16le'"
-            if encoding == "utf-16le"
-            else "PRAGMA encoding = 'UTF-16be'"
-        )
-        raw.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        raw.execute("DROP TABLE encoding_seed")
-        raw.commit()
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "wide.db", encoding)
     await upgrade_database(settings)
     database = Database(settings)
     ledger = ConnectionLedger(database)

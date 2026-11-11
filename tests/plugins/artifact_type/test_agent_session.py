@@ -750,7 +750,7 @@ def test_agent_session_provider_entry_point(kora_capture: Capture) -> None:
 def test_agent_session_provider_ignores_blocked_or_broken_diagnostics(
     sink: str,
 ) -> None:
-    arguments = ["-m", "tests.plugins.artifact_type.agent_session_sink_probe", sink]
+    arguments = ["-m", "tests.plugins.artifact_type.sink_probe", "agent_session", sink]
 
     process = run_python(arguments, {})
 

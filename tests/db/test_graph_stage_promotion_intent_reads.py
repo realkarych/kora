@@ -39,7 +39,7 @@ from tests.db.test_graph_stage_promotion_snapshot import (
     read,
     seed_documents,
 )
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings, sqlite_settings
 
 SCALAR_QUERY: str = "SELECT store_id, payload_digest, fence_incarnation"
 DOCUMENT_QUERY: str = " AS intent_present"
@@ -245,22 +245,11 @@ async def test_native_width_and_scalar_seeks_keep_the_same_snapshot(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "encoding_statement",
-    [
-        "PRAGMA encoding='UTF-8'",
-        "PRAGMA encoding='UTF-16le'",
-        "PRAGMA encoding='UTF-16be'",
-    ],
-)
+@pytest.mark.parametrize("encoding", ["UTF-8", "UTF-16le", "UTF-16be"])
 async def test_sqlite_operation_width_follows_its_exact_database_encoding(
-    tmp_path: Path, encoding_statement: str
+    tmp_path: Path, encoding: str
 ) -> None:
-    path = tmp_path / "encoding.sqlite3"
-    with closing(sqlite3.connect(path)) as seed:
-        seed.execute(encoding_statement)
-        seed.execute("CREATE TABLE encoding_anchor (id INTEGER)")
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "encoding.sqlite3", encoding)
     await upgrade_database(settings)
     database = Database(settings)
     operation = "x" * 256

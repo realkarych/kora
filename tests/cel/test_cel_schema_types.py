@@ -301,7 +301,7 @@ def test_cel_schema_types_resolve_references_only_through_the_closure() -> None:
     }
 
     result = types.document(schema)
-    referenced = types.reference(CANDIDATE)
+    referenced = types.document({"$ref": CANDIDATE})
 
     assert isinstance(result, Record)
     assert result.fields["best"].type is referenced
@@ -729,7 +729,7 @@ def test_cel_schema_bounds_follow_references_through_the_resolver() -> None:
     }
     types = SchemaTypes(documents.get)
 
-    variable = types.reference_variable(CANDIDATE)
+    variable = types.variable({"$ref": CANDIDATE})
 
     assert variable.bound == declared(element=declared(string_bytes=12))
 

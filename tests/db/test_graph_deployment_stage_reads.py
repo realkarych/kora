@@ -1,5 +1,3 @@
-import sqlite3
-from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from traceback import format_exception
@@ -29,7 +27,7 @@ from tests.db.test_graph_deployment_stage_migration import (
     stage_values,
 )
 from tests.db.test_graph_read_admission import executed_queries
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 
 def inventory_scope(scope: PreparedScope) -> GraphStageScope:
@@ -260,15 +258,7 @@ async def test_stage_inventory_masks_malformed_native_rows(
 async def test_stage_inventory_applies_native_sqlite_text_widths(
     tmp_path: Path, encoding: str
 ) -> None:
-    path = tmp_path / "utf16.db"
-    with closing(sqlite3.connect(path)) as seed:
-        seed.execute(
-            "PRAGMA encoding = 'UTF-16le'"
-            if encoding == "UTF-16le"
-            else "PRAGMA encoding = 'UTF-16be'"
-        )
-        seed.execute("CREATE TABLE encoding_anchor (id INTEGER)")
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "utf16.db", encoding)
     await upgrade_database(settings)
     database = Database(settings)
     try:

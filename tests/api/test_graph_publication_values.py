@@ -2,8 +2,6 @@ import asyncio
 import json
 import math
 import pickle
-import sqlite3
-from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -56,7 +54,7 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
 from tests.db.test_graph_read_admission import executed_queries
 from tests.engine.test_graph_resource_references import SCOPE, assert_refused
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 PRIVATE_WIRE = "private-wire-572"
 SQL_LOOKALIKE = PRIVATE_WIRE + " '); SELECT graph_version; \"\\"
@@ -302,13 +300,7 @@ async def test_fixed_publication_binds_own_the_inserted_native_row(
 async def test_fixed_publication_fields_keep_native_utf16_width(
     tmp_path: Path, encoding: str
 ) -> None:
-    path = tmp_path / "fixed-width.db"
-    with closing(sqlite3.connect(path)) as native:
-        native.execute(f"PRAGMA encoding = '{encoding}'")
-        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        native.execute("DROP TABLE encoding_seed")
-        native.commit()
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "fixed-width.db", encoding)
     await upgrade_database(settings)
     database = Database(settings)
     try:

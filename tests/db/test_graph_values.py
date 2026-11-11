@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import cast
 
 import pytest
-from sqlalchemy import insert, update
+from sqlalchemy import update
 
 from kora.db.connection import Database
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
@@ -22,7 +22,7 @@ from kora.db.tables import graph_version
 from kora.db.types import JsonObject, JsonValue
 from kora.ir import AgentConfig, export_ir, render_ir_json
 from tests.db.closing import ConnectionLedger
-from tests.db.seed import DIGEST, Seeder
+from tests.db.seed import Seeder, stored_graph_version
 from tests.ir.support import agent_document, deep_data
 
 
@@ -281,35 +281,9 @@ async def test_graph_version_encoding_round_trip(database: Database) -> None:
         source, {"parameters": source}, max_encoded_bytes=100_000
     )
     assert ledger.checkouts == 0
-    async with database.transaction() as connection:
-        seeder = Seeder(connection)
-        namespace_id = await seeder.namespace()
-        foreign_id = await seeder.namespace("foreign")
-        graph_id = await seeder.graph(namespace_id)
-        await connection.execute(
-            insert(graph_version).values(
-                id=seeder.new_id(),
-                graph_id=graph_id,
-                number=1,
-                ir=encoded.ir,
-                execution_contract=encoded.execution_contract,
-                value_encoding_version=encoded.value_encoding_version,
-                ir_digest=DIGEST,
-                source_digest=DIGEST,
-                execution_contract_digest=DIGEST,
-                deployment_digest=DIGEST,
-                resolved_digests={},
-                resources={},
-                deployed_by="owner",
-                deployed_at=seeder.clock.now(),
-                status="active",
-                **seeder.stamps(),
-            )
-        )
 
-    async with database.read_transaction() as connection:
-        row = await graph_version_by_number(connection, namespace_id, graph_id, 1)
-        foreign = await graph_version_by_number(connection, foreign_id, graph_id, 1)
+    row, foreign = await stored_graph_version(database, encoded)
+
     assert ledger.outstanding == database.units_in_flight() == 0
     assert row is not None
     decoded = read_graph_values(
