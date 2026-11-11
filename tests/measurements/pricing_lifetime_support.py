@@ -2642,7 +2642,7 @@ def pricing_provenance() -> dict[str, JsonValue]:
     for relative in (
         "pyproject.toml",
         "uv.lock",
-        ".github/workflows/ci.yml",
+        ".github/workflows/daily-lanes.yml",
         "tests/measurements/pricing_lifetime_support.py",
         "tests/measurements/metadata_lifetime_support.py",
         "tests/measurements/test_metadata_database_lifetime.py",

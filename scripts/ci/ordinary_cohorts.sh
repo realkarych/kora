@@ -1,5 +1,7 @@
 set -eo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/scheduled_lanes.sh"
+
 select_groups() {
   read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"
   case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
@@ -13,13 +15,6 @@ select_groups() {
   first=(
     tests/architecture/test_ir_measurement_ci.py
     tests/architecture/test_no_suppression.py
-    tests/conformance/test_lifetime_helper_phases.py
-    tests/conformance/test_lifetime_measurement_cohorts.py
-    tests/conformance/test_lifetime_parent_exit.py
-    tests/conformance/test_lifetime_pending_helpers.py
-    tests/conformance/test_lifetime_resume.py
-    tests/conformance/test_lifetime_rpc_concurrency.py
-    tests/conformance/test_lifetime_services.py
     tests/conformance/test_local_process_lifetime.py
     tests/ir/test_structured_schema_assertions.py
     tests/measurements/test_ir_measurement_evidence.py
@@ -38,11 +33,10 @@ select_groups() {
     tests/conformance/test_recovered_process_lifetime.py
     tests/engine/test_graph_projection_paths.py
     tests/conformance/test_storage_case_runner.py
-    tests/conformance/test_lifetime_journal_recovery.py
   )
   second=(tests/conformance tests/ir/test_inline_schema_resources.py tests/ir/test_fan_out_type_resources.py tests/ir/test_export_type_resources.py tests/ir/test_diagnostic_collection.py tests/ir/test_subgraph_interface_resources.py --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py)
   second+=(tests/ir/test_structured_schema_container_counts.py tests/plugins/artifact_type/test_agent_session.py)
-  for path in "${first[@]}" "${third[@]}"; do
+  for path in "${first[@]}" "${third[@]}" "${KORA_SCHEDULED_LIFETIME_MODULES[@]}"; do
     second+=("--ignore=$path")
   done
   engine=(

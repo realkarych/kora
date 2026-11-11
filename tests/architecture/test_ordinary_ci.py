@@ -9,7 +9,11 @@ from typing import cast
 import pytest
 
 from tests.measurements.storage_evidence_common import EvidenceFailure, junit_nodes
-from tests.scaffold_evidence import COHORTS, GENERAL_ARGUMENTS
+from tests.scaffold_evidence import (
+    COHORTS,
+    GENERAL_ARGUMENTS,
+    SCHEDULED_LIFETIME_MODULES,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 COHORT_SCRIPT = ROOT / "scripts/ci/ordinary_cohorts.sh"
@@ -32,13 +36,6 @@ INTEGRATION_SELECTION = (
 FIRST_MODULES = (
     "tests/architecture/test_ir_measurement_ci.py",
     "tests/architecture/test_no_suppression.py",
-    "tests/conformance/test_lifetime_helper_phases.py",
-    "tests/conformance/test_lifetime_measurement_cohorts.py",
-    "tests/conformance/test_lifetime_parent_exit.py",
-    "tests/conformance/test_lifetime_pending_helpers.py",
-    "tests/conformance/test_lifetime_resume.py",
-    "tests/conformance/test_lifetime_rpc_concurrency.py",
-    "tests/conformance/test_lifetime_services.py",
     "tests/conformance/test_local_process_lifetime.py",
     "tests/ir/test_structured_schema_assertions.py",
     "tests/measurements/test_ir_measurement_evidence.py",
@@ -57,7 +54,6 @@ THIRD_MODULES = (
     "tests/conformance/test_recovered_process_lifetime.py",
     "tests/engine/test_graph_projection_paths.py",
     "tests/conformance/test_storage_case_runner.py",
-    "tests/conformance/test_lifetime_journal_recovery.py",
 )
 ENGINE_MODULES = (
     "tests/engine/test_graph_execution_contract.py",
@@ -156,7 +152,8 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         for name in ("general", *COHORTS)
     }
     cohorts = {cohort: selected_files(arrays[cohort]) for cohort in COHORTS}
-    general = selected_files(arrays["general"])
+    scheduled = frozenset(SCHEDULED_LIFETIME_MODULES)
+    general = selected_files(arrays["general"]) - scheduled
 
     assert result.returncode == 0, result.stderr
     assert tuple(arrays["first"]) == FIRST_MODULES
@@ -216,6 +213,8 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     }
 
     assert all(cohorts.values())
+    assert scheduled <= selected_files(arrays["general"])
+    assert all(scheduled.isdisjoint(files) for files in cohorts.values())
     assert engine <= cohorts["measurements"] | cohorts["other"]
     assert surface <= cohorts["integration"]
     assert engine.isdisjoint(
