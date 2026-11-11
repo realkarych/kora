@@ -39,13 +39,14 @@ async def test_command_outcome_precedes_terminal_report_and_journal_removal(
     tmp_path: Path, outcome: OriginalOutcome
 ) -> None:
     clock = ControlledLifetimeClock()
+    progress = Progress()
     owner = ParentLifetime(
         clock=clock,
-        launcher=installed_launcher(tmp_path),
+        launcher=ProgressLauncher(installed_launcher(tmp_path), progress),
         await_command_outcome=True,
     )
     try:
-        async with asyncio.timeout(5):
+        async with progress.within(5):
             tree = await owner.reserve(
                 ReservationRequest(
                     operation_id=new_operation_id(),
@@ -85,13 +86,14 @@ async def test_missing_command_outcome_uses_original_close_deadline(
     tmp_path: Path,
 ) -> None:
     clock = ControlledLifetimeClock()
+    progress = Progress()
     owner = ParentLifetime(
         clock=clock,
-        launcher=installed_launcher(tmp_path),
+        launcher=ProgressLauncher(installed_launcher(tmp_path), progress),
         await_command_outcome=True,
     )
     try:
-        async with asyncio.timeout(5):
+        async with progress.within(5):
             await owner.ready()
             invocation = owner.mutations.directory
             assert invocation is not None
@@ -118,13 +120,14 @@ async def test_late_failed_command_outcome_distinguishes_durable_publication(
     tmp_path: Path, publication_failed: bool
 ) -> None:
     clock = ControlledLifetimeClock()
+    progress = Progress()
     owner = ParentLifetime(
         clock=clock,
-        launcher=installed_launcher(tmp_path),
+        launcher=ProgressLauncher(installed_launcher(tmp_path), progress),
         await_command_outcome=True,
     )
     try:
-        async with asyncio.timeout(5):
+        async with progress.within(5):
             tree = await owner.reserve(
                 ReservationRequest(
                     operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
@@ -244,9 +247,10 @@ async def test_retained_endpoint_reports_late_failure_before_unknown(
     tmp_path: Path,
 ) -> None:
     clock = ControlledLifetimeClock()
+    progress = Progress()
     owner = ParentLifetime(
         clock=clock,
-        launcher=installed_launcher(tmp_path),
+        launcher=ProgressLauncher(installed_launcher(tmp_path), progress),
         await_command_outcome=True,
     )
     retained: LifetimeEndpoint | None = None
@@ -257,7 +261,7 @@ async def test_retained_endpoint_reports_late_failure_before_unknown(
                 listener.bind(address)
                 listener.listen(1)
                 listener.setblocking(False)
-                async with asyncio.timeout(10):
+                async with progress.within(10):
                     tree = await owner.reserve(
                         ReservationRequest(
                             operation_id=new_operation_id(),
@@ -301,6 +305,7 @@ async def test_retained_endpoint_reports_late_failure_before_unknown(
                         child.token, acquired.operation_id, acquired.revision
                     )
                     endpoint, _ = await asyncio.get_running_loop().sock_accept(listener)
+                    progress.advanced()
                     retained = LifetimeEndpoint(
                         owner, child.token.resource_id, endpoint
                     )
