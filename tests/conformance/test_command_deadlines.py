@@ -20,6 +20,7 @@ from tests.conformance.lifetime_support import (
     read_probe,
     stall_barrier,
 )
+from tests.conformance.progress_guard import Progress, ProgressLauncher
 from tests.support.event_loop import turn
 
 
@@ -36,8 +37,11 @@ async def test_command_owns_interrupted_listener_receipt_and_startup_deadline(
         )
         barrier = stall_barrier(resources, tmp_path)
         launcher = barrier.launcher(phase="after", pause_at=(1, 7))
+        progress = Progress()
         command = ConformanceCommand(
-            capture.diagnostics, clock=clock, launcher=launcher
+            capture.diagnostics,
+            clock=clock,
+            launcher=ProgressLauncher(launcher, progress),
         )
         request = ChildInput(
             protocol=ProtocolName.SECRETS, name="env", fixtures="unused.fixture"
@@ -50,7 +54,7 @@ async def test_command_owns_interrupted_listener_receipt_and_startup_deadline(
         )
         with expected:
             try:
-                async with asyncio.timeout(10):
+                async with progress.within(10):
                     if mode == "setup_failure":
                         assert (
                             await read_probe(
@@ -65,6 +69,7 @@ async def test_command_owns_interrupted_listener_receipt_and_startup_deadline(
                         actual.monotonic_ns() + 5_000_000_000, actual
                     ):
                         clock.advance(15_000_000_000)
+                    await launcher.wait_for_start(7, operation)
                     with await barrier.entered(
                         actual.monotonic_ns() + 5_000_000_000, actual
                     ):

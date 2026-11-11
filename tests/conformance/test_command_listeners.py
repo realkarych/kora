@@ -22,6 +22,7 @@ from tests.conformance.lifetime_support import (
     dispose_test_owner,
     installed_launcher,
 )
+from tests.conformance.progress_guard import Progress, ProgressLauncher
 
 
 @pytest.mark.asyncio
@@ -31,12 +32,13 @@ async def test_command_listeners_stay_in_the_registered_child_tree(
 ) -> None:
     clock = ControlledLifetimeClock()
     original_cwd = Path.cwd()
+    progress = Progress()
     owner = ParentLifetime(
         clock=clock,
-        launcher=installed_launcher(tmp_path),
+        launcher=ProgressLauncher(installed_launcher(tmp_path), progress),
     )
     try:
-        async with asyncio.timeout(5):
+        async with progress.within(5):
             tree = await owner.reserve(
                 ReservationRequest(
                     operation_id=new_operation_id(),
@@ -99,6 +101,7 @@ async def test_command_listeners_stay_in_the_registered_child_tree(
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
+                    progress.advanced()
                     loop = asyncio.get_running_loop()
                     try:
                         for listener, name in zip(
@@ -106,6 +109,7 @@ async def test_command_listeners_stay_in_the_registered_child_tree(
                         ):
                             listener.setblocking(False)
                             endpoint, _ = await loop.sock_accept(listener)
+                            progress.advanced()
                             with endpoint:
                                 await loop.sock_sendall(endpoint, b"a")
                                 assert await loop.sock_recv(endpoint, 1) == name

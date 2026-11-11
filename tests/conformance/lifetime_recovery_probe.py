@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 from time import monotonic_ns
-from typing import Literal, Self
+from typing import Final, Literal, Self
 
 from pydantic import Field, model_validator
 
@@ -88,10 +88,17 @@ async def acknowledgment(deadline: int) -> bytes:
         readiness.close()
 
 
+STAGE_PROGRESS: Final = (
+    int(sys.argv[4]) if __name__ == "__main__" and len(sys.argv) > 4 else None
+)
+
+
 def report_stage(stage: str) -> None:
     record = f"recovery_probe stage={stage} monotonic_ns={monotonic_ns()}\n".encode()
     assert len(record) <= 128
     assert os.write(2, record) == len(record)
+    if STAGE_PROGRESS is not None:
+        assert os.write(STAGE_PROGRESS, b"s") == 1
 
 
 class PairPreparationRefused(Exception):
@@ -277,6 +284,8 @@ async def retain(home: Path, mode: str, phase: str = "complete") -> None:
 
 
 if __name__ == "__main__":
+    if STAGE_PROGRESS is not None:
+        os.set_inheritable(STAGE_PROGRESS, False)
     asyncio.run(
         retain(
             Path(sys.argv[1]),

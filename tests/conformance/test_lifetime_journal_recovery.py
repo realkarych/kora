@@ -43,6 +43,7 @@ from tests.conformance.lifetime_support import (
     limits,
     retained_live_invocation,
 )
+from tests.conformance.progress_guard import Progress
 
 
 async def reap_recovered(
@@ -782,6 +783,7 @@ async def test_live_probe_readiness_timeout_retains_joined_diagnostics(
     expected_phase = (
         "before_ack_barrier" if when == "before_ack" else "consumer_handoff"
     )
+    progress = Progress()
 
     async def acquire() -> None:
         async with retained_live_invocation(
@@ -791,6 +793,7 @@ async def test_live_probe_readiness_timeout_retains_joined_diagnostics(
             entered=entered,
             started=started,
             evidence=evidence,
+            progress=progress,
         ) as acquired:
             observers.extend(acquired.processes)
             entered.set()
@@ -800,7 +803,8 @@ async def test_live_probe_readiness_timeout_retains_joined_diagnostics(
         nonlocal initial_readiness_reached
         task = asyncio.create_task(acquire())
         try:
-            await asyncio.wait_for(entered.wait(), 5)
+            async with progress.within(5):
+                await entered.wait()
             initial_readiness_reached = True
             assert not evidence
             await asyncio.wait_for(never_ready.wait(), 0)
@@ -822,6 +826,7 @@ async def test_live_probe_readiness_timeout_retains_joined_diagnostics(
     assert "returncode=0 stderr_truncated=False" in evidence[0]
     assert "stage=report_ready" in evidence[0]
     assert "stage=ack_received" in evidence[0]
+    assert progress.advances > 0
     assert len(started) == 1
     assert started[0].returncode == 0
     assert NativeIdentityReader().read(started[0].pid).state is IdentityState.ABSENT

@@ -29,6 +29,7 @@ from tests.conformance.lifetime_support import (
     installed_launcher,
     stall_barrier,
 )
+from tests.conformance.progress_guard import Progress, ProgressLauncher
 from tests.support.event_loop import turn
 
 
@@ -168,13 +169,14 @@ async def test_late_failed_command_outcome_distinguishes_durable_publication(
 @pytest.mark.asyncio
 async def test_scoped_cleanup_does_not_wait_for_command_outcome(tmp_path: Path) -> None:
     clock = ControlledLifetimeClock()
+    progress = Progress()
     owner = ParentLifetime(
         clock=clock,
-        launcher=installed_launcher(tmp_path),
+        launcher=ProgressLauncher(installed_launcher(tmp_path), progress),
         await_command_outcome=True,
     )
     try:
-        async with asyncio.timeout(5):
+        async with progress.within(5):
             tree = await owner.reserve(
                 ReservationRequest(
                     operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE

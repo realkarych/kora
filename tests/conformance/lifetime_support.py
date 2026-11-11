@@ -4,8 +4,13 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import AsyncGenerator, Sequence
-from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
+from collections.abc import AsyncGenerator, Generator, Sequence
+from contextlib import (
+    AsyncExitStack,
+    ExitStack,
+    asynccontextmanager,
+    contextmanager,
+)
 from dataclasses import dataclass
 from io import FileIO
 from pathlib import Path
@@ -54,6 +59,7 @@ from tests.conformance.lifetime_recovery_probe import (
     ControlledLifetimeClock,
     RecoveryProbeReport,
 )
+from tests.conformance.progress_guard import Progress
 from tests.fixtures.provider_tooling.src.kora_tooling_fixture.clock import ProbeClock
 from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
     DeferredReaper,
@@ -267,6 +273,26 @@ async def join_live_probe(
                 original.add_note(note)
 
 
+@contextmanager
+def stage_progress(progress: Progress) -> Generator[int]:
+    reading, writing = os.pipe()
+    try:
+        loop = asyncio.get_running_loop()
+
+        def received() -> None:
+            if os.read(reading, 64):
+                progress.advanced()
+
+        loop.add_reader(reading, received)
+        try:
+            yield writing
+        finally:
+            loop.remove_reader(reading)
+    finally:
+        os.close(writing)
+        os.close(reading)
+
+
 @asynccontextmanager
 async def retained_live_invocation(
     home: Path,
@@ -281,6 +307,7 @@ async def retained_live_invocation(
     cleanup_release: asyncio.Event | None = None,
     evidence: list[str] | None = None,
     handoff: HandoffProgress | None = None,
+    progress: Progress | None = None,
 ) -> AsyncGenerator[RetainedInvocation]:
     actual = SystemClock() if clock is None else clock
     closing = CleanupDeadline(actual, 5_000_000_000) if cleanup is None else cleanup
@@ -296,12 +323,24 @@ async def retained_live_invocation(
 
     with ExitStack() as handles:
         diagnostics = handles.enter_context(TemporaryFile())
+        stages: tuple[int, ...] = ()
+        if progress is not None:
+            stages = (handles.enter_context(stage_progress(progress)),)
         process = subprocess.Popen(
-            [sys.executable, "-I", str(RECOVERY_PROBE), str(home), mode, phase],
+            [
+                sys.executable,
+                "-I",
+                str(RECOVERY_PROBE),
+                str(home),
+                mode,
+                phase,
+                *(str(descriptor) for descriptor in stages),
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=diagnostics,
             close_fds=True,
+            pass_fds=stages,
             bufsize=0,
         )
         handles.callback(process.poll)

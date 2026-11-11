@@ -30,6 +30,7 @@ from tests.conformance.lifetime_support import (
     dispose_test_owner,
     installed_launcher,
 )
+from tests.conformance.progress_guard import Progress, ProgressLauncher
 from tests.support.event_loop import turn
 
 
@@ -57,6 +58,7 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
     mode = "cancel_frame" if cancel_join else mode
     with ExitStack() as resources:
         clock = ControlledLifetimeClock()
+        progress = Progress()
         owner = ParentLifetime(
             clock=clock,
             limits=LifetimeLimits(
@@ -65,11 +67,11 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                 kill_observation_seconds=2.0,
                 drain_seconds=1.0,
             ),
-            launcher=installed_launcher(tmp_path),
+            launcher=ProgressLauncher(installed_launcher(tmp_path), progress),
         )
         running: asyncio.Task[ClosureReport] | None = None
         try:
-            async with asyncio.timeout(10):
+            async with progress.within(10):
                 tree = await owner.reserve(
                     ReservationRequest(
                         operation_id=new_operation_id(),
@@ -126,6 +128,7 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                     endpoint, _ = await asyncio.wait_for(
                         asyncio.get_running_loop().sock_accept(listener), 5
                     )
+                    progress.advanced()
                     parent = LifetimeEndpoint(owner, child.token.resource_id, endpoint)
                     closing_peer: str | bytes | None = None
                     if mode in {"eof", "terminal", "idle"}:
@@ -133,18 +136,20 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                         loop = asyncio.get_running_loop()
                         if mode == "idle":
                             marker, peer = await loop.sock_recvfrom(feedback, 1)
+                            progress.advanced()
                             assert marker == b"r"
                             clock.advance(
                                 2 * duration_ns(owner.limits.acquisition_seconds)
                             )
                             await loop.sock_sendto(feedback, b"s", peer)
                             assert await loop.sock_recv(feedback, 1) == b"p"
+                            progress.advanced()
                             assert owner.admission_open
                         marker, closing_peer = await loop.sock_recvfrom(feedback, 1)
+                        progress.advanced()
                         assert marker == b"c"
 
-                    frontier_deadline = asyncio.get_running_loop().time() + 5
-                    async with asyncio.timeout_at(frontier_deadline):
+                    async with progress.within(5) as frontier:
                         if closing_peer is not None:
                             assert running is not None
                             loop = asyncio.get_running_loop()
@@ -153,10 +158,8 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                         elif mode.startswith("header_"):
                             running = asyncio.create_task(parent.run())
                             loop = asyncio.get_running_loop()
-                            marker, peer = await asyncio.wait_for(
-                                loop.sock_recvfrom(feedback, 1),
-                                max(0, frontier_deadline - loop.time()),
-                            )
+                            marker, peer = await loop.sock_recvfrom(feedback, 1)
+                            progress.advanced()
                             assert marker == b"r"
                             retained = parent.control_bytes
                             resource_count = len(owner.records)
@@ -167,18 +170,13 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                 clock.advance(original_interval // 2)
                             original_deadline = clock.monotonic_ns() + original_interval
                             await loop.sock_sendto(feedback, b"s", peer)
-                            assert (
-                                await asyncio.wait_for(
-                                    loop.sock_recv(feedback, 1),
-                                    max(0, frontier_deadline - loop.time()),
-                                )
-                                == b"p"
-                            )
+                            assert await loop.sock_recv(feedback, 1) == b"p"
+                            progress.advanced()
                             if mode == "header_partial":
                                 while not running.done() and (
                                     unread_bytes(endpoint) or not clock.waiters
                                 ):
-                                    assert loop.time() < frontier_deadline
+                                    assert loop.time() < frontier.deadline
                                     await turn()
                                 assert not running.done(), running.result()
                                 assert not parent.pending
@@ -189,9 +187,7 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                 clock.advance(
                                     original_deadline - clock.monotonic_ns() + 1
                                 )
-                            report = await asyncio.wait_for(
-                                running, max(0, frontier_deadline - loop.time())
-                            )
+                            report = await running
                             assert len(owner.records) == resource_count
                         elif mode.startswith("cancel"):
                             running = asyncio.create_task(parent.run())
@@ -202,20 +198,15 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                 else (b"r", b"d", b"s", b"p")
                             )
                             for phase in phases:
-                                assert (
-                                    await asyncio.wait_for(
-                                        loop.sock_recv(feedback, 1),
-                                        max(0, frontier_deadline - loop.time()),
-                                    )
-                                    == phase
-                                )
+                                assert await loop.sock_recv(feedback, 1) == phase
+                                progress.advanced()
                             while not (
                                 owner.transport_execution_bytes
                                 if mode == "cancel_execution"
                                 else owner.transport_control_bytes
                                 - ENDPOINT_CONTROL_BYTES
                             ):
-                                assert loop.time() < frontier_deadline
+                                assert loop.time() < frontier.deadline
                                 await turn()
                             assert not parent.pending
                             assert any(
