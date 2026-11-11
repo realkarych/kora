@@ -8,6 +8,7 @@ from functools import partial
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
+    ACCEPTANCE_PROGRESS_NS,
     ENVELOPE_BYTES,
     FRAME_PROGRESS_NS,
     SECTION_FRAME_BYTES,
@@ -402,7 +403,7 @@ async def deliver_workload(
             channel, ACCEPT_WORKLOAD, request_id, (encoded,), clock, executor=executor
         )
         _, payload = await channel.read_typed_frame(
-            clock.monotonic_ns() + FRAME_PROGRESS_NS, reservations
+            clock.monotonic_ns() + ACCEPTANCE_PROGRESS_NS, reservations
         )
         read_delivery(payload, request_id, "accepted")
     finally:

@@ -8,6 +8,8 @@ import sys
 import threading
 import weakref
 from collections.abc import AsyncGenerator, Generator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from kora.ir.json import JsonObjectField
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import Level, LoggingSettings
 from kora.plugins.runtime.local.channel import (
+    ACCEPTANCE_PROGRESS_NS,
     ENVELOPE_BYTES,
     FrameType,
     SectionDeclaration,
@@ -28,6 +31,7 @@ from kora.plugins.runtime.local.channel import (
     read_error_envelope,
     workload_digest,
 )
+from kora.plugins.runtime.local.control import deliver_workload
 from kora.plugins.runtime.local.serving import FIRST_FRAME_NS, decoded_workload
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
@@ -49,7 +53,7 @@ from kora.runner.registry import (
     write_atomically,
 )
 from tests.plugins.runtime.local.frames_support import StepClock
-from tests.support.local_delivery import delivery_server
+from tests.support.local_delivery import DeliveryServer, delivery_server
 from tests.support.local_peers import (
     CONDITION_SECONDS,
     FAR_NS,
@@ -702,6 +706,76 @@ async def test_control_frames_expiry_during_decode_closes_sticky_gate(
             decoder.release.set()
             channel.close()
             await asyncio.gather(delivering, return_exceptions=True)
+
+
+def acceptance_pending(clock: StepClock) -> bool:
+    expected = clock.monotonic_ns() + ACCEPTANCE_PROGRESS_NS
+    return any(at == expected and not woken.done() for at, woken in clock.sleepers)
+
+
+@dataclass(frozen=True)
+class AwaitedAcceptance:
+    live: DeliveryServer
+    clock: StepClock
+    decoder: GatedDecoder
+    delivering: asyncio.Task[None]
+
+
+@asynccontextmanager
+async def acceptance_awaited_during_decode(
+    tmp_path: Path, capture: Capture
+) -> AsyncGenerator[AwaitedAcceptance]:
+    decoder = GatedDecoder()
+    clock = StepClock()
+    async with delivery_server(tmp_path, capture, clock=clock, decoder=decoder) as live:
+        delivering = asyncio.create_task(
+            deliver_workload(
+                live.entry.socket_path,
+                live.entry.runner,
+                live.work,
+                kernel_source(NativeIdentityReader()),
+                live.runtime.executor,
+                clock,
+                "delivery-1",
+            )
+        )
+        try:
+            await until(decoder.entered.is_set)
+            await until(lambda: acceptance_pending(clock))
+            yield AwaitedAcceptance(live, clock, decoder, delivering)
+        finally:
+            decoder.release.set()
+            await asyncio.gather(delivering, return_exceptions=True)
+            await until(decoder.finished.is_set)
+
+
+async def test_workload_acceptance_waits_for_decode_inside_its_budget(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with acceptance_awaited_during_decode(tmp_path, kora_capture) as awaited:
+        awaited.clock.advance(ACCEPTANCE_PROGRESS_NS - 1)
+        awaited.decoder.release.set()
+        await awaited.delivering
+        status = await client(awaited.live.entry.socket_path, awaited.clock)
+        try:
+            observed = await asked_status(status, awaited.clock)
+        finally:
+            status.close()
+
+    assert observed.holds_workload
+
+
+async def test_workload_acceptance_expires_at_its_budget_during_decode(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with acceptance_awaited_during_decode(tmp_path, kora_capture) as awaited:
+        awaited.clock.advance(ACCEPTANCE_PROGRESS_NS)
+        with pytest.raises(ChannelError) as expired:
+            await awaited.delivering
+        decoding = not awaited.decoder.finished.is_set()
+
+    assert expired.value.reason is ChannelFailure.DEADLINE
+    assert decoding
 
 
 @pytest_asyncio.fixture(autouse=True)
