@@ -35,7 +35,11 @@ from kora.engine.graph_cel_facts import GraphCelFacts
 from kora.ir.approval_compilation import ApprovalPrerequisite, checked_approval_sites
 from kora.ir.approval_defaults import ApprovalDefaultChecks
 from kora.ir.approval_predicates import ApprovalPredicateChecks
-from kora.ir.branch_expressions import BranchExpressionChecks, checked_branch_sites
+from kora.ir.branch_expressions import (
+    BranchExpressionChecks,
+    BranchExpressionResult,
+    checked_branch_sites,
+)
 from kora.ir.cel_inventory_admission import CheckedInventoryAdmission
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
@@ -47,10 +51,14 @@ from kora.ir.retry_expressions import (
     CheckedRetrySite,
     InfrastructureRetryPrerequisite,
     RetryExpressionChecks,
+    RetryExpressionResult,
     checked_infrastructure_retry_site,
     checked_retry_sites,
 )
-from kora.ir.trigger_expressions import checked_sensor_trigger_sites
+from kora.ir.trigger_expressions import (
+    SensorTriggerExpressionResult,
+    checked_sensor_trigger_sites,
+)
 from kora.ir.wait_expressions import (
     WaitExpressionChecks,
     WaitExpressionResult,
@@ -102,6 +110,7 @@ PARAMETER_SCHEMA: JsonObject = {
     },
 }
 UNRESOLVED_SCHEMA: JsonObject = {"$ref": "#/$defs/missing"}
+PRIVATE_SCHEMA: JsonObject = {"$ref": "https://example.invalid/private-schema"}
 PATTERN_OFFSET: int = len('"a".matches(')
 APPROVAL_PATTERN_OFFSET: int = len('true || "😀".matches(')
 REFUSAL_MARKER: str = "private-native-refusal-marker"
@@ -194,6 +203,25 @@ def observe_checker_construction() -> Generator[list[str]]:
         sys.setprofile(previous)
 
 
+@contextmanager
+def observe_rendering_boundary() -> Generator[tuple[list[str], list[object]]]:
+    checkers: list[str] = []
+    submitted: list[object] = []
+    previous = sys.getprofile()
+
+    def observe(frame: FrameType, event: str, argument: object) -> None:
+        if event == "call" and frame.f_code in CHECKER_CONSTRUCTORS:
+            checkers.append(frame.f_code.co_qualname)
+        elif event == "call" and frame.f_code is EvaluationThread.submit.__code__:
+            submitted.append(frame.f_locals.get("work"))
+
+    try:
+        sys.setprofile(observe)
+        yield checkers, submitted
+    finally:
+        sys.setprofile(previous)
+
+
 def with_infrastructure(
     document: GraphDocument, predicate: str | None
 ) -> GraphDocument:
@@ -264,6 +292,174 @@ def check_mixed() -> None:
     assert_settled(owner)
 
 
+def stored_failure(
+    root: dict[str, object],
+    failure: dict[str, object],
+    *,
+    schema: bool = False,
+) -> GraphDocument:
+    return document_for(
+        params=PRIVATE_SCHEMA if schema else None,
+        nodes={"first": root},
+        bodies={"unused": {"nodes": {"failure": failure}}},
+    )
+
+
+def approval_failures(*failures: dict[str, object]) -> GraphDocument:
+    return document_for(
+        nodes={"first": gate(predicate="true")},
+        bodies={
+            "unused": {
+                "nodes": {
+                    f"failure_{index}": failure
+                    for index, failure in enumerate(failures)
+                }
+            }
+        },
+    )
+
+
+def assert_branch_static(
+    typed: GraphCelResult,
+    syntax: GraphCelResult,
+    context: GraphCelResult,
+    schema: GraphCelResult,
+) -> None:
+    assert isinstance(typed, BranchExpressionResult)
+    assert typed.branch_expressions_complete
+    assert len(typed.diagnostics.errors) == 1
+    assert typed.diagnostics.errors[0].path == (
+        "graph",
+        "subgraphs",
+        "unused",
+        "nodes",
+        "failure",
+        "config",
+        "cases",
+        0,
+        "when",
+    )
+    assert isinstance(syntax, BranchExpressionResult)
+    assert syntax.syntax_unresolved == 1
+    assert isinstance(context, BranchExpressionResult)
+    assert context.context_unresolved == 1
+    assert isinstance(schema, BranchExpressionResult)
+    assert schema.schema_unresolved == 1
+    assert not typed.branch_expressions_valid
+    assert not syntax.branch_expressions_valid
+    assert not context.branch_expressions_valid
+    assert not schema.branch_expressions_valid
+
+
+def assert_wait_static(
+    typed: GraphCelResult,
+    syntax: GraphCelResult,
+    context: GraphCelResult,
+    schema: GraphCelResult,
+) -> None:
+    assert isinstance(typed, WaitExpressionResult)
+    assert typed.wait_expressions_complete
+    assert len(typed.diagnostics.errors) == 1
+    assert typed.diagnostics.errors[0].path == (
+        "graph",
+        "subgraphs",
+        "unused",
+        "nodes",
+        "failure",
+        "config",
+        "event",
+        "match",
+    )
+    assert isinstance(syntax, WaitExpressionResult)
+    assert syntax.syntax_unresolved == 1
+    assert isinstance(context, WaitExpressionResult)
+    assert context.context_unresolved == 1
+    assert isinstance(schema, WaitExpressionResult)
+    assert schema.schema_unresolved == 1
+    assert not typed.wait_expressions_valid
+    assert not syntax.wait_expressions_valid
+    assert not context.wait_expressions_valid
+    assert not schema.wait_expressions_valid
+
+
+def assert_retry_static(
+    typed: GraphCelResult,
+    syntax: GraphCelResult,
+    context: GraphCelResult,
+    schema: GraphCelResult,
+    body: GraphCelResult,
+) -> None:
+    assert isinstance(typed, RetryExpressionResult)
+    assert typed.retry_expressions_complete
+    assert len(typed.diagnostics.errors) == 1
+    assert typed.diagnostics.errors[0].path == (
+        "graph",
+        "subgraphs",
+        "unused",
+        "nodes",
+        "failure",
+        "retry",
+        "predicate",
+    )
+    assert isinstance(syntax, RetryExpressionResult)
+    assert syntax.syntax_unresolved == 1
+    assert isinstance(context, RetryExpressionResult)
+    assert context.context_unresolved == 1
+    assert isinstance(schema, RetryExpressionResult)
+    assert schema.schema_unresolved == 1
+    assert not typed.retry_expressions_valid
+    assert not syntax.retry_expressions_valid
+    assert not context.retry_expressions_valid
+    assert not schema.retry_expressions_valid
+    assert isinstance(body, RetryExpressionResult)
+    assert body.context_unresolved == 1
+    assert not body.retry_expressions_complete
+
+
+def assert_approval_static(
+    schema: GraphCelResult,
+    context: GraphCelResult,
+    typed: GraphCelResult,
+) -> None:
+    assert schema is ApprovalPrerequisite.SCHEMA_UNRESOLVED
+    assert context is ApprovalPrerequisite.CONTEXT_UNRESOLVED
+    assert isinstance(typed, DiagnosticCollection)
+    assert typed.errors_omitted == 0
+    assert [(error.code, error.path) for error in typed.errors] == [
+        (
+            "IR011",
+            (
+                "graph",
+                "subgraphs",
+                "unused",
+                "nodes",
+                name,
+                "config",
+                "approve_when",
+            ),
+        )
+        for name in ("failure_0", "failure_1")
+    ]
+
+
+def assert_sensor_static(typed: GraphCelResult, syntax: GraphCelResult) -> None:
+    assert isinstance(typed, SensorTriggerExpressionResult)
+    assert len(typed.diagnostics.errors) == 1
+    assert typed.diagnostics.errors[0].path == (
+        "graph",
+        "triggers",
+        1,
+        "poll",
+        "until",
+    )
+    assert typed.expressions_unresolved == 0
+    assert not typed.expressions_valid
+    assert isinstance(syntax, SensorTriggerExpressionResult)
+    assert syntax.expressions_unresolved == 1
+    assert not syntax.diagnostics.errors
+    assert not syntax.expressions_valid
+
+
 def check_refusals() -> None:
     document = mixed_document()
     single_family = branch_document(
@@ -274,6 +470,48 @@ def check_refusals() -> None:
         wait_node=wait("inputs.unavailable.ok", poll=True, inputs=unavailable_inputs())
     )
     approval_syntax = document_for(nodes={"gate": gate(predicate="true &&")})
+    valid = '"x".matches("^x$")'
+    branch_typed_document = stored_failure(branch(valid), branch("1"))
+    branch_syntax_document = stored_failure(branch(valid), branch("true &&"))
+    branch_context_document = stored_failure(
+        branch(valid), branch("inputs.missing", inputs=unavailable_inputs())
+    )
+    branch_schema_document = stored_failure(
+        branch(valid), branch("params.ok"), schema=True
+    )
+    wait_typed_document = stored_failure(wait(valid), wait("1"))
+    wait_syntax_document = stored_failure(wait(valid), wait("true &&"))
+    wait_context_document = stored_failure(
+        wait(valid), wait("inputs.missing", inputs=unavailable_inputs())
+    )
+    wait_schema_document = stored_failure(wait(valid), wait("params.ok"), schema=True)
+    retry_typed_document = stored_failure(retrying(valid), retrying("1"))
+    retry_syntax_document = stored_failure(retrying(valid), retrying("true &&"))
+    retry_context_document = stored_failure(
+        retrying(valid), retrying("inputs.missing", inputs=unavailable_inputs())
+    )
+    retry_schema_document = stored_failure(
+        retrying(valid), retrying("params.ok"), schema=True
+    )
+    retry_body_document = document_for(
+        nodes={"first": retrying(valid)},
+        bodies={
+            "unused": {
+                "retry": {"max_attempts": 1, "predicate": "has(outputs.value)"},
+                "nodes": {"timer": node()},
+            }
+        },
+    )
+    approval_schema_document = approval_failures(
+        gate(predicate="1"), gate(PRIVATE_SCHEMA)
+    )
+    approval_context_document = approval_failures(
+        gate(PRIVATE_SCHEMA),
+        gate(predicate="inputs.missing", inputs=unavailable_inputs()),
+    )
+    approval_typed_document = approval_failures(gate(predicate="1"), gate({}))
+    sensor_typed_document = document_for(triggers=[sensor("true"), sensor("1")])
+    sensor_syntax_document = document_for(triggers=[sensor("true"), sensor("true &&")])
     owner = EvaluationThread(load_binding())
 
     with asyncio.Runner() as runner:
@@ -287,6 +525,28 @@ def check_refusals() -> None:
                     pattern_work=SINGLE_FAMILY_PATTERN_WORK,
                 )
             )
+            rendering_boolean = cast(int, True)
+            with observe_rendering_boundary() as (rendering_checkers, submitted):
+                negative_characters = runner.run(
+                    verify(
+                        document,
+                        evaluator,
+                        declarations=DECLARATIONS,
+                        triggers=2,
+                        characters=-1,
+                        pattern_work=WORK,
+                    )
+                )
+                boolean_characters = runner.run(
+                    verify(
+                        document,
+                        evaluator,
+                        declarations=DECLARATIONS,
+                        triggers=2,
+                        characters=rendering_boolean,
+                        pattern_work=WORK,
+                    )
+                )
         finally:
             runner.run(evaluator.close())
         with observe_checker_construction() as admitted_checkers:
@@ -307,6 +567,24 @@ def check_refusals() -> None:
         typed_refusal = runner.run(verify(invalid_wait, evaluator))
         unresolved = runner.run(verify(missing_input, evaluator))
         approval_unresolved = runner.run(verify(approval_syntax, evaluator))
+        branch_typed = runner.run(verify(branch_typed_document, evaluator))
+        branch_syntax = runner.run(verify(branch_syntax_document, evaluator))
+        branch_context = runner.run(verify(branch_context_document, evaluator))
+        branch_schema = runner.run(verify(branch_schema_document, evaluator))
+        wait_typed = runner.run(verify(wait_typed_document, evaluator))
+        wait_syntax = runner.run(verify(wait_syntax_document, evaluator))
+        wait_context = runner.run(verify(wait_context_document, evaluator))
+        wait_schema = runner.run(verify(wait_schema_document, evaluator))
+        retry_typed = runner.run(verify(retry_typed_document, evaluator))
+        retry_syntax = runner.run(verify(retry_syntax_document, evaluator))
+        retry_context = runner.run(verify(retry_context_document, evaluator))
+        retry_schema = runner.run(verify(retry_schema_document, evaluator))
+        retry_body = runner.run(verify(retry_body_document, evaluator))
+        approval_schema = runner.run(verify(approval_schema_document, evaluator))
+        approval_context = runner.run(verify(approval_context_document, evaluator))
+        approval_typed = runner.run(verify(approval_typed_document, evaluator))
+        sensor_typed = runner.run(verify(sensor_typed_document, evaluator))
+        sensor_syntax = runner.run(verify(sensor_syntax_document, evaluator))
 
     assert isinstance(prefix, GraphCelChecks)
     assert prefix.compiled_fields == 3
@@ -317,7 +595,15 @@ def check_refusals() -> None:
         constructor.co_qualname for constructor in CHECKER_CONSTRUCTORS
     }
     assert refused_checkers == []
-    assert invalid is boolean is GraphCelRefusal.INVALID_ALLOWANCE
+    assert rendering_checkers == []
+    assert submitted == []
+    assert (
+        invalid
+        is boolean
+        is negative_characters
+        is boolean_characters
+        is GraphCelRefusal.INVALID_ALLOWANCE
+    )
     assert oversized_graph is oversized_triggers is GraphCelRefusal.CAPACITY_EXHAUSTED
     assert oversized_patterns is IncompletePatternCheck.CAPACITY_EXHAUSTED
     assert oversized_renderings == IncompleteRenderings(
@@ -330,6 +616,13 @@ def check_refusals() -> None:
     assert unresolved.diagnostics.valid
     assert not unresolved.wait_expressions_complete
     assert approval_unresolved is ApprovalPrerequisite.SYNTAX_UNRESOLVED
+    assert_branch_static(branch_typed, branch_syntax, branch_context, branch_schema)
+    assert_wait_static(wait_typed, wait_syntax, wait_context, wait_schema)
+    assert_retry_static(
+        retry_typed, retry_syntax, retry_context, retry_schema, retry_body
+    )
+    assert_approval_static(approval_schema, approval_context, approval_typed)
+    assert_sensor_static(sensor_typed, sensor_syntax)
     assert_settled(owner)
 
 
