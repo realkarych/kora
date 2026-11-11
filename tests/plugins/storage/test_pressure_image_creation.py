@@ -42,10 +42,17 @@ def observe_ejections(process: subprocess.Popen[bytes]) -> bytes:
     return next_line(process)
 
 
+def close_input(process: subprocess.Popen[bytes]) -> None:
+    assert process.stdin is not None
+    try:
+        process.stdin.close()
+    except BrokenPipeError:
+        assert process.stdin.closed
+
+
 def stop_dissenter(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes, int]:
     try:
-        assert process.stdin is not None
-        process.stdin.close()
+        close_input(process)
         return collect_process(process, 30)
     finally:
         for stream in (process.stdout, process.stderr):
@@ -61,14 +68,13 @@ def assert_dissenter_refuses_platform(image: Path) -> None:
     assert b"native_platform" in error_output
 
 
-def mount_flags(mountpoint: Path) -> frozenset[str]:
+def mount_flags(mountpoint: Path) -> frozenset[bytes]:
+    anchor = b" on " + os.fsencode(mountpoint) + b" ("
     listed = tuple(
-        line
-        for line in command(("/sbin/mount",)).decode().splitlines()
-        if f" on {mountpoint} (" in line
+        line for line in command(("/sbin/mount",)).splitlines() if anchor in line
     )
     assert len(listed) == 1
-    return frozenset(listed[0].rsplit(" (", 1)[1].removesuffix(")").split(", "))
+    return frozenset(listed[0].rsplit(b" (", 1)[1].removesuffix(b")").split(b", "))
 
 
 def test_image_acquisition_requests_no_ejection(tmp_path: Path) -> None:
@@ -89,9 +95,11 @@ def test_image_acquisition_requests_no_ejection(tmp_path: Path) -> None:
             cleanup_started = True
             controller.cleanup()
         finally:
-            output, error_output, status = stop_dissenter(dissenter)
-            if not cleanup_started:
-                controller.cleanup()
+            try:
+                output, error_output, status = stop_dissenter(dissenter)
+            finally:
+                if not cleanup_started:
+                    controller.cleanup()
 
     assert observing == b"observing\n"
     assert status == 0, error_output
@@ -100,8 +108,8 @@ def test_image_acquisition_requests_no_ejection(tmp_path: Path) -> None:
     assert attached is not None
     assert attached.mounted
     assert controller.report.filesystem == "hfs"
-    assert {"hfs", "nodev", "nosuid", "nobrowse"} <= flags
-    assert "noowners" not in flags
+    assert {b"hfs", b"nodev", b"nosuid", b"nobrowse"} <= flags
+    assert b"noowners" not in flags
     assert controller.manifest.resources_closed
     assert not (controller.directory / "mounted").exists()
     assert not (controller.directory / image_name()).exists()
