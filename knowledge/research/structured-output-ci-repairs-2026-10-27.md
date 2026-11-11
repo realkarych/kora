@@ -12,7 +12,7 @@ The finalizer uses existing `dispose_settled()`: pending mutations or unclosed h
 
 The same run's browser job was cancelled during dependency setup; it supplied no browser execution evidence. The repair routes the existing Ubuntu mirror-list source to the Ubuntu HTTPS archive while retaining package-signature authentication, signing keys, distribution/security sources and the installed dependency set. Read-only GitHub permissions, pinned tools/actions, frozen frontend install, full `playwright install --with-deps chromium`, required browser suite/artifact and ten-minute job deadline remain.
 
-[Browser CI checks](../../tests/architecture/test_browser_ci.py) retain `test_browser_setup_preserves_authenticated_installation_and_hard_checks`. [Current development guidance](../../docs/development.md#browser-checks) and the [current workflow](../../.github/workflows/ci.yml) own actual browser commands and acceptance; the original mirror observation establishes no throughput guarantee.
+`test_browser_setup_preserves_authenticated_installation_and_hard_checks` was removed when [issue #1376](https://github.com/realkarych/kora/issues/1376) limited workflow tests to trust properties; the browser status gate is tested by running its script in the [CI gate tests](../../tests/architecture/test_ci_gates.py). [Current development guidance](../../docs/development.md#browser-checks) and the [current workflow](../../.github/workflows/ci.yml) own actual browser commands and acceptance; the original mirror observation establishes no throughput guarantee.
 
 ## Evidence limits
 

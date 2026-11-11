@@ -139,6 +139,7 @@ jobs:
       KORA_PYTEST_ARGUMENTS: ${{ matrix.pytest-arguments }}
       KORA_SCAFFOLD_LANE: ${{ matrix.lane }}
       KORA_SCAFFOLD_OS: ${{ matrix.os }}
+      KORA_SCAFFOLD_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -208,216 +209,11 @@ jobs:
           printf 'Host fixture preparation took %s s\n' "$SECONDS"
       - name: Collect and execute the exact test lane
         id: tests
-        run: |
-          case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
-            ubuntu-24.04:conformance|ubuntu-24.04:remainder|ubuntu-24.04:integration|ubuntu-24.04:storage|ubuntu-24.04:local-runtime) ;;
-            macos-15:conformance|macos-15:remainder|macos-15:storage|macos-15:local-runtime) ;;
-            *) exit 1 ;;
-          esac
-          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
-          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
-          mkdir -p "$KORA_SCAFFOLD_DIRECTORY"
-          read -r -a KORA_SCAFFOLD_ARGUMENTS <<< "$KORA_PYTEST_ARGUMENTS"
-          if test "$KORA_SCAFFOLD_LANE" = conformance; then
-            if uv run --no-sync pytest --collect-only -q -m "not measurement" > "$KORA_SCAFFOLD_DIRECTORY/complete.txt" 2> "$KORA_SCAFFOLD_DIRECTORY/complete.stderr"; then
-              printf '0\n' > "$KORA_SCAFFOLD_DIRECTORY/complete.exit"
-            else
-              KORA_EXIT="$?"
-              printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/complete.exit"
-              exit "$KORA_EXIT"
-            fi
-          fi
-          KORA_SCAFFOLD_SELECTION=()
-          KORA_TEST_LAUNCH=()
-          if test "$KORA_SCAFFOLD_LANE" = local-runtime; then
-            KORA_SCAFFOLD_SELECTION=(-m "not measurement")
-            KORA_TEST_LAUNCH=(bash scripts/ci/run-local-runtime-tests.sh)
-          fi
-          KORA_EXIT=0
-          if test "$KORA_SCAFFOLD_LANE" != storage && test "$KORA_SCAFFOLD_LANE" != local-runtime; then
-            KORA_ORDINARY_OUTPUT="$(mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX")"
-            export KORA_ORDINARY_OUTPUT
-            printf 'KORA_ORDINARY_OUTPUT=%s\n' "$KORA_ORDINARY_OUTPUT" >> "$GITHUB_ENV"
-            if bash -e -o pipefail <<'KORA_ORDINARY_SCRIPT' > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
-          read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"
-          case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
-            ubuntu-24.04:conformance) names=(first second third) ;;
-            macos-15:conformance) names=(first second third surface) ;;
-            ubuntu-24.04:remainder) names=(measurements other engine) ;;
-            macos-15:remainder) names=(measurements integration other) ;;
-            ubuntu-24.04:integration) names=(integration surface) ;;
-            *) exit 1 ;;
-          esac
-          first=(
-            tests/architecture/test_ir_measurement_ci.py
-            tests/architecture/test_no_suppression.py
-            tests/conformance/test_lifetime_helper_phases.py
-            tests/conformance/test_lifetime_measurement_cohorts.py
-            tests/conformance/test_lifetime_parent_exit.py
-            tests/conformance/test_lifetime_pending_helpers.py
-            tests/conformance/test_lifetime_resume.py
-            tests/conformance/test_lifetime_rpc_concurrency.py
-            tests/conformance/test_lifetime_services.py
-            tests/conformance/test_local_process_lifetime.py
-            tests/ir/test_structured_schema_assertions.py
-            tests/measurements/test_ir_measurement_evidence.py
-            tests/ir/test_input_path_resources.py
-            tests/ir/test_expression_syntax_resources.py
-            tests/ir/test_edge_type_resources.py
-            tests/ir/test_approval_predicate_resources.py
-            tests/engine/test_graph_output_inventory.py
-            tests/ir/test_structured_schema_collection_predicates.py
-            tests/engine/test_graph_outputs.py
-            tests/engine/test_graph_native_outputs.py
-          )
-          third=(
-            tests/conformance/test_conformance_cases_detect_broken_providers.py
-            tests/conformance/test_parent_lifetime.py
-            tests/conformance/test_recovered_process_lifetime.py
-            tests/engine/test_graph_projection_paths.py
-            tests/conformance/test_storage_case_runner.py
-            tests/conformance/test_lifetime_journal_recovery.py
-          )
-          second=(tests/conformance tests/ir/test_inline_schema_resources.py tests/ir/test_fan_out_type_resources.py tests/ir/test_export_type_resources.py tests/ir/test_diagnostic_collection.py tests/ir/test_subgraph_interface_resources.py --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py)
-          second+=(tests/ir/test_structured_schema_container_counts.py tests/plugins/artifact_type/test_agent_session.py)
-          for path in "${first[@]}" "${third[@]}"; do
-            second+=("--ignore=$path")
-          done
-          engine=(
-            tests/engine/test_graph_execution_contract.py
-            tests/engine/test_start_parameter_cut.py
-            tests/browser/test_release_wait.py
-            tests/engine/test_graph_native_sources.py
-            tests/ir/test_tool_policy_resources.py
-            tests/ir/test_type_schema_resources.py
-            tests/db/test_pricing_migration.py
-            tests/db/test_attempt_outcome_migration.py
-            tests/db/test_db_upgrade_process.py
-            tests/db/test_attempt_deadline_migration.py
-          )
-          measurements=(
-            tests/measurements
-            --ignore=tests/measurements/test_ir_measurement_evidence.py
-            tests/db
-            tests/plugins
-            --ignore=tests/plugins/storage
-            --ignore=tests/plugins/runtime/local
-            --ignore=tests/plugins/artifact_type/test_agent_session.py
-            tests/ir/test_output_schema_resources.py
-            tests/ir/test_type_schema_resources.py
-          )
-          integration=(
-            tests/api
-            tests/cli
-            tests/ir/test_structured_schema_string_lengths.py
-          )
-          surface=(
-            tests/cli/test_conformance.py
-            tests/api/test_graph_execution_preparation.py
-          )
-          other=(tests --ignore=tests/ir/test_approval_predicate_resources.py --ignore=tests/ir/test_fan_out_type_resources.py --ignore=tests/ir/test_export_type_resources.py --ignore=tests/ir/test_input_path_resources.py --ignore=tests/ir/test_expression_syntax_resources.py --ignore=tests/ir/test_edge_type_resources.py --ignore=tests/api --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py --ignore=tests/architecture/test_no_suppression.py --ignore=tests/ir/test_output_schema_resources.py)
-          other+=(--ignore=tests/engine/test_graph_output_inventory.py --ignore=tests/ir/test_diagnostic_collection.py)
-          other+=(
-            --ignore=tests/engine/test_graph_outputs.py
-            --ignore=tests/engine/test_graph_native_outputs.py
-            --ignore=tests/engine/test_graph_projection_paths.py
-            --ignore=tests/ir/test_structured_schema_container_counts.py
-          )
-          pids=()
-          evidence=()
-          for name in "${names[@]}"; do
-            case "$name" in
-              first) arguments=("${first[@]}") ;;
-              second) arguments=("${second[@]}") ;;
-              measurements) arguments=("${measurements[@]}") ;;
-              integration) arguments=("${integration[@]}") ;;
-              other) arguments=("${other[@]}") ;;
-              third) arguments=("${third[@]}") ;;
-              engine) arguments=("${engine[@]}") ;;
-              surface) arguments=("${surface[@]}") ;;
-              *) exit 1 ;;
-            esac
-            if test "$name" = integration; then
-              case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
-                ubuntu-24.04:integration|macos-15:remainder)
-                  for path in "${surface[@]}"; do
-                    arguments+=("--ignore=$path")
-                  done
-                  ;;
-              esac
-            fi
-            if test "$KORA_SCAFFOLD_OS" = ubuntu-24.04 && test "$KORA_SCAFFOLD_LANE" = remainder && test "$name" != engine; then
-              for path in "${engine[@]}"; do
-                for index in "${!arguments[@]}"; do
-                  if test "${arguments[$index]}" = "$path"; then
-                    unset "arguments[$index]"
-                  fi
-                done
-                arguments+=("--ignore=$path")
-              done
-            fi
-            uv run --no-sync python -m tests.support.ordinary_pytest -v --exitfirst -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-$name" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-$name" --junitxml="$KORA_ORDINARY_OUTPUT/$name.xml" "${arguments[@]}" > "$KORA_ORDINARY_OUTPUT/$name.log" 2>&1 &
-            pids+=("$!")
-            evidence+=("$name.log" "$name.xml" "$name.exit")
-          done
-          result=0
-          for index in "${!pids[@]}"; do
-            if wait "${pids[$index]}"; then
-              status=0
-            else
-              status="$?"
-              result=1
-            fi
-            printf '%s\n' "$status" > "$KORA_ORDINARY_OUTPUT/${names[$index]}.exit"
-          done
-          for name in "${evidence[@]}"; do
-            test -f "$KORA_ORDINARY_OUTPUT/$name"
-            test ! -L "$KORA_ORDINARY_OUTPUT/$name"
-            test -s "$KORA_ORDINARY_OUTPUT/$name"
-          done
-          for name in "${evidence[@]}"; do
-            case "$name" in
-              inventory.json|*.log) cat "$KORA_ORDINARY_OUTPUT/$name" ;;
-            esac
-          done
-          exit "$result"
-          KORA_ORDINARY_SCRIPT
-              KORA_EXIT=0
-            else
-              KORA_EXIT="$?"
-            fi
-            for name in first.log second.log third.log measurements.log integration.log surface.log other.log engine.log first.xml second.xml third.xml measurements.xml integration.xml surface.xml other.xml engine.xml first.exit second.exit third.exit measurements.exit integration.exit surface.exit other.exit engine.exit; do
-              if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
-                cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
-              fi
-            done
-          elif "${KORA_TEST_LAUNCH[@]}" uv run --no-sync pytest -q "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
-            KORA_EXIT=0
-          else
-            KORA_EXIT="$?"
-          fi
-          printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/tests.exit"
-          if test "$KORA_EXIT" != 0; then
-            tail -c 65536 "$KORA_SCAFFOLD_DIRECTORY/tests.stdout"
-            tail -c 65536 "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"
-            exit "$KORA_EXIT"
-          fi
-          uv run --no-sync python -m tests.scaffold_evidence record \
-            "$KORA_SCAFFOLD_DIRECTORY" "$KORA_SCAFFOLD_RUN" "$KORA_SCAFFOLD_ATTEMPT" \
-            "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION" \
-            '${{ matrix.os }}' '${{ matrix.python }}' '${{ matrix.databases }}' '${{ matrix.lane }}' \
-            "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}"
-          tail -c 2048 "$KORA_SCAFFOLD_DIRECTORY/tests.stdout"
+        run: bash scripts/ci/scaffold_lane.sh tests
       - name: Preserve ordinary cohort evidence
         id: cohort_evidence
         if: ${{ always() && (matrix.lane == 'conformance' || matrix.lane == 'remainder' || matrix.lane == 'integration') }}
-        run: |
-          test -n "${KORA_ORDINARY_OUTPUT:-}"
-          for name in first.log second.log third.log measurements.log integration.log surface.log other.log engine.log first.xml second.xml third.xml measurements.xml integration.xml surface.xml other.xml engine.xml first.exit second.exit third.exit measurements.exit integration.exit surface.exit other.exit engine.exit; do
-            if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
-              cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
-            fi
-          done
+        run: bash scripts/ci/scaffold_lane.sh preserve
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: evidence_upload
         if: ${{ always() }}
@@ -461,45 +257,7 @@ jobs:
           DISTRIBUTIONS_OUTCOME: ${{ steps.distributions.outcome }}
           FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
-        run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$TESTS_OUTCOME" = success
-          test "$UPLOAD_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          case "$KORA_SCAFFOLD_LANE" in
-            local-runtime)
-              test "$PREPARATION_OUTCOME" = success
-              test "$TEARDOWN_OUTCOME" = success
-              ;;
-            *)
-              test "$PREPARATION_OUTCOME" = skipped
-              test "$TEARDOWN_OUTCOME" = skipped
-              ;;
-          esac
-          case "$KORA_SCAFFOLD_LANE" in
-            conformance)
-              test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = skipped
-              test "$DISTRIBUTIONS_OUTCOME" = skipped
-              ;;
-            remainder|integration)
-              test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = skipped
-              test "$DISTRIBUTIONS_OUTCOME" = skipped
-              ;;
-            storage)
-              test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = skipped
-              test "$DISTRIBUTIONS_OUTCOME" = skipped
-              ;;
-            local-runtime)
-              test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = success
-              test "$DISTRIBUTIONS_OUTCOME" = success
-              ;;
-            *) exit 1 ;;
-          esac
+        run: bash scripts/ci/require_outcomes.sh scaffold-lane
 
   scaffold-evidence:
     name: Scaffold evidence
@@ -516,7 +274,6 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/src
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: ${{ needs.change-scope.outputs.full != 'false' }}
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
@@ -567,25 +324,7 @@ jobs:
           DOWNLOAD_OUTCOME: ${{ steps.evidence_download.outcome }}
           VERIFICATION_OUTCOME: ${{ steps.verification.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
-        run: |
-          test "$SCOPE_RESULT" = success
-          test "$SCOPE_VERIFIED" = true
-          test "$WORKFLOW_CANCELLED" = false
-          if test "$FULL_SCOPE" = false; then
-            test "$LANES_RESULT" = skipped
-            test "$DEPENDENCIES_OUTCOME" = skipped
-            test "$DOWNLOAD_OUTCOME" = skipped
-            test "$VERIFICATION_OUTCOME" = skipped
-            printf 'verified=true\n' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          test "$FULL_SCOPE" = true
-          test "$LANES_RESULT" = success
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$DOWNLOAD_OUTCOME" = success
-          test "$VERIFICATION_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+        run: bash scripts/ci/require_outcomes.sh scaffold-evidence
 
   scaffold:
     name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
@@ -604,13 +343,18 @@ jobs:
           - os: macos-15
             python: 3.11.17
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Require verified scaffold evidence
+        if: ${{ always() }}
         env:
           EVIDENCE_RESULT: ${{ needs.scaffold-evidence.result }}
           EVIDENCE_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}
         run: |
-          test "$EVIDENCE_RESULT" = success
-          test "$EVIDENCE_VERIFIED" = true
+          bash scripts/ci/require_outcomes.sh check \
+            EVIDENCE_RESULT=success \
+            EVIDENCE_VERIFIED=true
 
   local-runtime-diagnostics:
     needs: [change-scope]
@@ -817,20 +561,20 @@ jobs:
           FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$MEASUREMENT_OUTCOME" = success
-          test "$LOGGING_UPLOAD_OUTCOME" = success
-          test "$DATABASE_MEASUREMENT_OUTCOME" = success
-          test "$DATABASE_UPLOAD_OUTCOME" = success
-          test "$FULL_DISK_PREPARE_OUTCOME" = success
-          test "$FULL_DISK_OUTCOME" = success
-          test "$FULL_DISK_EVIDENCE_OUTCOME" = success
-          test "$FULL_DISK_CLEANUP_OUTCOME" = success
-          test "$FULL_DISK_UPLOAD_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+          bash scripts/ci/require_outcomes.sh verify \
+            DEPENDENCIES_OUTCOME=success \
+            SOURCE_REVISION_OUTCOME=success \
+            MEASUREMENT_OUTCOME=success \
+            LOGGING_UPLOAD_OUTCOME=success \
+            DATABASE_MEASUREMENT_OUTCOME=success \
+            DATABASE_UPLOAD_OUTCOME=success \
+            FULL_DISK_PREPARE_OUTCOME=success \
+            FULL_DISK_OUTCOME=success \
+            FULL_DISK_EVIDENCE_OUTCOME=success \
+            FULL_DISK_CLEANUP_OUTCOME=success \
+            FULL_DISK_UPLOAD_OUTCOME=success \
+            FINAL_SYNC_OUTCOME=success \
+            WORKFLOW_CANCELLED=false
 
   provider-protocol-measurements:
     needs: [change-scope]
@@ -937,15 +681,15 @@ jobs:
           FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$PROVIDER_LOADING_MEASUREMENT_OUTCOME" = success
-          test "$PROVIDER_UPLOAD_OUTCOME" = success
-          test "$PROTOCOL_MODELS_MEASUREMENT_OUTCOME" = success
-          test "$PROTOCOL_UPLOAD_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+          bash scripts/ci/require_outcomes.sh verify \
+            DEPENDENCIES_OUTCOME=success \
+            SOURCE_REVISION_OUTCOME=success \
+            PROVIDER_LOADING_MEASUREMENT_OUTCOME=success \
+            PROVIDER_UPLOAD_OUTCOME=success \
+            PROTOCOL_MODELS_MEASUREMENT_OUTCOME=success \
+            PROTOCOL_UPLOAD_OUTCOME=success \
+            FINAL_SYNC_OUTCOME=success \
+            WORKFLOW_CANCELLED=false
 
   pricing-measurements:
     needs: [change-scope]
@@ -1108,18 +852,18 @@ jobs:
           FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$PRICING_ENVIRONMENT_OUTCOME" = success
-          test "$PRICING_MEASUREMENT_OUTCOME" = success
-          test "$PRICING_ISOLATION_OUTCOME" = success
-          test "$PRICING_RELEASE_OUTCOME" = success
-          test "$PRICING_PUBLICATION_OUTCOME" = success
-          test "$PRICING_UPLOAD_OUTCOME" = success
-          test "$PRICING_PUBLICATION_RELEASE_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+          bash scripts/ci/require_outcomes.sh verify \
+            DEPENDENCIES_OUTCOME=success \
+            SOURCE_REVISION_OUTCOME=success \
+            PRICING_ENVIRONMENT_OUTCOME=success \
+            PRICING_MEASUREMENT_OUTCOME=success \
+            PRICING_ISOLATION_OUTCOME=success \
+            PRICING_RELEASE_OUTCOME=success \
+            PRICING_PUBLICATION_OUTCOME=success \
+            PRICING_UPLOAD_OUTCOME=success \
+            PRICING_PUBLICATION_RELEASE_OUTCOME=success \
+            FINAL_SYNC_OUTCOME=success \
+            WORKFLOW_CANCELLED=false
 
   git-publication-measurements:
     needs: [change-scope]
@@ -1209,13 +953,13 @@ jobs:
           FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$GIT_PUBLICATION_MEASUREMENT_OUTCOME" = success
-          test "$GIT_PUBLICATION_UPLOAD_OUTCOME" = success
-          test "$FINAL_SYNC_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+          bash scripts/ci/require_outcomes.sh verify \
+            DEPENDENCIES_OUTCOME=success \
+            SOURCE_REVISION_OUTCOME=success \
+            GIT_PUBLICATION_MEASUREMENT_OUTCOME=success \
+            GIT_PUBLICATION_UPLOAD_OUTCOME=success \
+            FINAL_SYNC_OUTCOME=success \
+            WORKFLOW_CANCELLED=false
 
   ir-measurements:
     needs: [change-scope]
@@ -1226,25 +970,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - run: 0
-            pytest-arguments: >-
-              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_vcs_ref_validation_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_agent_session_action_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_agent_session_validation_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_command_result_action_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_command_result_validation_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_structured_output_action_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_structured_output_validation_lifetime' -k 'not test_ir_model_validation_cost or test_ir_model_validation_cost[dense_'
-          - run: 1
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' 'tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[schema_)'
-          - run: 2
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[control_)'
-          - run: 3
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' 'tests/measurements/test_ir_models_cost.py::test_agent_session_action_cost' 'tests/measurements/test_ir_models_cost.py::test_agent_session_validation_lifetime' 'tests/measurements/test_ir_models_cost.py::test_command_result_action_cost' 'tests/measurements/test_ir_models_cost.py::test_command_result_validation_lifetime' 'tests/measurements/test_ir_models_cost.py::test_structured_output_action_cost' 'tests/measurements/test_ir_models_cost.py::test_structured_output_validation_lifetime' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[remaining_)'
-          - run: 4
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[config_ or test_ir_model_validation_cost[document_)'
-          - run: 5
-            pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' 'tests/measurements/test_ir_models_cost.py::test_vcs_ref_validation_lifetime' -k 'not test_ir_model_validation_cost or (not (test_ir_model_validation_cost[dense_ or test_ir_model_validation_cost[schema_ or test_ir_model_validation_cost[control_ or test_ir_model_validation_cost[remaining_ or test_ir_model_validation_cost[config_ or test_ir_model_validation_cost[document_))'
+        run: [0, 1, 2, 3, 4, 5]
     env:
       KORA_TEST_DATABASES: sqlite
       KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -1280,8 +1006,7 @@ jobs:
           test "$(cat measurements/ir-checkout-revision-${{ matrix.run }}.txt)" = "$KORA_MEASUREMENT_REVISION"
       - name: Measure required IR shard
         id: measurement
-        run: |
-          uv run --no-sync pytest -q -p no:logging -m measurement ${{ matrix.pytest-arguments }} --junitxml=measurements/ir-models-cost-${{ matrix.run }}.xml
+        run: bash scripts/ci/measure_ir_shard.sh ${{ matrix.run }}
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: ir_upload
         if: ${{ always() }}
@@ -1376,15 +1101,15 @@ jobs:
           LIFETIME_UPLOAD_OUTCOME: ${{ steps.lifetime_upload.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$MEASUREMENT_OUTCOME" = success
-          test "$COST_REGRESSION_OUTCOME" = success
-          test "$CEL_ARTIFACTS_OUTCOME" = success
-          test "$COST_UPLOAD_OUTCOME" = success
-          test "$LIFETIME_UPLOAD_OUTCOME" = success
-          test "$WORKFLOW_CANCELLED" = false
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+          bash scripts/ci/require_outcomes.sh verify \
+            DEPENDENCIES_OUTCOME=success \
+            SOURCE_REVISION_OUTCOME=success \
+            MEASUREMENT_OUTCOME=success \
+            COST_REGRESSION_OUTCOME=success \
+            CEL_ARTIFACTS_OUTCOME=success \
+            COST_UPLOAD_OUTCOME=success \
+            LIFETIME_UPLOAD_OUTCOME=success \
+            WORKFLOW_CANCELLED=false
 
   cel-measurements:
     name: CEL evaluator lifetime
@@ -1402,7 +1127,6 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: 0.13.1
@@ -1457,23 +1181,7 @@ jobs:
       - name: Verify exact CEL evidence and both source receipts
         id: cel_inventory
         if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled() && steps.cel_lifetime_download.outcome == 'success' && steps.cel_cost_download.outcome == 'success') }}
-        run: |
-          test -d measurements/cel-lifetime
-          test ! -L measurements/cel-lifetime
-          test -d measurements/cel-cost
-          test ! -L measurements/cel-cost
-          test "$(find measurements/cel-lifetime -mindepth 1 -print | LC_ALL=C sort)" = "$(printf '%s\n' measurements/cel-lifetime/cel-checkout-revision.txt measurements/cel-lifetime/cel-evaluator-lifetime.json)"
-          test "$(find measurements/cel-cost -mindepth 1 -print | LC_ALL=C sort)" = "$(printf '%s\n' measurements/cel-cost/cel-checkout-revision.txt measurements/cel-cost/cel-cost-smoke.json)"
-          for path in measurements/cel-lifetime/cel-evaluator-lifetime.json measurements/cel-cost/cel-cost-smoke.json; do
-            test -f "$path"
-            test ! -L "$path"
-            test -s "$path"
-          done
-          for path in measurements/cel-lifetime/cel-checkout-revision.txt measurements/cel-cost/cel-checkout-revision.txt; do
-            test -f "$path"
-            test ! -L "$path"
-            test "$(cat "$path")" = "$KORA_MEASUREMENT_REVISION"
-          done
+        run: bash scripts/ci/check_evidence_inventory.sh cel
       - name: Record workflow cancellation
         id: workflow_cancellation
         if: ${{ needs.change-scope.outputs.full != 'false' && (cancelled()) }}
@@ -1507,45 +1215,7 @@ jobs:
           SCOPE_RESULT: ${{ needs.change-scope.result }}
           SCOPE_VERIFIED: ${{ needs.change-scope.outputs.verified }}
           FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
-        run: |
-          test "$SCOPE_RESULT" = success
-          test "$SCOPE_VERIFIED" = true
-          test "$WORKFLOW_CANCELLED" = false
-          if test "$FULL_SCOPE" = false; then
-            test "$SCAFFOLD_RESULT" = success
-            test "$SCAFFOLD_VERIFIED" = true
-            test "$IR_MATRIX_RESULT" = skipped
-            test "$RESOURCE_RESULT" = skipped
-            test "$PROVIDER_PROTOCOL_RESULT" = skipped
-            test "$PRICING_RESULT" = skipped
-            test "$CEL_RESULT" = skipped
-            test "$GIT_PUBLICATION_RESULT" = skipped
-            exit 0
-          fi
-          test "$FULL_SCOPE" = true
-          test "$SCAFFOLD_RESULT" = success
-          test "$SCAFFOLD_VERIFIED" = true
-          test "$IR_MATRIX_RESULT" = success
-          test "$RESOURCE_RESULT" = success
-          test "$PROVIDER_PROTOCOL_RESULT" = success
-          test "$PRICING_RESULT" = success
-          test "$CEL_RESULT" = success
-          test "$GIT_PUBLICATION_RESULT" = success
-          test "$DEPENDENCIES_OUTCOME" = success
-          test "$SOURCE_REVISION_OUTCOME" = success
-          test "$IR_DOWNLOAD_OUTCOME" = success
-          test "$IR_INVENTORY_OUTCOME" = success
-          test "$IR_UNION_UPLOAD_OUTCOME" = success
-          test "$CEL_LIFETIME_DOWNLOAD_OUTCOME" = success
-          test "$CEL_COST_DOWNLOAD_OUTCOME" = success
-          test "$CEL_INVENTORY_OUTCOME" = success
-          test "$RESOURCE_VERIFIED" = true
-          test "$PROVIDER_PROTOCOL_VERIFIED" = true
-          test "$PRICING_VERIFIED" = true
-          test "$CEL_VERIFIED" = true
-          test "$GIT_PUBLICATION_VERIFIED" = true
-          test "$WORKFLOW_CANCELLED" = false
-
+        run: bash scripts/ci/require_outcomes.sh cel-measurements
 
   browser:
     name: Console browser checks
@@ -1561,7 +1231,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: web/.node-version
@@ -1607,16 +1276,7 @@ jobs:
           FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
           BROWSER_RESULT: ${{ steps.verification.outcome }}
           CANCELLED: ${{ job.status == 'cancelled' }}
-        run: |
-          test "$CANCELLED" = false
-          test "$SCOPE_RESULT" = success
-          test "$SCOPE_VERIFIED" = true
-          if test "$FULL_SCOPE" = false; then
-            test "$BROWSER_RESULT" = skipped
-          else
-            test "$FULL_SCOPE" = true
-            test "$BROWSER_RESULT" = success
-          fi
+        run: bash scripts/ci/require_outcomes.sh browser
     needs:
       - change-scope
     if: ${{ always() }}

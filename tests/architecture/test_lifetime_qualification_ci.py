@@ -1,28 +1,16 @@
 import os
+import stat
 import subprocess
 import sys
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 import pytest
 
-from tests.support.workflows import (
-    action_name,
-    command_lines,
-    matrix_rows,
-    rendered,
-    step_list,
-    steps,
-    table,
-    workflow_document,
-)
-
 ROOT = Path(__file__).resolve().parents[2]
+MEASUREMENT_SCRIPT = ROOT / "scripts/ci/measure_conformance_lifetime.sh"
+INVENTORY_SCRIPT = ROOT / "scripts/ci/check_evidence_inventory.sh"
 MODULE = "tests/measurements/test_conformance_lifetime.py"
-FIXTURE = "qualification"
-INSTALLED = "installed-qualification"
-JOIN = "lifetime-evidence"
-GATES = ((INSTALLED, "required_measurements"), (JOIN, "required_evidence"))
+SHARDS = ("fixture", "listing", "command")
 REVISION = "a" * 40
 RECEIPT = "source-revision.txt"
 SHARD_FILES = {
@@ -50,15 +38,6 @@ INVENTORY_DAMAGE = [
         for shard, name in REQUIRED_PATHS
     ),
 ]
-FAILED_OUTCOMES = ("failure", "cancelled", "skipped", "")
-
-
-def lifetime_jobs() -> dict[str, object]:
-    return table(workflow_document("conformance-lifetime.yml")["jobs"])
-
-
-def lifetime_job(job_id: str) -> dict[str, object]:
-    return table(lifetime_jobs()[job_id])
 
 
 def collected_nodes() -> list[str]:
@@ -88,36 +67,42 @@ def collected_nodes() -> list[str]:
     )
 
 
-def shard_uploads() -> list[str]:
-    names: list[str] = []
-    for job_id in (FIXTURE, INSTALLED):
-        job = lifetime_job(job_id)
-        upload = table(steps(job)["lifetime_upload"]["with"])
-        names.extend(rendered(upload["name"], row) for row in matrix_rows(job))
-    return names
+def shard_command(commands: str, shard: str) -> list[str]:
+    return [
+        "/bin/bash",
+        "-c",
+        f'source "$1"\nselect_lifetime_shard "$2"\n{commands}',
+        "bash",
+        str(MEASUREMENT_SCRIPT),
+        shard,
+    ]
 
 
-def gate_environment(job_id: str, identity: str) -> dict[str, object]:
-    return table(steps(lifetime_job(job_id))[identity]["env"])
+def shard_selection(shard: str) -> str:
+    result = subprocess.run(
+        shard_command('printf "%s" "$selection"', shard),
+        capture_output=True,
+        check=True,
+        timeout=5,
+    )
+    return result.stdout.decode()
 
 
-def passing_value(name: str) -> str:
-    if name == "WORKFLOW_CANCELLED":
-        return "false"
-    return "true" if name.endswith("_VERIFIED") else "success"
-
-
-def gate_cases() -> list[tuple[str, str, str, str]]:
-    cases: list[tuple[str, str, str, str]] = []
-    for job_id, identity in GATES:
-        for name in gate_environment(job_id, identity):
-            outcomes = (
-                ("false", "true", "")
-                if name == "WORKFLOW_CANCELLED"
-                else (passing_value(name), *FAILED_OUTCOMES)
-            )
-            cases.extend((job_id, identity, name, outcome) for outcome in outcomes)
-    return cases
+def prepare_evidence(
+    workspace: Path, shard: str, checkout: str, requested: str
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        shard_command('prepare_lifetime_evidence\nprintf "%s" "$evidence"', shard),
+        cwd=workspace,
+        env={
+            **os.environ,
+            "KORA_LIFETIME_CHECKOUT_REVISION": checkout,
+            "KORA_MEASUREMENT_REVISION": requested,
+        },
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
 
 
 def source_receipt(checkout: str) -> str:
@@ -164,132 +149,54 @@ def damage_evidence(measurements: Path, damage: str, shard: str, name: str) -> N
 
 
 def test_lifetime_shards_select_every_measurement_exactly_once() -> None:
-    fixture = steps(lifetime_job(FIXTURE))["lifetime_measurement"]["run"]
-    installed = matrix_rows(lifetime_job(INSTALLED))
+    selected = sorted(shard_selection(shard) for shard in SHARDS)
 
-    selected = sorted(
-        [
-            command_lines(fixture)[-1][-1],
-            *(str(row["pytest-arguments"]) for row in installed),
-        ]
+    nodes = collected_nodes()
+
+    assert selected == nodes
+
+
+def test_unknown_lifetime_shard_is_refused() -> None:
+    result = subprocess.run(
+        shard_command('printf "%s" "$selection"', "installed"),
+        capture_output=True,
+        check=False,
+        timeout=5,
     )
 
-    assert selected == collected_nodes()
+    assert result.returncode != 0
+    assert result.stdout == b""
 
 
-def test_installed_lifetime_shards_keep_their_own_budget_and_evidence() -> None:
-    job = lifetime_job(INSTALLED)
-    selected = steps(job)
-    fixture = steps(lifetime_job(FIXTURE))
-    upload = table(selected["lifetime_upload"]["with"])
-    gate = selected["required_measurements"]
+@pytest.mark.parametrize("shard", SHARDS)
+def test_lifetime_measurement_prepares_private_evidence_in_a_fresh_checkout(
+    tmp_path: Path, shard: str
+) -> None:
+    fresh = prepare_evidence(tmp_path, shard, "a" * 40, "b" * 40)
+    repeated = prepare_evidence(tmp_path, shard, "c" * 40, "d" * 40)
 
-    measurement = command_lines(selected["lifetime_measurement"]["run"])
-
-    assert job["runs-on"] == "ubuntu-24.04"
-    assert job["timeout-minutes"] == 10
-    assert "needs" not in job
-    assert "continue-on-error" not in job
-    assert table(job["strategy"])["fail-fast"] is False
-    assert [row["run"] for row in matrix_rows(job)] == ["listing", "command"]
-    assert all(set(row) == {"run", "pytest-arguments"} for row in matrix_rows(job))
-    assert selected["dependencies"]["run"] == fixture["dependencies"]["run"]
-    assert selected["source_revision"] == fixture["source_revision"]
-    assert (
-        selected["lifetime_measurement"]["env"]
-        == fixture["lifetime_measurement"]["env"]
+    assert (fresh.returncode, fresh.stderr) == (0, b"")
+    assert repeated.returncode != 0
+    assert repeated.stderr != b""
+    evidence = tmp_path / fresh.stdout.decode()
+    assert evidence.parent == tmp_path / "measurements"
+    observed = evidence.lstat()
+    assert stat.S_ISDIR(observed.st_mode)
+    assert stat.S_IMODE(observed.st_mode) == 0o700
+    assert (evidence / RECEIPT).read_text() == (
+        f"Actual checkout: {'a' * 40}\nRequested measurement revision: {'b' * 40}\n"
     )
-    assert measurement[-1] == (
-        "KORA_MEASUREMENT_OUTPUT="
-        "$PWD/measurements/conformance-lifetime-${{matrix.run}}/report.json",
-        "exec",
-        "uv",
-        "run",
-        "--no-sync",
-        "pytest",
-        "-q",
-        "-p",
-        "no:logging",
-        "-m",
-        "measurement",
-        "${{matrix.pytest-arguments}}",
-        "--junitxml=measurements/conformance-lifetime-${{matrix.run}}/tests.xml",
-    )
-    assert action_name(selected["lifetime_upload"]["uses"]) == (
-        "actions/upload-artifact"
-    )
-    assert selected["lifetime_upload"]["if"] == (
-        "${{ always() && steps.lifetime_measurement.outcome != 'skipped' }}"
-    )
-    assert upload == {
-        "name": "conformance-lifetime-${{ github.sha }}-${{ matrix.run }}",
-        "path": "measurements/conformance-lifetime-${{ matrix.run }}",
-        "include-hidden-files": True,
-        "if-no-files-found": "error",
-    }
-    assert all("continue-on-error" not in step for step in step_list(job))
-    assert step_list(job)[-1] == gate
-    assert gate["if"] == "${{ always() }}"
-    assert gate_environment(INSTALLED, "required_measurements") == {
-        **{
-            f"{identity.upper()}_OUTCOME": f"${{{{ steps.{identity}.outcome }}}}"
-            for identity in selected
-            if identity not in {"required_measurements", "workflow_cancellation"}
-        },
-        "WORKFLOW_CANCELLED": "${{ steps.workflow_cancellation.outcome != 'skipped' }}",
-    }
-
-
-def test_lifetime_join_requires_every_shard_and_its_evidence() -> None:
-    join = lifetime_job(JOIN)
-    selected = steps(join)
-    download = selected["download"]
-    gate = selected["required_evidence"]
-
-    pattern = str(table(download["with"])["pattern"])
-
-    assert join["name"] == "Required lifetime evidence"
-    assert join["needs"] == [FIXTURE, INSTALLED]
-    assert join["if"] == "${{ always() }}"
-    assert join["timeout-minutes"] == 10
-    assert "continue-on-error" not in join
-    assert table(join["env"]) == {"KORA_MEASUREMENT_REVISION": "${{ github.sha }}"}
-    assert action_name(download["uses"]) == "actions/download-artifact"
-    assert download["if"] == "${{ always() && !cancelled() }}"
-    assert table(download["with"]) == {
-        "pattern": "conformance-lifetime-${{ github.sha }}-*",
-        "path": "measurements",
-        "merge-multiple": False,
-    }
-    assert len(shard_uploads()) == len(SHARD_FILES)
-    assert all(fnmatchcase(name, pattern) for name in shard_uploads())
-    assert selected["inventory"]["if"] == (
-        "${{ always() && !cancelled() && steps.download.outcome == 'success' }}"
-    )
-    assert selected["workflow_cancellation"]["if"] == "${{ cancelled() }}"
-    assert selected["workflow_cancellation"]["run"] == "exit 0"
-    assert step_list(join)[-1] == gate
-    assert gate["if"] == "${{ always() }}"
-    assert gate_environment(JOIN, "required_evidence") == {
-        "FIXTURE_RESULT": "${{ needs.qualification.result }}",
-        "FIXTURE_VERIFIED": "${{ needs.qualification.outputs.verified }}",
-        "INSTALLED_RESULT": "${{ needs.installed-qualification.result }}",
-        "DOWNLOAD_OUTCOME": "${{ steps.download.outcome }}",
-        "INVENTORY_OUTCOME": "${{ steps.inventory.outcome }}",
-        "WORKFLOW_CANCELLED": "${{ steps.workflow_cancellation.outcome != 'skipped' }}",
-    }
 
 
 @pytest.mark.parametrize(("damage", "shard", "name"), INVENTORY_DAMAGE)
 def test_lifetime_inventory_accepts_only_every_shard_with_its_receipt(
     tmp_path: Path, damage: str, shard: str, name: str
 ) -> None:
-    inventory = steps(lifetime_job(JOIN))["inventory"]["run"]
     measurements = write_complete_evidence(tmp_path)
     damage_evidence(measurements, damage, shard, name)
 
     result = subprocess.run(
-        ["/bin/bash", "-e", "-c", str(inventory)],
+        ["/bin/bash", str(INVENTORY_SCRIPT), "lifetime"],
         cwd=tmp_path,
         env={**os.environ, "KORA_MEASUREMENT_REVISION": REVISION},
         capture_output=True,
@@ -298,25 +205,3 @@ def test_lifetime_inventory_accepts_only_every_shard_with_its_receipt(
     )
 
     assert (result.returncode == 0) is (damage == "complete")
-
-
-@pytest.mark.parametrize(("job_id", "identity", "field", "outcome"), gate_cases())
-def test_lifetime_gates_pass_only_after_complete_success(
-    job_id: str, identity: str, field: str, outcome: str
-) -> None:
-    gate = steps(lifetime_job(job_id))[identity]
-    environment = {
-        **os.environ,
-        **{name: passing_value(name) for name in gate_environment(job_id, identity)},
-        field: outcome,
-    }
-
-    result = subprocess.run(
-        ["/bin/bash", "-e", "-c", str(gate["run"])],
-        env=environment,
-        capture_output=True,
-        check=False,
-        timeout=5,
-    )
-
-    assert (result.returncode == 0) is (outcome == passing_value(field))
