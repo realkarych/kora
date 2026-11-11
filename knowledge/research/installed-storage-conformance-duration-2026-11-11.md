@@ -51,7 +51,7 @@ The record assertions keep exactly one `protocols.loading.provider_loaded` recor
 
 - Every record must be at DEBUG level, so a lifetime warning still fails the test, as it did before.
 - Every other record must be a `started`, `activated` or `closed` lifetime record of the reported invocation.
-- There must be exactly one `started`, and the last record must be `closed`.
+- There must be exactly one `started`, and the last lifetime record must be `closed`.
 
 Regressions in `tests/conformance/test_progress_guard.py` use a real child process and an event loop whose time the test steps forward:
 
