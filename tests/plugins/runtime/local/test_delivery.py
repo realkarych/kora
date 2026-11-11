@@ -177,35 +177,6 @@ async def test_control_frames_refuse_changed_authority_or_content(
         assert refused.value.details == {}
 
 
-async def test_control_frames_accept_logically_equal_new_dispatcher(
-    tmp_path: Path, kora_capture: Capture
-) -> None:
-    async with delivery_server(tmp_path, kora_capture) as live:
-        first = await live.attach()
-        try:
-            await live.deliver(first)
-        finally:
-            first.close()
-        replacement = live.work.model_copy(update={"dispatcher_id": "replacement"})
-        await live.write(
-            live.entry.model_copy(
-                update={
-                    "submitter": Submitter(
-                        dispatcher_id="replacement",
-                        process=live.entry.submitter.process,
-                    )
-                }
-            )
-        )
-        second = await live.attach("replacement")
-        try:
-            await live.deliver(second, replacement)
-        finally:
-            second.close()
-
-        assert workload_digest(replacement) == workload_digest(live.work)
-
-
 class GatedDecoder:
     def __init__(self) -> None:
         self.entered = threading.Event()
@@ -558,6 +529,7 @@ async def test_control_frames_repeat_retains_original_workload(
         await until(lambda: live.server.connections == 0)
 
         assert decoder.calls == 2
+        assert workload_digest(replacement) == workload_digest(live.work)
         assert decoder.references[0]() is not None
         assert decoder.references[1]() is None
         await live.server.close()

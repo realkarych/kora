@@ -9,7 +9,7 @@ from kora.ir.structured_output import (
     StructuredOutput,
     StructuredOutputValidationError,
     parse_structured_output,
-    require_structured_output_revision,
+    structured_output_revision_descriptor,
     summarize_structured_output,
 )
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
@@ -23,30 +23,6 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 
 CONFIG_SCHEMA: Final[JsonObject] = {"type": "object", "additionalProperties": False}
-SUPPORTED_DESCRIPTOR: Final[JsonObject] = {
-    "name": "StructuredOutput",
-    "builtin_revision": "1",
-    "schema": "urn:kora:artifact:StructuredOutput",
-    "parent": None,
-    "behavior": {
-        "validation": "kora.structured-output-validation.v1",
-        "digest_fields": "kora.json-payload.v1",
-        "summary": "kora.json-payload.v1",
-    },
-    "validation": {
-        "max_raw_json_bytes": 1048576,
-        "max_canonical_json_bytes": 1048576,
-        "max_json_depth": 16,
-        "max_integer_bits": 14000,
-    },
-    "canonicalization": "kora.structured-json.v1",
-    "compatibility": {
-        "execution_semantics": "kora.execution.v1",
-        "checker_view": "kora.structured-output-view.v1",
-    },
-    "digest_selection": [""],
-    "schema_sha256": "e924b9a44c0825f0b2a43b0291d1f98c4851425a50e291914dd85ba096ac6eae",
-}
 COMPONENT: Final[str] = CATALOG.register_component("artifact_type.structured_output")
 OUTCOME: Final[EventSpec] = CATALOG.register(
     EventSpec(
@@ -89,16 +65,10 @@ def checked_binding(
     schema = cast("JsonObject", detach_ir_data(catalogued_schema))
     if not matches_fixed(binding.schema, schema):
         raise binding_error("schema")
-    if not matches_fixed(binding.revision_descriptor, SUPPORTED_DESCRIPTOR):
+    descriptor = structured_output_revision_descriptor()
+    if not matches_fixed(binding.revision_descriptor, descriptor):
         raise binding_error("revision_descriptor")
-    compatible = True
-    try:
-        require_structured_output_revision(SUPPORTED_DESCRIPTOR)
-    except StructuredOutputValidationError:
-        compatible = False
-    if not compatible:
-        raise binding_error("revision_descriptor")
-    return schema, deepcopy(SUPPORTED_DESCRIPTOR)
+    return schema, descriptor
 
 
 def parsed(payload: JsonValue) -> StructuredOutput | ContractViolation:

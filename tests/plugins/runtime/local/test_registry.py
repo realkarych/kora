@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.ir.json import JsonObjectField
 from kora.plugins.runtime.local.channel import workload_digest
 from kora.plugins.runtime.local.runtime import LocalRuntime
@@ -55,8 +54,6 @@ from tests.support.local_runtime import (
     runtime_context,
     state_root,
 )
-
-__all__ = ["kora_capture"]
 
 DIGEST = "sha256:" + "1" * 64
 MOMENT = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)

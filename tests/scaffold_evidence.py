@@ -23,7 +23,7 @@ ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
 LANE_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
     "ubuntu-24.04": {
         "conformance": ("first", "second", "third"),
-        "remainder": ("measurements", "other", "engine"),
+        "remainder": ("measurements", "other", "graph", "engine"),
         "integration": ("integration", "surface"),
         "storage": (),
         "local-runtime": (),
@@ -41,6 +41,7 @@ COHORTS = (
     "measurements",
     "integration",
     "other",
+    "graph",
     "third",
     "engine",
     "surface",
@@ -65,6 +66,33 @@ LANE_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "storage": STORAGE_ARGUMENTS,
     "local-runtime": LOCAL_RUNTIME_ARGUMENTS,
 }
+SCHEDULED_LIFETIME_MODULES = (
+    "tests/conformance/test_lifetime_cleanup_controls.py",
+    "tests/conformance/test_lifetime_direct_inputs.py",
+    "tests/conformance/test_lifetime_helper_phases.py",
+    "tests/conformance/test_lifetime_io_helper.py",
+    "tests/conformance/test_lifetime_journal_recovery.py",
+    "tests/conformance/test_lifetime_measurement_cohorts.py",
+    "tests/conformance/test_lifetime_measurement_observer.py",
+    "tests/conformance/test_lifetime_parent_exit.py",
+    "tests/conformance/test_lifetime_pending_helpers.py",
+    "tests/conformance/test_lifetime_recovery_claim.py",
+    "tests/conformance/test_lifetime_recovery_ownership.py",
+    "tests/conformance/test_lifetime_resume.py",
+    "tests/conformance/test_lifetime_rpc_concurrency.py",
+    "tests/conformance/test_lifetime_services.py",
+    "tests/conformance/test_lifetime_transport.py",
+)
+SCHEDULED_MACOS_STORAGE_MODULES = (
+    "tests/plugins/storage/test_pressure_controller.py",
+    "tests/plugins/storage/test_pressure_image_creation.py",
+    "tests/plugins/storage/test_pressure_native_release.py",
+)
+SCHEDULED_LANES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("ubuntu-24.04", "lifetime"): SCHEDULED_LIFETIME_MODULES,
+    ("macos-15", "lifetime"): SCHEDULED_LIFETIME_MODULES,
+    ("macos-15", "storage"): SCHEDULED_MACOS_STORAGE_MODULES,
+}
 LOCAL_RUNTIME_MODULE = "tests.plugins.runtime.local"
 LOCAL_RUNTIME_CONTRACTS = (
     "test_state_root.test_state_root_and_socket_dir_refuse_unsafe_ownership",
@@ -73,6 +101,50 @@ LOCAL_RUNTIME_CONTRACTS = (
     "test_lock.test_local_runtime_releases_resources",
     "test_platform.test_platform_mechanisms",
 )
+
+
+def scheduled_modules(operating_system: str) -> tuple[str, ...]:
+    return tuple(
+        module
+        for (system, _), modules in SCHEDULED_LANES.items()
+        if system == operating_system
+        for module in modules
+    )
+
+
+def lane_arguments(operating_system: str, lane: str) -> tuple[str, ...]:
+    if (operating_system, lane) == ("macos-15", "storage"):
+        ignored = tuple(f"--ignore={path}" for path in SCHEDULED_MACOS_STORAGE_MODULES)
+        return (*ignored, *STORAGE_ARGUMENTS)
+    return LANE_ARGUMENTS[lane]
+
+
+def module_identity(path: str) -> str:
+    return path.removesuffix(".py").replace("/", ".")
+
+
+def scheduled_owner(node: str, modules: tuple[str, ...]) -> str | None:
+    return next(
+        (
+            module
+            for module in modules
+            if node.startswith(f"{module_identity(module)}.")
+        ),
+        None,
+    )
+
+
+def verify_scheduled(report: Path, operating_system: str, lane: str) -> dict[str, int]:
+    modules = SCHEDULED_LANES.get((operating_system, lane))
+    if modules is None:
+        raise EvidenceFailure("scheduled execution has an unknown environment or lane")
+    nodes = junit_nodes(report, 16777216)
+    owners = [scheduled_owner(node, modules) for node in nodes]
+    if None in owners:
+        raise EvidenceFailure("scheduled lane ran tests outside its modules")
+    if frozenset(owners) != frozenset(modules):
+        raise EvidenceFailure("scheduled lane lacks a module")
+    return {"modules": len(modules), "tests": len(nodes)}
 
 
 def required_host_fixtures(operating_system: str) -> frozenset[str]:
@@ -220,7 +292,7 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
         "receipt.json"
     }:
         raise EvidenceFailure("scaffold artifact has unexpected file coverage")
-    if receipt.arguments != LANE_ARGUMENTS[receipt.lane]:
+    if receipt.arguments != lane_arguments(receipt.operating_system, receipt.lane):
         raise EvidenceFailure("scaffold receipt has different pytest arguments")
     for filename, digest in receipt.files.items():
         encoded = evidence_bytes(directory / filename)
@@ -332,6 +404,9 @@ def verify_scaffold(
             inventories[lane] = validate_lane(directory, receipt)
             if lane == "conformance":
                 complete = collection_nodes(directory / "complete.txt")
+        scheduled = scheduled_modules(operating_system)
+        if any(scheduled_owner(node, scheduled) for node in complete):
+            raise EvidenceFailure("scaffold collection contains scheduled modules")
         combined = frozenset[str]().union(*inventories.values())
         if sum(len(nodes) for nodes in inventories.values()) != len(combined):
             raise EvidenceFailure("scaffold lanes contain duplicate tests")
@@ -356,6 +431,11 @@ def verify_scaffold(
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["scheduled"] and len(sys.argv) == 5:
+        report, operating_system, lane = sys.argv[2:]
+        result = verify_scheduled(Path(report), operating_system, lane)
+        sys.stdout.write(json.dumps(result) + "\n")
+        return
     operation, directory, run_id, attempt, checkout, requested, *environment = sys.argv[
         1:
     ]

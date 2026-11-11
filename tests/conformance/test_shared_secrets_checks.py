@@ -30,6 +30,7 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.secret_value import SecretValue
 from kora.protocols.secrets import SecretsProvider
+from tests.conformance.loop_bound import LoopBoundWorker
 from tests.conformance.providers import (
     FORBIDDEN,
     MISSING,
@@ -61,26 +62,16 @@ class FinalizingSecretsProvider(ReferenceSecretsProvider):
         return await super().resolve(reference, ctx)
 
 
-class LoopBoundSecretsProvider(ReferenceSecretsProvider):
+class LoopBoundSecretsProvider(LoopBoundWorker, ReferenceSecretsProvider):
     def __init__(self, *, echo: bool = False) -> None:
-        self.loop = asyncio.get_running_loop()
-        self.queue: asyncio.Queue[asyncio.Future[None] | None] = asyncio.Queue()
-        self.worker = asyncio.create_task(self.serve())
+        self.start_loop_worker()
         self.contexts: list[ProtocolContext] = []
         self.references: list[str] = []
         self.operation_loops: list[asyncio.AbstractEventLoop] = []
-        self.cleanup_loop: asyncio.AbstractEventLoop | None = None
         self.echo = echo
 
-    async def serve(self) -> None:
-        while (completion := await self.queue.get()) is not None:
-            if not completion.done():
-                completion.set_result(None)
-
     async def round_trip(self) -> None:
-        completion: asyncio.Future[None] = self.loop.create_future()
-        self.queue.put_nowait(completion)
-        await completion
+        await self.pass_through()
         self.operation_loops.append(asyncio.get_running_loop())
 
     async def resolve(self, reference: str, ctx: ProtocolContext) -> SecretValue:
@@ -94,11 +85,6 @@ class LoopBoundSecretsProvider(ReferenceSecretsProvider):
     async def list_names(self, prefix: str) -> list[str]:
         await self.round_trip()
         return await super().list_names(prefix)
-
-    async def close(self) -> None:
-        self.queue.put_nowait(None)
-        await self.worker
-        self.cleanup_loop = asyncio.get_running_loop()
 
 
 async def failing_input(

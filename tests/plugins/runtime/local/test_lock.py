@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.spawn import (
     LAUNCHER_EXIT_NS,
@@ -87,8 +86,6 @@ from tests.support.local_runtime import (
     stopped_holder,
 )
 from tests.support.retirement_evidence import retirement_failure_note
-
-__all__ = ["kora_capture"]
 
 WAITERS = 8
 

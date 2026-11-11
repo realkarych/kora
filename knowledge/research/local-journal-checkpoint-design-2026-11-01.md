@@ -1,10 +1,10 @@
 # Local journal and checkpoint durability proposal
 
-Historical design record: the daemon-writer, pre-registration-only exit and startup per-sync clock below are superseded by the owner-approved [separate-helper contract](../specs/startup-io.md). Later running-state proposals remain unapproved; none is implemented by this design.
+Historical design record: the daemon-writer, pre-registration-only exit and startup per-sync clock of the original proposal are superseded by the owner-approved [separate-helper contract](../specs/startup-io.md). Later running-state proposals remain unapproved; none is implemented by this design.
 
 ## Status and scope
 
-Issue #615 is the design child of #196. The owner approved preparation and subsequently the startup-only contract on 2026-11-01: startup-before-registration, the 16 KiB record/checkpoint bounds, one operation, Running.startup and crash/cleanup semantics. Later running-state capacities, index representation and terminal formats remain proposals. The normative startup contract is recorded in protocols.md; the proposal wording below preserves the design rationale. Inspected base: `d2f14e3aa83421a0c1261c808d49d1e281d14f73`. No production implementation or platform experiment is included. Existing requirements remain authoritative until the owner accepts an amendment and it lands in the normative specification.
+Issue #615 is the design child of #196. The owner approved preparation and subsequently the startup-only contract on 2026-11-01: startup-before-registration, the 16 KiB record/checkpoint bounds, one operation, Running.startup and crash/cleanup semantics. Later running-state capacities, index representation and terminal formats remain proposals. The normative startup contract is recorded in [protocols.md](../specs/protocols.md#startup-durability-contract-issue-615) and [startup-io.md](../specs/startup-io.md); the original startup proposal wording is preserved at [revision 4368f4c](https://github.com/realkarych/kora/blob/4368f4c26eee7aa80017ce229d725865ce9fc43b/knowledge/research/local-journal-checkpoint-design-2026-11-01.md). Inspected base: `d2f14e3aa83421a0c1261c808d49d1e281d14f73`. No production implementation or platform experiment is included. Existing requirements remain authoritative until the owner accepts an amendment and it lands in the normative specification.
 
 The [C2 decomposition](https://github.com/realkarych/kora/issues/196#issuecomment-6488037673) includes journal/checkpoint durability, transfer, command execution and adoption. [C1](https://github.com/realkarych/kora/issues/195) is complete through #614. The first durability implementation must have a real supervisor consumer and complete its own failure/cleanup paths; an unused store protocol is not a milestone. Runner-side full-disk fencing and terminal retry remain C2 obligations. Only worker fallback, public retirement/recovery, final release and provider registration remain #197.
 
@@ -13,75 +13,6 @@ The [C2 decomposition](https://github.com/realkarych/kora/issues/196#issuecommen
 [Runtime protocols](../specs/protocols.md#local-runtime-issue-123) already specify canonical JSONL `{i, at, kind, data}`, append-assigned contiguous sequence, one writer, durable supervisor acknowledgement, Linux `fdatasync` and macOS `F_FULLFSYNC`, a five-second sync deadline, output batching at 50 ms or 256 records, and sparse indexing every 4,096 records. A readable complete line is not necessarily acknowledged durable. The first ENOSPC/EDQUOT append or sync failure permanently closes that process's journal for appends. Stop escalation and runner exit never wait on the writer or a registry lock.
 
 The runtime is cooperative: same-user modification cannot be cryptographically excluded. Integrity checks detect mismatched or corrupted state but do not establish hostile-code isolation, dispatcher authority or termination. ADR-0016/0017/0018/0022/0026 continue to govern those boundaries.
-
-## Recommended first consumer
-
-Use startup durability **before** the existing Starting-to-Running registration CAS and readiness byte. The actual consumer is `supervise`: it requires one factual `runner.started` record and matching startup checkpoint, waits for the writer to close its owned descriptors and finish, and only then attempts registration. The checkpoint says `registration_pending`, never workload accepted, preparation admitted/completed, candidate started or termination confirmed.
-
-Take the immutable attempt/request/workload/deadline binding and launch nonce from the checked Starting head; the workload has not yet crossed the channel. Bind the writer's own complete process identity. Recheck nonce, fence and entry at registration exactly as the current CAS does. The record/checkpoint is not a replacement for that CAS. On startup failure there is no readiness byte and no candidate; Starting remains available to its existing retirement path. A journal/checkpoint survivor never authorizes automatic restart.
-
-`accepted` and `holds_workload` keep their #611 delivery/retention meaning. The first child adds no journal writes after registration and closes its startup writer before serving. Later running-state producer activation must bring its complete memory fence, authentic stop/terminal state and retry together. This boundary prevents a running journal from relying on an unimplemented #197 receipt path.
-
-This recommendation changes startup ordering and requires explicit owner approval. Amend the old phrase that failed registration “writes nothing”: failed startup before registration may leave bounded private startup journal/checkpoint artifacts but creates no Running entry. A registration failure after head rename has an uncertain committed outcome and preserves potentially referenced artifacts. Neither failure produces readiness, a candidate or a completion/termination receipt. Existing registry/starting-retirement authority and deadlines remain unchanged. The runtime is still unregistered and its persisted intermediate heads exist only in tests; old heads missing the required startup reference are refused without migration/backfill, consistent with the existing interim-state policy. A populated external deployment would need a separate migration decision. Do not claim that these startup facts satisfy C2's command checkpoint or full-disk running-state obligations.
-
-## Proposed storage layout and input discipline
-
-Use a nonce-and-writer-specific private startup directory beneath the checked attempt control directory, opened through `DirectoryAnchor`; no pathname supplied by a workload chooses these files. Files are regular, private and single-link; open descriptor-relative with no-follow, refuse conflicting types/owners/aliases, and retain the anchor until its last actual operation finishes. Candidate directories never contain these files.
-
-- `journal.jsonl`: one startup append-only stream, containing exactly one initial record in this child; later journal activation needs a separate owned continuation design.
-- `checkpoint.json`: one atomically replaced, closed versioned startup checkpoint.
-- No index is created for one startup record. The proposed later index remains derivative and is never an authority source.
-- Existing registry head and lock remain in their established location. Retained peer/history records remain separate and are referenced, never copied into the checkpoint.
-
-Reuse canonical JSON and existing bounded identity/deadline models. Reject duplicate keys, unknown members, non-finite numbers, invalid UTF-8 and lone surrogates before model acceptance. Enforce file bounds before decoding and field/collection bounds afterwards. Unknown format versions fail closed without rewriting or backfilling from a new workload.
-
-## Proposed initial checkpoint
-
-The first variant is `local-startup-checkpoint/1`, with exactly these fields:
-
-| Field | Representation and source |
-|---|---|
-| `format` | Literal `local-startup-checkpoint/1` |
-| `execution_domain_id`, `attempt_id` | Existing bounded `Identifier`, equal to the checked registry key |
-| `request_digest`, `workload_digest` | Existing `Digest`, equal to the checked Starting head |
-| `runner` | Existing complete `ProcessIdentity`, the actual writer; never current reader identity substituted on reopen |
-| `deadline` | Existing nullable `ExecutionDeadline` wire representation, exactly the original registry binding |
-| `stage` | Literal `registration_pending` |
-| `launch_nonce` | Existing 32 lower-case hexadecimal nonce, equal to Starting |
-| `journal_next` | Existing `Count`, exclusive sequence after the referenced startup record |
-| `journal_end` | Existing `Count`, exclusive byte offset after that complete newline |
-| `record_digest` | `Digest` of the complete canonical startup line excluding its newline |
-
-Proposed encoded checkpoint cap: 16 KiB, including its complete canonical envelope. There are no arbitrary maps, payloads or optional future-phase bags. The bounded identifiers, identity and deadline require a worst-case serialization test below this cap before implementation acceptance. It contains neither full Workload nor environment, token, resolved secret/credential, secret-derived digest, mutable candidate path or fabricated executor result. Stored logical digests retain the existing #611 non-authority meaning; no new secret-derived hash is introduced.
-
-The startup record is a supervisor `runner.started` RawEvent with closed data `{stage: "registration_pending", launch_nonce, request_digest, workload_digest}`. `i` starts at zero in a new journal and uses existing `Count`; `at` uses `Instant`. Exhaustion of sequence range refuses another append and closes admission without wrapping. This is a new exact startup-data form requiring approval; later lifecycle variants cannot be accepted through generic unvalidated data.
-
-For this closed startup variant only, the proposed encoded line cap is 16 KiB including newline. This does not reduce the existing generic 64 KiB RawEvent data allowance: arbitrary RawEvent input is not accepted by this startup writer. Test every bounded startup field at its escaped maximum. The later general journal writer must select an envelope cap that accommodates the full existing data allowance. Arbitrary supervisor kinds are not admitted by the generic RawEvent model: each activated kind has a closed typed ingress. Adapter/output ingress cannot emit supervisor kinds.
-
-## Commit and acknowledgement order
-
-One startup operation owns both records. The writer assigns `i=0`, writes the complete line, syncs journal data, writes/syncs a unique checkpoint temporary, atomically replaces `checkpoint.json`, and syncs its parent directory. Every newly created directory entry is also durably published by syncing its parent, including the startup directory and any newly created attempt/control ancestors, before registration is attempted. Syncing the startup directory alone does not persist its name in its parent. Only then can the local operation report durable startup facts. The writer closes its actual descriptors and exits before the supervisor attempts the existing fresh registration CAS and emits readiness. A checkpoint is never registration authority.
-
-Each launched process owns a freshly created startup directory with a component derived from its launch nonce and a fresh 128-bit random identifier. Creation uses no-replace/no-follow and never takes ownership of a pre-existing directory. The startup directory component is exactly `<launch_nonce>-<writer_nonce>`, two 32-character lower-case hexadecimal strings. A new required `Running.startup` closed reference contains only `directory` (that 65-character component) and `checkpoint_digest` (Digest of the whole canonical checkpoint). It remains within the existing 64 KiB head bound. The reference is stored in the same registration CAS; cleanup may delete only its own directory after the writer actually releases it and a current head read under the registry lock proves no retained reference to that directory. A registration write can rename Running successfully and then fail directory sync: that is an uncertain commit, not a CAS loser. If a matching reference exists or the current head cannot be read/validated, preserve the directory and refuse cleanup; never infer absence from a raised write error. A registry reader cannot select an unreferenced directory as evidence. On a failed CAS or crash, existing nonce retirement confirms all matching launch processes stopped before sweeping unreferenced startup directories. Orphan enumeration is streaming and bounded by the existing operation deadline; do not build a list proportional to retained directories or hold the registry lock across the full sweep. Before each destructive action, acquire the existing lock, revalidate the relevant head/reference and confirmed writer absence, and remove only the fixed owned startup files. Incomplete inspection remains retryable under the same deadline. Do not sweep or overwrite another live writer's files merely because its nonce matches. The implementing plan must account for this reference field and retirement cleanup in its production size.
-
-The first child never retries an append in place after a failed write. Its one writer has one operation, one acknowledgement and at most one complete record. Cancellation of the waiter does not transfer ownership of native I/O or descriptors. A late completion after a failed startup is ignored for registration; no ready byte follows it. If native I/O is stuck at the original five-second sync deadline, the runner exits without interpreter shutdown waiting for that writer; the operating system closes process-owned resources. No other thread closes a descriptor while the writer uses it.
-
-| Crash or refusal barrier | Persistent interpretation | Action |
-|---|---|---|
-| Before append | No startup record/checkpoint | No readiness; Starting retirement remains the resolver |
-| Partial append | Incomplete final line | Ignore tail; no registration from it and no second writer admitted by it |
-| Complete line, journal sync incomplete/failed | Readable record, durability unknown | No readiness or registration; exit on failure |
-| Journal sync completed, checkpoint absent | No complete startup commit | No registration; preserve or clean only this writer's files after actual closure |
-| Checkpoint temporary written/synced, rename absent | No committed checkpoint | Never use temporary as committed state |
-| Rename completed, directory sync incomplete | A complete checkpoint may survive without a completed durability acknowledgement | No registration/ready; existence and digest validation alone do not prove completed sync |
-| Durable checkpoint, writer still closing | Durable startup facts, resources still owned | No registration until actual closure; failure still exits without candidate |
-| Writer closed, before registration CAS | Durable startup facts, no Running entry | No automatic restart or execution authority; current CAS remains required |
-| Registration CAS is a proved no-op after nonce/fence race | Owned startup artifacts are unreferenced | No ready/candidate/receipt; after writer closure, current locked head must prove no reference before cleanup |
-| Registration rename succeeds but registry directory sync fails | A Running reference may survive although acknowledgement failed | No readiness or assumed rollback; preserve startup artifacts while a reference exists or current head is uncertain; existing observation/retirement resolves the state |
-| Registration succeeds, ready byte lost | Running references exact startup record/checkpoint | Existing C1 lookup/retry semantics; do not start another runner |
-| Referenced checkpoint/journal mismatches identity or digest | Foreign/corrupt state | Content-free infrastructure refusal; no reconstructed success or replacement execution |
-
-The live writer distinguishes readable and synced positions. An on-disk complete line or checkpoint cannot retrospectively prove that an acknowledgement was sent. A later consumer that needs durability must re-establish its required sync under valid exclusive ownership before acknowledging a replay; it cannot treat validation alone as the missing sync. This child does not implement fallback append, running-phase replay, journal adoption or a new process taking over the startup journal.
 
 ## Proposed index
 
@@ -124,8 +55,6 @@ The loop holds bounded terminal evidence and owns one retry timer: first retry a
 ## Implementation handoff and decision boundary
 
 The first implementation combines startup consumer, closed startup checkpoint/reference, supervisor journal native durability, typed startup failure, actual writer closure/forced process exit, registry CAS and owned leftover cleanup. A preliminary allocation is 100–160 lines for closed models/reference validation, 180–260 for writer/file operations, 120–180 for lifecycle/fault handling and 140–220 for supervisor/registry/cleanup wiring: 540–820 added/deleted production lines before shared-helper extraction. This is a planning range, not a verified diff; all deleted/refactored lines count too. The implementing child must give a function-level estimate before approval. Preserve the startup reference through takeover, gate changes and subsequent state transitions until an explicit cleanup rule releases it. Forced exit must account for the actual process entry point and its diagnostics shutdown: a daemon writer alone does not prove that exit avoids blocking cleanup. Include both obligations in real subprocess and registry-transition tests.
-
-Recommended immediate decisions: startup-before-registration as the first consumer; the explicit no-write-wording amendment; `local-startup-checkpoint/1`, its 16 KiB checkpoint and startup-line bounds; one startup operation; bounded Running reference and owner-scoped leftover cleanup. These do not approve the provisional later running supervisor queue or complete terminal schema. No release/retirement scope is invented to make a startup-only milestone look complete.
 
 Subsequent C2 work remains explicit: continuation/ownership of the long-lived journal; running supervisor admission; exact full-disk tombstone extension and authentic receipt scope; batch/output/log caps and index/readers; transfer/spools/openat2; command/reaper/executor phases; and grants/adoption/followers. Their actual producer activation carries their own failure, cancellation, stop and release evidence. #197 retains the worker-side fallback and final provider registration. The early diagnostic portion above is a review proposal, not the complete terminal format or permission to activate Running writes.
 

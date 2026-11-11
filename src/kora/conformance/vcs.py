@@ -11,6 +11,7 @@ from kora.conformance.common import (
     check,
     fail,
     kora_capture,
+    raised_protocol_error,
     test_capabilities_are_frozen_and_consistent,
     test_config_schema_is_an_object_schema,
     test_failure_is_a_bounded_protocol_error,
@@ -161,7 +162,6 @@ async def checked_out(
     repo: str,
     revision: str,
     ctx: ProtocolContext,
-    publishing: bool = True,
 ) -> Checkout:
     request = CheckoutRequest(
         repo=repo,
@@ -171,7 +171,7 @@ async def checked_out(
         branch=WORK_BRANCH,
     )
     plan = await provider.checkout_plan(request, ctx)
-    result = await executor.prepare_workspace(plan, request, areas, (), publishing, ctx)
+    result = await executor.prepare_workspace(plan, request, areas, (), True, ctx)
     return Checkout(request, result, areas)
 
 
@@ -590,7 +590,7 @@ def test_vcs_head_sha(
     missing = absent_branch(ref, remote)
 
     head = run(kora_vcs_provider.head_sha(ref, ctx))
-    missing_error = refusal(lambda: run(kora_vcs_provider.head_sha(missing, ctx)))
+    missing_error = raised_protocol_error(kora_vcs_provider.head_sha(missing, ctx))
 
     check_head_sha(head, ref, missing_error)
 
@@ -646,14 +646,6 @@ def check_head_sha(
         missing_error is not None and not missing_error.retryable,
         "a missing ref is not retryable",
     )
-
-
-def refusal(work: Callable[[], object]) -> KoraProtocolError | None:
-    try:
-        work()
-    except KoraProtocolError as error:
-        return error
-    return None
 
 
 def local_request(
@@ -770,8 +762,8 @@ def test_vcs_credential_binding_mismatch_is_refused(
 ) -> None:
     stale = stale_request(kora_vcs_binding, kora_vcs_remote)
 
-    error = refusal(
-        lambda: run(kora_vcs_provider.acquire_credential(stale, kora_vcs_context))
+    error = raised_protocol_error(
+        kora_vcs_provider.acquire_credential(stale, kora_vcs_context)
     )
 
     check_credential_binding_mismatch_is_refused(error, kora_vcs_remote)
@@ -810,8 +802,8 @@ def test_vcs_api_credential_is_refused(
 ) -> None:
     request = api_request(kora_vcs_binding, kora_vcs_remote)
 
-    error = refusal(
-        lambda: run(kora_vcs_provider.acquire_credential(request, kora_vcs_context))
+    error = raised_protocol_error(
+        kora_vcs_provider.acquire_credential(request, kora_vcs_context)
     )
 
     check_api_credential_is_refused(error)

@@ -6,13 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from kora.conformance.common import kora_capture
 from kora.plugins.storage.local import LocalArtifactStorage
 from tests.measurements.harness import Report, new_report
 from tests.measurements.storage_lifetime_resources import source_digest
 from tests.plugins.storage.pressure_native import command
-
-__all__ = ["kora_capture"]
 
 
 @pytest.fixture(scope="session")

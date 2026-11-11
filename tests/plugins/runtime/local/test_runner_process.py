@@ -10,7 +10,6 @@ from typing import Final
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.spawn import (
     RUNNER_MODULE,
     runner_environment,
@@ -34,8 +33,6 @@ from tests.support.local_runtime import (
     runtime_context,
     state_root,
 )
-
-__all__ = ["kora_capture"]
 
 NONCE: Final[str] = "c" * 32
 SYSTEM_SUPPLIED: Final[frozenset[str]] = frozenset({"__CF_USER_TEXT_ENCODING"})

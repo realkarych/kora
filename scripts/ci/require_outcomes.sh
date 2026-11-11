@@ -81,36 +81,18 @@ require_cel_measurements() {
   if test "$FULL_SCOPE" = false; then
     test "$SCAFFOLD_RESULT" = success
     test "$SCAFFOLD_VERIFIED" = true
-    test "$IR_MATRIX_RESULT" = skipped
-    test "$RESOURCE_RESULT" = skipped
-    test "$PROVIDER_PROTOCOL_RESULT" = skipped
-    test "$PRICING_RESULT" = skipped
     test "$CEL_RESULT" = skipped
-    test "$GIT_PUBLICATION_RESULT" = skipped
     exit 0
   fi
   test "$FULL_SCOPE" = true
   test "$SCAFFOLD_RESULT" = success
   test "$SCAFFOLD_VERIFIED" = true
-  test "$IR_MATRIX_RESULT" = success
-  test "$RESOURCE_RESULT" = success
-  test "$PROVIDER_PROTOCOL_RESULT" = success
-  test "$PRICING_RESULT" = success
   test "$CEL_RESULT" = success
-  test "$GIT_PUBLICATION_RESULT" = success
-  test "$DEPENDENCIES_OUTCOME" = success
   test "$SOURCE_REVISION_OUTCOME" = success
-  test "$IR_DOWNLOAD_OUTCOME" = success
-  test "$IR_INVENTORY_OUTCOME" = success
-  test "$IR_UNION_UPLOAD_OUTCOME" = success
   test "$CEL_LIFETIME_DOWNLOAD_OUTCOME" = success
   test "$CEL_COST_DOWNLOAD_OUTCOME" = success
   test "$CEL_INVENTORY_OUTCOME" = success
-  test "$RESOURCE_VERIFIED" = true
-  test "$PROVIDER_PROTOCOL_VERIFIED" = true
-  test "$PRICING_VERIFIED" = true
   test "$CEL_VERIFIED" = true
-  test "$GIT_PUBLICATION_VERIFIED" = true
   test "$WORKFLOW_CANCELLED" = false
 }
 

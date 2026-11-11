@@ -185,32 +185,28 @@ def test_refusals_carry_no_exception_chain(kora_capture: Capture) -> None:
     assert raised.value.details == {}
 
 
-UNSAFE_PREFIXES: list[str] = ["KORA_", "A", "AWS_X", "WORKER"]
+INVALID_PREFIXES: list[tuple[str, str]] = [
+    ("KORA_", "secret_prefix_reserved"),
+    ("A", "secret_prefix_reserved"),
+    ("AWS_X", "secret_prefix_reserved"),
+    ("WORKER", "secret_prefix_reserved"),
+    ("", "string_pattern_mismatch"),
+]
 
 
 def with_prefix(prefix: str) -> dict[str, object]:
     return {**CONFIGURATION, "namespace_prefixes": {"conformance": [prefix]}}
 
 
-@pytest.mark.parametrize("prefix", UNSAFE_PREFIXES)
-def test_the_configuration_refuses_unsafe_prefixes(prefix: str) -> None:
+@pytest.mark.parametrize(("prefix", "expected"), INVALID_PREFIXES)
+def test_the_configuration_refuses_invalid_prefixes(prefix: str, expected: str) -> None:
     document = with_prefix(prefix)
 
     with pytest.raises(ValidationError) as raised:
         EnvSecretsConfiguration.model_validate(document)
 
     errors = [error["type"] for error in raised.value.errors()]
-    assert errors == ["secret_prefix_reserved"]
-
-
-def test_the_configuration_refuses_an_empty_prefix() -> None:
-    document = with_prefix("")
-
-    with pytest.raises(ValidationError) as raised:
-        EnvSecretsConfiguration.model_validate(document)
-
-    errors = [error["type"] for error in raised.value.errors()]
-    assert errors == ["string_pattern_mismatch"]
+    assert errors == [expected]
 
 
 def test_list_names_answers_only_configured_prefixes() -> None:

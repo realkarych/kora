@@ -33,6 +33,7 @@ from kora.protocols.harness import (
 )
 from kora.protocols.policy import PolicyClient
 from kora.protocols.vcs import WorkspaceTarget
+from tests.conformance.loop_bound import LoopBoundWorker
 from tests.conformance.test_shared_secrets_checks import assert_capture_released
 from tests.plugins.harness.fake.fake_support import (
     CASES,
@@ -46,13 +47,11 @@ MARKER: str = "harness-shared-input-marker"
 CONFIGURATION: JsonObject = {"session": {"prefix": "configured"}}
 
 
-class LoopBoundScript:
+class LoopBoundScript(LoopBoundWorker):
     def __init__(self, phase: str = "run", ending: str = "success") -> None:
-        self.loop = asyncio.get_running_loop()
+        self.start_loop_worker()
         self.script = CASES[checks.HarnessCase.TOOL_CALLS]
         self.header = self.script.header
-        self.queue: asyncio.Queue[asyncio.Future[None] | None] = asyncio.Queue()
-        self.worker = asyncio.create_task(self.serve())
         self.entered = asyncio.Event()
         self.phase = phase
         self.ending = ending
@@ -61,18 +60,9 @@ class LoopBoundScript:
         self.prepared = 0
         self.started = 0
         self.finished = 0
-        self.cleanup_loop: asyncio.AbstractEventLoop | None = None
-
-    async def serve(self) -> None:
-        while (completion := await self.queue.get()) is not None:
-            if not completion.done():
-                completion.set_result(None)
 
     async def advance(self, phase: str) -> None:
-        assert asyncio.get_running_loop() is self.loop
-        completion: asyncio.Future[None] = self.loop.create_future()
-        self.queue.put_nowait(completion)
-        await completion
+        await self.pass_through()
         if phase == self.phase:
             self.entered.set()
             if self.ending == "failure":
@@ -108,11 +98,6 @@ class LoopBoundScript:
         finally:
             self.active -= 1
             self.finished += 1
-
-    async def close(self) -> None:
-        self.queue.put_nowait(None)
-        await self.worker
-        self.cleanup_loop = asyncio.get_running_loop()
 
 
 class ConfiguredHarness(FakeHarness):

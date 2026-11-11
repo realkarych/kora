@@ -31,6 +31,7 @@ from kora.protocols.vcs import (
     PublishRequest,
     Vcs,
 )
+from tests.conformance.loop_bound import LoopBoundWorker
 from tests.conformance.test_shared_secrets_checks import assert_capture_released
 from tests.plugins.vcs.git_support import (
     GONE_REPO,
@@ -43,28 +44,17 @@ from tests.plugins.vcs.git_support import (
 MARKER: str = "vcs-shared-input-marker"
 
 
-class LoopBoundGit(GitVcs):
+class LoopBoundGit(LoopBoundWorker, GitVcs):
     def __init__(
         self, configuration: GitConfiguration, launcher: StepLauncher | None = None
     ) -> None:
         super().__init__(configuration, launcher)
-        self.loop = asyncio.get_running_loop()
-        self.queue: asyncio.Queue[asyncio.Future[None] | None] = asyncio.Queue()
-        self.worker = asyncio.create_task(self.serve())
+        self.start_loop_worker()
         self.contexts: list[ProtocolContext] = []
         self.credentials: list[CredentialRequest] = []
-        self.cleanup_loop: asyncio.AbstractEventLoop | None = None
-
-    async def serve(self) -> None:
-        while (completion := await self.queue.get()) is not None:
-            if not completion.done():
-                completion.set_result(None)
 
     async def advance(self, context: ProtocolContext) -> None:
-        assert asyncio.get_running_loop() is self.loop
-        completion: asyncio.Future[None] = self.loop.create_future()
-        self.queue.put_nowait(completion)
-        await completion
+        await self.pass_through()
         self.contexts.append(context)
 
     async def checkout_plan(
@@ -89,11 +79,6 @@ class LoopBoundGit(GitVcs):
         await self.advance(ctx)
         self.credentials.append(request)
         return await super().acquire_credential(request, ctx)
-
-    async def close(self) -> None:
-        self.queue.put_nowait(None)
-        await self.worker
-        self.cleanup_loop = asyncio.get_running_loop()
 
 
 def configured_request(document: JsonObject) -> CredentialRequest:

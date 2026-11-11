@@ -21,25 +21,18 @@ from kora.observability import LoggingSettings
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.policy import Policy, PolicyDecision, PolicyLayers, ToolCallRequest
+from tests.conformance.loop_bound import LoopBoundWorker
 from tests.conformance.policies import DECIDE_FAILED, ReferencePolicy, reference_calls
 from tests.conformance.test_shared_secrets_checks import assert_capture_released
 
 MARKER: str = "policy-shared-input-marker"
 
 
-class LoopBoundPolicy(ReferencePolicy):
+class LoopBoundPolicy(LoopBoundWorker, ReferencePolicy):
     def __init__(self) -> None:
-        self.loop = asyncio.get_running_loop()
-        self.queue: asyncio.Queue[asyncio.Future[None] | None] = asyncio.Queue()
-        self.worker = asyncio.create_task(self.serve())
+        self.start_loop_worker()
         self.contexts: list[ProtocolContext] = []
         self.requests: list[ToolCallRequest] = []
-        self.cleanup_loop: asyncio.AbstractEventLoop | None = None
-
-    async def serve(self) -> None:
-        while (completion := await self.queue.get()) is not None:
-            if not completion.done():
-                completion.set_result(None)
 
     async def decide(
         self,
@@ -48,21 +41,13 @@ class LoopBoundPolicy(ReferencePolicy):
         protected_paths: tuple[str, ...],
         ctx: ProtocolContext,
     ) -> PolicyDecision:
-        assert asyncio.get_running_loop() is self.loop
-        completion: asyncio.Future[None] = self.loop.create_future()
-        self.queue.put_nowait(completion)
-        await completion
+        await self.pass_through()
         self.contexts.append(ctx)
         self.requests.append(request)
         if request.tool == "ConformanceFailure":
             ctx.logger.emit(DECIDE_FAILED, reason="unreachable")
             raise KoraProtocolError("policy_failed", "the policy failed", False, {})
         return await super().decide(request, layers, protected_paths, ctx)
-
-    async def close(self) -> None:
-        self.queue.put_nowait(None)
-        await self.worker
-        self.cleanup_loop = asyncio.get_running_loop()
 
 
 async def failing_input(

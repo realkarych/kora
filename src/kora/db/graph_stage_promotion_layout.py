@@ -5,7 +5,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import TextClause
 
-from kora.db.transactions import WriterTransactionError, writer_transaction
 from kora.db.types import POSTGRESQL, SQLITE
 
 SQLITE_QUERY_ONLY: TextClause = text("PRAGMA query_only")
@@ -266,21 +265,5 @@ async def observe_graph_stage_promotion_layout(
         if verified
         and transaction.is_active
         and connection.get_transaction() is transaction
-        else GraphStagePromotionLayout.REFUSED
-    )
-
-
-async def observe_graph_stage_promotion_writer_layout(
-    connection: AsyncConnection,
-) -> GraphStagePromotionLayout:
-    try:
-        writer = writer_transaction(connection)
-        verified = await _observe_layout(connection, writable=True)
-        writer.require_active()
-    except (WriterTransactionError, SQLAlchemyError):
-        return GraphStagePromotionLayout.REFUSED
-    return (
-        GraphStagePromotionLayout.VERIFIED
-        if verified
         else GraphStagePromotionLayout.REFUSED
     )

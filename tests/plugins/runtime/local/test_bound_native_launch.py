@@ -12,7 +12,6 @@ from typing import cast
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.conformance.harness import NoLaunches
 from kora.plugins.harness.codex.app_server_rpc import RpcError, RpcFailure
 from kora.plugins.harness.codex.selected_turn import BoundTurnRpc
@@ -55,8 +54,6 @@ from tests.plugins.runtime.local.frames_support import (
     StepClock,
     TickingClock,
 )
-
-__all__ = ["kora_capture"]
 
 CUTOFF = ORIGIN_NS + 100
 PROVIDER_ROLES = frozenset({"app", "exec"})
