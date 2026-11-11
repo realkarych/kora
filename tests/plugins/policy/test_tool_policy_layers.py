@@ -5,7 +5,6 @@ from typing import Final
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.policy.allow_deny.patterns import MAX_PATTERNS
 from kora.protocols.policy import PolicyLayers, ToolCallRequest
 from tests.plugins.policy.policy_support import (
@@ -20,8 +19,6 @@ from tests.plugins.policy.policy_support import (
     request,
     shell,
 )
-
-__all__ = ["kora_capture"]
 
 INDIRECTION: Final[list[str]] = [
     "ls a#;rm -rf x",

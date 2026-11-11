@@ -860,115 +860,71 @@ def test_installed_conformance_owns_its_environment_and_wheel_copy(
     assert not core_wheel.is_relative_to(root)
 
 
-def test_installed_vcs_ref_artifact_type_conformance(
-    installed_conformance: InstalledTooling, tmp_path: Path
-) -> None:
-    config = tmp_path / "config.json"
-    config.write_text("{}")
-    home = private_home(tmp_path / "home")
-
-    process = installed_conformance.run(
-        *conformance_arguments(
-            "artifact_type", "vcs_ref", config, "fixtures_vcs_ref_artifact_type"
+@pytest.mark.parametrize(
+    ("provider", "fixtures", "markers", "expected"),
+    [
+        pytest.param(
+            "vcs_ref",
+            "fixtures_vcs_ref_artifact_type",
+            (
+                b"private-repository-marker",
+                b"private-branch-marker",
+                b"private-path-marker",
+                b"private-diff-marker",
+                b"private-principal-marker",
+            ),
+            None,
+            id="vcs_ref",
         ),
-        environment={"HOME": str(home)},
-    )
-
-    outcome = CommandResult.model_validate_json(process.stdout)
-    assert process.code == 0, (process.stdout, process.stderr)
-    assert outcome.outcome is OriginalOutcome.COMPLETE
-    assert outcome.completed == outcome.expected
-    assert outcome.expected > 0
-    assert_closed(outcome)
-    assert not list(home.rglob("journal"))
-    assert_undisclosed(
-        process,
-        b"private-repository-marker",
-        b"private-branch-marker",
-        b"private-path-marker",
-        b"private-diff-marker",
-        b"private-principal-marker",
-    )
-
-
-def test_installed_agent_session_artifact_type_conformance(
-    installed_conformance: InstalledTooling, tmp_path: Path
-) -> None:
-    config = tmp_path / "config.json"
-    config.write_text("{}")
-    home = private_home(tmp_path / "home")
-
-    process = installed_conformance.run(
-        *conformance_arguments(
-            "artifact_type",
+        pytest.param(
             "agent_session",
-            config,
             "fixtures_agent_session_artifact_type",
+            (
+                b"private-agent-session-price-marker",
+                b"private-agent-session-usage-marker",
+                b"private-agent-session-coverage-marker",
+                b"private-agent-session-denial-marker",
+            ),
+            None,
+            id="agent_session",
         ),
-        environment={"HOME": str(home)},
-    )
-
-    outcome = CommandResult.model_validate_json(process.stdout)
-    assert process.code == 0, (process.stdout, process.stderr)
-    assert outcome.outcome is OriginalOutcome.COMPLETE
-    assert outcome.completed == outcome.expected
-    assert outcome.expected > 0
-    assert_closed(outcome)
-    assert not list(home.rglob("journal"))
-    assert_undisclosed(
-        process,
-        b"private-agent-session-price-marker",
-        b"private-agent-session-usage-marker",
-        b"private-agent-session-coverage-marker",
-        b"private-agent-session-denial-marker",
-    )
-
-
-def test_installed_structured_output_artifact_type_conformance(
-    installed_conformance: InstalledTooling, tmp_path: Path
-) -> None:
-    config = tmp_path / "config.json"
-    config.write_text("{}")
-    home = private_home(tmp_path / "home")
-
-    process = installed_conformance.run(
-        *conformance_arguments(
-            "artifact_type",
+        pytest.param(
             "structured_output",
-            config,
             "fixtures_structured_output_artifact_type",
+            (
+                b"private-structured-output-payload-marker",
+                b"private-structured-output-key-marker",
+                b"private-structured-output-invalid-marker",
+            ),
+            10,
+            id="structured_output",
         ),
-        environment={"HOME": str(home)},
-    )
-
-    outcome = CommandResult.model_validate_json(process.stdout)
-    assert process.code == 0, (process.stdout, process.stderr)
-    assert outcome.outcome is OriginalOutcome.COMPLETE
-    assert outcome.completed == outcome.expected == 10
-    assert_closed(outcome)
-    assert not list(home.rglob("journal"))
-    assert_undisclosed(
-        process,
-        b"private-structured-output-payload-marker",
-        b"private-structured-output-key-marker",
-        b"private-structured-output-invalid-marker",
-    )
-
-
-def test_installed_command_result_artifact_type_conformance(
-    installed_conformance: InstalledTooling, tmp_path: Path
+        pytest.param(
+            "command_result",
+            "fixtures_command_result_artifact_type",
+            (
+                b"private-command-result-marker",
+                b"cHJpdmF0ZS1jb21tYW5kLXJlc3VsdC1tYXJrZXI=",
+            ),
+            None,
+            id="command_result",
+        ),
+    ],
+)
+def test_installed_artifact_type_conformance(
+    installed_conformance: InstalledTooling,
+    tmp_path: Path,
+    provider: str,
+    fixtures: str,
+    markers: tuple[bytes, ...],
+    expected: int | None,
 ) -> None:
     config = tmp_path / "config.json"
     config.write_text("{}")
     home = private_home(tmp_path / "home")
 
     process = installed_conformance.run(
-        *conformance_arguments(
-            "artifact_type",
-            "command_result",
-            config,
-            "fixtures_command_result_artifact_type",
-        ),
+        *conformance_arguments("artifact_type", provider, config, fixtures),
         environment={"HOME": str(home)},
     )
 
@@ -977,13 +933,10 @@ def test_installed_command_result_artifact_type_conformance(
     assert outcome.outcome is OriginalOutcome.COMPLETE
     assert outcome.completed == outcome.expected
     assert outcome.expected > 0
+    assert expected is None or outcome.expected == expected
     assert_closed(outcome)
     assert not list(home.rglob("journal"))
-    assert_undisclosed(
-        process,
-        b"private-command-result-marker",
-        b"cHJpdmF0ZS1jb21tYW5kLXJlc3VsdC1tYXJrZXI=",
-    )
+    assert_undisclosed(process, *markers)
 
 
 @pytest.mark.parametrize("selected", ["left", "right"])

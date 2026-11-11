@@ -5,7 +5,7 @@ from alembic import command
 from sqlalchemy import insert, inspect, select, update
 from sqlalchemy.exc import StatementError
 
-from kora.db.connection import Database, DatabaseClosedError, DatabaseSettings, Dialect
+from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.migrations import current_revision, upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import OUTCOME_PRESENCE_CHECK, attempt
@@ -20,19 +20,15 @@ from tests.db.cancel_cause_support import (
     UpgradeStage,
     attempt_schema_objects,
     capture_cause_predecessor,
+    interrupt_upgrade,
     migration_lock_count,
     seed_attempts,
     seed_cause_predecessor,
-    wait_for_validation,
 )
 from tests.db.seed import predecessor_snapshot
 from tests.db.test_db_upgrade_process import events, upgrade
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 from tests.engine.test_outcome_records import prepared
-
-VALIDATE_OUTCOME: str = (
-    "ALTER TABLE attempt VALIDATE CONSTRAINT ck_attempt_outcome_payload_presence"
-)
 
 
 async def seed_outcome_predecessor(database: Database) -> CausePredecessor:
@@ -196,48 +192,7 @@ async def test_outcome_migration_recovers_partial_schema(
     )
     try:
         before = await seed_outcome_predecessor(database)
-        task = asyncio.create_task(
-            upgrade_database(empty_database_settings, stage.open)
-        )
-        try:
-            await asyncio.wait_for(stage.entered.wait(), 4)
-            if database.dialect is Dialect.POSTGRESQL and ending != "prepared-cancel":
-                async with database.transaction() as holder:
-                    await holder.exec_driver_sql(
-                        "LOCK TABLE attempt IN SHARE UPDATE EXCLUSIVE MODE"
-                    )
-                    stage.release.set()
-                    await wait_for_validation(database, VALIDATE_OUTCOME)
-                    async with database.transaction() as progress:
-                        await progress.exec_driver_sql(
-                            "UPDATE attempt SET status = status"
-                        )
-                    if ending == "shutdown":
-                        assert stage.database is not None
-                        await stage.database.close(deadline_seconds=0)
-                    else:
-                        task.cancel()
-                        with pytest.raises(asyncio.CancelledError):
-                            await task
-                if ending == "shutdown":
-                    with pytest.raises(DatabaseClosedError):
-                        await task
-            elif ending == "shutdown":
-                assert stage.database is not None
-                await stage.database.close(deadline_seconds=0)
-                stage.release.set()
-                with pytest.raises(DatabaseClosedError):
-                    await task
-            else:
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-        finally:
-            stage.release.set()
-            if not task.done():
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
+        await interrupt_upgrade(database, empty_database_settings, stage, ending)
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
             after = await connection.run_sync(

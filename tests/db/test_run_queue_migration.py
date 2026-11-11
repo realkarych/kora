@@ -1,6 +1,4 @@
 import asyncio
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -24,7 +22,7 @@ from tests.db.closing import ConnectionLedger
 from tests.db.test_graph_publication_digest_migration import wait_for_invalid_index
 from tests.db.test_graph_read_admission import executed_queries, sqlite_instructions
 from tests.engine.test_run_queue import acquire, queue_case
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 PREDECESSOR = "0018"
 HEAD_REVISION = "0021"
@@ -123,12 +121,7 @@ async def test_queue_index_upgrade_recovers_and_preserves_existing_history(
 async def test_sqlite_queue_index_keeps_wide_legacy_ids_out_of_the_ordered_key(
     tmp_path: Path, encoding: str
 ) -> None:
-    path = tmp_path / "queue.db"
-    with closing(sqlite3.connect(path)) as connection:
-        connection.execute(f"PRAGMA encoding = '{encoding}'")
-        connection.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        connection.execute("DROP TABLE encoding_seed")
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "queue.db", encoding)
     database = Database(settings)
     try:
         async with database.migration_connection() as connection:

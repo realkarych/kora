@@ -3,8 +3,10 @@ import enum
 import re
 import secrets
 import shutil
+import sqlite3
 import time
 from collections.abc import Generator, Mapping
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -74,6 +76,19 @@ def selected_databases(environ: Mapping[str, str]) -> tuple[DatabaseKind, ...]:
 
 def sqlite_settings(path: Path) -> DatabaseSettings:
     return parse_database_url(f"{SQLITE_DRIVER}:///{path}")
+
+
+def encoded_sqlite_settings(
+    path: Path, encoding: str, page_size: int | None = None
+) -> DatabaseSettings:
+    with closing(sqlite3.connect(path)) as native:
+        if page_size is not None:
+            native.execute(f"PRAGMA page_size = {page_size}")
+        native.execute(f"PRAGMA encoding = '{encoding}'")
+        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
+        native.execute("DROP TABLE encoding_seed")
+        native.commit()
+    return sqlite_settings(path)
 
 
 def valid_database_name(name: str) -> str:

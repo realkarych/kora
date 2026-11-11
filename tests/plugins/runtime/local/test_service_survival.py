@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
 from kora.plugins.runtime.local.services import service_cgroup
 from kora.runner.identity import IdentityState, NativeIdentityReader
@@ -18,8 +17,6 @@ from tests.support.local_peers import until
 from tests.support.local_runners import reap_runners, short_directory
 from tests.support.local_runtime import prepared, runtime_context, state_root
 from tests.support.service_session import LISTENING_MARKER
-
-__all__ = ["kora_capture"]
 
 
 def command(arguments: list[str]) -> str:

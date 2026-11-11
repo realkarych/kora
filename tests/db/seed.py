@@ -22,8 +22,11 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnClause
 
+from kora.db.connection import Database
+from kora.db.graph_values import EncodedGraphValues
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.migrations.environment import alembic_config
+from kora.db.reads import GraphVersionRow, graph_version_by_number
 from kora.db.tables import (
     api_token,
     attempt,
@@ -110,28 +113,41 @@ class Seeder:
         return graph_id
 
     async def graph_version(
-        self, graph_id: str, number: int = 1, ir: JsonValue | None = None
+        self,
+        graph_id: str,
+        number: int = 1,
+        ir: JsonValue | None = None,
+        *,
+        version_id: str | None = None,
+        execution_contract: JsonValue | None = None,
+        value_encoding_version: int | None = None,
+        ir_digest: str = DIGEST,
+        source_digest: str = DIGEST,
+        execution_contract_digest: str = DIGEST,
+        deployment_digest: str = DIGEST,
+        resources: JsonValue | None = None,
     ) -> str:
-        version_id = self.new_id()
-        await self.connection.execute(
-            insert(graph_version).values(
-                id=version_id,
-                graph_id=graph_id,
-                number=number,
-                ir={"nodes": []} if ir is None else ir,
-                ir_digest=DIGEST,
-                source_digest=DIGEST,
-                execution_contract={},
-                execution_contract_digest=DIGEST,
-                deployment_digest=DIGEST,
-                resolved_digests={},
-                resources={},
-                deployed_by="owner",
-                deployed_at=self.clock.now(),
-                status="active",
-                **self.stamps(),
-            )
+        version_id = self.new_id() if version_id is None else version_id
+        statement = insert(graph_version).values(
+            id=version_id,
+            graph_id=graph_id,
+            number=number,
+            ir={"nodes": []} if ir is None else ir,
+            ir_digest=ir_digest,
+            source_digest=source_digest,
+            execution_contract={} if execution_contract is None else execution_contract,
+            execution_contract_digest=execution_contract_digest,
+            deployment_digest=deployment_digest,
+            resolved_digests={},
+            resources={} if resources is None else resources,
+            deployed_by="owner",
+            deployed_at=self.clock.now(),
+            status="active",
+            **self.stamps(),
         )
+        if value_encoding_version is not None:
+            statement = statement.values(value_encoding_version=value_encoding_version)
+        await self.connection.execute(statement)
         return version_id
 
     def run_values(
@@ -380,6 +396,30 @@ class Seeder:
             )
         )
         return worker_id
+
+
+async def stored_graph_version(
+    database: Database,
+    encoded: EncodedGraphValues,
+    *,
+    execution_contract_digest: str = DIGEST,
+) -> tuple[GraphVersionRow | None, GraphVersionRow | None]:
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        namespace_id = await seeder.namespace()
+        foreign_id = await seeder.namespace("foreign")
+        graph_id = await seeder.graph(namespace_id)
+        await seeder.graph_version(
+            graph_id,
+            ir=encoded.ir,
+            execution_contract=encoded.execution_contract,
+            value_encoding_version=encoded.value_encoding_version,
+            execution_contract_digest=execution_contract_digest,
+        )
+    async with database.read_transaction() as connection:
+        row = await graph_version_by_number(connection, namespace_id, graph_id, 1)
+        foreign = await graph_version_by_number(connection, foreign_id, graph_id, 1)
+    return row, foreign
 
 
 @dataclass(frozen=True)

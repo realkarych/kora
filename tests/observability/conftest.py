@@ -104,10 +104,8 @@ def finished_output(diagnostics: ProcessDiagnostics, pipe: Pipe) -> str:
     return "\n".join(pipe.reader.lines())
 
 
-def wait_until(
-    condition: Callable[[], bool], deadline_seconds: float = WAIT_SECONDS
-) -> None:
-    deadline = time.monotonic() + deadline_seconds
+def wait_until(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + WAIT_SECONDS
     while not condition():
         if time.monotonic() > deadline:
             raise TimeoutError("the condition was not met before the deadline")

@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.runner.filesystem import DirectoryAnchor, rename_no_replace
 from kora.runner.identity import (
     SCAN_NS,
@@ -37,8 +36,6 @@ from tests.support.local_runtime import (
     runtime_context,
     state_root,
 )
-
-__all__ = ["kora_capture"]
 
 REAL_EXITS = 100
 REAL_EXIT_STEP_NS = 1_000_000
