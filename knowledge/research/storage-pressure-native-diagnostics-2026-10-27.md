@@ -32,6 +32,8 @@ The macOS command is now:
 hdiutil create -size 64m -fs HFS+ -volname kora-pressure-<nonce> -o <private-owner>/filesystem.dmg
 ```
 
+The creation, attachment and mount commands in this section are superseded by the [2026-11-11 amendment](#image-creation-without-an-internal-eject-2026-11-11); the identity, ownership and recovery checks below are unchanged.
+
 UDRW is verified by actual `imageinfo`, rather than requesting `-format` without its supported source-folder form. A no-follow image descriptor verifies regular type, effective UID, one link, finite size and captured device/inode before `fchmod(0600)`. Its private directory and the path's matching identity are checked; the controller keeps its lease and persists the resulting stamp before attachment.
 
 Attachment retains `-nobrowse -owners on -mountpoint <private-owner>/mounted`. Unique image/device/mount discovery precedes an opened mounted-root check of device, inode, type, UID and filesystem. An owner-owned 0755 or 0700 HFS+ root can be normalized through that same descriptor to 0700 and checked again. Unexpected identity or ownership refuses without privileged ownership repair.
@@ -78,3 +80,43 @@ The exact case set now contains both `[1]` and `[4096]` identities and the four 
 A bounded real execution of the 19 pressure-controller cases, followed by the unchanged recovery collector, verified the corresponding raw counts: 17 distinct manifests, 12 primary reports and 17 final reports, no cleanup failures, and exactly two pre-provider `command_failed` primary reports. The two unsafe-ancestor refusals still create no owner. The additional direct-command parameter plus four new cases add five owners to the original 12; caught failure, stopped-reader cleanup and legacy orphan recovery add three primary reports to the original nine. Every report is closed.
 
 The raw validator and parser fixture now require those exact larger inventories and both new native-failure reports, preserving the original identity, ownership, ENOSPC, failure, numerical and closure assertions. Corruption cases verify that losing either the failure code or the pre-provider classification is rejected; both cases failed when that check was absent and passed after its restoration. No cycle count, capacity limit, budget, schedule, deadline, platform or qualification policy is loosened. No instrumented qualification campaign was rerun. This reconciliation accounts for the approved additional tests and prevents omission at their existing evidence boundary.
+
+## Image creation without an internal eject, 2026-11-11
+
+[Issue #1351](https://github.com/realkarych/kora/issues/1351) records three hosted macOS 15 failures with `hdiutil: create failed - Resource busy` before the provider started. The [cause analysis](https://github.com/realkarych/kora/issues/1351#issuecomment-6784590210) and the [owner approval](https://github.com/realkarych/kora/issues/1351#issuecomment-6791873714) define this amendment.
+
+### Cause
+
+`hdiutil create -size 64m -fs HFS+` attaches the new image without mounting it, formats the partition with `newfs_hfs -v <name>` and then ejects the image through DiskArbitration. If that eject is refused, hdiutil requests one more eject during its failure cleanup, deletes the image file and exits 1 with `hdiutil: create failed - Resource busy`. A local macOS 26.2 `-debug` trace of a run in which another process held the new raw disk node records both refusals:
+
+```text
+-ejectAfterFormat: synchronous eject returned 0x0000C010 (49168)
+-performCleanupWithError: synchronous eject returned 0x0000C010 (49168)
+deleting <image path>
+hdiutil: create failed - Resource busy
+```
+
+A DiskArbitration eject-approval callback answering with a `0xC010` dissenter reproduces the exit status and final stderr line within about one second.
+
+- When only the first eject is refused, no attachment remains.
+- When both are refused, the output is identical, but an attachment of the deleted image stays attached, served by a detached `diskimages-helper`, until something else ejects it.
+
+The [hosted diagnostic on #302](https://github.com/realkarych/kora/issues/302#issuecomment-6724631920) recorded such a double refusal on macOS 26 and found `storagekitd` still holding the raw node 0.56–0.93 s after refusals. hdiutil's two ejects were about 1–45 ms apart locally, so waiting and creating again cannot release the usual outcome.
+
+### Approved change
+
+macOS acquisition no longer uses hdiutil's internal attach–format–eject cycle:
+
+1. `hdiutil create -size 64m -layout GPTSPUD -o <private-owner>/filesystem.dmg` writes a blank UDRW image with a GUID partition map and one `Apple_HFS` partition. Its `-debug` trace shows no attach and no eject.
+2. `hdiutil attach -nomount -plist <image>` attaches it once, without mounting it. Discovery then requires the image's single attachment, unmounted, with exactly its root device and the root's `s1` partition.
+3. `newfs_hfs -v kora-pressure-<nonce prefix> /dev/rdiskNs1` formats that partition with the arguments hdiutil passed internally, as the invoking user.
+4. `diskutil mount -mountOptions nobrowse,owners -mountPoint <private-owner>/mounted diskNs1` mounts it. Locally the mount has the same flags as the previous attach (`hfs, local, nodev, nosuid, nobrowse`) and the same entities.
+
+The image's only eject is now the fixture's own native release. The manifest records `mount_requested` immediately before formatting and mounting, as on Linux, instead of together with the attachment. An interruption after attachment and before mounting leaves an unmounted attachment, which recovery releases through the existing eject-only branch of the native release. Failure diagnostics gain the fixed labels `newfs_hfs` and `diskutil mount`. Identity, ownership, mount verification, native release, deadlines, persisted formats and CI settings are unchanged. A refused format or mount fails at once, with no retry.
+
+### Regressions
+
+- `tests/plugins/storage/test_pressure_image_creation.py::test_image_acquisition_requests_no_ejection` runs the real acquisition while a test-owned DiskArbitration eject approver, bound to the exact image path through its IOKit `image-path`, would refuse the image's first eject with `0xC010`. It requires that no eject request reaches the approver before the test switches it to observation. The fixture's own release must then be observed and approved, and resources must close. On the parent revision this test fails with `create failed - Resource busy`.
+- `test_image_creation_failure_fails_after_one_command` requires a creation failure caused by an existing image file to fail after exactly one command.
+
+Hosted macOS 15 behavior of the user-run `newfs_hfs` and the `diskutil mount` options is established by the pull request's final-head CI, not by these local observations.

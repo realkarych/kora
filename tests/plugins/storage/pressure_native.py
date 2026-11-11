@@ -140,6 +140,8 @@ def native_command_label(arguments: tuple[str, ...]) -> NativeCommandLabel:
         ("/usr/bin/hdiutil", "attach"): "hdiutil attach",
         ("/usr/bin/hdiutil", "detach"): "hdiutil detach",
         ("/usr/sbin/diskutil", "eject"): "diskutil eject",
+        ("/usr/sbin/diskutil", "mount"): "diskutil mount",
+        ("/sbin/newfs_hfs",): "newfs_hfs",
         ("/usr/bin/hdiutil", "info"): "hdiutil info",
         ("/usr/bin/hdiutil", "imageinfo"): "hdiutil imageinfo",
         ("/usr/sbin/mkfs.ext4",): "mkfs.ext4",

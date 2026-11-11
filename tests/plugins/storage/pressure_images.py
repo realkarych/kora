@@ -118,10 +118,8 @@ def create_image(directory: Path, nonce: str, effect: Effect) -> ImageStamp:
                 "create",
                 "-size",
                 "64m",
-                "-fs",
-                "HFS+",
-                "-volname",
-                "kora-pressure-" + nonce[:12],
+                "-layout",
+                "GPTSPUD",
                 "-o",
                 str(image),
             )
@@ -272,11 +270,7 @@ def attach(directory: Path, effect: Effect) -> None:
             (
                 "/usr/bin/hdiutil",
                 "attach",
-                "-nobrowse",
-                "-owners",
-                "on",
-                "-mountpoint",
-                str(directory / "mounted"),
+                "-nomount",
                 "-plist",
                 str(directory / image_name()),
             )
@@ -295,7 +289,7 @@ def attach(directory: Path, effect: Effect) -> None:
         )
 
 
-def mount(directory: Path, attachment: Attachment, effect: Effect) -> None:
+def mount(directory: Path, nonce: str, attachment: Attachment, effect: Effect) -> None:
     if sys.platform == "linux":
         effect(
             (
@@ -310,6 +304,32 @@ def mount(directory: Path, attachment: Attachment, effect: Effect) -> None:
                 str(directory / "mounted"),
             )
         )
+        return
+    partition = attachment.device + "s1"
+    if attachment.mounted or sorted(attachment.entities) != [
+        attachment.device,
+        partition,
+    ]:
+        raise PressureFailure("attachment_identity")
+    effect(
+        (
+            "/sbin/newfs_hfs",
+            "-v",
+            "kora-pressure-" + nonce[:12],
+            "/dev/r" + partition.removeprefix("/dev/"),
+        )
+    )
+    effect(
+        (
+            "/usr/sbin/diskutil",
+            "mount",
+            "-mountOptions",
+            "nobrowse,owners",
+            "-mountPoint",
+            str(directory / "mounted"),
+            partition,
+        )
+    )
 
 
 def verify_mount(directory: Path, attachment: Attachment) -> str:

@@ -334,16 +334,18 @@ def test_pressure_image_creation_keeps_native_format_and_private_identity(
     assert attached is None
     assert controller.manifest.resources_closed
     if sys.platform == "darwin":
-        assert observed[0][:7] == (
-            "/usr/bin/hdiutil",
-            "create",
-            "-size",
-            "64m",
-            "-fs",
-            "HFS+",
-            "-volname",
-        )
-        assert "-srcfolder" not in observed[0]
+        assert observed == [
+            (
+                "/usr/bin/hdiutil",
+                "create",
+                "-size",
+                "64m",
+                "-layout",
+                "GPTSPUD",
+                "-o",
+                str(image),
+            )
+        ]
         assert image_format == "UDRW"
     else:
         assert observed[0][0] == "/usr/sbin/mkfs.ext4"

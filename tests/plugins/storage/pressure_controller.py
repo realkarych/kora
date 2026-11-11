@@ -543,12 +543,7 @@ class PressureController:
         self.persist()
         (self.directory / "mounted").mkdir(mode=0o700)
         synchronize_directory(self.directory)
-        self.manifest = self.manifest.model_copy(
-            update={
-                "attachment_requested": True,
-                "mount_requested": sys.platform == "darwin",
-            }
-        )
+        self.manifest = self.manifest.model_copy(update={"attachment_requested": True})
         self.persist()
         self.pause_response = workload == "lost-attachment-response"
         try:
@@ -566,7 +561,9 @@ class PressureController:
             raise PressureFailure("attachment_missing")
         self.manifest = self.manifest.model_copy(update={"mount_requested": True})
         self.persist()
-        pressure_images.mount(self.directory, attachment, self.effect)
+        pressure_images.mount(
+            self.directory, self.manifest.nonce, attachment, self.effect
+        )
         mounted = pressure_images.discover(self.directory, stamp, self.effect)
         if mounted is None:
             raise PressureFailure("mount_missing")

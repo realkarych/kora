@@ -214,6 +214,8 @@ NativeCommandLabel: TypeAlias = Literal[
     "hdiutil attach",
     "hdiutil detach",
     "diskutil eject",
+    "diskutil mount",
+    "newfs_hfs",
     "hdiutil info",
     "hdiutil imageinfo",
     "python",
