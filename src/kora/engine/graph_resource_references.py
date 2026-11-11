@@ -2,7 +2,14 @@ import json
 from dataclasses import dataclass
 from typing import Literal, Never, cast
 
+from pydantic import TypeAdapter, ValidationError
+
 from kora.cel_eval.errors import raise_safe
+from kora.db.graph_resource_owner_reads import (
+    MAX_OWNER_SIZE,
+    AcquiredGraphResourceOwners,
+    NativeOwnerRow,
+)
 from kora.db.graph_value_json import (
     GraphValueFailure,
     GraphValueRejected,
@@ -10,6 +17,8 @@ from kora.db.graph_value_json import (
     TextBudget,
     render_object,
 )
+from kora.db.identifiers import is_identifier
+from kora.db.types import DIGEST_LENGTH
 from kora.engine.graph_command_manifests import (
     MAX_FILES,
     CommandManifestLimits,
@@ -19,6 +28,7 @@ from kora.engine.graph_command_manifests import (
 )
 from kora.ir.config import COMMAND_RESOURCE_MAX_BYTES
 from kora.ir.json import JsonObject, JsonValue
+from kora.ir.scalars import NodeId
 from kora.ir.vcs_ref_json import lexical_depth_valid, unique_object, valid_scalars
 from kora.protocols.storage_models import MAX_STORAGE_METADATA, ContentRef
 
@@ -32,9 +42,20 @@ UTF8_BYTES_PER_UTF16_BYTE = 2
 DECODE_TEXT_COPIES = 3
 DECODE_STRUCTURE_UNITS = 10
 DECODE_SCANS = 6
+OWNER_NODE_BYTES = 64
+OWNER_IDENTIFIER_BYTES = 256
+OWNER_DIGEST_BYTES = len("sha256:") + DIGEST_LENGTH
+OWNER_METADATA_ENVELOPE = 256
+OWNER_MODEL_COPIES = 9
+OWNER_MODEL_PASSES = 12
+OWNER_STATE_BYTES = len("expiring")
+OWNER_STATES = frozenset({"present", "expiring", "expired", "missing"})
+OWNER_NODE: TypeAdapter[str] = TypeAdapter(NodeId)
+NATIVE_RESOURCE_ENCODINGS = ("utf-8", "utf-16le", "utf-16be")
 _BUILD = object()
 
 NativeResourceEncoding = Literal["utf-8", "utf-16le", "utf-16be"]
+NativeOwnerState = Literal["present", "expiring", "expired", "missing"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +106,11 @@ class GraphResourceOwner(_ProtectedGraphResources):
         object.__setattr__(self, "reference", reference)
 
 
+GraphResourceOwnerEvidence = (
+    tuple[GraphResourceOwner, ...] | AcquiredGraphResourceOwners
+)
+
+
 class GraphResourceReferences(_ProtectedGraphResources):
     __slots__ = ("_text",)
     _text: str
@@ -111,6 +137,15 @@ class NativeGraphResourceTransport(_ProtectedGraphResources):
             raise AttributeError("native graph resources are immutable")
         object.__setattr__(self, "payload", payload)
         object.__setattr__(self, "encoding", encoding)
+
+
+class CheckedNativeGraphResourceReferences(GraphResourceReferences):
+    __slots__ = ("owner_states",)
+    owner_states: tuple[NativeOwnerState, ...]
+
+    def __init__(self, text: str, owner_states: tuple[NativeOwnerState, ...]) -> None:
+        super().__init__(text)
+        object.__setattr__(self, "owner_states", owner_states)
 
 
 class PreparedGraphResourceReferences(GraphResourceReferences):
@@ -166,7 +201,7 @@ def _decode_native_resources(
         type(payload) is not bytes
         or not payload
         or type(encoding) is not str
-        or encoding not in ("utf-8", "utf-16le", "utf-16be")
+        or encoding not in NATIVE_RESOURCE_ENCODINGS
     ):
         raise GraphValueRejected(GraphValueFailure.INVALID)
     width = len(payload)
@@ -196,6 +231,114 @@ def _decode_native_resources(
     if not valid_scalars(document):
         raise GraphValueRejected(GraphValueFailure.INVALID)
     return document
+
+
+def _decode_native_owner(
+    row: NativeOwnerRow,
+    position: int,
+    scope: GraphResourceScope,
+    encoding: NativeResourceEncoding,
+    admission: ReferenceAdmission,
+) -> tuple[GraphResourceOwner, NativeOwnerState]:
+    if type(row) is not tuple or len(row) != 9:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    admission.keep(16)
+    ordinal, size, subgraph, node, file, store, digest, incarnation, state = row
+    fields = (node, file, store, digest, incarnation, state)
+    if (
+        type(ordinal) is not int
+        or ordinal != position
+        or type(size) is not int
+        or not 0 <= size <= MAX_OWNER_SIZE
+        or (subgraph is not None and (type(subgraph) is not bytes or not subgraph))
+        or any(type(field) is not bytes or not field for field in fields)
+    ):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    width = 1 if encoding == "utf-8" else 2
+    if (
+        (subgraph is not None and len(subgraph) > width * OWNER_NODE_BYTES)
+        or len(node) > width * OWNER_NODE_BYTES
+        or len(store) > width * OWNER_IDENTIFIER_BYTES
+        or len(digest) != width * OWNER_DIGEST_BYTES
+        or len(incarnation) > width * OWNER_IDENTIFIER_BYTES
+        or len(state) > width * OWNER_STATE_BYTES
+    ):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    native_bytes = sum(len(field) for field in fields) + (
+        0 if subgraph is None else len(subgraph)
+    )
+    text_bytes = UNICODE_BYTES_PER_NATIVE_BYTE * native_bytes
+    metadata = OWNER_METADATA_ENVELOPE + 2 * (
+        len(store) + len(digest) + len(incarnation)
+    )
+    admission.inspect(native_bytes)
+    admission.keep(text_bytes + OWNER_MODEL_COPIES * metadata)
+    admission.work.reserve(text_bytes + OWNER_MODEL_PASSES * metadata)
+    try:
+        name, file_name, store_id, sha256, object_incarnation, payload_state = (
+            field.decode(encoding) for field in fields
+        )
+        node_name = OWNER_NODE.validate_python(name)
+        path = (
+            ("graph", "nodes", node_name)
+            if subgraph is None
+            else (
+                "graph",
+                "subgraphs",
+                OWNER_NODE.validate_python(subgraph.decode(encoding)),
+                "nodes",
+                node_name,
+            )
+        )
+        if not valid_scalars(file_name) or payload_state not in OWNER_STATES:
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        reference = ContentRef.model_validate(
+            {
+                "version": 1,
+                "address": {
+                    "version": 1,
+                    "storage_identity": {"version": 1, "store_id": store_id},
+                    "payload_digest": sha256,
+                },
+                "object_incarnation": object_incarnation,
+                "total_size": size,
+            }
+        )
+    except (UnicodeError, ValidationError):
+        raise GraphValueRejected(GraphValueFailure.INVALID) from None
+    return GraphResourceOwner(scope, path, file_name, reference), cast(
+        NativeOwnerState, payload_state
+    )
+
+
+def _decode_native_owners(
+    batch: AcquiredGraphResourceOwners,
+    scope: GraphResourceScope,
+    encoding: NativeResourceEncoding,
+    admission: ReferenceAdmission,
+) -> tuple[tuple[GraphResourceOwner, ...], tuple[NativeOwnerState, ...]]:
+    if type(scope) is not GraphResourceScope or not all(
+        type(value) is str and is_identifier(value)
+        for value in (scope.namespace_id, scope.graph_id, scope.version_id)
+    ):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    rows = batch.rows
+    if (
+        type(batch.version_id) is not str
+        or batch.version_id != scope.version_id
+        or type(rows) is not tuple
+        or len(rows) > MAX_FILES
+    ):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    admission.inspect(len(rows))
+    admission.keep(4 + 4 * len(rows))
+    owners: list[GraphResourceOwner] = []
+    states: list[NativeOwnerState] = []
+    for position, row in enumerate(rows):
+        owner, state = _decode_native_owner(row, position, scope, encoding, admission)
+        owners.append(owner)
+        states.append(state)
+    return tuple(owners), tuple(states)
 
 
 def _scope_values(
@@ -288,12 +431,17 @@ def _reference_document(
     owners: tuple[GraphResourceOwner, ...],
     admission: ReferenceAdmission,
     ordered: list[GraphResourceOwner] | None,
+    *,
+    verify_order: bool = False,
 ) -> JsonObject:
     logical, count = _logical_commands(declared, admission)
     indexed = _index_owners(scope, owners, count, admission)
     admission.keep(3 + len(logical))
     if ordered is not None:
         admission.keep(2 * count)
+    position = 0
+    if verify_order:
+        admission.work.reserve(count)
     commands: list[JsonValue] = []
     for entry in logical:
         path = cast(list[str], entry["path"])
@@ -308,6 +456,10 @@ def _reference_document(
             owner = indexed.pop((path_key, name), None)
             if owner is None:
                 raise GraphValueRejected(GraphValueFailure.INVALID)
+            if verify_order:
+                if owner is not owners[position]:
+                    raise GraphValueRejected(GraphValueFailure.INVALID)
+                position += 1
             reference = owner.reference
             admission.inspect(MAX_STORAGE_METADATA)
             if (
@@ -368,14 +520,27 @@ def _references_result(
     saved_logical: object,
     saved_physical: object,
     scope: GraphResourceScope,
-    owners: tuple[GraphResourceOwner, ...],
+    owners: GraphResourceOwnerEvidence,
     limits: GraphResourceReferenceLimits,
     max_output_bytes: int | None = None,
 ) -> GraphResourceReferences | GraphValueFailure:
     try:
         admission = ReferenceAdmission(limits)
+        encoding: NativeResourceEncoding | None = None
         if type(saved_physical) is NativeGraphResourceTransport:
+            encoding = saved_physical.encoding
             saved_physical = _decode_native_resources(saved_physical, admission)
+        owner_states: tuple[NativeOwnerState, ...] | None = None
+        if type(owners) is AcquiredGraphResourceOwners:
+            if encoding is None:
+                raise GraphValueRejected(GraphValueFailure.INVALID)
+            owner_values, owner_states = _decode_native_owners(
+                owners, scope, encoding, admission
+            )
+        elif type(owners) is tuple:
+            owner_values = owners
+        else:
+            raise GraphValueRejected(GraphValueFailure.INVALID)
         ordered: list[GraphResourceOwner] | None = None
         if saved_logical is _BUILD:
             declared = build_declared_command_manifests(ir_text, limits=limits.logical)
@@ -385,12 +550,21 @@ def _references_result(
             declared = check_declared_command_manifests(
                 ir_text, saved_logical, limits=limits.logical
             )
-        expected = _reference_document(declared, scope, owners, admission, ordered)
+        expected = _reference_document(
+            declared,
+            scope,
+            owner_values,
+            admission,
+            ordered,
+            verify_order=owner_states is not None,
+        )
         if saved_physical is not _BUILD and not _matches(
             expected, saved_physical, admission
         ):
             raise GraphValueRejected(GraphValueFailure.INVALID)
         rendered = admission.render(expected, max_output_bytes)
+        if owner_states is not None:
+            return CheckedNativeGraphResourceReferences(rendered, owner_states)
         if ordered is None:
             return GraphResourceReferences(rendered)
         return PreparedGraphResourceReferences(rendered, tuple(ordered))
@@ -423,7 +597,7 @@ def check_graph_resource_references(
     saved_logical: object,
     saved_physical: object,
     scope: GraphResourceScope,
-    owners: tuple[GraphResourceOwner, ...],
+    owners: GraphResourceOwnerEvidence,
     *,
     limits: GraphResourceReferenceLimits,
 ) -> GraphResourceReferences:

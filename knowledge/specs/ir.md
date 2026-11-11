@@ -66,6 +66,8 @@ Unknown root keys are discarded without traversing their values. `inspect_ir_roo
 
 ### Graph parameter schema omission
 
+The [first-slice parameter evaluation profile](first-slice.md#graph-parameter-evaluation-support) adds an installation support check for the effective schema. The full structural IR, the exact authored schema and the omission rule remain the source of parameter meaning.
+
 The project owner accepted this contract on 2026-11-03 under [issue #642](https://github.com/realkarych/kora/issues/642). When `graph.params` is omitted, its effective parameter schema is exactly:
 
 ```json

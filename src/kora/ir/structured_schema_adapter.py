@@ -22,11 +22,19 @@ from kora.ir.structured_schema_assertions import (
     multiple_of_matches,
     type_matches,
 )
+from kora.ir.structured_schema_collection_predicates import (
+    dependent_required_present,
+    required_names_present,
+    unique_items_matches,
+)
 from kora.ir.structured_schema_cursors import (
     ArenaCursor,
     NativeCursor,
     NativeObjectIndex,
     arena_cursor,
+    build_native_object_index,
+    container_count,
+    cursor_kind,
 )
 from kora.ir.structured_schema_evaluation_policy import (
     PARAMETERS,
@@ -144,6 +152,7 @@ _Handler = Callable[
     [_Engine, _BoundKeyword, NativeCursor, dict[str, _BoundKeyword]], None
 ]
 _Assertion = Callable[[NativeCursor, ArenaCursor, EvaluationMeter], bool]
+_Membership = Callable[[NativeObjectIndex, ArenaCursor, EvaluationMeter], bool]
 
 
 class _EngineFactory(Protocol):
@@ -379,6 +388,18 @@ def _mismatch(meter: EvaluationMeter) -> Never:
     raise _Mismatch from None
 
 
+def _original_argument(
+    context: _Context, argument: _BoundKeyword, meter: EvaluationMeter
+) -> ArenaCursor:
+    meter.reserve()
+    prepared = context.prepared
+    meter.reserve()
+    arena = cast("tuple[SchemaNode, ...]", object.__getattribute__(prepared, "_arena"))
+    meter.reserve()
+    node = argument.node
+    return arena_cursor(arena, node, meter)
+
+
 def _assertion_handler(assertion: _Assertion) -> _Handler:
     def handle(
         _engine: _Engine,
@@ -389,15 +410,7 @@ def _assertion_handler(assertion: _Assertion) -> _Handler:
         frame = argument.frame
         context = frame.context
         meter = context.meter
-        meter.reserve()
-        prepared = context.prepared
-        meter.reserve()
-        arena = cast(
-            "tuple[SchemaNode, ...]", object.__getattribute__(prepared, "_arena")
-        )
-        meter.reserve()
-        node = argument.node
-        original = arena_cursor(arena, node, meter)
+        original = _original_argument(context, argument, meter)
         matched = assertion(instance, original, meter)
         meter.reserve()
         if not matched:
@@ -408,6 +421,58 @@ def _assertion_handler(assertion: _Assertion) -> _Handler:
 
 
 _type: _Handler = _assertion_handler(type_matches)
+
+
+def _frame_object_index(frame: _Frame, meter: EvaluationMeter) -> NativeObjectIndex:
+    meter.reserve()
+    index = frame.index
+    meter.reserve()
+    if index is None:
+        meter.reserve()
+        cursor = frame.value
+        meter.reserve()
+        mapping = cast("dict[str, object]", cursor.value)
+        index = build_native_object_index(mapping, meter)
+        meter.reserve()
+        frame.index = index
+    return index
+
+
+def _membership_handler(
+    expected_kind: Literal["array", "object"], membership: _Membership
+) -> _Handler:
+    def handle(
+        _engine: _Engine,
+        argument: _BoundKeyword,
+        instance: NativeCursor,
+        _schema: dict[str, _BoundKeyword],
+    ) -> None:
+        frame = argument.frame
+        context = frame.context
+        meter = context.meter
+        kind = cursor_kind(instance, meter)
+        meter.reserve()
+        if kind != "object":
+            _finish(frame, meter)
+            return
+        original = _original_argument(context, argument, meter)
+        argument_kind = cursor_kind(original, meter)
+        meter.reserve()
+        if argument_kind != expected_kind:
+            refuse()
+        count = container_count(original, meter)
+        meter.reserve()
+        if count == 0:
+            _finish(frame, meter)
+            return
+        index = _frame_object_index(frame, meter)
+        matched = membership(index, original, meter)
+        meter.reserve()
+        if not matched:
+            _mismatch(meter)
+        _finish(frame, meter)
+
+    return handle
 
 
 def _reference(
@@ -567,7 +632,7 @@ _HANDLERS: dict[str, _Handler] = {
     "anyOf": _unavailable,
     "const": _assertion_handler(const_matches),
     "contains": _unavailable,
-    "dependentRequired": _unavailable,
+    "dependentRequired": _membership_handler("object", dependent_required_present),
     "dependentSchemas": _unavailable,
     "else": _noop,
     "enum": _assertion_handler(enum_matches),
@@ -591,10 +656,10 @@ _HANDLERS: dict[str, _Handler] = {
     "prefixItems": _unavailable,
     "properties": _unavailable,
     "propertyNames": _unavailable,
-    "required": _unavailable,
+    "required": _membership_handler("array", required_names_present),
     "then": _noop,
     "type": _type,
-    "uniqueItems": _unavailable,
+    "uniqueItems": _assertion_handler(unique_items_matches),
 }
 _DRAFT: _DraftMetadata = cast("_DraftMetadata", Draft202012Validator)
 _CREATE: _CreateEngine = cast(

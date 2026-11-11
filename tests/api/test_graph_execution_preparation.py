@@ -9,11 +9,13 @@ from copy import deepcopy
 from dataclasses import replace
 from inspect import getcoroutinelocals, iscoroutine
 from traceback import walk_tb
+from types import CodeType, FunctionType, ModuleType
 from typing import Literal, cast
 
 import pytest
 from fastapi.encoders import jsonable_encoder
 
+from kora.api import graph_execution_preparation
 from kora.api.cel_pattern_validation import COMPLETED as PATTERN_COMPLETED
 from kora.api.cel_renderings import IncompleteRenderings, RenderingRefusal
 from kora.api.exchange import COMPONENT
@@ -40,9 +42,11 @@ from kora.db.graph_value_json import (
     render_object,
 )
 from kora.db.graph_version_reads import AcquiredGraphVersion
+from kora.engine import graph_command_manifests
 from kora.engine.graph_command_manifests import (
     CommandManifestLimits,
     CommandResourceContent,
+    GraphDeploymentSelectors,
     build_declared_command_manifests,
     check_declared_command_manifests,
 )
@@ -55,6 +59,7 @@ from kora.engine.graph_projection_paths import (
     build_graph_cel_projection_paths,
 )
 from kora.engine.graph_resource_references import GraphResourceOwner
+from kora.engine.graph_types import read_document
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.ir.config import COMMAND_RESOURCE_MAX_BYTES
 from kora.ir.json import JsonObject
@@ -79,13 +84,18 @@ from tests.engine.test_graph_command_manifests import LIMITS as GROUP_LIMITS
 from tests.engine.test_graph_command_manifests import ZERO, authored_manifest, resource
 from tests.engine.test_graph_execution_contract import LIMITS as READ_LIMITS
 from tests.engine.test_graph_execution_contract import complete_inputs
+from tests.engine.test_graph_output_inventory import observe_calls
 from tests.engine.test_graph_resource_references import SCOPE, assert_refused, content
 
 MARKER = "private-preparation-837"
 OWNER_MARKER = "second-object"
 PRIVATE_APPROVAL = "private_approval_641"
+PRIVATE_SELECTOR = "private_selector_657"
 PRIVATE_STORE = "Private-Deployment-Store-863"
 DEPLOYMENT_ENTRY = "prepare_graph_deployment_inputs"
+DEPLOYMENT_SELECTORS = GraphDeploymentSelectors(
+    authorized_namespace_name="example", route_graph="graph", request_graph="graph"
+)
 DEPLOYMENT_STORE = StorageIdentity(version=1, store_id=PRIVATE_STORE)
 COMMAND_PATH = ("graph", "nodes", "producer")
 LIMITS = ExecutionPreparationLimits(
@@ -187,12 +197,14 @@ def assert_protected(
     assert (
         not {"_prepare", "_draft", "_prepare_logical", "_checked_pair"} & frames.keys()
     )
+    assert not {"_derive", "_verified_contents", "_stage_groups_result"} & frames.keys()
     assert error.__context__ is None
     assert error.__cause__ is None
     assert MARKER not in repr(error)
     assert OWNER_MARKER not in repr(error)
     assert PRIVATE_STORE not in repr(error)
     assert PRIVATE_APPROVAL not in repr(error)
+    assert PRIVATE_SELECTOR not in repr(error)
 
 
 def check_roundtrip() -> None:
@@ -786,6 +798,7 @@ def check_deployment_roundtrip() -> None:
                     text,
                     contents,
                     evaluator,
+                    selectors=DEPLOYMENT_SELECTORS,
                     storage_identity=storage,
                     limits=DEPLOYMENT_LIMITS,
                 )
@@ -885,7 +898,12 @@ def check_deployment_refusals() -> None:
         for text, contents, storage, limits, reason in cases:
             task = loop.create_task(
                 prepare_graph_deployment_inputs(
-                    text, contents, evaluator, storage_identity=storage, limits=limits
+                    text,
+                    contents,
+                    evaluator,
+                    selectors=DEPLOYMENT_SELECTORS,
+                    storage_identity=storage,
+                    limits=limits,
                 )
             )
             run_loop_turn(loop)
@@ -900,6 +918,7 @@ def check_deployment_refusals() -> None:
                 invalid_ir,
                 files,
                 evaluator,
+                selectors=DEPLOYMENT_SELECTORS,
                 storage_identity=DEPLOYMENT_STORE,
                 limits=DEPLOYMENT_LIMITS,
             )
@@ -909,6 +928,7 @@ def check_deployment_refusals() -> None:
                 ir_text,
                 files,
                 evaluator,
+                selectors=DEPLOYMENT_SELECTORS,
                 storage_identity=DEPLOYMENT_STORE,
                 limits=replace(
                     DEPLOYMENT_LIMITS, execution=replace(LIMITS, rendering_characters=1)
@@ -922,6 +942,7 @@ def check_deployment_refusals() -> None:
                     ir_text,
                     files,
                     evaluator,
+                    selectors=DEPLOYMENT_SELECTORS,
                     storage_identity=DEPLOYMENT_STORE,
                     limits=DEPLOYMENT_LIMITS,
                 )
@@ -952,6 +973,76 @@ def check_deployment_refusals() -> None:
     assert_protected(unavailable, DEPLOYMENT_ENTRY)
 
 
+def phase_code(owner: ModuleType, name: str) -> CodeType:
+    phase: object = getattr(owner, name)
+    assert isinstance(phase, FunctionType)
+    return phase.__code__
+
+
+def check_deployment_selector_refusals() -> None:
+    files = deployment_contents()
+    ir_text = deployment_source(files)
+    phases = (
+        read_document.__code__,
+        phase_code(graph_command_manifests, "_commands"),
+        phase_code(graph_command_manifests, "_resource_manifest"),
+        phase_code(graph_command_manifests, "_group_verified_contents"),
+        phase_code(graph_execution_preparation, "_prepare_logical"),
+    )
+    invalid_selectors = (
+        (replace(DEPLOYMENT_SELECTORS, route_graph="Graph"), 1),
+        (replace(DEPLOYMENT_SELECTORS, request_graph="graph "), 1),
+        (
+            replace(
+                DEPLOYMENT_SELECTORS,
+                route_graph=PRIVATE_SELECTOR,
+                request_graph=PRIVATE_SELECTOR,
+            ),
+            1,
+        ),
+        (replace(DEPLOYMENT_SELECTORS, authorized_namespace_name=PRIVATE_SELECTOR), 1),
+        (replace(DEPLOYMENT_SELECTORS, request_graph=PRIVATE_SELECTOR * 4), 0),
+        (cast(GraphDeploymentSelectors, None), 0),
+    )
+
+    with borrowed() as (runner, evaluator):
+        for selectors, parses in invalid_selectors:
+            with (
+                observe_calls(phases) as counts,
+                pytest.raises(GraphValueRejected) as refused,
+            ):
+                runner.run(
+                    prepare_graph_deployment_inputs(
+                        ir_text,
+                        files,
+                        evaluator,
+                        selectors=selectors,
+                        storage_identity=DEPLOYMENT_STORE,
+                        limits=DEPLOYMENT_LIMITS,
+                    )
+                )
+
+            assert_refused(refused.value, GraphValueFailure.INVALID)
+            assert_protected(refused.value, DEPLOYMENT_ENTRY)
+            assert counts == [parses, 0, 0, 0, 0]
+            assert_idle(evaluator.owner, 1)
+        with observe_calls(phases) as positive:
+            prepared = runner.run(
+                prepare_graph_deployment_inputs(
+                    ir_text,
+                    files,
+                    evaluator,
+                    selectors=DEPLOYMENT_SELECTORS,
+                    storage_identity=DEPLOYMENT_STORE,
+                    limits=DEPLOYMENT_LIMITS,
+                )
+            )
+
+    assert isinstance(prepared, PreparedGraphDeploymentInputs)
+    assert len(prepared.groups) == 2
+    assert all(count > 0 for count in positive)
+
+
 def assert_deployment_suspended(
     task: asyncio.Task[PreparedGraphDeploymentInputs | GraphDeploymentCelRefusal],
 ) -> None:
@@ -961,6 +1052,7 @@ def assert_deployment_suspended(
 
     assert locals_at_wait["contents"] == ()
     assert locals_at_wait["storage_identity"] is None
+    assert "selectors" not in locals_at_wait
     assert type(locals_at_wait["groups"]) is tuple
     groups = cast(tuple[object, ...], locals_at_wait["groups"])
     assert len(groups) == 2
@@ -979,6 +1071,7 @@ def check_deployment_cancellation() -> None:
                     ir_text,
                     files,
                     evaluator,
+                    selectors=DEPLOYMENT_SELECTORS,
                     storage_identity=DEPLOYMENT_STORE,
                     limits=DEPLOYMENT_LIMITS,
                 )
@@ -1003,6 +1096,7 @@ def check_deployment_cancellation() -> None:
                 ir_text,
                 files,
                 evaluator,
+                selectors=DEPLOYMENT_SELECTORS,
                 storage_identity=DEPLOYMENT_STORE,
                 limits=DEPLOYMENT_LIMITS,
             )
@@ -1028,6 +1122,7 @@ def run(scenario: str) -> None:
         "logical_cancellation": lambda: check_cancellation(logical=True),
         "deployment_roundtrip": check_deployment_roundtrip,
         "deployment_refusals": check_deployment_refusals,
+        "deployment_selector_refusals": check_deployment_selector_refusals,
         "deployment_cancellation": check_deployment_cancellation,
     }
     diagnostics = configure_process(
@@ -1062,6 +1157,7 @@ def run(scenario: str) -> None:
         ("logical_cancellation", ["complete"], 1),
         ("deployment_roundtrip", ["complete"] * 4, 4),
         ("deployment_refusals", ["complete", "capacity_exhausted"], 1),
+        ("deployment_selector_refusals", ["complete"], 1),
         ("deployment_cancellation", ["complete"], 1),
     ],
 )
@@ -1082,6 +1178,7 @@ def test_graph_execution_preparation_uses_real_bounded_native_verification(
     assert OWNER_MARKER not in result.stderr
     assert PRIVATE_STORE not in result.stderr
     assert PRIVATE_APPROVAL not in result.stderr
+    assert PRIVATE_SELECTOR not in result.stderr
     assert "Function 'matches' error:" not in result.stderr
     records: list[dict[str, object]] = [
         json.loads(line) for line in result.stderr.splitlines()

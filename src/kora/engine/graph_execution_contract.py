@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Never, cast
 
 from kora.cel_eval.errors import raise_safe
+from kora.db.graph_resource_owner_reads import AcquiredGraphResourceOwners
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.db.graph_version_reads import AcquiredGraphVersion, transport_limit
 from kora.db.types import DIGEST_LENGTH
@@ -11,10 +12,12 @@ from kora.engine.graph_projection_paths import (
     read_graph_cel_projection_paths,
 )
 from kora.engine.graph_resource_references import (
-    GraphResourceOwner,
+    NATIVE_RESOURCE_ENCODINGS,
+    GraphResourceOwnerEvidence,
     GraphResourceReferenceLimits,
     GraphResourceReferences,
     GraphResourceScope,
+    NativeGraphResourceTransport,
     check_graph_resource_references,
 )
 from kora.engine.graph_version_identity import (
@@ -248,7 +251,7 @@ def check_execution_contract_members(
     saved: JsonObject,
     physical: object,
     scope: GraphResourceScope,
-    owners: tuple[GraphResourceOwner, ...],
+    owners: GraphResourceOwnerEvidence,
     limits: ExecutionContractReadLimits,
 ) -> tuple[GraphResourceReferences, ParameterProjectionPaths]:
     paths = check_execution_contract_projection_members(canonical_ir, saved, limits)
@@ -293,7 +296,7 @@ def _checked_result(
     pin: GraphVersionPin,
     scope: GraphResourceScope,
     physical: object,
-    owners: tuple[GraphResourceOwner, ...],
+    owners: GraphResourceOwnerEvidence,
     limits: ExecutionContractReadLimits,
     parameter_schema_limits: ParameterSchemaReadLimits | None,
 ) -> CheckedExecutionContract | GraphValueFailure:
@@ -306,7 +309,31 @@ def _checked_result(
             or type(pin.graph_id) is not str
             or type(pin.version_id) is not str
             or type(pin.execution_contract_digest) is not str
-            or acquired.namespace_id != scope.namespace_id
+        ):
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        if type(owners) is AcquiredGraphResourceOwners:
+            if type(physical) is not NativeGraphResourceTransport or any(
+                type(value) is not str
+                for value in (
+                    acquired.namespace_id,
+                    acquired.graph_id,
+                    acquired.id,
+                    acquired.encoding,
+                    scope.namespace_id,
+                    scope.graph_id,
+                    scope.version_id,
+                    physical.encoding,
+                )
+            ):
+                raise GraphValueRejected(GraphValueFailure.INVALID)
+            encoding = "utf-8" if acquired.encoding == "ascii" else acquired.encoding
+            if (
+                physical.encoding not in NATIVE_RESOURCE_ENCODINGS
+                or physical.encoding != encoding
+            ):
+                raise GraphValueRejected(GraphValueFailure.INVALID)
+        if (
+            acquired.namespace_id != scope.namespace_id
             or scope.graph_id != pin.graph_id
             or scope.version_id != pin.version_id
         ):
@@ -353,7 +380,7 @@ def check_detached_execution_contract(
     pin: GraphVersionPin,
     scope: GraphResourceScope,
     physical: object,
-    owners: tuple[GraphResourceOwner, ...],
+    owners: GraphResourceOwnerEvidence,
     *,
     limits: ExecutionContractReadLimits,
     parameter_schema_limits: ParameterSchemaReadLimits | None = None,

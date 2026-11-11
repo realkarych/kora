@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TypeVar, cast
 from weakref import ReferenceType, ref
 
+import aiosqlite
 from sqlalchemy import URL, Connection, event, make_url, text
 from sqlalchemy.engine.interfaces import DBAPIConnection, DBAPICursor, ExceptionContext
 from sqlalchemy.exc import ArgumentError, SQLAlchemyError
@@ -56,6 +57,7 @@ PRIVATE_FILE_MODE: int = 0o600
 SQLITE_BUSY_TIMEOUT_SECONDS: float = 5.0
 SQLITE_SYNCHRONOUS_FULL: int = 2
 SQLITE_READERS: int = 4
+AIOSQLITE_ITER_CHUNK_SIZE: int = 64
 DEFAULT_POOL_SIZE: int = 5
 DEFAULT_MAX_OVERFLOW: int = 5
 DEFAULT_POOL_TIMEOUT_SECONDS: float = 5.0
@@ -360,13 +362,38 @@ def keep_connection_on_cancellation(context: ExceptionContext) -> None:
         context.is_disconnect = False
 
 
+class SqliteDriverConnection(aiosqlite.Connection):
+    def __init__(self, opened: sqlite3.Connection) -> None:
+        super().__init__(lambda: opened, AIOSQLITE_ITER_CHUNK_SIZE)
+        self._thread.daemon = True
+
+
+def open_sqlite_file(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(
+        path,
+        timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+
+
+def sqlite_connector(
+    path: Path,
+) -> Callable[[], Awaitable[aiosqlite.Connection]]:
+    async def connect() -> aiosqlite.Connection:
+        opened = await asyncio.to_thread(open_sqlite_file, path)
+        return await SqliteDriverConnection(opened)
+
+    return connect
+
+
 def sqlite_engine(
     settings: DatabaseSettings, writer: bool, *, require_full_sync: bool = False
 ) -> AsyncEngine:
-    connect_args = {"timeout": SQLITE_BUSY_TIMEOUT_SECONDS, "isolation_level": None}
+    connector = sqlite_connector(settings.sqlite_path.absolute())
     if writer:
         engine = create_async_engine(
-            settings.url, poolclass=StaticPool, connect_args=connect_args
+            settings.url, poolclass=StaticPool, async_creator=connector
         )
     else:
         engine = create_async_engine(
@@ -375,7 +402,7 @@ def sqlite_engine(
             pool_size=SQLITE_READERS,
             max_overflow=0,
             pool_timeout=settings.pool_timeout_seconds,
-            connect_args=connect_args,
+            async_creator=connector,
         )
     if require_full_sync:
         configure = configure_full_sync_writer if writer else configure_full_sync_reader
@@ -960,12 +987,14 @@ class Database:
 
     @asynccontextmanager
     async def _read_transaction(
-        self, deadline: float | None
+        self, deadline: float | None, *, snapshot: bool = False
     ) -> AsyncGenerator[AsyncConnection, None]:
         self._enter_unit()
         cancelled = False
         try:
-            async with self._unit(self._reader, deadline=deadline) as connection:
+            async with self._unit(
+                self._reader, deadline=deadline, snapshot=snapshot
+            ) as connection:
                 yield connection
         except asyncio.CancelledError:
             cancelled = True
@@ -974,19 +1003,24 @@ class Database:
             try:
                 await self._leave_unit_and_release()
             except (asyncio.CancelledError, *SNAPSHOT_NATIVE_ERRORS):
-                if deadline is None or not cancelled:
+                if not snapshot or not cancelled:
                     raise
 
     @asynccontextmanager
     async def read_snapshot(
         self, *, deadline: float | None = None
     ) -> AsyncGenerator[AsyncConnection, None]:
+        connection = None
         if deadline is None:
-            async with self._read_snapshot(None) as connection:
-                yield connection
+            try:
+                async with self._read_snapshot(None) as connection:
+                    yield connection
+            except asyncio.CancelledError as error:
+                clear_snapshot_error(error)
+                del self, connection
+                raise
             return
         timer = asyncio.timeout_at(deadline)
-        connection = None
         try:
             if type(deadline) is not float or not math.isfinite(deadline):
                 raise DatabaseSnapshotRejected(DatabaseSnapshotFailure.UNAVAILABLE)
@@ -1027,7 +1061,7 @@ class Database:
             setup = text("BEGIN DEFERRED")
         else:
             setup = text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        async with self._read_transaction(deadline) as connection:
+        async with self._read_transaction(deadline, snapshot=True) as connection:
             await self._run_snapshot_phase(deadline, lambda: connection.execute(setup))
             self._require_snapshot_current(deadline)
             yield connection
@@ -1218,6 +1252,7 @@ class Database:
         transactional: bool = True,
         *,
         deadline: float | None = None,
+        snapshot: bool = False,
         admission: _WriterAdmission | None = None,
         verify_postgresql_writer: bool = False,
     ) -> AsyncGenerator[AsyncConnection, None]:
@@ -1244,7 +1279,12 @@ class Database:
             except BaseException as error:
                 if admission is not None and not admission.handed_off:
                     raise
-                await self._rollback_unit(connection, deadline, error)
+                await self._rollback_unit(
+                    connection,
+                    error,
+                    verify_snapshot=deadline is not None
+                    or (snapshot and isinstance(error, asyncio.CancelledError)),
+                )
                 self._record_rollback(error)
                 raise
         except BaseException as error:
@@ -1262,8 +1302,7 @@ class Database:
                     connection,
                     verify_generation=deadline is not None
                     or (admission is not None and engine is self._reader),
-                    preserve_cancellation=cancelled
-                    and (deadline is not None or before_handoff),
+                    preserve_cancellation=cancelled and (snapshot or before_handoff),
                 )
         if deadline is not None:
             self._snapshot_admission.require_current(engine, deadline)
@@ -1271,10 +1310,11 @@ class Database:
     async def _rollback_unit(
         self,
         connection: AsyncConnection,
-        deadline: float | None,
         cause: BaseException,
+        *,
+        verify_snapshot: bool,
     ) -> None:
-        if deadline is None:
+        if not verify_snapshot:
             await complete(connection.rollback())
             return
 

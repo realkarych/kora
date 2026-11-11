@@ -18,6 +18,7 @@ from kora.engine.graph_cel_facts import EXECUTION_SEMANTICS, GraphCelFacts
 from kora.engine.graph_command_manifests import (
     CommandManifestLimits,
     CommandResourceContent,
+    GraphDeploymentSelectors,
     PreparedCommandStageGroup,
     build_declared_command_manifests,
     check_declared_command_manifests,
@@ -493,16 +494,26 @@ async def prepare_graph_deployment_inputs(
     contents: tuple[CommandResourceContent, ...],
     evaluator: Evaluator,
     *,
+    selectors: GraphDeploymentSelectors,
     storage_identity: StorageIdentity | None,
     limits: GraphDeploymentPreparationLimits,
 ) -> PreparedGraphDeploymentInputs | GraphDeploymentCelRefusal:
     groups: tuple[PreparedCommandStageGroup, ...] = ()
     error: BaseException
     try:
-        _admit_deployment(limits)
-        groups = prepare_graph_command_stage_groups(
-            ir_text, contents, storage_identity=storage_identity, limits=limits.contents
-        )
+        try:
+            _admit_deployment(limits)
+            if type(selectors) is not GraphDeploymentSelectors:
+                raise GraphValueRejected(GraphValueFailure.INVALID)
+            groups = prepare_graph_command_stage_groups(
+                ir_text,
+                contents,
+                selectors=selectors,
+                storage_identity=storage_identity,
+                limits=limits.contents,
+            )
+        finally:
+            del selectors
         contents = ()
         storage_identity = None
         result = await _prepare_logical(ir_text, evaluator, limits.execution)

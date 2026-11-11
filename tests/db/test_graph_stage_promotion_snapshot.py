@@ -1,10 +1,10 @@
 import asyncio
-import socket
 import sqlite3
 from collections.abc import Generator
 from contextlib import AsyncExitStack, closing, contextmanager
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from traceback import format_exception, walk_tb
 
 import pytest
@@ -342,8 +342,7 @@ async def test_promotion_snapshot_refuses_a_failed_native_checkout_privately(
     database: Database, tmp_path: Path
 ) -> None:
     binding, _ = await seed_documents(database)
-    with socket.socket() as reserved:
-        reserved.bind(("127.0.0.1", 0))
+    with TemporaryDirectory(prefix=f"{PRIVATE}-", dir="/tmp") as socket_directory:
         settings = database.settings
         if database.dialect is Dialect.SQLITE:
             settings = replace(
@@ -352,9 +351,7 @@ async def test_promotion_snapshot_refuses_a_failed_native_checkout_privately(
         else:
             settings = replace(
                 settings,
-                url=settings.url.set(
-                    host="127.0.0.1", port=reserved.getsockname()[1], password=PRIVATE
-                ),
+                url=settings.url.set(host=socket_directory, password=PRIVATE),
             )
         unavailable = Database(settings)
         if database.dialect is Dialect.SQLITE:

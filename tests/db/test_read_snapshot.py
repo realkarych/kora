@@ -734,8 +734,9 @@ async def test_already_requested_cancellation_starts_no_timed_native_checkout(
 
 
 @pytest.mark.asyncio
-async def test_timed_snapshot_keeps_cancellation_after_native_connection_loss(
-    single_slot_database: Database,
+@pytest.mark.parametrize("timed", [True, False], ids=["timed", "untimed"])
+async def test_snapshot_keeps_cancellation_after_native_connection_loss(
+    single_slot_database: Database, timed: bool
 ) -> None:
     database = single_slot_database
     ledger = ConnectionLedger(database)
@@ -744,14 +745,28 @@ async def test_timed_snapshot_keeps_cancellation_after_native_connection_loss(
     rollback_started = asyncio.Event()
     finish_rollback = asyncio.Event()
     drivers: list[object] = []
+    originals: list[asyncio.CancelledError] = []
+    returned: list[asyncio.CancelledError] = []
     deadline = asyncio.get_running_loop().time() + CONDITION_DEADLINE_SECONDS
 
     async def read() -> None:
-        async with database.read_snapshot(deadline=deadline) as connection:
-            assert await connection.scalar(select(1)) == 1
-            drivers.append((await connection.get_raw_connection()).driver_connection)
-            entered.set()
-            await hold.wait()
+        try:
+            async with database.read_snapshot(
+                deadline=deadline if timed else None
+            ) as connection:
+                assert await connection.scalar(select(1)) == 1
+                drivers.append(
+                    (await connection.get_raw_connection()).driver_connection
+                )
+                entered.set()
+                try:
+                    await hold.wait()
+                except asyncio.CancelledError as error:
+                    originals.append(error)
+                    raise
+        except asyncio.CancelledError as error:
+            returned.append(error)
+            raise
 
     def pause_rollback(connection: object) -> None:
         if not rollback_started.is_set():
@@ -773,14 +788,20 @@ async def test_timed_snapshot_keeps_cancellation_after_native_connection_loss(
 
             assert task.cancel("owner cancellation")
             await asyncio.wait_for(rollback_started.wait(), CONDITION_DEADLINE_SECONDS)
+            assert ledger.outstanding == database.units_in_flight() == 1
+            assert not task.done()
             assert task.cancel("repeat cancellation")
         finally:
             finish_rollback.set()
         with pytest.raises(asyncio.CancelledError) as cancelled:
             await asyncio.wait_for(task, CONDITION_DEADLINE_SECONDS)
+        assert ledger.outstanding == database.units_in_flight() == 0
+        assert ledger.closed_while_checked_out == 1
+        assert_native_closed(handle)
         after_cleanup = ledger.checkouts
+        probe_deadline = asyncio.get_running_loop().time() + CONDITION_DEADLINE_SECONDS
         with pytest.raises(DatabaseSnapshotRejected) as fenced:
-            await timed_snapshot(database, deadline)
+            await timed_snapshot(database, probe_deadline)
         after_fenced_refusal = ledger.checkouts
         async with database.read_transaction() as connection:
             recovered: object = await connection.scalar(select(1))
@@ -789,6 +810,9 @@ async def test_timed_snapshot_keeps_cancellation_after_native_connection_loss(
         event.remove(engine, "rollback", pause_rollback)
         await database.close()
 
+    assert len(originals) == len(returned) == 1
+    assert returned[0] is originals[0]
+    assert returned[0].__cause__ is returned[0].__context__ is None
     assert cancelled.value.args == ("owner cancellation",)
     assert cancelled.value.__cause__ is cancelled.value.__context__ is None
     assert fenced.value.reason is DatabaseSnapshotFailure.UNAVAILABLE
@@ -800,8 +824,9 @@ async def test_timed_snapshot_keeps_cancellation_after_native_connection_loss(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("timed", [True, False], ids=["timed", "untimed"])
 async def test_repeat_cancellation_preserves_verified_native_return(
-    single_slot_database: Database,
+    single_slot_database: Database, timed: bool
 ) -> None:
     database = single_slot_database
     ledger = ConnectionLedger(database)
@@ -813,7 +838,7 @@ async def test_repeat_cancellation_preserves_verified_native_return(
     finish_reset = asyncio.Event()
 
     async def read() -> None:
-        async with database.read_snapshot(deadline=deadline):
+        async with database.read_snapshot(deadline=deadline if timed else None):
             lent.set()
             await hold_body.wait()
 
@@ -836,6 +861,7 @@ async def test_repeat_cancellation_preserves_verified_native_return(
             finish_reset.set()
         with pytest.raises(asyncio.CancelledError) as cancelled:
             await asyncio.wait_for(task, CONDITION_DEADLINE_SECONDS)
+        assert ledger.outstanding == database.units_in_flight() == 0
     finally:
         event.remove(engine, "reset", pause_reset)
     verified = await timed_snapshot(database, deadline)
@@ -848,8 +874,9 @@ async def test_repeat_cancellation_preserves_verified_native_return(
 
 
 @pytest.mark.asyncio
-async def test_last_timed_unit_keeps_first_cancellation_through_pool_shutdown(
-    single_slot_database: Database,
+@pytest.mark.parametrize("timed", [True, False], ids=["timed", "untimed"])
+async def test_last_snapshot_keeps_first_cancellation_through_pool_shutdown(
+    single_slot_database: Database, timed: bool
 ) -> None:
     database = single_slot_database
     engine = database.reader_engine.sync_engine
@@ -861,7 +888,9 @@ async def test_last_timed_unit_keeps_first_cancellation_through_pool_shutdown(
     handles: list[object] = []
 
     async def read() -> None:
-        async with database.read_snapshot(deadline=deadline) as connection:
+        async with database.read_snapshot(
+            deadline=deadline if timed else None
+        ) as connection:
             raw = await connection.get_raw_connection()
             handles.append(physical_handle(database, raw.driver_connection))
             lent.set()
@@ -880,6 +909,7 @@ async def test_last_timed_unit_keeps_first_cancellation_through_pool_shutdown(
             await database.close(deadline_seconds=0.0)
             assert task.cancel("owner cancellation")
             await asyncio.wait_for(disposal.wait(), CONDITION_DEADLINE_SECONDS)
+            assert not task.done()
             assert task.cancel("repeat cancellation")
         finally:
             hold_body.set()
