@@ -117,6 +117,14 @@ def command(
     return result.output
 
 
+def dependency_variables(root: Path, cache: str) -> dict[str, str]:
+    return {
+        **environment(root),
+        "UV_PROJECT_ENVIRONMENT": str(root / ".venv"),
+        "UV_CACHE_DIR": cache,
+    }
+
+
 def synchronize(
     root: Path,
     uv: str,
@@ -456,8 +464,6 @@ def audit(
                 limit=MAX_WORK,
             )
             unpack(content, root)
-            variables = environment(root)
-            variables["UV_PROJECT_ENVIRONMENT"] = str(root / ".venv")
             cache = (
                 command(
                     [uv, "cache", "dir"],
@@ -469,7 +475,7 @@ def audit(
                 .decode()
                 .strip()
             )
-            variables["UV_CACHE_DIR"] = cache
+            variables = dependency_variables(root, cache)
             synchronize(root, uv, variables, deadline, stop, offline=offline)
             command(
                 [

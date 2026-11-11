@@ -10,11 +10,14 @@ from scripts.ci.mutation_audit import (
     admit_environment,
     classify,
     command,
+    dependency_variables,
     inventory,
     synchronize,
 )
 from scripts.ci.mutation_models import Report, ordered
 from scripts.ci.mutation_process import Stop, environment, execute
+
+CACHE_LOCATION = ("UV_CACHE_DIR", "XDG_CACHE_HOME")
 
 
 def probe_native_inventory() -> None:
@@ -87,19 +90,25 @@ def probe_environment_admission() -> None:
         raise FileNotFoundError("environment admission requires uv")
     stop = Stop()
     deadline = time.monotonic() + 120
+    location = {name: os.environ[name] for name in CACHE_LOCATION if name in os.environ}
     cache = (
-        command([uv, "cache", "dir"], ROOT, deadline, stop, variables=dict(os.environ))
+        command(
+            [uv, "cache", "dir"],
+            ROOT,
+            deadline,
+            stop,
+            variables={**environment(ROOT), "HOME": str(Path.home()), **location},
+        )
         .decode()
         .strip()
     )
     with TemporaryDirectory(prefix="mutation-environment-") as temporary:
         root = Path(temporary)
-        variables = environment(root)
-        variables["UV_PROJECT_ENVIRONMENT"] = str(root / ".venv")
-        variables["UV_CACHE_DIR"] = cache
+        variables = dependency_variables(root, cache)
 
         synchronize(root, uv, variables, deadline, stop, offline=True)
 
+        assert (root / ".venv/bin/python").is_file()
         admit_environment(root / ".venv")
 
 
