@@ -18,6 +18,7 @@ from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from packaging.requirements import Requirement
 from packaging.tags import parse_tag, sys_tags
@@ -365,6 +366,9 @@ def install_measurement_fixture(root: Path, fixture_wheel: Path) -> Path:
     return python
 
 
+INSTALLED_COMMAND_SECONDS: Final[int] = 60
+
+
 @dataclass(frozen=True)
 class InstalledTooling:
     python: Path
@@ -372,6 +376,9 @@ class InstalledTooling:
 
     def command(self, *arguments: str) -> list[str]:
         return [str(self.python), "-I", "-m", "kora", *arguments]
+
+    def environment(self, environment: Mapping[str, str] | None) -> dict[str, str]:
+        return {"PATH": os.defpath, **({} if environment is None else environment)}
 
     def run(
         self,
@@ -382,10 +389,10 @@ class InstalledTooling:
         completed = subprocess.run(
             self.command(*arguments),
             cwd=self.outside,
-            env={"PATH": os.defpath, **({} if environment is None else environment)},
+            env=self.environment(environment),
             capture_output=True,
             check=False,
-            timeout=60,
+            timeout=INSTALLED_COMMAND_SECONDS,
             umask=umask,
         )
         return ProcessResult(completed.returncode, completed.stdout, completed.stderr)

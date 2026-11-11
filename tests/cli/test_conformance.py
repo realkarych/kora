@@ -23,12 +23,14 @@ from kora.protocols.lifetime import (
     OriginalOutcome,
 )
 from kora.protocols.metadata import ProtocolName
+from tests.conformance.progress_guard import Progress, progress_run
 from tests.support.configured_conformance import (
     installed_conformance as installed_conformance,
 )
 from tests.support.configured_conformance import vcs_configuration
 from tests.support.observability import ProcessResult
 from tests.support.provider_tooling import (
+    INSTALLED_COMMAND_SECONDS,
     InstalledTooling,
 )
 
@@ -595,24 +597,37 @@ def test_installed_provider_supports_local_tooling(
         )
     )
 
+    progress = Progress()
+
     with ExitStack() as resources:
         probe = (
             resources.enter_context(vcs_preparation_probe(tmp_path))
             if protocol is ProtocolName.VCS
             else None
         )
-        process = installed.run(
-            *conformance_arguments(
-                protocol.value,
-                "configured",
-                config,
-                plugin,
-                probe.fixture_data if probe is not None else None,
-            ),
-            environment={
-                "HOME": str(home),
-                "KORA_LOG_COMPONENT_LEVELS": "protocols.loading=DEBUG",
-            },
+        process = asyncio.run(
+            progress_run(
+                installed.command(
+                    *conformance_arguments(
+                        protocol.value,
+                        "configured",
+                        config,
+                        plugin,
+                        probe.fixture_data if probe is not None else None,
+                    )
+                ),
+                cwd=installed.outside,
+                environment=installed.environment(
+                    {
+                        "HOME": str(home),
+                        "KORA_LOG_COMPONENT_LEVELS": (
+                            "protocols.loading=DEBUG,conformance.lifetime=DEBUG"
+                        ),
+                    }
+                ),
+                progress=progress,
+                seconds=INSTALLED_COMMAND_SECONDS,
+            )
         )
         preparation = probe.observed() if probe is not None else ()
         timed_steps = probe.timed_steps() if probe is not None else ()
@@ -627,9 +642,19 @@ def test_installed_provider_supports_local_tooling(
     assert outcome.completed == outcome.expected == expected
     assert_closed(outcome)
     records = process.records()
-    assert len(records) == 1
-    assert records[0]["event"] == "protocols.loading.provider_loaded"
-    assert records[0]["protocol"] == protocol.value
+    loading = [item for item in records if item["component"] == "protocols.loading"]
+    lifetime = [item for item in records if item["component"] == "conformance.lifetime"]
+    assert len(loading) + len(lifetime) == len(records)
+    assert len(loading) == 1
+    assert loading[0]["event"] == "protocols.loading.provider_loaded"
+    assert loading[0]["protocol"] == protocol.value
+    assert {item["invocation_id"] for item in lifetime} == {outcome.invocation_id}
+    assert [item["event"] for item in lifetime].count(
+        "conformance.lifetime.started"
+    ) == 1
+    assert lifetime[-1]["event"] == "conformance.lifetime.closed"
+    assert lifetime[-1]["reason"] == "complete"
+    assert progress.advances > 0
     assert not list(home.rglob("journal"))
     if protocol is ProtocolName.VCS:
         assert preparation == ("prepare_entered", "prepare_complete")
