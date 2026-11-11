@@ -61,7 +61,7 @@ The walking skeleton runs one graph end to end through kora's public surfaces, o
 
 The architecture stays as designed: the worker reaches the metadata database only through the HTTP API, the agent session runs in its own runner, and the CLI and the MCP server are thin clients over the shared API client. Only the depth of each component is simplified. [The implementation plan](../implementation-plan.md#walking-skeleton) names each step, its owning work item and its order.
 
-The walking skeleton is not first-slice-ready. This amendment weakens or removes no first-slice gate: the gates of the amendments above, of the [first-slice contract](../../knowledge/specs/first-slice.md) and of the component specifications apply when the skeleton's path is extended to slice acceptance. Until the skeleton runs, deepening of graph publication, of manual-start parameter evaluation and of macOS native qualification pauses.
+The walking skeleton is not first-slice-ready. Apart from the narrowing listed below, this amendment weakens or removes no first-slice gate: the gates of the amendments above, of the [first-slice contract](../../knowledge/specs/first-slice.md) and of the component specifications apply when the skeleton's path is extended to slice acceptance. Until the skeleton runs, deepening of graph publication, of manual-start parameter evaluation and of macOS native qualification pauses.
 
 The `claude` adapter is assembled in a parallel stream, with the minimal runner-side harness hosting of [issue #199](https://github.com/realkarych/kora/issues/199), so that the same path also runs with a real Claude session on a developer machine. CI keeps the fake harness. The `codex` adapter stays required for slice acceptance under the amendment of 2026-10-21.
 
@@ -69,7 +69,7 @@ The same decision narrows the depth of the first slice:
 
 - Live-session adoption after a worker restart stays required for slice acceptance. It is outside the walking skeleton.
 - Local process identity uses the process group and the process start time. Extended platform process identity moves out of the first slice.
-- The isolated crash and diagnostic file I/O of [#616](https://github.com/realkarych/kora/issues/616), [#700](https://github.com/realkarych/kora/issues/700) and [#701](https://github.com/realkarych/kora/issues/701) moves out of the first slice.
+- The isolated crash and diagnostic file I/O of [#616](https://github.com/realkarych/kora/issues/616), [#700](https://github.com/realkarych/kora/issues/700) and [#701](https://github.com/realkarych/kora/issues/701) moves out of the first slice. With #616, the startup durability contract moves out entirely: a runner registers without a durable startup record and checkpoint.
 - macOS native qualification of the runner moves out of the first slice.
 - `kora doctor` is minimal: it checks the kora version, that the CEL binding loads, the configured harness binaries and their versions, that the metadata database is reachable and that the state root is writable.
 
