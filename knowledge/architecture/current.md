@@ -160,20 +160,20 @@ Work-item numbers refer to the [implementation plan](../../docs/implementation-p
 
 ## 5. The walking skeleton and the first slice
 
-This section changes most often. It describes the owner decisions of 2026-11-11 in [#1356](https://github.com/realkarych/kora/issues/1356) and the skeleton plan under [#1357](https://github.com/realkarych/kora/issues/1357). [ADR-0001](../../docs/decisions/0001-own-control-plane.md), the [implementation plan](../../docs/implementation-plan.md) and the [first-slice contract](../specs/first-slice.md) remain the authority; the #1357 pull request records these decisions there, and this section then only points to them.
+This section changes most often. It describes the owner decisions of 2026-11-11 in [#1356](https://github.com/realkarych/kora/issues/1356) and the skeleton plan under [#1357](https://github.com/realkarych/kora/issues/1357). [ADR-0001](../../docs/decisions/0001-own-control-plane.md), the [implementation plan](../../docs/implementation-plan.md) and the [first-slice contract](../specs/first-slice.md) remain the authority; the #1357 pull request, [#1387](https://github.com/realkarych/kora/pull/1387), records these decisions there, and once it merges this section only points to them.
 
 **The walking skeleton** is an intermediate milestone of the first slice, reached before the first-slice gates apply: one graph runs end to end on SQLite through kora's public surfaces, with deliberately simple implementations.
 
 1. Deploy a graph.
 2. Trigger it through the CLI and the HTTP API.
-3. A scheduler tick creates the attempt.
+3. A scheduler tick advances the run.
 4. A worker claims it over HTTP.
 5. An agent node runs on the fake harness in its own runner.
 6. A command node runs on the local runtime.
 7. A person approves through the CLI.
 8. The run completes.
 
-The architecture stays as designed: the worker reaches the control plane only through the HTTP API, the agent runs in its own runner, and the CLI and MCP are thin clients. Only depth is simplified. The skeleton is not first-slice-ready. No first-slice gate is weakened; the gates apply when the path is extended to slice acceptance. The Claude adapter is assembled in parallel so that the same path also runs with a real Claude session on a developer machine, while CI keeps the fake harness. The owners also decided that deeper work on graph publication, manual-start parameter evaluation and macOS native qualification of the runner pauses until the skeleton runs.
+The architecture stays as designed: the worker reaches the control plane only through the HTTP API, the agent runs in its own runner, and the CLI and MCP are thin clients. Only depth is simplified. The skeleton is not first-slice-ready. No first-slice gate is weakened; the gates apply when the path is extended to slice acceptance. #1387 proposes the depth of each step, for example a fake agent that returns structured output without publishing a commit, and a deploy writer without the durable preparation record. The Claude adapter is assembled in parallel so that the same path also runs with a real Claude session on a developer machine, while CI keeps the fake harness. The owners also decided that deeper work on graph publication, manual-start parameter evaluation and macOS native qualification of the runner pauses until the skeleton runs.
 
 **The first slice** is defined by ADR-0001 and the first-slice contract:
 
