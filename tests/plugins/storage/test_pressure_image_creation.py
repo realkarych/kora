@@ -1,14 +1,12 @@
 import os
-import plistlib
 import select
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
-from tests.plugins.storage.pressure_controller import PressureController, create
+from tests.plugins.storage.pressure_controller import create
 from tests.plugins.storage.pressure_images import (
     create_image,
     discover,
@@ -18,11 +16,6 @@ from tests.plugins.storage.pressure_models import PressureFailure
 from tests.plugins.storage.pressure_native import collect_process, command
 
 REPOSITORY: Path = Path(__file__).resolve().parents[3]
-
-
-class NativeImageInformation(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    format: StrictStr = Field(alias="Format")
 
 
 def start_dissenter(image: Path) -> subprocess.Popen[bytes]:
@@ -68,18 +61,14 @@ def assert_dissenter_refuses_platform(image: Path) -> None:
     assert b"native_platform" in error_output
 
 
-def image_format(controller: PressureController) -> str:
-    raw: object = plistlib.loads(
-        command(
-            (
-                "/usr/bin/hdiutil",
-                "imageinfo",
-                "-plist",
-                str(controller.directory / image_name()),
-            )
-        )
+def mount_flags(mountpoint: Path) -> frozenset[str]:
+    listed = tuple(
+        line
+        for line in command(("/sbin/mount",)).decode().splitlines()
+        if f" on {mountpoint} (" in line
     )
-    return NativeImageInformation.model_validate(raw).format
+    assert len(listed) == 1
+    return frozenset(listed[0].rsplit(" (", 1)[1].removesuffix(")").split(", "))
 
 
 def test_image_acquisition_requests_no_ejection(tmp_path: Path) -> None:
@@ -88,21 +77,22 @@ def test_image_acquisition_requests_no_ejection(tmp_path: Path) -> None:
         return
     with create(tmp_path / "guarded-acquisition") as controller:
         dissenter = start_dissenter(controller.directory / image_name())
+        cleanup_started = False
         try:
-            ready = next_line(dissenter)
+            assert next_line(dissenter) == b"ready\n"
             controller.acquire("enospc")
             stamp = controller.manifest.image_stamp
             assert stamp is not None
             attached = discover(controller.directory, stamp)
-            native_format = image_format(controller)
+            flags = mount_flags(controller.directory / "mounted")
+            observing = observe_ejections(dissenter)
+            cleanup_started = True
+            controller.cleanup()
         finally:
-            try:
-                observing = observe_ejections(dissenter)
+            output, error_output, status = stop_dissenter(dissenter)
+            if not cleanup_started:
                 controller.cleanup()
-            finally:
-                output, error_output, status = stop_dissenter(dissenter)
 
-    assert ready == b"ready\n"
     assert observing == b"observing\n"
     assert status == 0, error_output
     assert output.splitlines()
@@ -110,7 +100,8 @@ def test_image_acquisition_requests_no_ejection(tmp_path: Path) -> None:
     assert attached is not None
     assert attached.mounted
     assert controller.report.filesystem == "hfs"
-    assert native_format == "UDRW"
+    assert {"hfs", "nodev", "nosuid", "nobrowse"} <= flags
+    assert "noowners" not in flags
     assert controller.manifest.resources_closed
     assert not (controller.directory / "mounted").exists()
     assert not (controller.directory / image_name()).exists()
