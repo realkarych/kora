@@ -10,7 +10,6 @@ from kora.executor.captures import Captures, capture_limit, parsed
 from kora.executor.failures import (
     ExecutorError,
     Phase,
-    StepPosition,
     misconfigured,
 )
 from kora.executor.guard import PhaseGuard
@@ -195,17 +194,19 @@ def report_failure(
 
 
 def outcome_error(
-    step: PlanStep, index: int, outcome: StepOutcome, phase: Phase
+    step: PlanStep, outcome: StepOutcome, phase: Phase
 ) -> ExecutorError | None:
-    position = StepPosition(phase, index, outcome.exit_code)
+    exit_code = outcome.exit_code
     if outcome.ending is Ending.UNKNOWN:
         return ExecutorError(
-            ErrorClass.INFRASTRUCTURE, "step_outcome_unknown", phase, position
+            ErrorClass.INFRASTRUCTURE, "step_outcome_unknown", phase, exit_code
         )
     if outcome.ending is Ending.TIMED_OUT:
-        return ExecutorError(ErrorClass.TIMEOUT, "step_timed_out", phase, position)
+        return ExecutorError(ErrorClass.TIMEOUT, "step_timed_out", phase, exit_code)
     if outcome.exit_code != 0:
-        return ExecutorError(failure_class(step, phase), "step_failed", phase, position)
+        return ExecutorError(
+            failure_class(step, phase), "step_failed", phase, exit_code
+        )
     return None
 
 
@@ -215,10 +216,7 @@ async def launched(step: PlanStep, index: int, context: StepContext) -> StepOutc
         return await context.launcher.run(spec)
     except OSError:
         error = ExecutorError(
-            ErrorClass.INFRASTRUCTURE,
-            "step_spawn_failed",
-            context.phase,
-            StepPosition(context.phase, index, None),
+            ErrorClass.INFRASTRUCTURE, "step_spawn_failed", context.phase
         )
         report_failure(context, index, error, None)
         raise error from None
@@ -228,7 +226,7 @@ async def run_step(
     step: PlanStep, index: int, context: StepContext, captures: Captures
 ) -> tuple[Captures, StepOutcome]:
     outcome = await launched(step, index, context)
-    error = outcome_error(step, index, outcome, context.phase)
+    error = outcome_error(step, outcome, context.phase)
     if error is not None:
         report_failure(context, index, error, outcome)
         raise error

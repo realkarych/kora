@@ -16,21 +16,7 @@ from scripts.ci.secret_scan import (
     log_options,
     scan_range,
 )
-
-
-def repository(root: Path) -> Path:
-    root.mkdir()
-    git(root, "init", "--initial-branch=master")
-    git(root, "config", "user.name", "Fixture")
-    git(root, "config", "user.email", "fixture@example.invalid")
-    return root
-
-
-def commit(root: Path, content: str) -> str:
-    (root / "value.txt").write_text(content)
-    git(root, "add", ".")
-    git(root, "commit", "-m", "fixture")
-    return git(root, "rev-parse", "HEAD")
+from tests.support.secret_scan_probe import commit, repository
 
 
 def pull_event(base: str, head: str) -> dict[str, object]:

@@ -38,24 +38,6 @@ CHECKS: tuple[
 )
 
 
-def test_artifact_type_shared_checks_accept_vcs_ref() -> None:
-    provider = VcsRefArtifactType({}, binding())
-    exercises = inputs()
-    with captured(
-        CONFORMANCE_COMPONENT,
-        checks.artifact_type_capture_settings(),
-        "shared-vcs",
-        utc_now,
-    ) as capture:
-        context = context_for(capture)
-
-        for check in CHECKS:
-            check(provider, exercises, context)
-        asyncio.run(awaited(exercises.configuration_effect(provider, {}, context)))
-
-    assert_capture_released(capture)
-
-
 def test_artifact_type_shared_checks_accept_selected_field_summary() -> None:
     provider = SelectedFieldArtifactType()
     exercises = selected_inputs()

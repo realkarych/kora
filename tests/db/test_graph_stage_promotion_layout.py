@@ -1,17 +1,10 @@
-import asyncio
-import sqlite3
-import threading
 from collections.abc import Mapping
 
 import pytest
-from aiosqlite import Connection as SQLiteDriver
-from sqlalchemy import Executable, event, text
+from sqlalchemy import Executable, text
 from sqlalchemy.engine import Dialect as SQLAlchemyDialect
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from kora.conformance.capture import captured
-from kora.db import DB_COMPONENT
 from kora.db.connection import Database, Dialect
 from kora.db.graph_stage_promotion_custody_v1 import INTENT_TABLE, SETTLEMENT_TABLE
 from kora.db.graph_stage_promotion_intent_reads import (
@@ -27,16 +20,12 @@ from kora.db.graph_stage_promotion_layout import (
     SQLITE_RELATIONS,
     GraphStagePromotionLayout,
     observe_graph_stage_promotion_layout,
-    observe_graph_stage_promotion_writer_layout,
 )
 from kora.db.graph_stage_promotion_projection import (
     MAX_PROMOTION_PAIR_BYTES,
     graph_stage_promotion_document_statement,
 )
-from kora.db.transactions import writer_transaction
-from kora.observability import Level, LoggingSettings
-from tests.db.closing import CONDITION_DEADLINE_SECONDS, ConnectionLedger
-from tests.db.seed import FakeClock
+from tests.db.closing import ConnectionLedger
 from tests.db.test_graph_read_admission import executed_queries
 from tests.db.test_graph_stage_promotion_custody_migration import (
     INTENT_INSERT,
@@ -94,15 +83,10 @@ SQLITE_SPLIT_COLLATION_INTENT: str = (
     "content_generation BIGINT NOT NULL, request_bytes BLOB NOT NULL, "
     "PRIMARY KEY (stage_id COLLATE BINARY))"
 )
-PRIVATE: str = "promotion-layout-private-canary"
-
-
-class DeliberateLayoutRollback(RuntimeError):
-    pass
 
 
 def expected_catalog_queries(
-    dialect: SQLAlchemyDialect, *, writable: bool
+    dialect: SQLAlchemyDialect,
 ) -> list[tuple[str, tuple[object, ...]]]:
     if dialect.name == Dialect.SQLITE:
         return [
@@ -117,17 +101,9 @@ def expected_catalog_queries(
     return [
         (
             str(POSTGRES_LAYOUT.compile(dialect=dialect)),
-            ("read committed", "off") if writable else ("repeatable read", "on"),
+            ("repeatable read", "on"),
         )
     ]
-
-
-async def refuse_writer_without_query(connection: AsyncConnection) -> None:
-    with executed_queries(connection) as observed:
-        result = await observe_graph_stage_promotion_writer_layout(connection)
-
-    assert result is GraphStagePromotionLayout.REFUSED
-    assert observed == []
 
 
 @pytest.mark.asyncio
@@ -136,7 +112,7 @@ async def test_promotion_layout_observes_only_native_metadata(
 ) -> None:
     ledger = ConnectionLedger(database)
     async with database.read_snapshot() as connection:
-        expected = expected_catalog_queries(connection.dialect, writable=False)
+        expected = expected_catalog_queries(connection.dialect)
         with executed_queries(connection) as observed:
             result = await observe_graph_stage_promotion_layout(connection)
         async with connection.begin_nested():
@@ -166,219 +142,6 @@ async def test_promotion_layout_refuses_an_ordinary_writer(
     assert len(observed) == 1
     assert ledger.outstanding == 0
     assert database.units_in_flight() == 0
-
-
-@pytest.mark.asyncio
-async def test_promotion_writer_layout_observes_only_current_writer_catalog(
-    database: Database,
-) -> None:
-    ledger = ConnectionLedger(database)
-    async with database.transaction() as connection:
-        lease = writer_transaction(connection)
-        transaction = connection.get_transaction()
-        checkouts = ledger.checkouts
-        expected = expected_catalog_queries(connection.dialect, writable=True)
-
-        with executed_queries(connection) as observed:
-            result = await observe_graph_stage_promotion_writer_layout(connection)
-
-        assert result is GraphStagePromotionLayout.VERIFIED
-        assert observed == expected
-        assert writer_transaction(connection) is lease
-        assert connection.get_transaction() is transaction
-        assert ledger.checkouts == checkouts
-        assert ledger.outstanding == database.units_in_flight() == 1
-    assert ledger.outstanding == database.units_in_flight() == 0
-    assert database.writer_is_free()
-
-
-@pytest.mark.asyncio
-async def test_promotion_writer_layout_refuses_inactive_or_foreign_lease(
-    database: Database,
-) -> None:
-    ledger = ConnectionLedger(database)
-
-    async with database.read_snapshot() as reader:
-        await refuse_writer_without_query(reader)
-    async with database.writer_engine.begin() as unmanaged:
-        await refuse_writer_without_query(unmanaged)
-    async with database.transaction() as writer:
-        async with writer.begin_nested():
-            await refuse_writer_without_query(writer)
-        await asyncio.create_task(refuse_writer_without_query(writer))
-        old_root = writer.get_transaction()
-        await writer.rollback()
-        async with writer.begin() as new_root:
-            assert new_root is not old_root
-            await refuse_writer_without_query(writer)
-    await refuse_writer_without_query(writer)
-
-    assert ledger.outstanding == database.units_in_flight() == 0
-    assert database.writer_is_free()
-
-
-@pytest.mark.asyncio
-async def test_promotion_writer_layout_refuses_wrong_native_modes(
-    database: Database,
-) -> None:
-    ledger = ConnectionLedger(database)
-    sqlite = database.dialect is Dialect.SQLITE
-    modes = (
-        ("PRAGMA query_only=ON",)
-        if sqlite
-        else (
-            "SET TRANSACTION READ ONLY",
-            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
-        )
-    )
-    results: list[GraphStagePromotionLayout] = []
-
-    for mode in modes:
-        async with database.transaction() as connection:
-            await connection.exec_driver_sql(mode)
-            checkouts = ledger.checkouts
-            try:
-                with executed_queries(connection) as observed:
-                    results.append(
-                        await observe_graph_stage_promotion_writer_layout(connection)
-                    )
-                assert (
-                    observed
-                    == expected_catalog_queries(connection.dialect, writable=True)[:1]
-                )
-                assert ledger.checkouts == checkouts
-            finally:
-                if sqlite:
-                    await connection.exec_driver_sql("PRAGMA query_only=OFF")
-            await connection.rollback()
-
-    assert results == [GraphStagePromotionLayout.REFUSED] * len(modes)
-    assert ledger.outstanding == database.units_in_flight() == 0
-    assert database.writer_is_free()
-
-
-async def denied_sqlite_catalog_query(
-    connection: AsyncConnection,
-) -> GraphStagePromotionLayout:
-    raw = await connection.get_raw_connection()
-    driver: object = raw.driver_connection
-    assert isinstance(driver, SQLiteDriver)
-    denied = threading.Event()
-
-    def authorize(
-        action: int,
-        target: str | None,
-        value: str | None,
-        database: str | None,
-        source: str | None,
-    ) -> int:
-        if action == sqlite3.SQLITE_PRAGMA and target == "query_only":
-            denied.set()
-            return sqlite3.SQLITE_DENY
-        return sqlite3.SQLITE_OK
-
-    await driver.set_authorizer(authorize)
-    try:
-        result = await observe_graph_stage_promotion_writer_layout(connection)
-    finally:
-        await driver.set_authorizer(None)
-    assert denied.is_set()
-    return result
-
-
-@pytest.mark.asyncio
-async def test_promotion_writer_layout_native_failure_is_private_and_releases_writer(
-    database: Database,
-) -> None:
-    ledger = ConnectionLedger(database)
-    settings = LoggingSettings(
-        level=Level.DEBUG,
-        component_levels={DB_COMPONENT: Level.DEBUG},
-        third_party={"sqlalchemy": Level.DEBUG, "aiosqlite": Level.DEBUG},
-    )
-
-    async def refuse_then_roll_back() -> None:
-        async with database.transaction() as connection:
-            checkouts = ledger.checkouts
-            transaction = connection.get_transaction()
-            if database.dialect is Dialect.SQLITE:
-                result = await denied_sqlite_catalog_query(connection)
-            else:
-                with pytest.raises(DBAPIError, match=PRIVATE):
-                    await connection.exec_driver_sql(
-                        "DO $$ BEGIN RAISE EXCEPTION "
-                        "'promotion-layout-private-canary'; END $$"
-                    )
-                result = await observe_graph_stage_promotion_writer_layout(connection)
-            assert result is GraphStagePromotionLayout.REFUSED
-            assert ledger.checkouts == checkouts
-            assert connection.get_transaction() is transaction
-            raise DeliberateLayoutRollback()
-
-    with captured(
-        DB_COMPONENT, settings, "promotion-layout-test", FakeClock().now
-    ) as capture:
-        with pytest.raises(DeliberateLayoutRollback) as rolled_back:
-            await refuse_then_roll_back()
-        assert ledger.outstanding == database.units_in_flight() == 0
-        async with database.transaction() as connection:
-            recovered = await observe_graph_stage_promotion_writer_layout(connection)
-        records = capture.finish()
-        diagnostics = capture.reader.data
-
-    assert recovered is GraphStagePromotionLayout.VERIFIED
-    assert rolled_back.value.__cause__ is rolled_back.value.__context__ is None
-    assert sum(record["event"] == "db.transaction.failed" for record in records) == 1
-    assert any(record["event"] == "thirdparty.record" for record in records)
-    for hidden in (
-        PRIVATE,
-        "not authorized",
-        "InFailedSQLTransaction",
-        "pg_catalog.current_setting",
-        "PRAGMA query_only",
-        "RAISE EXCEPTION",
-    ):
-        assert hidden.encode() not in diagnostics
-    assert ledger.outstanding == database.units_in_flight() == 0
-    assert database.writer_is_free()
-
-
-@pytest.mark.asyncio
-async def test_promotion_writer_layout_cancellation_releases_writer(
-    database: Database,
-) -> None:
-    ledger = ConnectionLedger(database)
-    engine = database.writer_engine.sync_engine
-    expected = expected_catalog_queries(engine.dialect, writable=True)[0][0]
-    admissions: list[int] = []
-
-    def cancel_at_dispatch(
-        connection: object, cursor: object, statement: str, *arguments: object
-    ) -> None:
-        if statement != expected:
-            return
-        owner = asyncio.current_task()
-        assert owner is not None
-        admissions.append(ledger.outstanding)
-        asyncio.get_running_loop().call_soon(owner.cancel)
-
-    async def observe() -> None:
-        async with database.transaction() as connection:
-            await observe_graph_stage_promotion_writer_layout(connection)
-
-    event.listen(engine, "before_cursor_execute", cancel_at_dispatch)
-    try:
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(observe(), timeout=CONDITION_DEADLINE_SECONDS)
-    finally:
-        event.remove(engine, "before_cursor_execute", cancel_at_dispatch)
-    async with database.transaction() as connection:
-        recovered = await observe_graph_stage_promotion_writer_layout(connection)
-
-    assert admissions == [1]
-    assert recovered is GraphStagePromotionLayout.VERIFIED
-    assert ledger.outstanding == database.units_in_flight() == 0
-    assert database.writer_is_free()
 
 
 @pytest.mark.asyncio
@@ -415,19 +178,9 @@ async def test_promotion_layout_refuses_native_drift(
     async with database.read_snapshot() as connection:
         with executed_queries(connection) as observed:
             result = await observe_graph_stage_promotion_layout(connection)
-    async with database.transaction() as connection:
-        with executed_queries(connection) as writer_queries:
-            writer_result = await observe_graph_stage_promotion_writer_layout(
-                connection
-            )
-        await connection.rollback()
 
-    assert result is writer_result is GraphStagePromotionLayout.REFUSED
+    assert result is GraphStagePromotionLayout.REFUSED
     assert 1 <= len(observed) <= 4
-    assert (
-        writer_queries
-        == expected_catalog_queries(connection.dialect, writable=True)[: len(observed)]
-    )
     assert ledger.outstanding == 0
     assert database.units_in_flight() == 0
 
@@ -453,27 +206,10 @@ async def test_promotion_layout_refuses_shadowed_catalog_or_source(
             )
         with executed_queries(connection) as observed:
             result = await observe_graph_stage_promotion_layout(connection)
-    async with database.transaction() as connection:
-        if not sqlite:
-            await connection.exec_driver_sql(
-                "SET LOCAL search_path TO promotion_shadow, pg_catalog, public"
-            )
-        with executed_queries(connection) as writer_queries:
-            writer_result = await observe_graph_stage_promotion_writer_layout(
-                connection
-            )
-        await connection.rollback()
 
-    assert result is writer_result is GraphStagePromotionLayout.REFUSED
+    assert result is GraphStagePromotionLayout.REFUSED
     statements = 2 if sqlite else 1
-    assert (
-        observed
-        == expected_catalog_queries(connection.dialect, writable=False)[:statements]
-    )
-    assert (
-        writer_queries
-        == expected_catalog_queries(connection.dialect, writable=True)[:statements]
-    )
+    assert observed == expected_catalog_queries(connection.dialect)[:statements]
     assert database.units_in_flight() == 0
 
 
@@ -591,7 +327,7 @@ async def _promotion_query_rows(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("parent_state", ["settled", "intent", "empty"])
-async def test_promotion_data_queries_exclude_alternate_relations_after_layout(
+async def test_promotion_data_queries_exclude_alternate_relations(
     database: Database, parent_state: str
 ) -> None:
     ledger = ConnectionLedger(database)
@@ -610,7 +346,6 @@ async def test_promotion_data_queries_exclude_alternate_relations_after_layout(
             )
 
     async with database.transaction() as writer:
-        before = await observe_graph_stage_promotion_writer_layout(writer)
         if sqlite:
             await _promotion_alternates(writer, stage, sqlite=True)
         else:
@@ -651,17 +386,10 @@ async def test_promotion_data_queries_exclude_alternate_relations_after_layout(
             ),
             key,
         )
-        after = await observe_graph_stage_promotion_writer_layout(writer)
         if sqlite:
             await writer.exec_driver_sql(f"DROP TABLE temp.{SETTLEMENT_TABLE}")
             await writer.exec_driver_sql(f"DROP TABLE temp.{INTENT_TABLE}")
 
-    assert before is GraphStagePromotionLayout.VERIFIED
-    assert after is (
-        GraphStagePromotionLayout.VERIFIED
-        if sqlite
-        else GraphStagePromotionLayout.REFUSED
-    )
     assert intent_control == 1 + int(not sqlite and request is not None)
     assert settlement_control == 1 + int(not sqlite and settlement is not None)
     expected = stage.request(operation, b"")

@@ -1,5 +1,3 @@
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -49,7 +47,7 @@ from tests.db.test_graph_stage_promotion_custody_migration import (
 )
 from tests.engine.test_graph_publication_ordinal import read_ordinal
 from tests.engine.test_graph_publication_target import seed_target
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings, sqlite_settings
 
 PREDECESSOR = "0016"
 REVISION = "0017"
@@ -256,12 +254,7 @@ async def test_graph_ordinal_migration_preserves_rows_and_unique_identity(
 async def test_migrated_sqlite_ordinal_indexes_exclude_wide_number_payloads(
     tmp_path: Path, encoding: str
 ) -> None:
-    settings = sqlite_settings(tmp_path / "ordinal.db")
-    with closing(sqlite3.connect(settings.sqlite_path)) as native:
-        native.execute(f"PRAGMA encoding = '{encoding}'")
-        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        native.execute("DROP TABLE encoding_seed")
-        native.commit()
+    settings = encoded_sqlite_settings(tmp_path / "ordinal.db", encoding)
     database = Database(settings)
     try:
         async with database.migration_connection() as connection:

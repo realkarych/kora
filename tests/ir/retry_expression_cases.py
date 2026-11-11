@@ -8,15 +8,13 @@ from tests.ir.inline_schema_cases import document_for
 def retrying(
     text: str | None = "true",
     declaration: dict[str, object] | None = None,
-    *,
-    attempts: int = 1,
     **fields: object,
 ) -> dict[str, object]:
     return {
         **(node("command") if declaration is None else declaration),
         **fields,
         "retry": {
-            "max_attempts": attempts,
+            "max_attempts": 1,
             **({} if text is None else {"predicate": text}),
         },
     }

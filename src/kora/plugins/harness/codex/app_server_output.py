@@ -8,7 +8,6 @@ from kora.ir.structured_json import (
     decode_json,
 )
 from kora.plugins.harness.codex.app_server_messages import CompletedMessage
-from kora.plugins.harness.codex.app_server_turn import TurnCompletion
 from kora.protocols.harness import OutputCandidate
 
 
@@ -22,17 +21,6 @@ class OutputRefused(Exception):
     def __init__(self, reason: OutputFailure) -> None:
         self.reason = reason
         super().__init__(reason.value)
-
-
-def output_candidate(
-    completion: TurnCompletion, *, thread_id: str
-) -> OutputCandidate | None:
-    message = completion.final_message
-    if completion.status != "completed" or message is None:
-        return None
-    return final_message_candidate(
-        message, thread_id=thread_id, turn_id=completion.turn_id
-    )
 
 
 def final_message_candidate(

@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from enum import StrEnum
 from typing import NoReturn
 
@@ -17,38 +16,26 @@ class Phase(StrEnum):
     ACQUIRE = "acquire"
 
 
-@dataclass(frozen=True)
-class StepPosition:
-    phase: Phase
-    index: int
-    exit_code: int | None
-
-
 class ExecutorError(Exception):
     def __init__(
         self,
         failure_class: ErrorClass,
         code: str,
         phase: Phase,
-        position: StepPosition | None = None,
+        exit_code: int | None = None,
     ) -> None:
         super().__init__(code)
         self.failure_class = failure_class
         self.code = code
         self.phase = phase
-        self.position = position
+        self.exit_code = exit_code
 
     def __str__(self) -> str:
         return f"{self.failure_class.value}: {self.code}"
 
 
-def fail(
-    failure_class: ErrorClass,
-    code: str,
-    phase: Phase,
-    position: StepPosition | None = None,
-) -> NoReturn:
-    raise ExecutorError(failure_class, code, phase, position)
+def fail(failure_class: ErrorClass, code: str, phase: Phase) -> NoReturn:
+    raise ExecutorError(failure_class, code, phase)
 
 
 def invalid(code: str, phase: Phase) -> NoReturn:

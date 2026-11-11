@@ -1,6 +1,4 @@
 import json
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -52,7 +50,7 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import DIGEST, Seeder
 from tests.db.test_graph_read_admission import executed_queries
 from tests.engine.test_graph_resource_references import SCOPE
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 LARGE_TEXT = 32_768
 SQLITE_ENCODINGS = ("UTF-16le", "UTF-16be")
@@ -289,13 +287,7 @@ async def test_graph_publication_measurement_matches_native_storage(
     if database.dialect is Dialect.POSTGRESQL:
         return
     for encoding in SQLITE_ENCODINGS:
-        path = tmp_path / f"{encoding}.db"
-        with closing(sqlite3.connect(path)) as seed:
-            seed.execute(f"PRAGMA encoding = '{encoding}'")
-            seed.execute("CREATE TABLE encoding_seed (value INTEGER)")
-            seed.execute("DROP TABLE encoding_seed")
-            seed.commit()
-        settings = sqlite_settings(path)
+        settings = encoded_sqlite_settings(tmp_path / f"{encoding}.db", encoding)
         await upgrade_database(settings)
         encoded = Database(settings)
         try:
@@ -314,13 +306,7 @@ async def test_sqlite_record_measurement_matches_inserted_metadata(
     measurements_inputs: tuple[PreparedGraphPublicationBinds, ...],
     encoding: str,
 ) -> None:
-    path = tmp_path / "graph-record.db"
-    with closing(sqlite3.connect(path)) as native:
-        native.execute(f"PRAGMA encoding = '{encoding}'")
-        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        native.execute("DROP TABLE encoding_seed")
-        native.commit()
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "graph-record.db", encoding)
     await upgrade_database(settings)
     database = Database(settings)
     ledger = ConnectionLedger(database)

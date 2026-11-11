@@ -8,7 +8,6 @@ import pytest
 from pydantic import ValidationError
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.harness.claude.configuration import ClaudeEnvironmentConfiguration
 from kora.plugins.runtime.local.environment import candidate_environment
 from kora.protocols.errors import KoraProtocolError
@@ -20,8 +19,6 @@ from tests.support.provider_tooling import (
     create_virtual_environment,
     run_setup,
 )
-
-__all__ = ["kora_capture"]
 
 PROBE: Final[Path] = REPOSITORY / "tests" / "support" / "claude_launch_probe.py"
 NATIVE_NAMES: Final[tuple[str, ...]] = (

@@ -10,12 +10,7 @@ from kora.conformance.capture import (
     CaptureOverflow,
     captured,
 )
-from kora.conformance.common import (
-    CONFORMANCE_COMPONENT,
-    INSTANCE_ID,
-    kora_capture,
-    utc_now,
-)
+from kora.conformance.common import CONFORMANCE_COMPONENT, INSTANCE_ID, utc_now
 from kora.observability import LoggingSettings
 from kora.plugins.runtime.local.runtime import Sweep, SweepOutcome, SweepRefused
 from kora.protocols.errors import KoraProtocolError
@@ -43,8 +38,6 @@ from tests.support.retirement_evidence import (
     recovery_retirement_observation,
     retirement_failure_note,
 )
-
-__all__ = ["kora_capture"]
 
 
 @pytest.mark.asyncio

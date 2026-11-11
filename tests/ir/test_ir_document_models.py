@@ -62,6 +62,72 @@ def test_ir_document_models_accept_examples() -> None:
     assert len(exported) >= 2
 
 
+def tool_policies(value: object) -> list[object]:
+    if isinstance(value, dict):
+        items = cast("dict[object, object]", value)
+        found = [item for key, item in items.items() if key == "tool_policy"]
+        return found + [
+            policy for item in items.values() for policy in tool_policies(item)
+        ]
+    if isinstance(value, list):
+        return [
+            policy
+            for item in cast("list[object]", value)
+            for policy in tool_policies(item)
+        ]
+    return []
+
+
+def test_ir_example_tool_policies_round_trip() -> None:
+    policies = [
+        policy
+        for path in sorted(EXAMPLES.glob("*.ir.yaml"))
+        for policy in tool_policies(load_yaml(path))
+    ]
+
+    dumped = [
+        ir.ToolPolicy.model_validate(policy).model_dump(mode="json", exclude_unset=True)
+        for policy in policies
+    ]
+
+    assert dumped == policies
+    assert len(policies) >= 6
+
+
+def configured_models(document: ir.GraphDocument) -> set[type[object]]:
+    graph = document.graph
+    subgraphs = () if graph.subgraphs is MISSING else tuple(graph.subgraphs.values())
+    nodes = [node for body in (graph, *subgraphs) for node in body.nodes.values()]
+    owners = (*subgraphs, *nodes)
+    return {
+        *(type(node.config) for node in nodes),
+        *(type(owner.retry) for owner in owners),
+        *(type(owner.limits) for owner in owners),
+        *(
+            type(node.config.workspace)
+            for node in nodes
+            if isinstance(node, topology.AgentNode)
+        ),
+    }
+
+
+def test_ir_examples_carry_representative_configurations() -> None:
+    documents = [
+        ir.GraphDocument.model_validate(load_yaml(path))
+        for path in sorted(EXAMPLES.glob("*.ir.yaml"))
+    ]
+
+    models = [configured_models(document) for document in documents]
+
+    assert len(models) >= 2
+    assert all(
+        {ir.CommandConfig, ir.Workspace, ir.NodeLimits} <= found for found in models
+    )
+    assert {ir.BranchConfig, ir.FanOutConfig, ir.Retry} <= set[type[object]]().union(
+        *models
+    )
+
+
 def test_ir_document_preserves_omission_and_wire_aliases() -> None:
     value = {"$schema": "not a normalized URI", **document(), "x-meta": False}
 

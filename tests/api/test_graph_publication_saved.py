@@ -39,11 +39,6 @@ from kora.api.graph_publication_values import (
 )
 from kora.db.connection import Database, Dialect
 from kora.db.identifiers import encode
-from kora.db.maintenance import (
-    PUBLICATION_TRIGGER_CHECK,
-    SQLitePublicationTriggerObservation,
-    observe_sqlite_publication_triggers,
-)
 from kora.db.migrations import upgrade_database
 from kora.db.tables import event, graph_version, graph_version_read_admission
 from kora.engine.graph_resource_references import GraphResourceScope
@@ -180,9 +175,6 @@ async def compare_fresh_graph_row(database: Database) -> None:
     }
 
     async with database.transaction() as writer:
-        if sqlite:
-            triggers = await observe_sqlite_publication_triggers(writer)
-            assert triggers is SQLitePublicationTriggerObservation.VERIFIED
         compiled_insert = insert.compile(dialect=writer.dialect)
         compiled = compare.compile(dialect=writer.dialect)
         with executed_queries(writer) as operations:
@@ -366,10 +358,6 @@ async def test_sqlite_later_event_trigger_invalidates_the_saved_match(
 
         async with database.transaction() as writer:
             await writer.execute(rewrite_on_event)
-            with executed_queries(writer) as preflight:
-                refused = await observe_sqlite_publication_triggers(writer)
-            assert refused is SQLitePublicationTriggerObservation.REFUSED
-            assert preflight == [(PUBLICATION_TRIGGER_CHECK.text, ())]
             locator: object = await writer.scalar(insert, parameters)
             expected = parameters | {SAVED_LOCATOR: locator}
             original: object = await writer.scalar(compare, expected)
@@ -398,7 +386,6 @@ async def test_sqlite_later_event_trigger_invalidates_the_saved_match(
             )
             await writer.rollback()
         async with database.transaction() as writer:
-            cleared = await observe_sqlite_publication_triggers(writer)
             versions = await writer.scalar(
                 select(func.count()).select_from(graph_version)
             )
@@ -415,7 +402,6 @@ async def test_sqlite_later_event_trigger_invalidates_the_saved_match(
     assert type(changed) is int
     assert changed == 0
     assert rewritten == (locator, b"e" * 64)
-    assert cleared is SQLitePublicationTriggerObservation.VERIFIED
     assert versions == events == admissions == 0
     assert ledger.outstanding == database.units_in_flight() == 0
     assert database.writer_is_free()
