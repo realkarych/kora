@@ -1,9 +1,12 @@
 import asyncio
 import gc
 import json
-from collections.abc import Coroutine
-from dataclasses import asdict
+import sys
+from collections.abc import Coroutine, Generator
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
 from functools import partial
+from types import CodeType, FrameType
 from typing import cast
 from weakref import ref
 
@@ -23,27 +26,36 @@ from kora.api.graph_cel import (
     GraphCelResult,
     verify_graph_cel,
 )
-from kora.cel_eval.binding import load_binding
-from kora.cel_eval.errors import EvaluatorUnavailable, UnavailableReason
+from kora.cel import Environment
+from kora.cel_eval.binding import Binding, NativeCompile, NativeProgram, load_binding
+from kora.cel_eval.errors import EvaluatorUnavailable, Fault, UnavailableReason
 from kora.cel_eval.thread import EvaluationThread, Evaluator
 from kora.db.graph_value_json import ObjectReader
 from kora.engine.graph_cel_facts import GraphCelFacts
-from kora.ir.approval_compilation import checked_approval_sites
-from kora.ir.branch_expressions import checked_branch_sites
+from kora.ir.approval_compilation import ApprovalPrerequisite, checked_approval_sites
+from kora.ir.approval_defaults import ApprovalDefaultChecks
+from kora.ir.approval_predicates import ApprovalPredicateChecks
+from kora.ir.branch_expressions import BranchExpressionChecks, checked_branch_sites
 from kora.ir.cel_inventory_admission import CheckedInventoryAdmission
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
+from kora.ir.expression_contexts import InputParameterContexts
 from kora.ir.expression_fields import FieldPath
 from kora.ir.graph_cel_inventory import checked_graph_sites
 from kora.ir.json import JsonObject
 from kora.ir.retry_expressions import (
     CheckedRetrySite,
     InfrastructureRetryPrerequisite,
+    RetryExpressionChecks,
     checked_infrastructure_retry_site,
     checked_retry_sites,
 )
 from kora.ir.trigger_expressions import checked_sensor_trigger_sites
-from kora.ir.wait_expressions import WaitExpressionResult, checked_wait_sites
+from kora.ir.wait_expressions import (
+    WaitExpressionChecks,
+    WaitExpressionResult,
+    checked_wait_sites,
+)
 from kora.observability import Level, LoggingSettings, bound_scope, configure_process
 from kora.observability.settings import RenderFormat
 from tests.api.cel_pattern_validation_scenarios import (
@@ -92,6 +104,21 @@ PARAMETER_SCHEMA: JsonObject = {
 UNRESOLVED_SCHEMA: JsonObject = {"$ref": "#/$defs/missing"}
 PATTERN_OFFSET: int = len('"a".matches(')
 APPROVAL_PATTERN_OFFSET: int = len('true || "😀".matches(')
+REFUSAL_MARKER: str = "private-native-refusal-marker"
+REFUSED_REASON: str = f'"{REFUSAL_MARKER}"'
+REFUSED_PATH: FieldPath = ("graph", "nodes", "branch", "config", "cases", 0, "reason")
+REFUSED_DELIVERIES: int = 2
+CHECKER_CONSTRUCTORS: frozenset[CodeType] = frozenset(
+    {
+        BranchExpressionChecks.__init__.__code__,
+        ApprovalDefaultChecks.__init__.__code__,
+        ApprovalPredicateChecks.__init__.__code__,
+        RetryExpressionChecks.__init__.__code__,
+        WaitExpressionChecks.__init__.__code__,
+        InputParameterContexts.__init__.__code__,
+        Environment.__init__.__code__,
+    }
+)
 REJECTED_OFFSETS: dict[FieldPath, int] = {
     ("graph", "nodes", "branch", "config", "cases", 0, "when"): PATTERN_OFFSET,
     ("graph", "nodes", "gate", "config", "approve_when"): APPROVAL_PATTERN_OFFSET,
@@ -109,6 +136,7 @@ def mixed_document(
     rejected: bool = False,
     wait_node: dict[str, object] | None = None,
     params: JsonObject | None = None,
+    reason: str = '"reason"',
 ) -> GraphDocument:
     prefix = "(?ii)" if rejected else "^"
     escaped = r"\u0070" + PATTERN_MARKER[1:]
@@ -118,7 +146,7 @@ def mixed_document(
         contracts=BUILTINS,
         params=params,
         nodes={
-            "branch": branch(predicate, '"reason"', '"fallback"'),
+            "branch": branch(predicate, reason, '"fallback"'),
             "target": node(depends_on=["branch"]),
             "default": gate(),
             "gate": gate(predicate=escaped_predicate),
@@ -136,6 +164,34 @@ def mixed_document(
         },
         triggers=[{"kind": "manual"}, sensor(predicate)],
     )
+
+
+@dataclass(frozen=True)
+class RefusingCompile:
+    native: NativeCompile
+    renderings: list[str] = field(default_factory=list[str])
+
+    def __call__(self, expression: str) -> NativeProgram:
+        self.renderings.append(expression)
+        if REFUSAL_MARKER in expression:
+            raise ValueError(expression)
+        return self.native(expression)
+
+
+@contextmanager
+def observe_checker_construction() -> Generator[list[str]]:
+    constructions: list[str] = []
+    previous = sys.getprofile()
+
+    def observe(frame: FrameType, event: str, argument: object) -> None:
+        if event == "call" and frame.f_code in CHECKER_CONSTRUCTORS:
+            constructions.append(frame.f_code.co_qualname)
+
+    try:
+        sys.setprofile(observe)
+        yield constructions
+    finally:
+        sys.setprofile(previous)
 
 
 def with_infrastructure(
@@ -217,6 +273,7 @@ def check_refusals() -> None:
     missing_input = mixed_document(
         wait_node=wait("inputs.unavailable.ok", poll=True, inputs=unavailable_inputs())
     )
+    approval_syntax = document_for(nodes={"gate": gate(predicate="true &&")})
     owner = EvaluationThread(load_binding())
 
     with asyncio.Runner() as runner:
@@ -232,11 +289,15 @@ def check_refusals() -> None:
             )
         finally:
             runner.run(evaluator.close())
-        invalid = runner.run(verify(document, evaluator, pattern_work=0))
-        oversized_graph = runner.run(
-            verify(document, evaluator, declarations=DECLARATIONS - 1)
-        )
-        oversized_triggers = runner.run(verify(document, evaluator, triggers=1))
+        with observe_checker_construction() as admitted_checkers:
+            admitted = checked_graph_sites(document, DECLARATIONS, 2)
+        with observe_checker_construction() as refused_checkers:
+            invalid = runner.run(verify(document, evaluator, pattern_work=0))
+            boolean = runner.run(verify(document, evaluator, declarations=True))
+            oversized_graph = runner.run(
+                verify(document, evaluator, declarations=DECLARATIONS - 1)
+            )
+            oversized_triggers = runner.run(verify(document, evaluator, triggers=1))
         oversized_patterns = runner.run(
             verify(document, evaluator, pattern_work=SINGLE_FAMILY_PATTERN_WORK)
         )
@@ -245,11 +306,18 @@ def check_refusals() -> None:
         )
         typed_refusal = runner.run(verify(invalid_wait, evaluator))
         unresolved = runner.run(verify(missing_input, evaluator))
+        approval_unresolved = runner.run(verify(approval_syntax, evaluator))
 
     assert isinstance(prefix, GraphCelChecks)
     assert prefix.compiled_fields == 3
     assert prefix.diagnostics.valid
-    assert invalid is GraphCelRefusal.INVALID_ALLOWANCE
+    assert isinstance(admitted, tuple)
+    assert len(admitted) == FIELDS
+    assert set(admitted_checkers) == {
+        constructor.co_qualname for constructor in CHECKER_CONSTRUCTORS
+    }
+    assert refused_checkers == []
+    assert invalid is boolean is GraphCelRefusal.INVALID_ALLOWANCE
     assert oversized_graph is oversized_triggers is GraphCelRefusal.CAPACITY_EXHAUSTED
     assert oversized_patterns is IncompletePatternCheck.CAPACITY_EXHAUSTED
     assert oversized_renderings == IncompleteRenderings(
@@ -261,6 +329,7 @@ def check_refusals() -> None:
     assert unresolved.context_unresolved == 1
     assert unresolved.diagnostics.valid
     assert not unresolved.wait_expressions_complete
+    assert approval_unresolved is ApprovalPrerequisite.SYNTAX_UNRESOLVED
     assert_settled(owner)
 
 
@@ -682,6 +751,53 @@ def cancel_delivery(
     assert_idle(owner, 1)
 
 
+def check_native_refusal() -> None:
+    document = mixed_document(reason=REFUSED_REASON)
+    inventory = checked_graph_sites(document, DECLARATIONS, 2)
+    assert isinstance(inventory, tuple)
+    submitted = [site.checked.rendering for site in inventory[:REFUSED_DELIVERIES]]
+    del inventory
+    loaded = load_binding()
+    native = RefusingCompile(loaded.native_compile)
+    owner = EvaluationThread(Binding(loaded.version, loaded.panic, native))
+
+    with asyncio.Runner() as runner:
+        loop = runner.get_loop()
+        evaluator = runner.run(open_evaluator(owner))
+        try:
+            baseline = checked_expression_count()
+            refused = observe_deliveries(
+                loop,
+                loop.create_task(verify(document, evaluator, facts_bytes=WORK)),
+                owner,
+                REFUSED_DELIVERIES,
+            )
+            compiled = list(native.renderings)
+            retained_trees = checked_expression_count() - baseline
+            retained_patterns = pending_patterns()
+            retained_facts = pending_facts()
+            reused = observe_deliveries(
+                loop,
+                loop.create_task(verify(mixed_document(), evaluator)),
+                owner,
+                FIELDS + 1,
+            )
+            assert_idle(owner, 1)
+        finally:
+            runner.run(evaluator.close())
+
+    assert refused == IncompleteRenderings(
+        RenderingRefusal.NATIVE_REFUSED, REFUSED_PATH, Fault.VALUE_ERROR
+    )
+    assert REFUSAL_MARKER not in repr(refused)
+    assert compiled == submitted
+    assert retained_trees == retained_patterns == retained_facts == 0
+    assert isinstance(reused, GraphCelChecks)
+    assert reused.compiled_fields == FIELDS
+    assert reused.diagnostics.valid
+    assert_settled(owner)
+
+
 def run(scenario: str) -> None:
     cases = {
         "mixed": check_mixed,
@@ -690,6 +806,7 @@ def run(scenario: str) -> None:
         "facts": check_facts,
         "typed-limits": check_typed_limits,
         "lifetime": check_lifetime,
+        "native-refusal": check_native_refusal,
     }
     diagnostics = configure_process(
         COMPONENT,
