@@ -3,89 +3,70 @@ from hashlib import sha256
 from typing import cast
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import BigInteger, LargeBinary, func, select
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.elements import ColumnElement
 
 from kora.api.graph_deployment import (
     DeploymentFindings,
     DeploymentRefusal,
-    PreparedDeployment,
     prepare_graph_deployment,
 )
-from kora.api.graph_deployment_limits import READ
+from kora.api.graph_deployment_limits import IR_BYTES, READ
 from kora.api.graph_deployment_writer import (
     GraphDeploymentTarget,
     PublishedGraphVersion,
     publish_graph_deployment,
 )
 from kora.cel_eval.thread import Evaluator
-from kora.db.connection import Database
+from kora.db.connection import Database, Dialect
 from kora.db.graph_read_admission import read_graph_version_admission
+from kora.db.graph_resource_transport import graph_resource_binary_projection
+from kora.db.graph_value_json import GraphValueRejected
 from kora.db.graph_version_reads import MAX_SQL_LENGTH, acquire_graph_version
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import graph, graph_version, graph_version_resource_owner
-from kora.engine.graph_command_manifests import GraphDeploymentSelectors
 from kora.engine.graph_version_identity import (
     GraphVersionPin,
     read_graph_version_identity,
 )
-from kora.ir.deployment_checks import DeploymentSelection
 from kora.ir.json import JsonObject
 from tests.api.deployment_cases import (
     AT,
     GRAPH,
-    HARNESS,
-    NAMESPACE,
     OWNER,
+    SELECTION,
+    SELECTORS,
     evaluator,
+    prepared,
     principal,
+    publish,
     seeded_namespace,
     skeleton_ir,
+    unresolved_approval,
 )
 from tests.db.closing import ConnectionLedger
-from tests.db.seed import FakeClock, fixed_randomness
+from tests.db.seed import FakeClock, Seeder, fixed_randomness
 
 __all__ = ["evaluator"]
 
-SELECTORS = GraphDeploymentSelectors(
-    authorized_namespace_name=NAMESPACE, route_graph=GRAPH, request_graph=GRAPH
-)
-SELECTION = DeploymentSelection(HARNESS)
 EMPTY_RESOURCES: JsonObject = {
     "interpretation": "kora.graph-resource-refs.v1",
     "commands": [],
 }
 
 
-async def prepared(
-    evaluator: Evaluator, ir: JsonObject | None = None
-) -> PreparedDeployment:
-    result = await prepare_graph_deployment(
-        skeleton_ir() if ir is None else ir, SELECTORS, SELECTION, evaluator
-    )
-    assert isinstance(result, PreparedDeployment)
-    return result
-
-
-async def publish(
-    database: Database, deployment: PreparedDeployment, namespace_id: str, token_id: str
-) -> PublishedGraphVersion:
-    return await publish_graph_deployment(
-        database,
-        deployment,
-        GraphDeploymentTarget(namespace_id, GRAPH, principal(namespace_id, token_id)),
-        identifiers=IdentifierGenerator(FakeClock(AT).now),
-        at=AT,
-    )
-
-
-def changed_ir() -> JsonObject:
-    ir = skeleton_ir()
-    nodes = cast(
+def nodes_of(ir: JsonObject) -> dict[str, dict[str, dict[str, object]]]:
+    return cast(
         "dict[str, dict[str, dict[str, object]]]",
-        cast("dict[str, object]", ir["graph"])["nodes"],
+        cast("JsonObject", ir["graph"])["nodes"],
     )
-    nodes["agent"]["config"]["prompt"] = "Summarize the changes."
+
+
+def with_prompt(prompt: str) -> JsonObject:
+    ir = skeleton_ir()
+    nodes_of(ir)["agent"]["config"]["prompt"] = prompt
     return ir
 
 
@@ -94,6 +75,34 @@ async def row_counts(database: Database) -> tuple[int, int]:
         graphs = await reader.scalar(select(func.count()).select_from(graph))
         versions = await reader.scalar(select(func.count()).select_from(graph_version))
     return int(graphs or 0), int(versions or 0)
+
+
+def stored_widths(dialect: Dialect) -> tuple[ColumnElement[int], ColumnElement[int]]:
+    if dialect is Dialect.POSTGRESQL:
+        total = sum(
+            (
+                func.pg_column_size(column, type_=BigInteger())
+                for column in graph_version.columns
+            ),
+            start=cast("ColumnElement[int]", sql_cast(0, BigInteger())),
+        )
+        transport = func.octet_length(
+            graph_resource_binary_projection(dialect, graph_version.c.resources),
+            type_=BigInteger(),
+        )
+        return total, transport
+    total = sum(
+        (
+            func.length(sql_cast(column, LargeBinary()), type_=BigInteger())
+            for column in graph_version.columns
+        ),
+        start=cast("ColumnElement[int]", sql_cast(0, BigInteger())),
+    )
+    transport = func.length(
+        graph_resource_binary_projection(dialect, graph_version.c.resources),
+        type_=BigInteger(),
+    )
+    return total, transport
 
 
 @pytest.mark.asyncio
@@ -112,6 +121,7 @@ async def test_deployment_preparation_returns_preimage_digests(
         + logical.canonical_contract.encode("ascii")
         + b"}"
     )
+    assert deployment.graph_name == GRAPH
     assert (
         logical.digests.ir_digest == sha256(logical.canonical_ir.encode()).hexdigest()
     )
@@ -146,16 +156,36 @@ async def test_deployment_preparation_refuses_before_preparing(
     unselected = skeleton_ir(harness="claude")
     malformed = skeleton_ir()
     malformed["graph"] = "not a graph"
+    oversized = with_prompt("x" * IR_BYTES)
+    unresolved = unresolved_approval()
 
     outcomes = [
         await prepare_graph_deployment(ir, SELECTORS, SELECTION, evaluator)
-        for ir in (foreign, renamed, unselected, malformed)
+        for ir in (foreign, renamed, unselected, malformed, oversized, unresolved)
     ]
 
     assert outcomes[:2] == [DeploymentRefusal.SELECTORS, DeploymentRefusal.SELECTORS]
     assert isinstance(outcomes[2], DeploymentFindings)
     assert [error.code for error in outcomes[2].diagnostics.errors] == ["IR018"]
-    assert outcomes[3] == DeploymentRefusal.DOCUMENT
+    assert outcomes[3:] == [
+        DeploymentRefusal.DOCUMENT,
+        DeploymentRefusal.TOO_LARGE,
+        DeploymentRefusal.INCOMPLETE,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deployment_preparation_admits_documents_within_its_budgets(
+    evaluator: Evaluator,
+) -> None:
+    admitted = with_prompt("x" * 700_000)
+    beyond = with_prompt("x" * 1_200_000)
+
+    within = await prepare_graph_deployment(admitted, SELECTORS, SELECTION, evaluator)
+    exhausted = await prepare_graph_deployment(beyond, SELECTORS, SELECTION, evaluator)
+
+    assert not isinstance(within, DeploymentRefusal | DeploymentFindings)
+    assert exhausted is DeploymentRefusal.INCOMPLETE
 
 
 @pytest.mark.asyncio
@@ -167,9 +197,11 @@ async def test_deploy_writer_publishes_first_graph_without_files(
 
     published = await publish(database, deployment, namespace_id, token_id)
 
+    total, transport = stored_widths(database.dialect)
     async with database.read_transaction() as reader:
         graph_row = (await reader.execute(select(graph))).one()
         version = (await reader.execute(select(graph_version))).one()
+        widths = (await reader.execute(select(total, transport))).one()
         owners = await reader.scalar(
             select(func.count()).select_from(graph_version_resource_owner)
         )
@@ -197,6 +229,8 @@ async def test_deploy_writer_publishes_first_graph_without_files(
     assert version.source_digest == digests.ir_digest
     assert owners == 0
     assert admission is not None
+    assert admission.db_input_bytes >= int(widths[0])
+    assert admission.resource_transport_bytes == int(widths[1])
     assert acquired is not None
     identity = read_graph_version_identity(
         acquired,
@@ -216,7 +250,10 @@ async def test_deploy_writer_reuses_equal_version(
 
     again = await publish(database, await prepared(evaluator), namespace_id, token_id)
     changed = await publish(
-        database, await prepared(evaluator, changed_ir()), namespace_id, token_id
+        database,
+        await prepared(evaluator, with_prompt("Summarize the changes.")),
+        namespace_id,
+        token_id,
     )
 
     assert again == PublishedGraphVersion(
@@ -235,7 +272,7 @@ async def test_deploy_writer_concurrent_first_publications(
     equal_namespace, token_id = await seeded_namespace(database)
     different_namespace, _ = await seeded_namespace(database, "different")
     original = await prepared(evaluator)
-    changed = await prepared(evaluator, changed_ir())
+    changed = await prepared(evaluator, with_prompt("Summarize the changes."))
 
     equal = await asyncio.gather(
         publish(database, original, equal_namespace, token_id),
@@ -258,15 +295,57 @@ async def test_deploy_writer_concurrent_first_publications(
 async def test_deploy_writer_rolls_back_and_releases(
     database: Database, evaluator: Evaluator
 ) -> None:
+    namespace_id, token_id = await seeded_namespace(database)
+    upcoming = IdentifierGenerator(FakeClock(AT).now, fixed_randomness(7))
+    graph_id, colliding_version = upcoming.new(), upcoming.new()
+    async with database.transaction() as writer:
+        seeder = Seeder(writer)
+        other = await seeder.graph(namespace_id, "other")
+        await seeder.graph_version(other, version_id=colliding_version)
     ledger = ConnectionLedger(database)
     deployment = await prepared(evaluator)
-    missing_namespace = IdentifierGenerator(
-        FakeClock(AT).now, fixed_randomness(7)
-    ).new()
 
     with pytest.raises(IntegrityError):
-        await publish(database, deployment, missing_namespace, missing_namespace)
+        await publish_graph_deployment(
+            database,
+            deployment,
+            GraphDeploymentTarget(namespace_id, principal(namespace_id, token_id)),
+            identifiers=IdentifierGenerator(FakeClock(AT).now, fixed_randomness(7)),
+            at=AT,
+        )
 
-    assert await row_counts(database) == (0, 0)
+    async with database.read_transaction() as reader:
+        graphs = (await reader.execute(select(graph.c.id))).scalars().all()
+    assert graphs == [other]
+    assert graph_id not in graphs
+    assert await row_counts(database) == (1, 1)
     assert database.writer_is_free()
     assert ledger.outstanding == 0
+
+
+@pytest.mark.asyncio
+async def test_deploy_writer_refuses_a_service_principal_before_reuse(
+    database: Database, evaluator: Evaluator
+) -> None:
+    namespace_id, token_id = await seeded_namespace(database)
+    deployment = await prepared(evaluator)
+    await publish(database, deployment, namespace_id, token_id)
+    service = principal(namespace_id, token_id).model_copy(
+        update={
+            "kind": "service",
+            "runtime": "local",
+            "approve": False,
+            "platform": False,
+        }
+    )
+
+    with pytest.raises(GraphValueRejected):
+        await publish_graph_deployment(
+            database,
+            deployment,
+            GraphDeploymentTarget(namespace_id, service),
+            identifiers=IdentifierGenerator(FakeClock(AT).now),
+            at=AT,
+        )
+
+    assert await row_counts(database) == (1, 1)

@@ -11,7 +11,12 @@ from kora.api.graph_execution_preparation import (
     prepare_graph_deployment_inputs,
 )
 from kora.cel_eval.thread import Evaluator
-from kora.db.graph_value_json import GraphValueRejected, TextBudget, render_object
+from kora.db.graph_value_json import (
+    GraphValueFailure,
+    GraphValueRejected,
+    TextBudget,
+    render_object,
+)
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
 from kora.engine.graph_types import read_document
 from kora.ir.deployment_checks import (
@@ -27,12 +32,14 @@ DIGEST_PREFIX = "sha256:"
 
 class DeploymentRefusal(StrEnum):
     DOCUMENT = "document"
+    TOO_LARGE = "too_large"
     SELECTORS = "selectors"
     INCOMPLETE = "incomplete"
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedDeployment:
+    graph_name: str
     inputs: PreparedGraphDeploymentInputs
     source_digest: str
     warnings: DiagnosticCollection
@@ -46,12 +53,14 @@ class DeploymentFindings:
 DeploymentPreparation = PreparedDeployment | DeploymentFindings | DeploymentRefusal
 
 
-def _read(ir: JsonObject) -> tuple[str, GraphDocument] | None:
+def _read(ir: JsonObject) -> tuple[str, GraphDocument] | DeploymentRefusal:
     try:
         text = render_object(ir, TextBudget(IR_BYTES))
         return text, read_document(text, TextBudget(IR_BYTES))
-    except GraphValueRejected:
-        return None
+    except GraphValueRejected as rejected:
+        if rejected.reason is GraphValueFailure.BUDGET:
+            return DeploymentRefusal.TOO_LARGE
+        return DeploymentRefusal.DOCUMENT
 
 
 def _selected(document: GraphDocument, selectors: GraphDeploymentSelectors) -> bool:
@@ -85,8 +94,8 @@ async def prepare_graph_deployment(
     evaluator: Evaluator,
 ) -> DeploymentPreparation:
     read = _read(ir)
-    if read is None:
-        return DeploymentRefusal.DOCUMENT
+    if isinstance(read, DeploymentRefusal):
+        return read
     text, document = read
     if not _selected(document, selectors):
         return DeploymentRefusal.SELECTORS
@@ -109,6 +118,7 @@ async def prepare_graph_deployment(
     if isinstance(prepared, GraphDeploymentCelRefusal):
         return _cel_findings(prepared)
     return PreparedDeployment(
+        document.graph.id,
         prepared,
         _source_digest(document, prepared.logical.digests.ir_digest),
         checks.diagnostics,

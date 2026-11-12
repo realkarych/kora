@@ -1,6 +1,7 @@
 from typing import cast
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from kora.api.graph_deployment_writer import (
     GraphDeploymentTarget,
@@ -13,13 +14,12 @@ from kora.ir.deployment_checks import DeploymentSelection, check_deployment_docu
 from kora.observability import Level, LoggingSettings
 from tests.api.deployment_cases import (
     AT,
-    GRAPH,
     OWNER,
     evaluator,
+    prepared,
     principal,
     seeded_namespace,
 )
-from tests.api.test_graph_deployment import prepared
 from tests.db.seed import FakeClock
 from tests.ir.first_slice_configuration_cases import chain_document, chain_nodes
 from tests.observability.conftest import (
@@ -72,9 +72,8 @@ async def test_deploy_writer_logging_is_content_free(
 ) -> None:
     namespace_id, token_id = await seeded_namespace(database)
     deployment = await prepared(evaluator)
-    target = GraphDeploymentTarget(
-        namespace_id, GRAPH, principal(namespace_id, token_id)
-    )
+    target = GraphDeploymentTarget(namespace_id, principal(namespace_id, token_id))
+    missing = GraphDeploymentTarget(token_id, principal(token_id, token_id))
     diagnostics = configured_with_reader(
         configure, pipe, LoggingSettings(level=Level.DEBUG)
     )
@@ -89,6 +88,14 @@ async def test_deploy_writer_logging_is_content_free(
         )
         for _ in range(2)
     ]
+    with pytest.raises(IntegrityError):
+        await publish_graph_deployment(
+            database,
+            deployment,
+            missing,
+            identifiers=IdentifierGenerator(FakeClock(AT).now),
+            at=AT,
+        )
     output = finished_output(diagnostics, pipe)
 
     records = [
