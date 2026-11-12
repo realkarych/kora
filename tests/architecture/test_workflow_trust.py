@@ -27,6 +27,7 @@ FULL_COMMIT_PIN = re.compile(
     r"[a-z0-9_.-]+/[a-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}"
 )
 REVIEWED_ACTION_COMMITS = {
+    "actions/cache": "caa296126883cff596d87d8935842f9db880ef25",
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/download-artifact": "634f93cb2916e3fdff6788551b99b062d0335ce0",
     "actions/setup-node": "820762786026740c76f36085b0efc47a31fe5020",
@@ -149,6 +150,12 @@ CLASSIFIER_OUTPUTS = {
     "verified": "${{ steps.scope.outputs.verified }}",
 }
 CHECKOUT_AUTHENTICATION_INPUT = "token"
+ACQUISITION_CACHE_INPUTS = {"path": "${{ runner.temp }}/kora-acquisitions"}
+ACQUISITION_CACHE_KEY = re.compile(
+    r"kora-acquisitions-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}"
+    r"-[a-z0-9.-]+(?:\$\{\{ matrix\.python \}\})?"
+    r"-\$\{\{ hashFiles\('scripts/ci/acquire\.py'\) \}\}"
+)
 
 
 def action_references(workflows: Workflows) -> list[tuple[str, str]]:
@@ -724,6 +731,91 @@ def test_actions_are_pinned_to_reviewed_full_commits() -> None:
     violations = unpinned_actions(workflows)
 
     assert action_references(workflows)
+    assert violations == []
+
+
+def cache_steps(job: dict[str, object]) -> list[dict[str, object]]:
+    return [
+        step
+        for step in step_list(job)
+        if "uses" in step and action_repository(str(step["uses"])) == "actions/cache"
+    ]
+
+
+def bound_cache(inputs: dict[str, object]) -> bool:
+    key = inputs.get("key")
+    return (
+        {name: value for name, value in inputs.items() if name != "key"}
+        == ACQUISITION_CACHE_INPUTS
+        and isinstance(key, str)
+        and ACQUISITION_CACHE_KEY.fullmatch(key) is not None
+    )
+
+
+def unbound_caches(workflows: Workflows) -> list[str]:
+    return [
+        f"{location}: {step.get('with')}"
+        for location, job in jobs_of(workflows)
+        for step in cache_steps(job)
+        if not bound_cache(table(step.get("with", {})))
+    ]
+
+
+def links_cache_inputs(workflows: Workflows) -> dict[str, object]:
+    return table(cache_steps(job_of(workflows, "ci.yml", "links"))[0]["with"])
+
+
+def drop_the_manifest_digest_from_a_cache_key(workflows: Workflows) -> None:
+    inputs = links_cache_inputs(workflows)
+    inputs["key"] = "kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-lychee"
+
+
+def restore_a_prefix_matched_cache(workflows: Workflows) -> None:
+    links_cache_inputs(workflows)["restore-keys"] = "kora-acquisitions-"
+
+
+def cache_another_directory(workflows: Workflows) -> None:
+    links_cache_inputs(workflows)["path"] = "~/.cache"
+
+
+def share_a_cache_across_operating_systems(workflows: Workflows) -> None:
+    links_cache_inputs(workflows)["enableCrossOsArchive"] = True
+
+
+def restore_through_the_cache_subaction(workflows: Workflows) -> None:
+    steps = cast(list[object], job_of(workflows, "ci.yml", "markdown")["steps"])
+    commit = REVIEWED_ACTION_COMMITS["actions/cache"]
+    steps.insert(
+        1,
+        {"uses": f"actions/cache/restore@{commit}", "with": {"path": "~", "key": "k"}},
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        drop_the_manifest_digest_from_a_cache_key,
+        restore_a_prefix_matched_cache,
+        cache_another_directory,
+        share_a_cache_across_operating_systems,
+        restore_through_the_cache_subaction,
+    ],
+)
+def test_cache_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = unbound_caches(workflows)
+
+    assert violations
+
+
+def test_caches_restore_only_the_acquisition_store_under_its_pinned_digest() -> None:
+    workflows = repository_workflows()
+
+    violations = unbound_caches(workflows)
+
+    assert any(cache_steps(job) for _, job in jobs_of(workflows))
     assert violations == []
 
 

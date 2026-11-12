@@ -8,6 +8,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 NODE_SETUP = ROOT / "scripts/ci/setup_scaffold_node.sh"
+UV_SETUP = ROOT / "scripts/ci/setup_uv_cache.sh"
 LINK_CHECK = ROOT / "scripts/ci/check_links.sh"
 
 
@@ -56,6 +57,56 @@ def test_scaffold_node_refuses_partial_or_symlink_cache(
         b"Incomplete or invalid Scaffold Node cache entry"
         if architecture is not None
         else b"Unsupported Scaffold Node archive platform"
+    )
+    assert expected in result.stderr
+    assert result.stdout == b""
+    assert sorted(cache_root.rglob("*")) == before
+
+
+@pytest.mark.parametrize(
+    "cache_state", ["directory", "marker", "destination_symlink", "binary_symlink"]
+)
+def test_uv_setup_refuses_partial_or_symlink_cache(
+    tmp_path: Path, cache_state: str
+) -> None:
+    machine = (platform.system(), platform.machine())
+    architecture = {("Darwin", "arm64"): "aarch64", ("Linux", "x86_64"): "x86_64"}.get(
+        machine
+    )
+    cache_root = tmp_path / "tool cache"
+    version_root = cache_root / "uv" / "0.13.1"
+    version_root.mkdir(parents=True)
+    if architecture is not None:
+        destination = version_root / architecture
+        if cache_state in {"directory", "binary_symlink"}:
+            destination.mkdir()
+        if cache_state != "directory":
+            (version_root / f"{architecture}.complete").touch()
+        if cache_state == "destination_symlink":
+            target = tmp_path / "real directory"
+            target.mkdir()
+            for name in ("uv", "uvx"):
+                (target / name).touch(mode=0o700)
+            destination.symlink_to(target, target_is_directory=True)
+        if cache_state == "binary_symlink":
+            (destination / "uv").symlink_to(Path("/bin/bash").resolve())
+            (destination / "uvx").touch(mode=0o700)
+    before = sorted(cache_root.rglob("*"))
+
+    result = subprocess.run(
+        ("/bin/bash", str(UV_SETUP), "3.11.17"),
+        cwd=ROOT,
+        env={**os.environ, "RUNNER_TOOL_CACHE": str(cache_root.resolve())},
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 1
+    expected = (
+        b"Incomplete or invalid uv tool cache entry"
+        if architecture is not None
+        else b"Unsupported uv archive platform"
     )
     assert expected in result.stderr
     assert result.stdout == b""
