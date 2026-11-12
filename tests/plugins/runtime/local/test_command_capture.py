@@ -101,8 +101,9 @@ SUBMITTER = Submitter(dispatcher_id="dispatcher-1", process=identity_of(os.getpi
 HOLDER = "\n".join(
     (
         "import os, signal, sys",
-        "with open('holder.pid', 'w') as stream:",
+        "with open('holder.pid.partial', 'w') as stream:",
         "    stream.write(str(os.getpid()))",
+        "os.replace('holder.pid.partial', 'holder.pid')",
         "ready = int(sys.argv[1])",
         "os.write(ready, b'r')",
         "os.close(ready)",
