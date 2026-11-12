@@ -192,6 +192,24 @@ async def test_mcp_uses_only_its_own_credential(
             stderr=asyncio.subprocess.PIPE,
         )
         startup = await asyncio.wait_for(unconfigured.communicate(), DEADLINE_SECONDS)
+        refused_origin = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-m",
+            "kora",
+            "mcp",
+            "--server",
+            "authoring",
+            "--url",
+            "http://localhost:9",
+            env={"PATH": os.environ["PATH"], "KORA_MCP_TOKEN": other_token},
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        origin_startup = await asyncio.wait_for(
+            refused_origin.communicate(), DEADLINE_SECONDS
+        )
         session = await start(
             {"KORA_URL": origin, "KORA_TOKEN": cli_token, "KORA_MCP_TOKEN": other_token}
         )
@@ -204,6 +222,9 @@ async def test_mcp_uses_only_its_own_credential(
     assert unconfigured.returncode == 78
     assert startup[0] == b""
     assert b"KORA_MCP_TOKEN: missing" in startup[1]
+    assert refused_origin.returncode == 78
+    assert origin_startup[0] == b""
+    assert b"--url: invalid" in origin_startup[1]
     assert refused["isError"] is True
     assert error["code"] == "API005"
     assert code == 0

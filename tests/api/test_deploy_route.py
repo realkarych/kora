@@ -217,7 +217,10 @@ async def test_deploy_route_returns_document_findings(
             .encode(),
             None,
         ),
-        (json.dumps(body(with_prompt("ж" * 700_000))).encode(), None),
+        (
+            json.dumps(body(with_prompt("ж" * 700_000)), ensure_ascii=False).encode(),
+            None,
+        ),
         (oversized, None),
     )
 
