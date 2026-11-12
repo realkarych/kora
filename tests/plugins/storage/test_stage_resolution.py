@@ -1,5 +1,4 @@
 import asyncio
-import cProfile
 import hashlib
 from pathlib import Path
 
@@ -19,6 +18,7 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import PreparedContentRef, SealedStage
 from tests.plugins.storage.configuration import local_configuration
 from tests.plugins.storage.inspection import InspectedStorage
+from tests.support.call_observation import ObservedCalls, observing_calls
 
 
 class ResolutionStorage(InspectedStorage):
@@ -53,7 +53,8 @@ def test_resolution_decodes_one_complete_receipt_view_per_stage(
                     request, RepeatedSource(output_size), context
                 )
 
-            with cProfile.Profile() as profile:
+            calls = ObservedCalls()
+            with observing_calls(calls, ResolutionStorage.resolve_stage.__code__):
                 segments = provider.resolve_stage(content)
             reader = await provider.read_stage(content, context)
             digest = hashlib.sha256()
@@ -62,9 +63,8 @@ def test_resolution_decodes_one_complete_receipt_view_per_stage(
                     digest.update(chunk)
 
             decoded_views = sum(
-                entry.callcount
-                for entry in profile.getstats()
-                if entry.code is LocalState.stage_observations.__code__
+                code is LocalState.stage_observations.__code__
+                for code in calls.functions
             )
             assert decoded_views == 1
             assert sum(segment.size for segment in segments) == output_size

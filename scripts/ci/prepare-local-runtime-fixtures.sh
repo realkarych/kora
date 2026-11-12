@@ -33,8 +33,7 @@ prepare_linux() {
     rm -f "$fixtures/userns.previous"
   fi
   touch "$fixtures/user-namespaces"
-  DEBIAN_FRONTEND=noninteractive apt-get update -q -o Acquire::Retries=3
-  DEBIAN_FRONTEND=noninteractive apt-get install -o Acquire::Retries=3 -y -q --no-install-recommends nfs-kernel-server
+  bash "$(dirname "$0")/apt_install.sh" nfs-kernel-server
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/nfs-export"
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/nfs-export/state"
   install -d -o 0 -g 0 -m 0755 /etc/exports.d

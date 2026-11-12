@@ -1,4 +1,3 @@
-import cProfile
 import sys
 from typing import cast
 
@@ -7,7 +6,12 @@ from pydantic import MISSING
 from sqlalchemy import insert
 
 from kora.db.connection import Database
-from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected, ObjectReader
+from kora.db.graph_value_json import (
+    GraphValueFailure,
+    GraphValueRejected,
+    ObjectReader,
+    render_object,
+)
 from kora.db.graph_values import (
     DecodedGraphValues,
     prepare_graph_values,
@@ -25,6 +29,7 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import DIGEST, Seeder
 from tests.ir.document_cases import document
 from tests.ir.support import deep_data
+from tests.support.call_observation import ObservedCalls, observing_calls
 
 INTERPRETATION = "kora.graph-parameters.v1"
 CLOSED_EMPTY: JsonObject = {
@@ -200,22 +205,18 @@ def test_graph_parameter_binding_admits_root_before_copy_or_visitation() -> None
     pinned = parameter_document({str(index): 0 for index in range(10_000)})
     assert pinned.graph.params is not MISSING
     cast(dict[str, object], pinned.graph.params)["late invalid"] = object()
-    profile = cProfile.Profile()
+    calls = ObservedCalls()
 
-    profile.enable()
-    try:
-        with pytest.raises(GraphValueRejected) as failure:
-            build_graph_parameter_binding(pinned, max_encoded_bytes=64)
-    finally:
-        profile.disable()
+    with (
+        pytest.raises(GraphValueRejected) as failure,
+        observing_calls(calls, build_graph_parameter_binding.__code__),
+    ):
+        build_graph_parameter_binding(pinned, max_encoded_bytes=64)
 
     assert failure.value.reason is GraphValueFailure.BUDGET
-    calls = [entry.code for entry in profile.getstats() if isinstance(entry.code, str)]
-    assert not any("copy" in name or "items" in name for name in calls)
-    assert not any(
-        getattr(entry.code, "co_name", None) == "render_object"
-        for entry in profile.getstats()
-    )
+    assert calls.functions
+    assert not any("copy" in name or "items" in name for name in calls.builtins)
+    assert render_object.__code__ not in calls.functions
 
 
 @pytest.mark.parametrize("cycle", [False, True])

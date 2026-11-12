@@ -10,16 +10,10 @@ case "$(uname -s):$(uname -m)" in
   Linux:x86_64)
     platform=linux
     architecture=x64
-    bytes=58256361
-    digest=28ea0a438de9a13bd7891fd758eee6c7819ee8af5442dfd8d45bd65e56d4228c
-    checksum=(sha256sum)
     ;;
   Darwin:arm64)
     platform=darwin
     architecture=arm64
-    bytes=53049576
-    digest=6a9724d9b50a5f22b4816cded441b5a8d9ddae546191a5e5b7efa5a5e2ee26d5
-    checksum=(shasum -a 256)
     ;;
   *)
     printf 'Unsupported Scaffold Node archive platform\n' >&2
@@ -60,25 +54,16 @@ if ! absent "$destination" || ! absent "$complete"; then
   exit 1
 fi
 
+archive=$(python3 "$(dirname -- "${BASH_SOURCE[0]}")/acquire.py" fetch \
+  "${RUNNER_TEMP:?}/kora-acquisitions" "node-$version-$platform-$architecture")
+
 mkdir -p -- "$version_dir"
 staging=$(mktemp -d "$version_dir/.kora-node.XXXXXXXX")
 trap 'rm -rf -- "$staging"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-archive="node-v$version-$platform-$architecture.tar.gz"
-printf 'Acquiring Scaffold Node %s from nodejs.org\n' "$version"
-curl --disable --fail --location --proto '=https' --proto-redir '=https' \
-  --silent --show-error --connect-timeout 15 --max-time 60 --max-filesize 67108864 \
-  --output "$staging/$archive" "https://nodejs.org/dist/v$version/$archive"
-
-archive_size=$(wc -c < "$staging/$archive")
-if (( archive_size != bytes )); then
-  printf 'Unexpected Scaffold Node archive size\n' >&2
-  exit 1
-fi
-printf '%s  %s\n' "$digest" "$staging/$archive" | "${checksum[@]}" -c -
-tar -xzf "$staging/$archive" -C "$staging"
-extracted="$staging/${archive%.tar.gz}"
+tar -xzf "$archive" -C "$staging"
+extracted="$staging/node-v$version-$platform-$architecture"
 actual_version=$("$extracted/bin/node" --version)
 test "$actual_version" = "v$version"
 mv -- "$extracted" "$destination"

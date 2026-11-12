@@ -57,18 +57,9 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   report="$staging/lychee.md"
   link_arguments "$staging/paths" "$report"
 
-  archive="$staging/lychee.tar.gz"
   binary="$staging/lychee"
-  curl --disable --fail --location --proto '=https' --proto-redir '=https' \
-    --silent --show-error --connect-timeout 15 --max-time 60 --max-filesize 16777216 \
-    --header 'Accept: application/octet-stream' --output "$archive" \
-    'https://api.github.com/repos/lycheeverse/lychee/releases/assets/409959156'
-  archive_size=$(wc -c < "$archive")
-  if (( archive_size != 7626970 )); then
-    printf 'Unexpected Lychee archive size\n' >&2
-    exit 1
-  fi
-  printf '%s  %s\n' 1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a "$archive" | sha256sum -c -
+  archive=$(python3 "$(dirname -- "${BASH_SOURCE[0]}")/acquire.py" fetch \
+    "$RUNNER_TEMP/kora-acquisitions" lychee-0.24.2-x86_64-unknown-linux-gnu)
   tar -xOzf "$archive" -- lychee-x86_64-unknown-linux-gnu/lychee > "$binary"
   printf '%s  %s\n' 87e6e75195df5753f08c53b5c0a13694b8328edd8df009914ae9e29b5000162d "$binary" | sha256sum -c -
   chmod u+x "$binary"

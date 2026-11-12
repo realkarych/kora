@@ -101,6 +101,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-uv-python-${{ matrix.python }}-${{ hashFiles('scripts/ci/acquire.py') }}
       - name: Prepare verified Scaffold Node cache
         run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
@@ -113,6 +117,10 @@ jobs:
           run_install: false
           cache: true
           cache_dependency_path: web/pnpm-lock.yaml
+      - name: Prepare verified uv and Python
+        env:
+          KORA_UV_PYTHON: ${{ matrix.python }}
+        run: bash scripts/ci/setup_uv_cache.sh "$KORA_UV_PYTHON"
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: 0.13.1
@@ -148,7 +156,7 @@ jobs:
         if: ${{ matrix.lane == 'local-runtime' }}
         run: |
           SECONDS=0
-          sudo scripts/ci/prepare-local-runtime-fixtures.sh prepare
+          sudo --preserve-env=RUNNER_TEMP scripts/ci/prepare-local-runtime-fixtures.sh prepare
           printf 'Host fixture preparation took %s s\n' "$SECONDS"
       - name: Collect and execute the exact test lane
         id: tests
@@ -344,6 +352,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         if: ${{ needs.change-scope.outputs.full != 'false' }}
         with:
@@ -452,6 +468,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-${{ matrix.python }}-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        env:
+          KORA_UV_PYTHON: ${{ matrix.python }}
+        run: bash scripts/ci/setup_uv_cache.sh "$KORA_UV_PYTHON"
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: 0.13.1
@@ -501,6 +525,12 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: 0.13.1
@@ -652,6 +682,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified Node
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: web/.node-version
@@ -669,7 +707,8 @@ jobs:
           test -f /etc/apt/apt-mirrors.txt
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           pnpm --dir web install --frozen-lockfile
-          pnpm --dir web exec playwright install --with-deps --only-shell chromium
+          python3 scripts/ci/acquire.py run 120 -- \
+            pnpm --dir web exec playwright install --with-deps --only-shell chromium
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Check and build browser sources
         run: |
@@ -710,12 +749,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified Node
+        run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
+      - name: Install pinned Markdown linter
+        run: python3 scripts/ci/acquire.py run 60 -- npx --yes markdownlint-cli@0.45.0 --version
       - name: Lint repository Markdown
         shell: bash
+        env:
+          npm_config_prefer_offline: "true"
         run: |
           set -euo pipefail
           KORA_DOC_FILES="$(mktemp)"
@@ -731,6 +780,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-lychee-${{ hashFiles('scripts/ci/acquire.py') }}
       - name: Check repository Markdown offline
         run: bash scripts/ci/check_links.sh
 
@@ -742,16 +795,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified Node
+        run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
       - name: Install diagram discovery tool
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ripgrep
+        run: sudo --preserve-env=RUNNER_TEMP bash scripts/ci/apt_install.sh ripgrep
+      - name: Install pinned Mermaid renderer
+        run: python3 scripts/ci/acquire.py run 90 -- npx --yes @mermaid-js/mermaid-cli@12.0.0 --version
       - name: Parse every Mermaid diagram
         shell: bash
+        env:
+          npm_config_prefer_offline: "true"
         run: |
           set -euo pipefail
           KORA_DOC_FILES="$(mktemp)"
@@ -778,6 +839,12 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: 0.13.1
@@ -812,6 +879,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: 0.13.1
@@ -834,6 +907,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: 0.13.1

@@ -1,4 +1,3 @@
-import cProfile
 import json
 import math
 import sys
@@ -24,6 +23,7 @@ from kora.ir import AgentConfig, export_ir, render_ir_json
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder, stored_graph_version
 from tests.ir.support import agent_document, deep_data
+from tests.support.call_observation import ObservedCalls, observing_calls
 
 
 @pytest.mark.parametrize("depth", [0, 1024, 4096])
@@ -225,31 +225,24 @@ def test_graph_value_budget_refuses_before_expanding_oversized_work(case: str) -
         ),
     }
     chosen = actions[case]
-    profile = cProfile.Profile()
+    calls = ObservedCalls()
 
-    profile.enable()
-    try:
-        with pytest.raises(GraphValueRejected) as failure:
-            chosen.action()
-    finally:
-        profile.disable()
+    with (
+        pytest.raises(GraphValueRejected) as failure,
+        observing_calls(
+            calls, prepare_graph_values.__code__, read_graph_values.__code__
+        ),
+    ):
+        chosen.action()
 
     assert failure.value.reason is GraphValueFailure.BUDGET
-    calls = {
-        entry.code: entry.callcount
-        for entry in profile.getstats()
-        if isinstance(entry.code, str)
-    }
     assert (
-        sum(count for name, count in calls.items() if "encode_basestring_ascii" in name)
+        sum("encode_basestring_ascii" in name for name in calls.builtins)
         == chosen.rendered_strings
     )
-    assert not any("to_json" in name for name in calls)
+    assert not any("to_json" in name for name in calls.builtins)
     if case == "decode":
-        assert not any(
-            "raw_decode" == getattr(entry.code, "co_name", None)
-            for entry in profile.getstats()
-        )
+        assert not any(code.co_name == "raw_decode" for code in calls.functions)
 
 
 @pytest.mark.parametrize("version", [False, True, 0, 2, "1"])

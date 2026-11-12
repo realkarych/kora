@@ -4,6 +4,7 @@ import pytest
 
 from kora.api.graph_cel import COMPLETED
 from tests.api.cel_pattern_validation_scenarios import PATTERN_MARKER, REQUEST_ID
+from tests.api.graph_cel_scenarios import REFUSAL_MARKER
 from tests.cel_eval.children import ROOT, full_path, run_child
 
 
@@ -15,13 +16,14 @@ from tests.cel_eval.children import ROOT, full_path, run_child
             "refusals",
             [
                 "complete",
-                "invalid_allowance",
-                "capacity_exhausted",
-                "capacity_exhausted",
-                "capacity_exhausted",
-                "capacity_exhausted",
-                "typed_refused",
-                "typed_refused",
+                *(["invalid_allowance"] * 4),
+                *(["capacity_exhausted"] * 4),
+                *(["typed_refused"] * 2),
+                "syntax_unresolved",
+                *(["typed_refused"] * 13),
+                "schema_unresolved",
+                "context_unresolved",
+                *(["typed_refused"] * 3),
             ],
         ),
         (
@@ -60,6 +62,7 @@ from tests.cel_eval.children import ROOT, full_path, run_child
             ],
         ),
         ("lifetime", ["complete"]),
+        ("native-refusal", ["rendering_refused", "complete"]),
     ],
     ids=[
         "cross-family",
@@ -68,6 +71,7 @@ from tests.cel_eval.children import ROOT, full_path, run_child
         "facts",
         "typed-limits",
         "resource-release",
+        "native-refusal",
     ],
 )
 def test_graph_cel_uses_complete_bounded_native_verification(
@@ -80,6 +84,7 @@ def test_graph_cel_uses_complete_bounded_native_verification(
     assert result.code == 0, result.stderr
     assert result.stdout == ""
     assert PATTERN_MARKER not in result.stderr
+    assert REFUSAL_MARKER not in result.stderr
     assert "Function 'matches' error:" not in result.stderr
     records: list[dict[str, object]] = [
         json.loads(line) for line in result.stderr.splitlines()
