@@ -4,7 +4,7 @@ import json
 import subprocess
 import sys
 import sysconfig
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,10 +53,12 @@ def is_binding_entry(name: str) -> bool:
     return name == MODULE or name.startswith(f"{DIST_INFO_PREFIX}-")
 
 
-def isolated_site(directory: Path) -> Path:
+def isolated_site(
+    directory: Path, excluded: Callable[[str], bool] = is_binding_entry
+) -> Path:
     directory.mkdir(parents=True)
     for entry in sorted(SITE_PACKAGES.iterdir()):
-        if not is_binding_entry(entry.name):
+        if not excluded(entry.name):
             (directory / entry.name).symlink_to(entry)
     return directory
 

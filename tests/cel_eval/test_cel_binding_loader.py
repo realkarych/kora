@@ -266,28 +266,83 @@ def with_real_binding(tmp_path: Path) -> list[str]:
     return full_path()
 
 
+def with_other_version(tmp_path: Path) -> list[str]:
+    return isolated_path(
+        install_fake(isolated_site(tmp_path / "site"), fake("", "0.9.0"))
+    )
+
+
+DOCTOR_OUTCOME: str = """
+import contextlib, io, json, pathlib
+from kora.__main__ import DoctorSettings, main
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    code = main(
+        ["doctor", "--json"],
+        {},
+        doctor_settings=DoctorSettings(home=lambda: pathlib.Path(sys.argv[2])),
+    )
+checks = json.loads(output.getvalue())["checks"]
+cel = next(check for check in checks if check["check"] == "cel")
+print(code, cel["status"], cel["reason"], cel["detail"])
+"""
+
+
+@dataclass(frozen=True)
+class EntryPointCase:
+    name: str
+    code: str
+    path_for: WithoutBinding
+    expected: str
+
+
+ENTRY_POINT_CASES: list[EntryPointCase] = [
+    EntryPointCase(
+        "missing", LOAD_OUTCOME, without_distribution, refused_line(Refusal.MISSING)
+    ),
+    EntryPointCase(
+        "already_imported",
+        "import cel\n" + LOAD_OUTCOME,
+        with_real_binding,
+        refused_line(Refusal.ALREADY_IMPORTED),
+    ),
+    EntryPointCase(
+        "submodule_imported",
+        "import types\nsys.modules['cel.x'] = types.ModuleType('cel.x')\n"
+        + LOAD_OUTCOME,
+        with_real_binding,
+        refused_line(Refusal.ALREADY_IMPORTED),
+    ),
+    EntryPointCase(
+        "doctor_missing", DOCTOR_OUTCOME, without_distribution, "1 failed missing None"
+    ),
+    EntryPointCase(
+        "doctor_version_mismatch",
+        DOCTOR_OUTCOME,
+        with_other_version,
+        "1 failed version_mismatch None",
+    ),
+    EntryPointCase(
+        "doctor_healthy",
+        DOCTOR_OUTCOME,
+        with_real_binding,
+        f"1 passed None {PINNED_VERSION}",
+    ),
+]
+
+
 @pytest.mark.parametrize(
-    ("prefix", "path_for", "refusal"),
-    [
-        ("", without_distribution, Refusal.MISSING),
-        ("import cel\n", with_real_binding, Refusal.ALREADY_IMPORTED),
-        (
-            "import types\nsys.modules['cel.x'] = types.ModuleType('cel.x')\n",
-            with_real_binding,
-            Refusal.ALREADY_IMPORTED,
-        ),
-    ],
-    ids=["missing", "already_imported", "submodule_imported"],
+    "case", ENTRY_POINT_CASES, ids=[case.name for case in ENTRY_POINT_CASES]
 )
 def test_cel_evaluating_entry_points_refuse_without_binding(
-    tmp_path: Path, prefix: str, path_for: WithoutBinding, refusal: Refusal
+    tmp_path: Path, case: EntryPointCase
 ) -> None:
-    path = path_for(tmp_path)
+    path = case.path_for(tmp_path)
 
-    result = run_child(prefix + LOAD_OUTCOME, path)
+    result = run_child(case.code, path, str(tmp_path / "home"))
 
     assert result.code == 0, result.stderr
-    assert result.lines() == [refused_line(refusal)]
+    assert result.lines() == [case.expected]
 
 
 REAL_PANIC: str = (

@@ -27,7 +27,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from kora.ir import ConfigWarning, ErrorClass
+from kora.ir import ConfigWarning, ErrorClass, ToolPolicy
 from kora.ir.cost import (
     Basis,
     BillingClass,
@@ -55,11 +55,18 @@ from kora.ir.json import (
     spend_string,
 )
 from kora.ir.scalars import Digest
+from kora.ir.tool_patterns import MAX_PATTERN_CHARACTERS, MAX_PATTERNS
 from kora.protocols.boundary import refusal_discriminator
 from kora.protocols.common import BoundaryModel
 from kora.protocols.evidence import Code, record_kind
 from kora.protocols.identity import Count, Identifier
-from kora.protocols.policy import RULE_ID, PolicyClient, PolicyReason
+from kora.protocols.policy import (
+    NODE_PATH,
+    RULE_ID,
+    PolicyClient,
+    PolicyLayers,
+    PolicyReason,
+)
 from kora.protocols.vcs import WorkspaceTarget
 
 MAX_TEXT_BYTES: Final[int] = 61_440
@@ -69,6 +76,7 @@ MAX_SAMPLE_ITEMS: Final[int] = 1000
 MAX_USAGE_ROWS: Final[int] = 64
 MAX_MCP_SOURCES: Final[int] = 64
 MAX_SESSION_FILES: Final[int] = 64
+MAX_RUNTIME_ATTEMPT: Final[int] = 2**31 - 1
 
 
 def refused() -> PydanticCustomError:
@@ -243,6 +251,44 @@ class SessionSpec(BoundaryModel):
 
 def folded_name(name: str) -> str:
     return unicodedata.normalize("NFC", unicodedata.normalize("NFD", name).casefold())
+
+
+PolicyPattern = Annotated[
+    str,
+    StringConstraints(strict=True, min_length=1, max_length=MAX_PATTERN_CHARACTERS),
+]
+NodePath = Annotated[
+    str, StringConstraints(strict=True, pattern=f"^{NODE_PATH.pattern}$")
+]
+
+
+class AgentPolicyLayer(BoundaryModel):
+    allow: tuple[PolicyPattern, ...] = Field(max_length=MAX_PATTERNS)
+    deny: tuple[PolicyPattern, ...] = Field(max_length=MAX_PATTERNS)
+
+    def tool_policy(self) -> ToolPolicy:
+        return ToolPolicy.model_validate(
+            {"allow": list(self.allow), "deny": list(self.deny)}
+        )
+
+
+class AgentPolicyLayers(BoundaryModel):
+    namespace: AgentPolicyLayer
+    node: AgentPolicyLayer
+
+
+class AgentExecution(BoundaryModel):
+    harness: Identifier
+    node_path: NodePath
+    runtime_attempt: Annotated[StrictInt, Field(ge=1, le=MAX_RUNTIME_ATTEMPT)]
+    policy_layers: AgentPolicyLayers
+    output_format: StrictBool
+
+    def layers(self) -> PolicyLayers:
+        return PolicyLayers(
+            namespace=self.policy_layers.namespace.tool_policy(),
+            node=self.policy_layers.node.tool_policy(),
+        )
 
 
 class SessionStartedData(BoundaryModel):

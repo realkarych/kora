@@ -5,11 +5,13 @@ from typing import Annotated, Final, Literal, Protocol, Self, cast
 
 from pydantic import (
     AfterValidator,
+    ConfigDict,
     Field,
     StrictBool,
     StrictInt,
     StringConstraints,
     Tag,
+    TypeAdapter,
     WithJsonSchema,
     model_validator,
 )
@@ -34,11 +36,13 @@ from kora.protocols.common import (
 )
 from kora.protocols.deadlines import ExecutionDeadline, is_duration, require
 from kora.protocols.evidence import (
+    Code,
     DispatcherQuiescence,
     NormalCompletionQuiescence,
     TerminationReceipt,
+    record_kind,
 )
-from kora.protocols.harness import SessionSpec
+from kora.protocols.harness import RunnerCause, SessionResult, SessionSpec
 from kora.protocols.history import (
     GrantHistoryPage,
     GrantHistoryProgress,
@@ -350,6 +354,28 @@ class PublicationAuthorization(BoundaryModel):
         return self
 
 
+class SessionResultObservation(BoundaryModel):
+    kind: Literal["result"]
+    result: SessionResult
+    cause: RunnerCause | None
+    journal_complete: StrictBool
+
+
+class SessionFailedObservation(BoundaryModel):
+    kind: Literal["session_failed"]
+    code: Code
+
+
+SessionObservation = Annotated[
+    Annotated[SessionResultObservation, Tag("result")]
+    | Annotated[SessionFailedObservation, Tag("session_failed")],
+    refusal_discriminator(record_kind, runtime_refused),
+]
+SESSION_OBSERVATION: Final[TypeAdapter[SessionObservation]] = TypeAdapter(
+    SessionObservation, config=ConfigDict(hide_input_in_errors=True)
+)
+
+
 class Runtime(Protocol):
     name: str
     config_schema: JsonObject
@@ -439,6 +465,10 @@ class Runtime(Protocol):
     async def quiescence(
         self, handle: Handle, ctx: ProtocolContext
     ) -> NormalCompletionQuiescence: ...
+
+    async def session_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> SessionObservation: ...
 
     async def record_dispatcher_quiescence(
         self,
