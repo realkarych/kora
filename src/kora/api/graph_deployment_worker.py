@@ -111,6 +111,9 @@ class DeploymentPreparer:
 
         def finished(task: asyncio.Task[DeploymentPreparation]) -> None:
             caller.call_soon_threadsafe(self._slot.release)
+            if task.cancelled():
+                result.cancel()
+                return
             error = task.exception()
             if error is not None:
                 result.set_exception(error)
