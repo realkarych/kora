@@ -8,8 +8,10 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -42,7 +44,15 @@ from tests.support.https_fixture import (
     create_authority,
     https_server,
 )
-from tests.support.workflows import jobs_of, repository_workflows, step_list
+from tests.support.workflows import (
+    Workflows,
+    action_name,
+    job_of,
+    jobs_of,
+    repository_workflows,
+    step_list,
+    table,
+)
 
 CONTENT = b"pinned fixture archive bytes"
 PLANTED_CREDENTIAL = "kora-fixture-credential-value"
@@ -58,6 +68,18 @@ COMMAND_SCRIPTS = {
     "scripts/ci/apt_install.sh": "scripts/ci/apt_install.sh",
     "prepare-local-runtime-fixtures.sh prepare": "scripts/ci/apt_install.sh",
 }
+VERIFIED_SETUPS = {
+    "astral-sh/setup-uv": "scripts/ci/setup_uv_cache.sh",
+    "actions/setup-node": "scripts/ci/setup_scaffold_node.sh",
+}
+PRIVILEGED_ACQUISITIONS = (
+    "prepare-local-runtime-fixtures.sh prepare",
+    "apt_install.sh",
+)
+BUDGET_PRESERVING_SUDO = "sudo --preserve-env=RUNNER_TEMP "
+PLANNED_LANE_JOBS = frozenset(
+    {"ci.yml:scaffold-plan", "ci.yml:scaffold-tests", "ci.yml:scaffold-tests-macos"}
+)
 DEADLINE_MARGIN_SECONDS = 120.0
 INVOCATION_ALLOWANCE_SECONDS = 5.0
 STOP_DEADLINE_SECONDS = 10.0
@@ -554,7 +576,130 @@ def test_every_job_acquisition_worst_case_fits_its_deadline() -> None:
         > float(str(job["timeout-minutes"])) * 60 - DEADLINE_MARGIN_SECONDS
     ]
     assert len(acquiring) >= 10
+    assert PLANNED_LANE_JOBS <= {location for location, _, _ in acquiring}
     assert exceeding == []
+
+
+def action_of(step: dict[str, object]) -> str:
+    return action_name(step["uses"]) if "uses" in step else ""
+
+
+def prepared_python(step: dict[str, object]) -> str:
+    argument = str(step.get("run", "")).partition("setup_uv_cache.sh")[2].strip()
+    if argument == '"$KORA_UV_PYTHON"':
+        return str(table(step.get("env", {})).get("KORA_UV_PYTHON"))
+    return argument
+
+
+def unverified_setup(
+    steps: list[dict[str, object]], index: int, script: str
+) -> str | None:
+    earlier = steps[:index]
+    prepared = [step for step in earlier if script in str(step.get("run", ""))]
+    if not prepared:
+        return "without its verified acquisition"
+    before = earlier[: earlier.index(prepared[0])]
+    if not any(action_of(step) == "actions/cache" for step in before):
+        return "without the acquisition cache"
+    python = table(steps[index].get("with", {})).get("python-version")
+    if script.endswith("setup_uv_cache.sh") and prepared_python(prepared[-1]) != str(
+        python
+    ):
+        return "after an acquisition for another Python"
+    return None
+
+
+def unverified_tool_setups(workflows: Workflows) -> list[str]:
+    violations: list[str] = []
+    for location, job in jobs_of({"ci.yml": workflows["ci.yml"]}):
+        steps = step_list(job)
+        for index, step in enumerate(steps):
+            script = VERIFIED_SETUPS.get(action_of(step))
+            problem = None if script is None else unverified_setup(steps, index, script)
+            if problem is not None:
+                violations.append(f"{location}: {action_of(step)} {problem}")
+        violations.extend(
+            f"{location}: {line.strip()}"
+            for step in steps
+            for line in str(step.get("run", "")).splitlines()
+            if any(marker in line for marker in PRIVILEGED_ACQUISITIONS)
+            and BUDGET_PRESERVING_SUDO not in line
+        )
+    return violations
+
+
+def lane_step(
+    workflows: Workflows, job: str, matches: Callable[[dict[str, object]], bool]
+) -> dict[str, object]:
+    return next(
+        step for step in step_list(job_of(workflows, "ci.yml", job)) if matches(step)
+    )
+
+
+def drop_the_planning_uv_acquisition(workflows: Workflows) -> None:
+    steps = cast(list[object], job_of(workflows, "ci.yml", "scaffold-plan")["steps"])
+    steps.remove(
+        lane_step(
+            workflows,
+            "scaffold-plan",
+            lambda step: step.get("name") == "Prepare verified uv and Python",
+        )
+    )
+
+
+def drop_the_macos_lane_acquisition_cache(workflows: Workflows) -> None:
+    steps = cast(
+        list[object], job_of(workflows, "ci.yml", "scaffold-tests-macos")["steps"]
+    )
+    steps.remove(
+        lane_step(
+            workflows,
+            "scaffold-tests-macos",
+            lambda step: action_of(step) == "actions/cache",
+        )
+    )
+
+
+def prepare_macos_fixtures_without_the_budget(workflows: Workflows) -> None:
+    step = lane_step(
+        workflows, "scaffold-tests-macos", lambda step: step.get("id") == "preparation"
+    )
+    step["run"] = str(step["run"]).replace(BUDGET_PRESERVING_SUDO, "sudo ")
+
+
+def plan_with_another_python(workflows: Workflows) -> None:
+    step = lane_step(
+        workflows, "scaffold-plan", lambda step: action_of(step) == "astral-sh/setup-uv"
+    )
+    table(step["with"])["python-version"] = "3.15.0"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        drop_the_planning_uv_acquisition,
+        drop_the_macos_lane_acquisition_cache,
+        prepare_macos_fixtures_without_the_budget,
+        plan_with_another_python,
+    ],
+)
+def test_tool_setup_check_refuses_a_mutated_workflow(
+    mutation: Callable[[Workflows], None],
+) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = unverified_tool_setups(workflows)
+
+    assert violations
+
+
+def test_every_ci_tool_setup_follows_its_verified_cached_acquisition() -> None:
+    workflows = repository_workflows()
+
+    violations = unverified_tool_setups(workflows)
+
+    assert violations == []
 
 
 def run_command(

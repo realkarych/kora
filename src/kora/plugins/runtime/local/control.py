@@ -15,6 +15,7 @@ from kora.plugins.runtime.local.channel import (
     START_PROGRESS_NS,
     AttachRequest,
     FrameType,
+    LogRequest,
     MessageRefusal,
     OutputRequest,
     StatusValue,
@@ -221,14 +222,15 @@ async def transfer_output(
     source: PeerSource,
     executor: TransitionExecutor,
     clock: Clock,
-    request_id: str,
     spool: int,
-    name: str,
+    header: OutputRequest | LogRequest,
     message_deadline: int,
     *,
+    whole: bool,
     close_spool: Callable[[], None],
     active: Callable[[], None] | None = None,
 ) -> int:
+    request_id = header.request_id
     deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
     endpoint = await connected(path, clock, deadline)
     channel = BoundedChannel(endpoint, clock)
@@ -261,7 +263,6 @@ async def transfer_output(
         reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
         _, payload = await channel.read_typed_frame(deadline, reservations)
         read_delivery(payload, request_id, "attached")
-        header = OutputRequest(op="transfer_out", request_id=request_id, name=name)
         await channel.write_typed_frame(
             FrameType.JSON,
             canonical_bytes(header.model_dump(mode="json")),
@@ -276,6 +277,7 @@ async def transfer_output(
             message_deadline,
             active,
             close_spool,
+            whole=whole,
         )
     except ChannelError as error:
         if error.reason in (ChannelFailure.MALFORMED, ChannelFailure.CAPACITY):
@@ -299,6 +301,8 @@ async def receive_output(
     message_deadline: int,
     active: Callable[[], None] | None,
     close_spool: Callable[[], None],
+    *,
+    whole: bool,
 ) -> int:
     reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
     _, payload = await channel.read_typed_frame(message_deadline, reservations)
@@ -335,7 +339,7 @@ async def receive_output(
     )
     trailer = read_output_trailer(payload, request_id)
     computed = "sha256:" + digest.hexdigest()
-    if computed != declared.sha256 or trailer != declared.sha256:
+    if (whole and computed != declared.sha256) or trailer != declared.sha256:
         raise delivery_error("integrity_error")
     await channel.expect_eof(
         min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)

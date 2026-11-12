@@ -19,21 +19,36 @@ from kora.executor.launcher import (
 from kora.executor.scan import InspectionSource
 from kora.plugins.vcs.fake import DirVcs
 from kora.plugins.vcs.local import LocalConfiguration
-from tests.plugins.vcs.dirvcs_support import make_dir_world
+from tests.plugins.vcs.dirvcs_support import make_dir_world, residue
 from tests.plugins.vcs.git_support import REPO
 
 CYCLES = 2
 DEADLINE_SECONDS = 30.0
+KILL_GRACE_NS = 30_000_000_000
+STAGED_MARKERS: dict[str, str] = {
+    "killed_mid_publish": "publish",
+    "killed_mid_import": "import",
+}
 PROBE = Path(__file__).with_name("dirvcs_publish_probe.py")
+
+
+@dataclass(frozen=True)
+class Unwound:
+    residue: list[str]
+    notes: list[str]
 
 
 @dataclass
 class StagedLauncher(StepLauncher):
     ready: Path
-    inner: StepLauncher = field(default_factory=ProcessLauncher)
+    marker: str
+    inner: StepLauncher = field(
+        default_factory=lambda: ProcessLauncher(kill_grace_ns=KILL_GRACE_NS)
+    )
+    unwound: list[Unwound] = field(default_factory=lambda: [])
 
     async def run(self, spec: LaunchSpec) -> StepOutcome:
-        if "publish" in spec.argv:
+        if self.marker in spec.argv:
             helper = spec.argv.index("-I") + 1
             argv = (
                 *spec.argv[:helper],
@@ -46,7 +61,11 @@ class StagedLauncher(StepLauncher):
                 for item in argv
             )
             spec = replace(spec, argv=argv)
-        return await self.inner.run(spec)
+        try:
+            return await self.inner.run(spec)
+        except asyncio.CancelledError as error:
+            self.unwound.append(Unwound(residue(spec.cwd), list(error.__notes__)))
+            raise
 
 
 class HeldSource(InspectionSource):
@@ -100,7 +119,9 @@ async def cancel_after(task: asyncio.Task[object], ready: asyncio.Event) -> None
         await asyncio.wait_for(task, DEADLINE_SECONDS)
 
 
-@pytest.mark.parametrize("ending", ["success", "killed_mid_publish", "cancelled_scan"])
+@pytest.mark.parametrize(
+    "ending", ["success", "killed_mid_publish", "killed_mid_import", "cancelled_scan"]
+)
 def test_dirvcs_publication_releases_resources(
     tmp_path: Path, kora_capture: Capture, ending: str
 ) -> None:
@@ -114,6 +135,7 @@ def test_dirvcs_publication_releases_resources(
         keeper = os.open(ready_path, os.O_WRONLY | os.O_NONBLOCK)
         loop = asyncio.get_running_loop()
         acknowledgements: list[bytes] = []
+        staged_residue: list[list[str]] = []
 
         def received() -> None:
             try:
@@ -121,14 +143,12 @@ def test_dirvcs_publication_releases_resources(
             except BlockingIOError:
                 return
             acknowledgements.append(data)
+            staged_residue.append(residue(tmp_path))
             gate.set()
 
         loop.add_reader(reader, received)
-        launcher = (
-            StagedLauncher(ready_path)
-            if ending == "killed_mid_publish"
-            else ProcessLauncher()
-        )
+        marker = STAGED_MARKERS.get(ending)
+        staged = None if marker is None else StagedLauncher(ready_path, marker)
 
         def provider(config: LocalConfiguration) -> DirVcs:
             return (
@@ -138,7 +158,10 @@ def test_dirvcs_publication_releases_resources(
             )
 
         world = make_dir_world(
-            tmp_path, kora_capture, launcher=launcher, provider_type=provider
+            tmp_path,
+            kora_capture,
+            launcher=staged or ProcessLauncher(),
+            provider_type=provider,
         )
         live_baseline = len(os.listdir("/dev/fd"))
         try:
@@ -157,6 +180,10 @@ def test_dirvcs_publication_releases_resources(
                 (world.candidate(checkout) / f"cycle-{cycle}.txt").write_text(
                     f"cycle {cycle}\n"
                 )
+                if ending == "killed_mid_import" or (
+                    ending != "cancelled_scan" and cycle == CYCLES - 1
+                ):
+                    world.commit(checkout, {}, f"candidate cycle {cycle}")
                 plan, sealed = await sealed_input(
                     world.provider,
                     world.executor,
@@ -174,6 +201,17 @@ def test_dirvcs_publication_releases_resources(
                 )
                 if ending == "cancelled_scan":
                     await cancel_after(asyncio.create_task(preparation), gate)
+                elif ending == "killed_mid_import":
+                    await cancel_after(asyncio.create_task(preparation), gate)
+                    assert acknowledgements == [b"ready"] * (cycle + 1)
+                    assert [name.split("-")[0] for name in staged_residue[-1]] == [
+                        ".tmp",
+                        "incoming",
+                    ]
+                    assert staged is not None
+                    assert staged.unwound[-1].residue == []
+                    assert "executor child exit_code=143" in staged.unwound[-1].notes
+                    assert world.remote_head() is None
                 else:
                     prepared = await preparation
                     publication = published(world.executor, prepared, world.context())
@@ -184,12 +222,10 @@ def test_dirvcs_publication_releases_resources(
                     else:
                         assert (await publication).state == "pushed"
                 assert len(os.listdir("/dev/fd")) == live_baseline
-                assert not list(tmp_path.rglob(".tmp-*"))
-                assert not list(tmp_path.rglob("incoming-*"))
-                assert (
-                    len(list(tmp_path.glob("bench-*/case-*/publication/prepared-*")))
-                    == cycle + 1
-                )
+                assert residue(tmp_path) == []
+                assert len(
+                    list(tmp_path.glob("bench-*/case-*/publication/prepared-*"))
+                ) == (0 if ending == "killed_mid_import" else cycle + 1)
         finally:
             loop.remove_reader(reader)
             os.close(keeper)

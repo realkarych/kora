@@ -39,8 +39,8 @@ def attempt(hypothesis: Hypothesis, baseline: MetricsReport, previous_attempt: P
                            workspace=change, success_exit_codes=[0, 3])(run=run, baseline=baseline, change=change)
     verdict = node.agent("review", preset=reviewer, output=ReviewVerdict, trigger_rule="all_done",
                          workspace=change)(change=change, run=run, baseline=baseline, same=same)
-    accepted = node.command("accept", cmd=["python3", "{resource_root}/pack_candidate.py", "--change=.kora/inputs/change.json",
-                                           "--metrics=.kora/inputs/metrics.json", "--hypothesis=.kora/inputs/hypothesis.json", "--out=candidate.json"],
+    accepted = node.command("accept", cmd=["python3", "{resource_root}/pack_candidate.py", "--change={input_root}/change.json",
+                                           "--metrics={input_root}/metrics.json", "--hypothesis={input_root}/hypothesis.json", "--out=candidate.json"],
                             resources={"pack_candidate.py": "gates/pack_candidate.py"},
                             output_file="candidate.json", output=Candidate)(change=change, metrics=run, hypothesis=hypothesis)
     branch("decide", "inputs.verdict.approved && inputs.same.exit_code == 0",          # CEL string (DD-3)
@@ -57,8 +57,8 @@ def sql_optimization(target_task: str | None = None):
                             output_file="out.json", output=MetricsReport, attempt_invariant=True)(target=target)
     hyps     = node.agent("hypotheses", preset=optimizer, output=list[Hypothesis])(target=target, baseline=baseline)
     cands    = expand("candidates", attempt, over=hyps, baseline=baseline, max_parallel=3, skip_failures=True)
-    best     = node.command("select_best", cmd=["python3", "{resource_root}/select_best.py", "--candidates=.kora/inputs/candidates.json",
-                                                "--baseline=.kora/inputs/baseline.json", "--min-gain-pct=15", "--out=best.json"],
+    best     = node.command("select_best", cmd=["python3", "{resource_root}/select_best.py", "--candidates={input_root}/candidates.json",
+                                                "--baseline={input_root}/baseline.json", "--min-gain-pct=15", "--out=best.json"],
                             resources={"select_best.py": "gates/select_best.py"},
                             output_file="best.json", output=Candidate)(candidates=cands, baseline=baseline)
     bundle   = node.agent("bundle", preset=packer, output=ReviewBundle, workspace=best.change)(best=best, baseline=baseline, all=cands)

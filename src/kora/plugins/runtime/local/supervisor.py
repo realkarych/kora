@@ -26,12 +26,14 @@ from kora.observability import (
     configure_process,
 )
 from kora.plugins.runtime.local.command import CommandSession
+from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.serving import (
     COMPONENT,
     BoundSocket,
     ControlServer,
     bound_socket,
 )
+from kora.plugins.runtime.local.workload_session import WorkloadSession
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.secret_value import SecretScope
@@ -247,7 +249,7 @@ class PreparedRegistration:
         reader: NativeIdentityReader,
         identity: ProcessIdentity,
         log: ComponentLogger,
-        command: CommandSession | None = None,
+        session: WorkloadSession | None = None,
     ) -> ControlServer:
         bound = self.bound
         if bound is None:
@@ -263,7 +265,7 @@ class PreparedRegistration:
             self.key,
             identity,
             reader,
-            command=command,
+            session=session,
         )
         self.bound = None
         return server
@@ -328,6 +330,7 @@ async def supervise(
     identity = own_identity(reader)
     attempt = attempt_directory(arguments)
     server: ControlServer | None = None
+    reaper = AdoptedReaper()
     try:
         prepared = prepare_registration(arguments)
         try:
@@ -342,13 +345,18 @@ async def supervise(
                 SecretScope(diagnostics),
                 clock,
                 diagnostics.logger(COMPONENT),
+                reaper,
             )
             server = prepared.server(clock, reader, identity, log, command)
             try:
                 server.start()
                 await asyncio.Event().wait()
             finally:
-                await server.close()
+                try:
+                    await server.close()
+                finally:
+                    if server.resources_settled:
+                        await reaper.stop()
         finally:
             if server is None or server.resources_settled:
                 prepared.close()

@@ -27,14 +27,16 @@ COMPLETION_FIELDS = (
 WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipped"}
 WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"}
 LANE_OUTCOMES = {
-    "conformance": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "remainder": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "integration": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "general-1": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "general-8": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "local-runtime": {},
 }
+UNPLANNED_LANES = ("general-0", "general-9", "general-10", "general-", "conformance")
 SCAFFOLD_JOIN_FIELDS = (
+    "PLAN_RESULT",
     "LANES_RESULT",
+    "MACOS_LANES_RESULT",
     "DEPENDENCIES_OUTCOME",
     "DOWNLOAD_OUTCOME",
     "VERIFICATION_OUTCOME",
@@ -181,19 +183,20 @@ def lane_completion_cases() -> dict[str, GateCase]:
                         {**complete, field: outcome},
                         False,
                     )
-    cases["unknown-conformance-profile"] = (
-        "unknown",
-        expected_lane_outcomes("conformance"),
-        False,
-    )
+    for lane in UNPLANNED_LANES:
+        cases[f"unplanned-{lane}-profile"] = (
+            lane,
+            expected_lane_outcomes("general-1"),
+            False,
+        )
     cases["unknown-local-runtime-profile"] = (
         "unknown",
         expected_lane_outcomes("local-runtime"),
         False,
     )
-    cases["empty-conformance-profile"] = (
+    cases["empty-general-profile"] = (
         "",
-        expected_lane_outcomes("conformance"),
+        expected_lane_outcomes("general-1"),
         False,
     )
     return cases

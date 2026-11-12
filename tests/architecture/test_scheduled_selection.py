@@ -208,6 +208,7 @@ def test_measurement_jobs_run_only_in_the_daily_workflow() -> None:
 def test_pull_requests_that_edit_a_scheduled_input_run_the_daily_workflow() -> None:
     expected = [
         ".github/workflows/daily-lanes.yml",
+        "scripts/ci/lane_plan.py",
         "scripts/ci/scheduled_lanes.sh",
         "scripts/ci/scheduled_report.py",
         "tests/scaffold_evidence.py",

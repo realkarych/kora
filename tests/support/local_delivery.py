@@ -6,6 +6,7 @@ from pathlib import Path
 
 from kora.conformance.capture import Capture
 from kora.ir.vcs_ref_json import canonical_bytes
+from kora.observability import ComponentLogger
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
     ENVELOPE_BYTES,
@@ -16,6 +17,7 @@ from kora.plugins.runtime.local.channel import (
     workload_digest,
 )
 from kora.plugins.runtime.local.command import CommandSession
+from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import (
     COMPONENT,
@@ -25,9 +27,10 @@ from kora.plugins.runtime.local.serving import (
 )
 from kora.protocols.common import ProtocolContext
 from kora.protocols.runtime import Workload
+from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import BoundedChannel
-from kora.runner.filesystem import open_local_directory
+from kora.runner.filesystem import DirectoryAnchor, open_local_directory
 from kora.runner.identity import IdentityReader, NativeIdentityReader
 from kora.runner.peers import kernel_source
 from kora.runner.registry import Registry, Running, Submitter
@@ -136,7 +139,7 @@ async def delivery_server(
             own,
             identities or reader,
             decoder=decoder,
-            command=command,
+            session=command,
         )
         server.start()
         try:
@@ -145,3 +148,22 @@ async def delivery_server(
             await server.close()
             registry.directory.close()
             await runtime.close()
+
+
+class ReapedSession(CommandSession):
+    def __init__(
+        self,
+        attempt: DirectoryAnchor,
+        candidate: str,
+        scope: SecretScope,
+        clock: Clock,
+        log: ComponentLogger,
+    ) -> None:
+        self.reaper = AdoptedReaper()
+        super().__init__(attempt, candidate, scope, clock, log, self.reaper)
+
+    async def stop(self) -> None:
+        try:
+            await super().stop()
+        finally:
+            await self.reaper.stop()

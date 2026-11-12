@@ -8,6 +8,7 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - .github/workflows/daily-lanes.yml
+      - scripts/ci/lane_plan.py
       - scripts/ci/scheduled_lanes.sh
       - scripts/ci/scheduled_report.py
       - tests/scaffold_evidence.py

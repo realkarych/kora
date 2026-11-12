@@ -23,9 +23,26 @@ def test_ordinary_collection_accepts_complete_selected_count(
 
 
 @pytest.mark.parametrize(
+    "duration", ["1.26s", "61.23s (0:01:01)", "3600.00s (1:00:00)"]
+)
+def test_ordinary_collection_accepts_pytest_duration_summaries(
+    tmp_path: Path, duration: str
+) -> None:
+    path = tmp_path / "collection"
+    path.write_text(f"tests/example.py::test_value\n\n1 test collected in {duration}\n")
+
+    result = collection(path)
+
+    assert result == {"tests/example.py::test_value"}
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "",
+        "tests/example.py::test_value\n1 test collected in 61.23s (1:01)\n",
+        "tests/example.py::test_value\n1 test collected in 61.23s (0:01:61)\n",
+        "tests/example.py::test_value\n1 test collected in 61.23s(0:01:01)\n",
         "tests/example.py::test_value\n",
         "1 test collected in 0.01s\n",
         "tests/example.py::test_value\n0 tests collected in 0.01s\n",

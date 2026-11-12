@@ -5,7 +5,7 @@ import sys
 import time
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Final
+from typing import Final, Protocol
 
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.time import Clock
@@ -25,6 +25,15 @@ CENSUS_RETRY_NS: Final[int] = 250_000_000
 class StopOutcome(StrEnum):
     CONFIRMED = "confirmed"
     UNRESOLVED = "unresolved"
+
+
+class DomainStop(Protocol):
+    def stop(self, started_ns: int) -> StopOutcome: ...
+
+
+DomainStopFactory = Callable[
+    [int, bytes, Clock, Callable[[], None], dict[int, int] | None], DomainStop
+]
 
 
 class CommandDomainStop:

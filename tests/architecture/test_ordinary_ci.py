@@ -8,78 +8,13 @@ from typing import cast
 
 import pytest
 
+from scripts.ci.lane_plan import MAXIMUM_LANES
 from tests.measurements.storage_evidence_common import EvidenceFailure, junit_nodes
-from tests.scaffold_evidence import (
-    COHORTS,
-    GENERAL_ARGUMENTS,
-    SCHEDULED_LIFETIME_MODULES,
-)
+from tests.scaffold_evidence import CHILD_NAMES
 
 ROOT = Path(__file__).resolve().parents[2]
 COHORT_SCRIPT = ROOT / "scripts/ci/ordinary_cohorts.sh"
 LANE_SCRIPT = ROOT / "scripts/ci/scaffold_lane.sh"
-IR_RESOURCE_MODULES = frozenset(
-    {
-        "tests/ir/test_approval_predicate_resources.py",
-        "tests/ir/test_export_type_resources.py",
-        "tests/ir/test_fan_out_type_resources.py",
-        "tests/ir/test_inline_schema_resources.py",
-        "tests/ir/test_type_schema_resources.py",
-        "tests/ir/test_output_schema_resources.py",
-    }
-)
-INTEGRATION_SELECTION = (
-    "tests/api",
-    "tests/cli",
-    "tests/ir/test_structured_schema_string_lengths.py",
-)
-FIRST_MODULES = (
-    "tests/architecture/test_ir_measurement_ci.py",
-    "tests/architecture/test_no_suppression.py",
-    "tests/conformance/test_local_process_lifetime.py",
-    "tests/ir/test_structured_schema_assertions.py",
-    "tests/measurements/test_ir_measurement_evidence.py",
-    "tests/ir/test_input_path_resources.py",
-    "tests/ir/test_expression_syntax_resources.py",
-    "tests/ir/test_edge_type_resources.py",
-    "tests/ir/test_approval_predicate_resources.py",
-    "tests/engine/test_graph_output_inventory.py",
-    "tests/ir/test_structured_schema_collection_predicates.py",
-    "tests/engine/test_graph_outputs.py",
-    "tests/engine/test_graph_native_outputs.py",
-)
-THIRD_MODULES = (
-    "tests/conformance/test_conformance_cases_detect_broken_providers.py",
-    "tests/conformance/test_parent_lifetime.py",
-    "tests/conformance/test_recovered_process_lifetime.py",
-    "tests/engine/test_graph_projection_paths.py",
-    "tests/conformance/test_storage_case_runner.py",
-)
-ENGINE_MODULES = (
-    "tests/engine/test_graph_execution_contract.py",
-    "tests/engine/test_start_parameter_cut.py",
-    "tests/browser/test_release_wait.py",
-    "tests/engine/test_graph_native_sources.py",
-    "tests/ir/test_tool_policy_resources.py",
-    "tests/ir/test_type_schema_resources.py",
-    "tests/db/test_pricing_migration.py",
-    "tests/db/test_attempt_outcome_migration.py",
-    "tests/db/test_db_upgrade_process.py",
-    "tests/db/test_attempt_deadline_migration.py",
-)
-SURFACE_MODULES = (
-    "tests/cli/test_conformance.py",
-    "tests/api/test_graph_execution_preparation.py",
-)
-
-
-EXPECTED_ORDINARY = {
-    ("ubuntu-24.04", "conformance"): ("first", "second", "third"),
-    ("ubuntu-24.04", "remainder"): ("measurements", "other", "graph", "engine"),
-    ("ubuntu-24.04", "integration"): ("integration", "surface"),
-    ("macos-15", "conformance"): ("first", "second", "third", "surface"),
-    ("macos-15", "remainder"): ("measurements", "integration", "other"),
-}
 
 
 def shard_evidence(children: tuple[str, ...]) -> tuple[str, ...]:
@@ -128,177 +63,30 @@ def selected_files(arguments: list[str]) -> frozenset[str]:
     )
 
 
-def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> None:
-    printing = "".join(
-        f'printf "%s\\0" "${{{name}[@]}}" > "$KORA_COHORT_OUTPUT/{name}"\n'
-        for name in ("general", *COHORTS)
-    )
-
-    result = subprocess.run(
-        sourced(COHORT_SCRIPT, f"select_groups\n{printing}"),
-        env={
-            **os.environ,
-            "KORA_SCAFFOLD_LANE": "conformance",
-            "KORA_SCAFFOLD_OS": "ubuntu-24.04",
-            "KORA_PYTEST_ARGUMENTS": " ".join(GENERAL_ARGUMENTS),
-            "KORA_COHORT_OUTPUT": str(tmp_path),
-        },
-        capture_output=True,
-        check=False,
-        timeout=5,
-    )
-    arrays = {
-        name: (tmp_path / name).read_text(encoding="utf-8").split("\0")[:-1]
-        for name in ("general", *COHORTS)
-    }
-    cohorts = {cohort: selected_files(arrays[cohort]) for cohort in COHORTS}
-    scheduled = frozenset(SCHEDULED_LIFETIME_MODULES)
-    general = selected_files(arrays["general"]) - scheduled
-
-    assert result.returncode == 0, result.stderr
-    assert tuple(arrays["first"]) == FIRST_MODULES
-    assert tuple(arrays["third"]) == THIRD_MODULES
-    assert tuple(arrays["engine"]) == ENGINE_MODULES
-    assert tuple(arrays["surface"]) == SURFACE_MODULES
-    assert IR_RESOURCE_MODULES & cohorts["measurements"] == {
-        "tests/ir/test_type_schema_resources.py",
-        "tests/ir/test_output_schema_resources.py",
-    }
-    assert cohorts["second"] - selected_files(["tests/conformance"]) == {
-        "tests/ir/test_inline_schema_resources.py",
-        "tests/ir/test_fan_out_type_resources.py",
-        "tests/ir/test_export_type_resources.py",
-        "tests/ir/test_diagnostic_collection.py",
-        "tests/ir/test_subgraph_interface_resources.py",
-        "tests/ir/test_structured_schema_container_counts.py",
-        "tests/plugins/artifact_type/test_agent_session.py",
-    }
-    assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
-    assert cohorts["integration"] == selected_files(list(INTEGRATION_SELECTION))
-    assert tuple(arrays["integration"]) == INTEGRATION_SELECTION
-    assert (
-        "tests/plugins/artifact_type/test_agent_session.py"
-        not in cohorts["measurements"]
-    )
-    assert "tests/ir/test_output_schema_resources.py" not in cohorts["integration"]
-    assert "tests/architecture/test_ir_measurement_ci.py" not in cohorts["other"]
-    assert all(
-        not argument.startswith("-") or argument.startswith("--ignore=")
-        for values in arrays.values()
-        for argument in values
-    )
-    assert all(
-        (ROOT / argument).exists()
-        for values in arrays.values()
-        for argument in values
-        if not argument.startswith("-")
-    )
-    engine = cohorts["engine"]
-    graph = cohorts["graph"]
-    surface = cohorts["surface"]
-    placed = ("first", "second", "third")
-    placed_engine = {
-        path
-        for path in cohorts["first"] | cohorts["third"] | engine
-        if path.startswith("tests/engine/")
-    }
-    ubuntu = {
-        **{name: cohorts[name] for name in placed},
-        "measurements": cohorts["measurements"] - engine,
-        "other": cohorts["other"] - engine - graph,
-        "graph": graph,
-        "engine": engine,
-        "integration": cohorts["integration"] - surface,
-        "surface": surface,
-    }
-    macos = {
-        **{name: cohorts[name] for name in placed},
-        "measurements": cohorts["measurements"],
-        "other": cohorts["other"],
-        "integration": cohorts["integration"] - surface,
-        "surface": surface,
-    }
-
-    assert all(cohorts.values())
-    assert scheduled <= selected_files(arrays["general"])
-    assert all(scheduled.isdisjoint(files) for files in cohorts.values())
-    assert engine <= cohorts["measurements"] | cohorts["other"]
-    assert graph == selected_files(["tests/engine"]) - placed_engine
-    assert graph <= cohorts["other"]
-    assert surface <= cohorts["integration"]
-    assert engine.isdisjoint(
-        frozenset[str]().union(
-            *(cohorts[name] for name in (*placed, "integration", "graph"))
-        )
-    )
-    assert surface.isdisjoint(
-        frozenset[str]().union(
-            *(
-                cohorts[name]
-                for name in (*placed, "measurements", "other", "graph", "engine")
-            )
-        )
-    )
-    assert sum(len(files) for files in ubuntu.values()) == len(general)
-    assert frozenset[str]().union(*ubuntu.values()) == general
-    assert sum(len(files) for files in macos.values()) == len(general)
-    assert frozenset[str]().union(*macos.values()) == general
+LANE_NAMES = [
+    ("ubuntu-24.04", "general-1", True),
+    ("ubuntu-24.04", f"general-{MAXIMUM_LANES}", True),
+    ("macos-15", "general-3", True),
+    ("ubuntu-24.04", "storage", True),
+    ("macos-15", "local-runtime", True),
+    ("ubuntu-24.04", "general-0", False),
+    ("ubuntu-24.04", f"general-{MAXIMUM_LANES + 1}", False),
+    ("macos-15", "general-10", False),
+    ("ubuntu-24.04", "conformance", False),
+    ("macos-15", "remainder", False),
+    ("ubuntu-24.04", "integration", False),
+    ("ubuntu-24.04", "", False),
+    ("macos-26", "general-1", False),
+]
 
 
-def test_shards_partition_every_inventory_group() -> None:
-    for system in ("ubuntu-24.04", "macos-15"):
-        children = [
-            child
-            for (owner, _), assigned in EXPECTED_ORDINARY.items()
-            if owner == system
-            for child in assigned
-        ]
-
-        assert len(children) == len(set(children))
-        if system == "ubuntu-24.04":
-            assert sorted(children) == sorted(COHORTS)
-        else:
-            assert sorted((*children, "engine", "graph")) == sorted(COHORTS)
-            assert "engine" not in children
-            assert "graph" not in children
-
-
-@pytest.mark.parametrize(
-    ("system", "lane"),
-    [
-        *EXPECTED_ORDINARY,
-        ("macos-15", "integration"),
-        ("ubuntu-24.04", ""),
-        ("ubuntu-24.04", "all"),
-        ("macos-26", "conformance"),
-        ("ubuntu-24.04", "storage"),
-    ],
-)
-def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
-    tmp_path: Path, system: str, lane: str
+@pytest.mark.parametrize(("system", "lane", "admitted"), LANE_NAMES)
+def test_lane_shell_admits_only_planned_lane_names(
+    tmp_path: Path, system: str, lane: str, admitted: bool
 ) -> None:
-    listing = (
-        'select_groups\nfor name in "${names[@]}"; do\n'
-        '  group_arguments "$name"\n'
-        '  printf "%s\\0" "$name" "${arguments[@]}"\n'
-        '  printf "\\n"\ndone\n'
-    )
-    environment = {
-        **os.environ,
-        "KORA_SCAFFOLD_OS": system,
-        "KORA_SCAFFOLD_LANE": lane,
-        "KORA_PYTEST_ARGUMENTS": "",
-    }
+    environment = {**os.environ, "KORA_SCAFFOLD_OS": system, "KORA_SCAFFOLD_LANE": lane}
 
     result = subprocess.run(
-        sourced(COHORT_SCRIPT, listing),
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        check=False,
-        timeout=5,
-    )
-    outer = subprocess.run(
         sourced(LANE_SCRIPT, "admit_lane\nprintf admitted\n"),
         cwd=tmp_path,
         env=environment,
@@ -307,57 +95,130 @@ def test_ordinary_shell_selects_exact_groups_or_refuses_before_collection(
         timeout=5,
     )
 
-    children = EXPECTED_ORDINARY.get((system, lane), ())
-    assert result.returncode == (0 if children else 1)
-    groups = tuple(
-        line.removesuffix("\0").split("\0")
-        for line in result.stdout.decode().splitlines()
+    assert (result.returncode == 0) is admitted
+    assert (result.stdout == b"admitted") is admitted
+
+
+HEADROOM_WARNING = b"::warning title=Scaffold lane headroom::macos-15 Python 3.11.17 "
+
+
+@pytest.mark.parametrize(("elapsed", "warned"), [(400, False), (451, True)])
+def test_lane_warns_when_its_job_runs_beyond_the_headroom_threshold(
+    tmp_path: Path, elapsed: int, warned: bool
+) -> None:
+    environment = {
+        **os.environ,
+        "KORA_SCAFFOLD_OS": "macos-15",
+        "KORA_SCAFFOLD_PYTHON": "3.11.17",
+        "KORA_SCAFFOLD_LANE": "general-2",
+    }
+    commands = (
+        f"KORA_LANE_STARTED=$(($(date +%s) - {elapsed}))\n"
+        "require_lane_start\ntrap report_headroom EXIT\nexit 3\n"
     )
-    assert tuple(name for name, *_ in groups) == children
-    if lane == "remainder" and children:
-        schema_resources = "tests/ir/test_type_schema_resources.py"
-        owners = tuple(
-            name for name, *arguments in groups if schema_resources in arguments
-        )
-        assert owners == (
-            ("engine",) if system == "ubuntu-24.04" else ("measurements",)
-        )
-    if (system, lane) == ("ubuntu-24.04", "remainder"):
-        other_arguments = next(
-            arguments for name, *arguments in groups if name == "other"
-        )
-        graph_arguments = next(
-            arguments for name, *arguments in groups if name == "graph"
-        )
-        assert "tests/engine" in graph_arguments
-        assert "--ignore=tests/engine" in other_arguments
-        assert "tests/engine" not in other_arguments
-    if (system, lane) in {
-        ("ubuntu-24.04", "integration"),
-        ("macos-15", "conformance"),
-    }:
-        for path in SURFACE_MODULES:
-            assert tuple(name for name, *arguments in groups if path in arguments) == (
-                "surface",
-            )
-    if (system, lane) in {
-        ("ubuntu-24.04", "integration"),
-        ("macos-15", "remainder"),
-    }:
-        integration_arguments = next(
-            arguments for name, *arguments in groups if name == "integration"
-        )
-        for path in SURFACE_MODULES:
-            assert f"--ignore={path}" in integration_arguments
-    assert outer.returncode == (0 if children or lane == "storage" else 1)
-    assert (outer.stdout == b"admitted") is bool(children or lane == "storage")
+
+    result = subprocess.run(
+        sourced(LANE_SCRIPT, commands),
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 3
+    expected = HEADROOM_WARNING + b"general-2 lane job ran"
+    assert result.stdout.startswith(expected) is warned
+
+
+@pytest.mark.parametrize("started", ["", "0", "1.5", "soon"])
+def test_lane_refuses_a_missing_job_start(tmp_path: Path, started: str) -> None:
+    environment = {**os.environ, "KORA_LANE_STARTED": started}
+
+    result = subprocess.run(
+        sourced(LANE_SCRIPT, "require_lane_start\nprintf started\n"),
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == b""
+
+
+def test_children_run_exactly_their_argument_files(tmp_path: Path) -> None:
+    source = tmp_path / "test_planned.py"
+    source.write_text(
+        "def test_first() -> None:\n    pass\n\n\n"
+        "def test_second() -> None:\n    pass\n\n\n"
+        "def test_third() -> None:\n    pass\n"
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    root = f"--rootdir={tmp_path}\n"
+    (output / "child-1.args").write_text(
+        f"{root}{source}::test_third\n{source}::test_first\n"
+    )
+    (output / "child-2.args").write_text(f"{root}{source}::test_second\n")
+
+    result = subprocess.run(
+        ["/bin/bash", str(COHORT_SCRIPT)],
+        cwd=ROOT,
+        env={**os.environ, "KORA_ORDINARY_OUTPUT": str(output)},
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    first_log = (output / "child-1.log").read_text()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert junit_nodes(output / "child-1.xml") == {
+        "test_planned.test_third",
+        "test_planned.test_first",
+    }
+    assert junit_nodes(output / "child-2.xml") == {"test_planned.test_second"}
+    assert first_log.index("test_third") < first_log.index("test_first")
+    assert [(output / f"child-{index}.exit").read_text() for index in (1, 2)] == [
+        "0\n",
+        "0\n",
+    ]
+
+
+@pytest.mark.parametrize("invalid", ["empty", "symlink", "missing"])
+def test_launcher_refuses_invalid_argument_files_before_any_child_starts(
+    tmp_path: Path, invalid: str
+) -> None:
+    first = tmp_path / "child-1.args"
+    second = tmp_path / "child-2.args"
+    first.write_text("tests/test_value.py::test_value\n")
+    if invalid == "empty":
+        second.write_text("")
+    elif invalid == "symlink":
+        second.symlink_to(first)
+    else:
+        first.unlink()
+
+    result = subprocess.run(
+        sourced(COHORT_SCRIPT, "launch_children\nprintf launched\n"),
+        cwd=tmp_path,
+        env={**os.environ, "KORA_ORDINARY_OUTPUT": str(tmp_path)},
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == b""
+    assert not any(tmp_path.glob("*.log"))
 
 
 @pytest.mark.parametrize("failed_child", [None, 0, 1, 2])
 def test_ordinary_shell_joins_all_owned_children_after_failure(
     tmp_path: Path, failed_child: int | None
 ) -> None:
-    launches = ["pids=()", "names=(measurements integration other)"]
+    launches = ["pids=()", "names=(child-1 child-2 child-3)"]
     for index in range(3):
         exit_code = 1 if index == failed_child else 0
         launches.append(f'(printf complete > "{index}"; exit {exit_code}) &')
@@ -375,7 +236,7 @@ def test_ordinary_shell_joins_all_owned_children_after_failure(
 
     assert result.returncode == (0 if failed_child is None else 1)
     assert all((tmp_path / str(index)).read_text() == "complete" for index in range(3))
-    for index, name in enumerate(("measurements", "integration", "other")):
+    for index, name in enumerate(CHILD_NAMES):
         assert (tmp_path / f"{name}.exit").read_text() == (
             "1\n" if index == failed_child else "0\n"
         )
@@ -485,7 +346,7 @@ def test_interrupted_cohort_preserves_only_regular_evidence(tmp_path: Path) -> N
     }
     script = (
         "open_ordinary_output\n"
-        'printf entered > "$KORA_ORDINARY_OUTPUT/measurements.log"\n'
+        'printf entered > "$KORA_ORDINARY_OUTPUT/child-1.log"\n'
         "printf ready\\n\nread -r finish\n"
     )
 
@@ -502,19 +363,20 @@ def test_interrupted_cohort_preserves_only_regular_evidence(tmp_path: Path) -> N
             assert readable
             assert process.stdout.read(5) == b"ready"
             output = Path(environment_file.read_text().strip().partition("=")[2])
-            assert (output / "measurements.log").read_text() == "entered"
+            assert (output / "child-1.log").read_text() == "entered"
             process.terminate()
             process.wait(timeout=5)
         finally:
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
-    (output / "cache-other").mkdir()
-    (output / "tmp-other").mkdir()
-    (output / "tmp-other" / "private").write_text("fixture-payload")
-    (output / "other.log").symlink_to(output / "tmp-other" / "private")
-    os.mkfifo(output / "other.xml")
-    (output / "integration.xml").mkdir()
+    (output / "cache-child-2").mkdir()
+    (output / "tmp-child-2").mkdir()
+    (output / "tmp-child-2" / "private").write_text("fixture-payload")
+    (output / "child-2.log").symlink_to(output / "tmp-child-2" / "private")
+    os.mkfifo(output / "child-2.xml")
+    (output / "child-3.xml").mkdir()
+    (output / "child-3.args").write_text("tests/test_value.py::test_value\n")
     copied = subprocess.run(
         ["/bin/bash", str(LANE_SCRIPT), "preserve"],
         env={**environment, "KORA_ORDINARY_OUTPUT": str(output)},
@@ -526,17 +388,16 @@ def test_interrupted_cohort_preserves_only_regular_evidence(tmp_path: Path) -> N
     assert process.returncode is not None
     assert process.returncode != 0
     assert copied.returncode == 0, copied.stderr
-    assert sorted(path.name for path in evidence.iterdir()) == ["measurements.log"]
-    assert (evidence / "measurements.log").read_text() == "entered"
+    assert sorted(path.name for path in evidence.iterdir()) == ["child-1.log"]
+    assert (evidence / "child-1.log").read_text() == "entered"
     assert not (evidence / "receipt.json").exists()
 
 
-@pytest.mark.parametrize("children", list(EXPECTED_ORDINARY.values()))
 @pytest.mark.parametrize("invalid", [None, "missing", "empty", "symlink"])
 def test_ordinary_shell_requires_all_regular_nonempty_evidence(
-    tmp_path: Path, children: tuple[str, ...], invalid: str | None
+    tmp_path: Path, invalid: str | None
 ) -> None:
-    evidence = shard_evidence(children)
+    evidence = shard_evidence(CHILD_NAMES)
     for name in evidence:
         (tmp_path / name).write_text("complete")
     target = tmp_path / evidence[-1]

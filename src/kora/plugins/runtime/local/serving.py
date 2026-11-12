@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import hashlib
 import os
 import socket
 import stat
@@ -14,6 +15,7 @@ from typing import Final, TypeVar
 
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.accepted_socket import accept_socket
+from kora.plugins.runtime.local.capture import OpenedLog, read_log_frame
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
     ENVELOPE_ERRORS,
@@ -23,6 +25,7 @@ from kora.plugins.runtime.local.channel import (
     SECTION_FRAME_BYTES,
     AttachRequest,
     FrameType,
+    LogRequest,
     OutputRequest,
     StatusValue,
     TransferRequest,
@@ -34,6 +37,7 @@ from kora.plugins.runtime.local.channel import (
     output_envelope,
     output_trailer,
     parse_header,
+    read_log_request,
     read_output,
     read_request,
     read_transfer,
@@ -44,8 +48,12 @@ from kora.plugins.runtime.local.channel import (
     workload_digest,
     write_transfer_bytes,
 )
-from kora.plugins.runtime.local.command import CommandSession, Incoming, OpenedOutput
 from kora.plugins.runtime.local.spawn import open_socket_directory
+from kora.plugins.runtime.local.workload_session import (
+    Incoming,
+    OpenedOutput,
+    WorkloadSession,
+)
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.runtime import RuntimeStatus, TransferItem, Workload
@@ -246,7 +254,7 @@ class ControlServer:
         *,
         binder: Callable[[Path, str], BoundSocket] = rebound,
         decoder: Callable[[bytearray], Workload] = decoded_workload,
-        command: CommandSession | None = None,
+        session: WorkloadSession | None = None,
     ) -> None:
         bound.listener.setblocking(False)
         self._bound = bound
@@ -257,7 +265,7 @@ class ControlServer:
         self._log = log
         self._binder = binder
         self._decoder = decoder
-        self._command = command
+        self._session = session
         self._deadline_closed = False
         self._registry = registry
         self._key = key
@@ -473,6 +481,10 @@ class ControlServer:
             if output is not None:
                 await self._send_output(channel, submitter, observational, output)
                 return
+            log = read_log_request(payload)
+            if log is not None:
+                await self._send_log(channel, submitter, observational, log)
+                return
             header = parse_header(payload, ACCEPT_WORKLOAD)
             declaration = header.sections[0]
             refusal: KoraProtocolError | None = None
@@ -526,7 +538,7 @@ class ControlServer:
                         ):
                             raise delivery_error("workload_conflict")
                         if self._workload is None:
-                            command = self._command
+                            command = self._session
                             if (
                                 sys.platform == "darwin"
                                 and command is not None
@@ -545,7 +557,7 @@ class ControlServer:
                                     lambda: self._authorized(submitter)
                                 )
                             if command is not None:
-                                command.note(submitter, prelaunch)
+                                command.accept(submitter, prelaunch, decoded)
                             self._workload = decoded
                             self._workload_sha256 = declaration.sha256
                     answer = delivery_envelope(header.request_id, "accepted")
@@ -576,7 +588,7 @@ class ControlServer:
         started: int,
     ) -> None:
         item = request.item
-        command = self._command
+        command = self._session
         cutoff: int | None = None
         deadline = started + MESSAGE_PROGRESS_NS
         claimed = False
@@ -661,7 +673,7 @@ class ControlServer:
         request: OutputRequest,
     ) -> None:
         started_ns = self._clock.monotonic_ns()
-        command = self._command
+        command = self._session
         opened: OpenedOutput | None = None
         outcome: str | None = None
         owned = True
@@ -764,6 +776,105 @@ class ControlServer:
             if command is not None and outcome is not None:
                 command.note_output(outcome, started_ns)
 
+    def _current_submitter(self, submitter: Submitter) -> None:
+        if self._running().submitter != submitter:
+            raise delivery_error("submitter_superseded")
+        unchanged(self._identities, submitter.process)
+
+    async def _send_log(
+        self,
+        channel: BoundedChannel,
+        submitter: Submitter,
+        observational: bool,
+        request: LogRequest,
+    ) -> None:
+        deadline = self._clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        command = self._session
+        opened: OpenedLog | None = None
+        owned = True
+        digest = hashlib.sha256()
+
+        def dispose() -> None:
+            nonlocal opened
+            if opened is not None:
+                current, opened = opened, None
+                os.close(current.descriptor)
+
+        def authorize() -> None:
+            if self._closing is not None:
+                raise delivery_error("transfer_refused")
+            self._current_submitter(submitter)
+            if self._clock.monotonic_ns() >= deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+
+        def progress() -> int:
+            return min(deadline, self._clock.monotonic_ns() + FRAME_PROGRESS_NS)
+
+        try:
+            try:
+                if command is None:
+                    raise delivery_error("transfer_refused")
+                if observational:
+                    raise delivery_error("execution_unauthorized")
+                session = command
+
+                def open_file() -> OpenedLog:
+                    nonlocal opened
+                    authorize()
+                    opened = session.open_log(
+                        submitter, request.which, request.from_offset
+                    )
+                    return opened
+
+                current = await self._transfer_native(open_file, dispose)
+                declared = current.size - current.offset
+                await channel.write_typed_frame(
+                    FrameType.JSON,
+                    output_envelope(request.request_id, declared, current.sha256),
+                    progress(),
+                )
+                for position in range(0, current.size, SECTION_FRAME_BYTES):
+
+                    def read(start: int = position) -> bytes:
+                        authorize()
+                        length = min(SECTION_FRAME_BYTES, current.size - start)
+                        piece = read_log_frame(current, start, length)
+                        digest.update(piece)
+                        return piece[max(0, current.offset - start) :]
+
+                    chunk = await self._transfer_native(read, dispose)
+                    if chunk:
+                        await channel.write_typed_frame(
+                            FrameType.BYTES, chunk, progress()
+                        )
+
+                def finish() -> None:
+                    authorize()
+                    dispose()
+                    if "sha256:" + digest.hexdigest() != current.sha256:
+                        raise delivery_error("integrity_error")
+
+                await self._transfer_native(finish, dispose)
+                await channel.write_typed_frame(
+                    FrameType.JSON,
+                    output_trailer(request.request_id, current.sha256),
+                    progress(),
+                )
+            except KoraProtocolError as error:
+                if error.code == "registry_busy":
+                    error = delivery_error("workload_busy")
+                await self._answer(
+                    channel, self._transfer_answer(request.request_id, error)
+                )
+        except NativeIOSubmissionUncertain:
+            owned = False
+            channel.close()
+        except NativeIOUnresolved:
+            channel.close()
+        finally:
+            if owned:
+                dispose()
+
     async def _transfer_native(
         self,
         operation: Callable[[], Result],
@@ -777,7 +888,7 @@ class ControlServer:
         return await self._executor.run(operation, after_uncertain_submission=settled)
 
     def _transfer_io(
-        self, command: CommandSession, operation: Callable[[], Result]
+        self, command: WorkloadSession, operation: Callable[[], Result]
     ) -> Result:
         try:
             return operation()
@@ -794,7 +905,7 @@ class ControlServer:
     async def _store_transfer(
         self,
         channel: BoundedChannel,
-        command: CommandSession,
+        command: WorkloadSession,
         item: TransferItem,
         deadline: int,
         authorize: Callable[[], None],
@@ -871,14 +982,14 @@ class ControlServer:
     async def _start(
         self, submitter: Submitter, request_id: str, observational: bool
     ) -> bytes:
-        command = self._command
+        command = self._session
         if command is None:
             return error_envelope(
                 request_id, delivery_error("workload_kind_unavailable")
             )
         try:
             await self._executor.run(
-                lambda: command.begin(
+                lambda: command.supervise(
                     submitter,
                     observational,
                     self._workload,
@@ -894,7 +1005,7 @@ class ControlServer:
         return delivery_envelope(request_id, "started")
 
     def _observed(self) -> StatusValue:
-        command = self._command
+        command = self._session
         if command is None:
             state, phase, code = "starting", "preparation", None
         else:
@@ -960,8 +1071,9 @@ class ControlServer:
 
     async def _release(self) -> None:
         self._bound.listener.close()
-        if self._command is not None:
-            self._command.close_journal()
+        if self._session is not None:
+            self._session.fence()
+            self._session.close_journal()
         tasks = [*self._connections]
         if self._accepting is not None:
             tasks.append(self._accepting)
@@ -989,10 +1101,10 @@ class ControlServer:
                 workers_joined = True
             finally:
                 try:
-                    if self._command is not None and (
+                    if self._session is not None and (
                         workers_joined or self._transfer_native_settled
                     ):
-                        await self._command.aclose()
+                        await self._session.stop()
                 finally:
                     if (
                         settled or self._transfer_native_settled

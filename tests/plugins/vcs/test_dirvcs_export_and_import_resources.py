@@ -82,7 +82,7 @@ def test_import_refuses_a_forged_sealed_head(tmp_path: Path, bundle: bool) -> No
     (tmp_path / "head.json").write_text(json.dumps({"head": head, "bundle": bundle}))
 
     with pytest.raises(store.Refused):
-        store.import_base(str(tmp_path), base)
+        store.import_chain(str(tmp_path), base)
 
 
 def test_helper_main_installs_its_termination_handler() -> None:

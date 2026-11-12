@@ -480,6 +480,7 @@ def workload(**changes: object) -> dict[str, object]:
         "deadline": None,
         "session_spec": SESSION_SPEC,
         "dispatcher_process": None,
+        "checkout_request": None,
         **changes,
     }
 

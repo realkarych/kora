@@ -21,10 +21,12 @@ from kora.protocols.history import (
 from kora.protocols.identity import GrantBinding
 from kora.protocols.report import MAX_ERROR_BYTES, AttemptError, TerminalReport
 from kora.protocols.runtime import (
+    MAX_PROTECTED_PATHS,
     MAX_REFERENCE_BYTES,
     MAX_RESOURCES,
     MAX_TYPE_NAME_LENGTH,
     AdoptedSession,
+    CheckoutSource,
     Workload,
 )
 from kora.protocols.vcs import (
@@ -114,6 +116,25 @@ def widest_session_spec() -> dict[str, object]:
     }
 
 
+def maximal_checkout_request() -> dict[str, object]:
+    request: dict[str, object] = {
+        "repo": '"' * 2048,
+        "rev": '"' * 512,
+        "pinned": {"commit": "c" * 255, "base_commit": "b" * 255},
+        "branch": '"' * 512,
+        "protected_paths": [],
+    }
+    paths: list[str] = []
+    while len(paths) < MAX_PROTECTED_PATHS:
+        candidate = {**request, "protected_paths": [*paths, '"' * 2048]}
+        try:
+            CheckoutSource.model_validate(candidate)
+        except ValidationError:
+            break
+        paths.append('"' * 2048)
+    return {**request, "protected_paths": paths}
+
+
 def maximal_workload() -> dict[str, object]:
     reference = "secret://env/" + "r" * (MAX_REFERENCE_BYTES - 13)
     artifact = {
@@ -141,6 +162,7 @@ def maximal_workload() -> dict[str, object]:
         },
         resources=[resource] * MAX_RESOURCES,
         session_spec=widest_session_spec(),
+        checkout_request=maximal_checkout_request(),
     )
 
 

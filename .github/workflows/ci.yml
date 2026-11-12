@@ -42,89 +42,51 @@ jobs:
           fi
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
 
-  scaffold-tests:
+  scaffold-plan:
     needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
+    name: Plan scaffold lanes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      linux: ${{ steps.plan.outputs.linux }}
+      macos: ${{ steps.plan.outputs.macos }}
+      lanes: ${{ steps.plan.outputs.lanes }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: scaffold-3.11.17-general
+      - name: Install locked dependencies
+        run: bash scripts/ci/scaffold_lane.sh dependencies
+      - name: Plan general lanes from measured test durations
+        id: plan
+        run: bash scripts/ci/scaffold_lane.sh plan
+
+  scaffold-tests:
+    needs: [change-scope, scaffold-plan]
     if: ${{ needs.change-scope.outputs.full != 'false' }}
     name: Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.lane }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
-    concurrency:
-      group: scaffold-${{ github.run_id }}-${{ matrix.os == 'macos-15' && (matrix.lane == 'conformance' || matrix.lane == 'storage') && 'macos-a' || matrix.os == 'macos-15' && 'macos-b' || format('{0}-{1}-{2}', matrix.os, matrix.python, matrix.lane) }}
-      cancel-in-progress: false
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            python: 3.11.17
-            databases: sqlite,postgresql
-            lane: conformance
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: ubuntu-24.04
-            python: 3.11.17
-            databases: sqlite,postgresql
-            lane: remainder
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: ubuntu-24.04
-            python: 3.11.17
-            databases: sqlite,postgresql
-            lane: integration
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: ubuntu-24.04
-            python: 3.11.17
-            databases: sqlite,postgresql
-            lane: storage
-            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py tests/conformance/test_installed_conformance.py
-          - os: ubuntu-24.04
-            python: 3.11.17
-            databases: sqlite,postgresql
-            lane: local-runtime
-            pytest-arguments: tests/plugins/runtime/local
-          - os: ubuntu-24.04
-            python: 3.15.0
-            databases: sqlite,postgresql
-            lane: conformance
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: ubuntu-24.04
-            python: 3.15.0
-            databases: sqlite,postgresql
-            lane: remainder
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: ubuntu-24.04
-            python: 3.15.0
-            databases: sqlite,postgresql
-            lane: integration
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: ubuntu-24.04
-            python: 3.15.0
-            databases: sqlite,postgresql
-            lane: storage
-            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py tests/conformance/test_installed_conformance.py
-          - os: ubuntu-24.04
-            python: 3.15.0
-            databases: sqlite,postgresql
-            lane: local-runtime
-            pytest-arguments: tests/plugins/runtime/local
-          - os: macos-15
-            python: 3.11.17
-            databases: sqlite
-            lane: conformance
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: macos-15
-            python: 3.11.17
-            databases: sqlite
-            lane: remainder
-            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py --ignore=tests/plugins/runtime/local
-          - os: macos-15
-            python: 3.11.17
-            databases: sqlite
-            lane: storage
-            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py tests/conformance/test_installed_conformance.py
-          - os: macos-15
-            python: 3.11.17
-            databases: sqlite
-            lane: local-runtime
-            pytest-arguments: tests/plugins/runtime/local
+      matrix: ${{ fromJSON(needs.scaffold-plan.outputs.linux) }}
     defaults:
       run:
         shell: bash
@@ -138,9 +100,12 @@ jobs:
       KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       KORA_PYTEST_ARGUMENTS: ${{ matrix.pytest-arguments }}
       KORA_SCAFFOLD_LANE: ${{ matrix.lane }}
+      KORA_SCAFFOLD_LANES: ${{ matrix.lanes }}
       KORA_SCAFFOLD_OS: ${{ matrix.os }}
       KORA_SCAFFOLD_PYTHON: ${{ matrix.python }}
     steps:
+      - name: Record lane job start
+        run: printf 'KORA_LANE_STARTED=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
@@ -170,24 +135,10 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: true
           cache-dependency-glob: uv.lock
-          cache-suffix: scaffold-${{ matrix.python }}-${{ matrix.lane }}
+          cache-suffix: scaffold-${{ matrix.python }}-${{ startsWith(matrix.lane, 'general-') && 'general' || matrix.lane }}
       - name: Install locked dependencies
         id: dependencies
-        run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel --extra claude --no-install-project
-          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
-          uv export --locked --only-group build --no-emit-project \
-            --format requirements.txt \
-            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" \
-            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
-            --require-hashes \
-            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
-            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
-            --require-build-hashes \
-            --editable .
-          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
+        run: bash scripts/ci/scaffold_lane.sh dependencies
       - name: Install locked frontend dependencies
         id: frontend_dependencies
         run: pnpm --dir web install --frozen-lockfile
@@ -218,9 +169,144 @@ jobs:
       - name: Collect and execute the exact test lane
         id: tests
         run: bash scripts/ci/scaffold_lane.sh tests
-      - name: Preserve ordinary cohort evidence
+      - name: Preserve general lane evidence
         id: cohort_evidence
-        if: ${{ always() && (matrix.lane == 'conformance' || matrix.lane == 'remainder' || matrix.lane == 'integration') }}
+        if: ${{ always() && startsWith(matrix.lane, 'general-') }}
+        run: bash scripts/ci/scaffold_lane.sh preserve
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: evidence_upload
+        if: ${{ always() }}
+        with:
+          name: scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
+          path: ${{ env.KORA_SCAFFOLD_DIRECTORY }}
+          if-no-files-found: error
+      - name: Remove local runtime host fixtures
+        id: teardown
+        if: ${{ always() && matrix.lane == 'local-runtime' }}
+        run: sudo scripts/ci/prepare-local-runtime-fixtures.sh teardown
+      - name: Build isolated distributions offline
+        id: distributions
+        if: ${{ matrix.lane == 'local-runtime' }}
+        run: |
+          KORA_BUILD_OFFLINE=1 uv build --offline \
+            --python "$PWD/.venv/bin/python" \
+            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --require-hashes --clear
+      - name: Check the synced environment and unchanged dependency files
+        id: final_sync
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+
+      - name: Record lane workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require complete lane execution
+        if: ${{ always() }}
+        env:
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          PREPARATION_OUTCOME: ${{ steps.preparation.outcome }}
+          TEARDOWN_OUTCOME: ${{ steps.teardown.outcome }}
+          FRONTEND_OUTCOME: ${{ steps.frontend_dependencies.outcome }}
+          STATIC_OUTCOME: ${{ steps.static_checks.outcome }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.evidence_upload.outcome }}
+          DISTRIBUTIONS_OUTCOME: ${{ steps.distributions.outcome }}
+          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: bash scripts/ci/require_outcomes.sh scaffold-lane
+
+  scaffold-tests-macos:
+    needs: [change-scope, scaffold-plan]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
+    name: Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.lane }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.scaffold-plan.outputs.macos) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      KORA_TEST_DATABASES: ${{ matrix.databases }}
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+      KORA_SCAFFOLD_DIRECTORY: ${{ github.workspace }}/scaffold-evidence/scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
+      KORA_SCAFFOLD_RUN: ${{ github.run_id }}
+      KORA_SCAFFOLD_ATTEMPT: ${{ github.run_attempt }}
+      KORA_WORKFLOW_REVISION: ${{ github.sha }}
+      KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      KORA_PYTEST_ARGUMENTS: ${{ matrix.pytest-arguments }}
+      KORA_SCAFFOLD_LANE: ${{ matrix.lane }}
+      KORA_SCAFFOLD_LANES: ${{ matrix.lanes }}
+      KORA_SCAFFOLD_OS: ${{ matrix.os }}
+      KORA_SCAFFOLD_PYTHON: ${{ matrix.python }}
+    steps:
+      - name: Record lane job start
+        run: printf 'KORA_LANE_STARTED=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-uv-python-${{ matrix.python }}-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified Scaffold Node cache
+        run: bash scripts/ci/setup_scaffold_node.sh
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version-file: web/.node-version
+          package-manager-cache: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
+        with:
+          package_json_file: web/package.json
+          run_install: false
+          cache: true
+          cache_dependency_path: web/pnpm-lock.yaml
+      - name: Prepare verified uv and Python
+        env:
+          KORA_UV_PYTHON: ${{ matrix.python }}
+        run: bash scripts/ci/setup_uv_cache.sh "$KORA_UV_PYTHON"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: 0.13.1
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: scaffold-${{ matrix.python }}-${{ startsWith(matrix.lane, 'general-') && 'general' || matrix.lane }}
+      - name: Install locked dependencies
+        id: dependencies
+        run: bash scripts/ci/scaffold_lane.sh dependencies
+      - name: Install locked frontend dependencies
+        id: frontend_dependencies
+        run: pnpm --dir web install --frozen-lockfile
+      - name: Check Python and frontend sources
+        id: static_checks
+        if: ${{ matrix.lane == 'local-runtime' }}
+        run: |
+          uv lock --check
+          uv run --no-sync ruff format --check .
+          uv run --no-sync ruff check --ignore-noqa .
+          uv run --no-sync pyright
+          pnpm --dir web run typecheck
+          pnpm --dir web run lint
+          pnpm --dir web run build
+      - name: Prepare local runtime host fixtures
+        id: preparation
+        if: ${{ matrix.lane == 'local-runtime' }}
+        run: |
+          SECONDS=0
+          sudo --preserve-env=RUNNER_TEMP scripts/ci/prepare-local-runtime-fixtures.sh prepare
+          printf 'Host fixture preparation took %s s\n' "$SECONDS"
+      - name: Collect and execute the exact test lane
+        id: tests
+        run: bash scripts/ci/scaffold_lane.sh tests
+      - name: Preserve general lane evidence
+        id: cohort_evidence
+        if: ${{ always() && startsWith(matrix.lane, 'general-') }}
         run: bash scripts/ci/scaffold_lane.sh preserve
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: evidence_upload
@@ -270,7 +356,7 @@ jobs:
   scaffold-evidence:
     name: Scaffold evidence
     if: ${{ always() }}
-    needs: [change-scope, scaffold-tests]
+    needs: [change-scope, scaffold-plan, scaffold-tests, scaffold-tests-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -310,20 +396,29 @@ jobs:
         with:
           pattern: scaffold-tests-*
           path: scaffold-evidence
-      - name: Verify fourteen lanes and complete collection coverage
-        if: ${{ needs.change-scope.outputs.full != 'false' }}
+      - name: Report planned and recorded lane times
+        if: ${{ !cancelled() && needs.change-scope.outputs.full != 'false' }}
+        id: timings
+        env:
+          KORA_SCAFFOLD_LANES: ${{ needs.scaffold-plan.outputs.lanes }}
+        run: |
+          uv run --no-sync python -m tests.scaffold_evidence timings \
+            scaffold-evidence "$KORA_SCAFFOLD_LANES"
+      - name: Verify the planned lanes and complete collection coverage
+        if: ${{ !cancelled() && needs.change-scope.outputs.full != 'false' }}
         id: verification
         env:
           KORA_SCAFFOLD_RUN: ${{ github.run_id }}
           KORA_SCAFFOLD_ATTEMPT: ${{ github.run_attempt }}
           KORA_WORKFLOW_REVISION: ${{ github.sha }}
           KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          KORA_SCAFFOLD_LANES: ${{ needs.scaffold-plan.outputs.lanes }}
         run: |
           KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
           test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
           uv run --no-sync python -m tests.scaffold_evidence verify \
             scaffold-evidence "$KORA_SCAFFOLD_RUN" "$KORA_SCAFFOLD_ATTEMPT" \
-            "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
+            "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION" "$KORA_SCAFFOLD_LANES"
       - name: Record join workflow cancellation
         id: workflow_cancellation
         if: ${{ cancelled() }}
@@ -335,7 +430,9 @@ jobs:
           SCOPE_RESULT: ${{ needs.change-scope.result }}
           SCOPE_VERIFIED: ${{ needs.change-scope.outputs.verified }}
           FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
+          PLAN_RESULT: ${{ needs.scaffold-plan.result }}
           LANES_RESULT: ${{ needs.scaffold-tests.result }}
+          MACOS_LANES_RESULT: ${{ needs.scaffold-tests-macos.result }}
           DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
           DOWNLOAD_OUTCOME: ${{ steps.evidence_download.outcome }}
           VERIFICATION_OUTCOME: ${{ steps.verification.outcome }}
