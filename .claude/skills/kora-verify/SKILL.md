@@ -50,7 +50,7 @@ Apply the [observability contract](../../../knowledge/specs/observability.md) to
 
 ## Blocking checks and diagnostics
 
-[Development verification](../../../AGENTS.md#development-verification) in AGENTS.md defines the blocking safety and recovery gates, the classification of numerical checks, the owner approval an existing gate needs before it changes and the bounds on investigation; its [Testing](../../../AGENTS.md#testing) section makes CI's ten-minute total a feedback target. This router also applies:
+[Development verification](../../../AGENTS.md#development-verification) in AGENTS.md defines the blocking safety and recovery gates, the classification of numerical checks, the owner approval an existing gate needs before it changes and the bounds on investigation; AGENTS.md's [Testing](../../../AGENTS.md#testing) section makes CI's ten-minute total a feedback target. This router also applies:
 
 1. Keep contract, integrity, authorization, crash/replay, exact resource closure, capacity admission and deterministic work/space bounds blocking. A deadline protecting cleanup, stop escalation or bounded child execution is a safety check, not an optional performance statistic.
 2. A numerical performance gate needs an approved requirement and method: workload and scale, environment, warm-up and intentional caches, observation overhead, metric, meaningful regression size and failure decision. Known bounded runtime state must be described separately from abandoned component resources.
