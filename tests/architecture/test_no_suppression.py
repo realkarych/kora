@@ -1927,6 +1927,9 @@ def replacement_reference(
         return node.module in OS_MODULES and any(
             alias.name in REPLACEMENT_APIS or alias.name == "*" for alias in node.names
         )
+    if isinstance(node, ast.Call) and call_name(node) in DYNAMIC_IMPORT_CALLS:
+        target = first_string_argument(node) or ""
+        return not REPLACEMENT_APIS.isdisjoint(re.split(r"[.:]", target))
     return isinstance(
         node, ast.Attribute | ast.Call | ast.Subscript
     ) and named_api_reference(node, getters, REPLACEMENT_APIS)
@@ -2159,6 +2162,8 @@ def test_replacement_guard_refuses_exec_imports_from_posix_and_nt(
         "posix_alias": "from posix import execv as replace\nreplace('x', ())\n",
         "posix_star": "from posix import *\n",
         "nt": "from nt import execv\nexecv('x', ())\n",
+        "resolve_name": "pkgutil.resolve_name('os:execve')('x', (), {})\n",
+        "resolve_name_dotted": "pkgutil.resolve_name('posix.execv')('x', ())\n",
     }
     for name, source in imports.items():
         write(tmp_path / f"{name}_other", REPLACEMENT_GATE, GATE_APPROVED_SOURCE)
