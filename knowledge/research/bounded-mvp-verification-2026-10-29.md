@@ -22,3 +22,7 @@ Repetition inside an existing behavioral or resource test is preserved. Schedule
 Retain historical failures and their actual revisions. Do not retry an unexplained failed execution until it passes, discard adverse observations or relabel old evidence. Targeted local checks answer changed-input questions; one successful final-head CI supplies complete-suite evidence. Reuse supported independent conclusions when their relevant inputs match, and obtain only missing or affected review. Additional investigation must answer a concrete unresolved correctness or trust-boundary question rather than create another delivery stage.
 
 After two unsuccessful repair iterations for one problem, stop that repair and ask the project owner for a decision. Independent work may continue. An unresolved required failure remains a merge blocker; escalation is not a waiver.
+
+## Amendment of 2026-11-13
+
+The project owner approved one bounded repetition as a pull-request merge requirement under [issue #1440](https://github.com/realkarych/kora/issues/1440): the `Changed test repetition` job described in [changed test repetition](changed-test-repetition-2026-11-13.md). It repeats only the test modules a pull request adds or changes, inside one ordinary ten-minute job. The replacements and preserved checks above are otherwise unchanged; campaigns of whole pipelines or of fixed files stay removed.
