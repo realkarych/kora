@@ -1,0 +1,205 @@
+import json
+from typing import cast
+
+import httpx
+import pytest
+from sqlalchemy import func, select
+
+from kora.cel_eval.thread import Evaluator
+from kora.conformance.capture import Capture
+from kora.db.connection import Database
+from kora.db.tables import graph, graph_version
+from kora.ir.json import JsonObject
+from kora.models.errors import ApiErrorEnvelope
+from kora.models.graphs import DeployResponse
+from tests.api.deployment_cases import (
+    GRAPH,
+    HARNESS,
+    NAMESPACE,
+    evaluator,
+    skeleton_ir,
+)
+from tests.api.support import (
+    api_capture,
+    application,
+    client_for,
+    deployment_services,
+)
+from tests.plugins.authentication.support import seed_case
+
+__all__ = ["api_capture", "evaluator"]
+
+PATH = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/versions"
+EMPTY_FILE: JsonObject = {
+    "name": "check.sh",
+    "sha256": "sha256:"
+    + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size": 0,
+    "executable": True,
+}
+
+
+def body(ir: JsonObject | None = None, graph: str = GRAPH) -> JsonObject:
+    return {"graph": graph, "ir": skeleton_ir() if ir is None else ir, "resources": []}
+
+
+def with_command_file() -> JsonObject:
+    ir = skeleton_ir()
+    nodes = cast(
+        "dict[str, dict[str, dict[str, object]]]",
+        cast("JsonObject", ir["graph"])["nodes"],
+    )
+    nodes["gate"]["config"]["resources"] = [EMPTY_FILE]
+    return ir
+
+
+async def rows(database: Database) -> tuple[int, int]:
+    async with database.read_transaction() as reader:
+        graphs = await reader.scalar(select(func.count()).select_from(graph))
+        versions = await reader.scalar(select(func.count()).select_from(graph_version))
+    return int(graphs or 0), int(versions or 0)
+
+
+async def authorized(database: Database, kind: str = "user") -> dict[str, str]:
+    case = await seed_case(database, NAMESPACE if kind == "user" else "workers", kind)
+    return {"Authorization": str(case.request.authorization)}
+
+
+def error_of(response: httpx.Response) -> ApiErrorEnvelope:
+    return ApiErrorEnvelope.model_validate(response.json())
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_publishes_and_reuses(
+    database: Database, evaluator: Evaluator, api_capture: Capture
+) -> None:
+    headers = await authorized(database)
+    app = application(
+        database, api_capture, deployment_services(database, evaluator, HARNESS)
+    )
+
+    async with client_for(app) as client:
+        first = await client.post(PATH, json=body(), headers=headers)
+        again = await client.post(PATH, json=body(), headers=headers)
+
+    published = DeployResponse.model_validate(first.json())
+    reused = DeployResponse.model_validate(again.json())
+    assert (first.status_code, again.status_code) == (201, 200)
+    assert published.graph_version_id.startswith("gv_")
+    assert (published.number, published.reused, published.warnings) == (1, False, ())
+    assert reused == published.model_copy(update={"reused": True})
+    assert await rows(database) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_refuses_selector_mismatch(
+    database: Database, evaluator: Evaluator, api_capture: Capture
+) -> None:
+    headers = await authorized(database)
+    app = application(
+        database, api_capture, deployment_services(database, evaluator, HARNESS)
+    )
+    mismatches = (
+        (f"/api/v1/namespaces/{NAMESPACE}/graphs/other/versions", body()),
+        (PATH, body(graph="other")),
+        (PATH, body(skeleton_ir(graph="other"))),
+        (PATH, body(skeleton_ir(namespace="other"))),
+    )
+
+    async with client_for(app) as client:
+        responses = [
+            await client.post(path, json=payload, headers=headers)
+            for path, payload in mismatches
+        ]
+
+    assert {response.status_code for response in responses} == {422}
+    assert {error_of(response).error.code for response in responses} == {"API003"}
+    assert await rows(database) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_authorizes_before_body(
+    database: Database, evaluator: Evaluator, api_capture: Capture
+) -> None:
+    user = await authorized(database)
+    service = await authorized(database, "service")
+    foreign = await seed_case(database, "other")
+    app = application(
+        database, api_capture, deployment_services(database, evaluator, HARNESS)
+    )
+    malformed = b"{not json"
+    foreign_path = "/api/v1/namespaces/other/graphs/skeleton/versions"
+
+    async with client_for(app) as client:
+        anonymous = await client.post(PATH, content=malformed)
+        worker = await client.post(PATH, content=malformed, headers=service)
+        outside = await client.post(foreign_path, content=malformed, headers=user)
+        missing = await client.post(
+            "/api/v1/namespaces/absent/graphs/skeleton/versions",
+            content=malformed,
+            headers=user,
+        )
+        wrong_method = await client.get(PATH, headers=user)
+        anonymous_method = await client.get(PATH)
+
+    assert foreign.principal.namespaces
+    assert (anonymous.status_code, error_of(anonymous).error.code) == (401, "API009")
+    assert anonymous.headers["www-authenticate"] == "Bearer"
+    for refused in (worker, outside, missing):
+        assert (refused.status_code, error_of(refused).error.code) == (403, "API005")
+    assert (wrong_method.status_code, wrong_method.headers["allow"]) == (405, "POST")
+    assert anonymous_method.status_code == 401
+    assert await rows(database) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_returns_document_findings(
+    database: Database, evaluator: Evaluator, api_capture: Capture
+) -> None:
+    headers = await authorized(database)
+    app = application(
+        database, api_capture, deployment_services(database, evaluator, HARNESS)
+    )
+    oversized = json.dumps(body() | {"padding": "x" * (4 * 1024 * 1024)}).encode()
+    requests: tuple[tuple[bytes, str | None], ...] = (
+        (json.dumps(body(skeleton_ir(harness="claude"))).encode(), "IR018"),
+        (json.dumps(body(with_command_file())).encode(), "IR028"),
+        (b"{not json", None),
+        (
+            b'{"graph": "skeleton", "graph": "skeleton", "ir": {}, "resources": []}',
+            None,
+        ),
+        (
+            json.dumps(body())
+            .replace('"resources": []', '"resources": [NaN]')
+            .encode(),
+            None,
+        ),
+        (json.dumps(body() | {"resources": [{}]}).encode(), None),
+        (
+            json.dumps(body(cast("JsonObject", {"graph": "not a document"}))).encode(),
+            None,
+        ),
+        ("\udcff".encode("utf-8", "surrogateescape"), None),
+        (oversized, None),
+    )
+
+    async with client_for(app) as client:
+        responses = [
+            await client.post(
+                PATH,
+                content=content,
+                headers=headers | {"Content-Type": "application/json"},
+            )
+            for content, _ in requests
+        ]
+
+    for response, (_, code) in zip(responses, requests, strict=True):
+        envelope = error_of(response)
+        assert (response.status_code, envelope.error.code) == (422, "API003")
+        details = envelope.model_dump(mode="json")["error"]["details"]
+        if code is None:
+            assert details == {}
+        else:
+            assert code in {error["code"] for error in details["errors"]}
+    assert await rows(database) == (0, 0)

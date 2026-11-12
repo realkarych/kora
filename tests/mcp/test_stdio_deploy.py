@@ -1,0 +1,189 @@
+import asyncio
+import json
+import os
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+from kora.cel_eval.thread import Evaluator
+from kora.conformance.capture import Capture
+from kora.db.connection import Database
+from kora.ir.json import JsonObject
+from tests.api.deployment_cases import HARNESS, NAMESPACE, evaluator, skeleton_ir
+from tests.api.support import api_capture, application, deployment_services
+from tests.client.support import running_app
+from tests.plugins.authentication.support import seed_case
+
+__all__ = ["api_capture", "evaluator"]
+
+DEADLINE_SECONDS = 60.0
+PROTOCOL_VERSION = "2025-11-25"
+
+
+@dataclass
+class StdioSession:
+    process: asyncio.subprocess.Process
+    lines: list[JsonObject] = field(default_factory=list[JsonObject])
+    sequence: int = 0
+
+    async def send(self, message: JsonObject) -> None:
+        stdin = self.process.stdin
+        assert stdin is not None
+        stdin.write(json.dumps(message).encode() + b"\n")
+        await stdin.drain()
+
+    async def request(self, method: str, params: JsonObject) -> JsonObject:
+        self.sequence += 1
+        await self.send(
+            {"jsonrpc": "2.0", "id": self.sequence, "method": method, "params": params}
+        )
+        stdout = self.process.stdout
+        assert stdout is not None
+        while True:
+            line = await asyncio.wait_for(stdout.readline(), DEADLINE_SECONDS)
+            assert line, "the server closed stdout before responding"
+            message = cast("JsonObject", json.loads(line))
+            self.lines.append(message)
+            if message.get("id") == self.sequence:
+                return message
+
+    async def call(self, path: Path) -> JsonObject:
+        response = await self.request(
+            "tools/call", {"name": "kora_deploy", "arguments": {"path": str(path)}}
+        )
+        return cast("JsonObject", response["result"])
+
+    async def close(self) -> tuple[int, bytes]:
+        stdin = self.process.stdin
+        assert stdin is not None
+        stdin.close()
+        stdout, stderr = await asyncio.wait_for(
+            self.process.communicate(), DEADLINE_SECONDS
+        )
+        assert stdout == b""
+        assert self.process.returncode is not None
+        return self.process.returncode, stderr
+
+
+async def start(environment: dict[str, str]) -> StdioSession:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-m",
+        "kora",
+        "mcp",
+        "--server",
+        "authoring",
+        env={"PATH": os.environ["PATH"], **environment},
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    session = StdioSession(process)
+    await session.request(
+        "initialize",
+        {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "kora-test", "version": "1"},
+        },
+    )
+    await session.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return session
+
+
+async def bearer(database: Database, namespace: str) -> str:
+    case = await seed_case(database, namespace)
+    authorization = case.request.authorization
+    assert authorization is not None
+    return authorization.removeprefix("Bearer ")
+
+
+def written(directory: Path, name: str, document: JsonObject) -> Path:
+    path = directory / name
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+@pytest.mark.asyncio
+async def test_mcp_deploy_without_files(
+    database: Database, evaluator: Evaluator, api_capture: Capture, tmp_path: Path
+) -> None:
+    token = await bearer(database, NAMESPACE)
+    app = application(
+        database, api_capture, deployment_services(database, evaluator, HARNESS)
+    )
+    graph = written(tmp_path, "skeleton.ir.json", skeleton_ir())
+    refused = written(tmp_path, "refused.ir.json", skeleton_ir(harness="claude"))
+
+    async with running_app(app) as origin:
+        session = await start({"KORA_URL": origin, "KORA_MCP_TOKEN": token})
+        listed = await session.request("tools/list", {})
+        published = await session.call(graph)
+        rejected = await session.call(refused)
+        malformed = await session.call(tmp_path / "absent.ir.json")
+        code, stderr = await session.close()
+
+    tools = cast("list[JsonObject]", cast("JsonObject", listed["result"])["tools"])
+    published_content = cast("JsonObject", published["structuredContent"])
+    rejected_content = cast("JsonObject", rejected["structuredContent"])
+    assert [tool["name"] for tool in tools] == ["kora_deploy"]
+    assert published.get("isError") is not True
+    assert cast("str", published_content["graph_version_id"]).startswith("gv_")
+    assert published_content["reused"] is False
+    assert rejected["isError"] is True
+    assert cast("JsonObject", rejected_content["error"])["code"] == "API003"
+    assert malformed["isError"] is True
+    assert all(line["jsonrpc"] == "2.0" for line in session.lines)
+    assert code == 0
+    assert token.encode() not in stderr
+
+
+@pytest.mark.asyncio
+async def test_mcp_uses_only_its_own_credential(
+    database: Database, evaluator: Evaluator, api_capture: Capture, tmp_path: Path
+) -> None:
+    cli_token = await bearer(database, NAMESPACE)
+    other_token = await bearer(database, "other")
+    app = application(
+        database, api_capture, deployment_services(database, evaluator, HARNESS)
+    )
+    graph = written(tmp_path, "skeleton.ir.json", skeleton_ir())
+
+    async with running_app(app) as origin:
+        unconfigured = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-m",
+            "kora",
+            "mcp",
+            "--server",
+            "authoring",
+            env={
+                "PATH": os.environ["PATH"],
+                "KORA_URL": origin,
+                "KORA_TOKEN": cli_token,
+            },
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        startup = await asyncio.wait_for(unconfigured.communicate(), DEADLINE_SECONDS)
+        session = await start(
+            {"KORA_URL": origin, "KORA_TOKEN": cli_token, "KORA_MCP_TOKEN": other_token}
+        )
+        refused = await session.call(graph)
+        code, _ = await session.close()
+
+    error = cast(
+        "JsonObject", cast("JsonObject", refused["structuredContent"])["error"]
+    )
+    assert unconfigured.returncode == 78
+    assert startup[0] == b""
+    assert b"KORA_MCP_TOKEN: missing" in startup[1]
+    assert refused["isError"] is True
+    assert error["code"] == "API005"
+    assert code == 0

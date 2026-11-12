@@ -16,6 +16,7 @@ from kora.observability import (
     ProcessDiagnostics,
     bound_scope,
 )
+from kora.protocols.authentication import Principal
 
 COMPONENT: str = CATALOG.register_component("api")
 COMPLETED: EventSpec = CATALOG.register(
@@ -66,6 +67,7 @@ class Exchange:
     status: int = 0
     code: str = "none"
     failed: bool = False
+    principal: Principal | None = None
 
     def failure(self, error: Exception) -> None:
         if not self.failed:

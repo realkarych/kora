@@ -11,9 +11,10 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 import typer.main
@@ -78,6 +79,13 @@ CONFIGURATION_PREFIX: str = "kora: invalid logging configuration"
 DATABASE_CONFIGURATION_PREFIX: str = "kora: invalid database configuration"
 DATABASE_GROUP: str = DB_COMPONENT
 MISSING_COMMAND: str = "a command or --version is required"
+CLIENT_CONFIGURATION_PREFIX: str = "kora: invalid client configuration"
+MCP_EXTRA_REQUIRED: str = "kora: the stdio MCP server requires the kora[mcp] extra"
+MCP_DISTRIBUTIONS: frozenset[str] = frozenset({"mcp", "mcp_types"})
+
+
+class McpServerName(StrEnum):
+    AUTHORING = "authoring"
 
 
 def write_stderr(text: str) -> None:
@@ -597,6 +605,32 @@ def conformance(
     raise typer.Exit(result.exit_code)
 
 
+def serve_mcp(
+    environment: Mapping[str, str], diagnostics: ProcessDiagnostics, url: str | None
+) -> None:
+    from kora.client.settings import (
+        MCP_CREDENTIAL_VARIABLE,
+        ClientConfigurationError,
+        read_client_settings,
+    )
+
+    try:
+        from kora.mcp.stdio import serve_authoring
+    except ModuleNotFoundError as error:
+        if (error.name or "").partition(".")[0] not in MCP_DISTRIBUTIONS:
+            raise
+        write_stderr(f"{MCP_EXTRA_REQUIRED}\n")
+        raise typer.Exit(EXIT_CONFIGURATION) from None
+    try:
+        settings = read_client_settings(environment, MCP_CREDENTIAL_VARIABLE, url)
+    except ClientConfigurationError as error:
+        write_stderr(
+            f"{CLIENT_CONFIGURATION_PREFIX}: {error.variable}: {error.problem.value}\n"
+        )
+        raise typer.Exit(EXIT_CONFIGURATION) from None
+    asyncio.run(serve_authoring(settings, diagnostics))
+
+
 def compose_application(
     environment: Mapping[str, str], diagnostics: ProcessDiagnostics
 ) -> typer.Typer:
@@ -605,6 +639,22 @@ def compose_application(
     app.add_typer(
         build_plugins_app(InstalledPluginDiscovery(diagnostics)), name="plugins"
     )
+
+    @app.command(name="deploy", help="Deploy a compiled graph without command files.")
+    def deploy(
+        path: Path,
+        as_json: bool = typer.Option(False, "--json", help="Print the API response."),
+    ) -> None:
+        from kora.cli.graphs import deploy_command
+
+        deploy_command(environment, diagnostics, path, as_json)
+
+    @app.command(name="mcp", help="Serve the kora MCP tools over stdio.")
+    def serve_mcp_command(
+        server: Annotated[McpServerName, typer.Option("--server")],
+        url: str | None = typer.Option(None, "--url"),
+    ) -> None:
+        serve_mcp(environment, diagnostics, url)
 
     @app.command(
         name="conformance", help="Check an installed provider or resume local cleanup."

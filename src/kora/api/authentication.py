@@ -20,9 +20,9 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.time import Clock
 
 
-async def schema_authorization(
+async def personal_authentication(
     request: Request, authenticator: Authenticator, clock: Clock
-) -> ApiErrorEnvelope | None:
+) -> Principal | ApiErrorEnvelope:
     exchange = current_exchange()
     headers = [
         value for name, value in request.headers.raw if name.lower() == b"authorization"
@@ -46,4 +46,4 @@ async def schema_authorization(
     principal = Principal.model_validate(principal)
     if principal.kind != "user":
         return definitive_error(ApiErrorCode.FORBIDDEN, request_id=exchange.request_id)
-    return None
+    return principal

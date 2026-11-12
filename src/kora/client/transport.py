@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
 from typing import Self, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import certifi
 import httpcore
@@ -30,10 +30,15 @@ from kora.client.errors import (
 from kora.client.network import DirectTransport
 from kora.ir.json import JsonObject, JsonShapeError, parse_json_object
 from kora.models.errors import HTTP_STATUSES, ApiErrorCode, require_api_error_fields
+from kora.models.graphs import DeployRequest, DeployResponse
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, ProcessDiagnostics
 
 OPENAPI_PATH: str = "/api/v1/openapi.json"
 OPENAPI_RESPONSE_BYTES: int = 4 * 1024 * 1024
+GRAPH_VERSIONS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
+DEPLOY_RESPONSE_BYTES: int = 2 * 1024 * 1024
+OK: frozenset[int] = frozenset({200})
+CREATED_OR_OK: frozenset[int] = frozenset({200, 201})
 JSON_DEPTH: int = 64
 HTTP_LOOPBACK: re.Pattern[str] = re.compile(r"127\.0\.0\.1(?::[0-9]+)?")
 TOKEN: re.Pattern[str] = re.compile(r"[a-zA-Z0-9._~+/\-]+=*")
@@ -77,6 +82,16 @@ class OpenAPIFields(BaseModel):
 def openapi_document(value: JsonObject) -> JsonObject:
     OpenAPIFields.model_validate(value)
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class DeployedGraphVersion:
+    response: DeployResponse
+    document: JsonObject
+
+
+def deployed_graph_version(value: JsonObject) -> DeployedGraphVersion:
+    return DeployedGraphVersion(DeployResponse.model_validate(value), value)
 
 
 def direct_origin(value: str) -> httpx.URL:
@@ -230,6 +245,20 @@ class KoraClient:
             "GET", OPENAPI_PATH, openapi_document, response_limit=OPENAPI_RESPONSE_BYTES
         )
 
+    async def deploy(
+        self, namespace: str, request: DeployRequest
+    ) -> DeployedGraphVersion:
+        return await self._request_json(
+            "POST",
+            GRAPH_VERSIONS_PATH.format(
+                ns=quote(namespace, safe=""), graph=quote(request.graph, safe="")
+            ),
+            deployed_graph_version,
+            response_limit=DEPLOY_RESPONSE_BYTES,
+            body=request.model_dump(mode="json"),
+            success=CREATED_OR_OK,
+        )
+
     async def _request_json(
         self,
         method: str,
@@ -238,6 +267,7 @@ class KoraClient:
         *,
         response_limit: int,
         body: JsonObject | None = None,
+        success: frozenset[int] = OK,
     ) -> T:
         if self._closing is not None:
             raise RuntimeError("The API client is closed.")
@@ -251,7 +281,9 @@ class KoraClient:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout
         task = asyncio.create_task(
-            self._exchange(method, path, decode, response_limit, body, exchange)
+            self._exchange(
+                method, path, decode, response_limit, body, success, exchange
+            )
         )
         self._active[task] = exchange.scope
         try:
@@ -294,6 +326,7 @@ class KoraClient:
         decode: Callable[[JsonObject], T],
         response_limit: int,
         body: JsonObject | None,
+        success: frozenset[int],
         exchange: Exchange,
     ) -> T:
         request = httpx.Request(
@@ -308,14 +341,20 @@ class KoraClient:
             extensions={"trace": exchange.observe},
         )
         with exchange.scope, exchange.handoff:
-            status, content = await self._receive(request, response_limit, exchange)
+            status, content = await self._receive(
+                request, response_limit, success, exchange
+            )
             return self._decode_response(
-                content, status, decode, response_limit, exchange
+                content, status, decode, response_limit, success, exchange
             )
         raise asyncio.CancelledError
 
     async def _receive(
-        self, request: httpx.Request, response_limit: int, exchange: Exchange
+        self,
+        request: httpx.Request,
+        response_limit: int,
+        success: frozenset[int],
+        exchange: Exchange,
     ) -> tuple[int, bytes]:
         try:
             response = await self._transport.handle_async_request(request)
@@ -323,7 +362,7 @@ class KoraClient:
                 exchange.status = response.status_code
                 ids = response.headers.get_list("X-Request-ID")
                 exchange.request_id = self._safe_id(ids[0]) if len(ids) == 1 else None
-                content = await read_body(response, response_limit, exchange)
+                content = await read_body(response, response_limit, success, exchange)
                 return response.status_code, content
             finally:
                 with CancelScope(shield=True):
@@ -342,6 +381,7 @@ class KoraClient:
         status: int,
         decode: Callable[[JsonObject], T],
         response_limit: int,
+        success: frozenset[int],
         exchange: Exchange,
     ) -> T:
         try:
@@ -351,14 +391,14 @@ class KoraClient:
                 parse_constant=reject_constant,
             )
         except (ValueError, RecursionError):
-            reason = Failure.JSON if status == 200 else Failure.STATUS_ENVELOPE
+            reason = Failure.JSON if status in success else Failure.STATUS_ENVELOPE
             raise exchange.failure(reason) from None
         try:
             value = parse_json_object(
                 raw, max_depth=JSON_DEPTH, max_bytes=response_limit
             )
         except JsonShapeError:
-            reason = Failure.SCHEMA if status == 200 else Failure.STATUS_ENVELOPE
+            reason = Failure.SCHEMA if status in success else Failure.STATUS_ENVELOPE
             raise exchange.failure(reason) from None
         if status >= 400:
             raise self._api_error(value, content, status, exchange)
@@ -418,9 +458,11 @@ class KoraClient:
         Context().run(self._logger.bind(**context).emit_at, level, COMPLETED, **fields)
 
 
-async def read_body(response: httpx.Response, limit: int, exchange: Exchange) -> bytes:
+async def read_body(
+    response: httpx.Response, limit: int, success: frozenset[int], exchange: Exchange
+) -> bytes:
     status = response.status_code
-    if status != 200 and not 400 <= status < 600:
+    if status not in success and not 400 <= status < 600:
         raise exchange.failure(Failure.STATUS_ENVELOPE)
     if response.headers.get("content-encoding", "identity").lower() != "identity":
         raise exchange.failure(Failure.STATUS_ENVELOPE)

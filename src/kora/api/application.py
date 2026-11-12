@@ -9,17 +9,27 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from kora.api.authentication import schema_authorization
+from kora.api.authentication import personal_authentication
 from kora.api.errors import definitive_error
 from kora.api.exchange import ApiExchange, current_exchange, method_of
+from kora.api.graph_deployment_route import (
+    GraphDeploymentServices,
+    deployment_handler,
+)
 from kora.api.responses import (
     error_response,
     framework_error,
     unexpected_error,
     validation_error,
 )
-from kora.api.routes import RECOGNIZED_METHODS, ActiveCatalog, RouteName
-from kora.models.errors import ApiErrorCode
+from kora.api.routes import (
+    PROTECTED_ROUTES,
+    RECOGNIZED_METHODS,
+    ActiveCatalog,
+    RouteName,
+)
+from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
+from kora.models.graphs import DeployRequest, DeployResponse
 from kora.observability import ProcessDiagnostics
 from kora.protocols.authentication import Authenticator
 from kora.protocols.time import Clock
@@ -52,13 +62,14 @@ class ApiDispatch:
         if matched is not None:
             exchange.route = matched.name.value
         method = method_of(scope)
-        if matched is not None and matched.name == RouteName.SCHEMA:
-            refusal = await schema_authorization(
+        if matched is not None and matched.name in PROTECTED_ROUTES:
+            principal = await personal_authentication(
                 Request(scope), self.authenticator, self.clock
             )
-            if refusal is not None:
-                await error_response(refusal, method=method)(scope, receive, send)
+            if isinstance(principal, ApiErrorEnvelope):
+                await error_response(principal, method=method)(scope, receive, send)
                 return
+            exchange.principal = principal
         code: ApiErrorCode | None = None
         if method not in RECOGNIZED_METHODS:
             code = ApiErrorCode.METHOD_NOT_IMPLEMENTED
@@ -82,6 +93,7 @@ def create_application(
     diagnostics: ProcessDiagnostics,
     clock: Clock,
     request_id: Callable[[], str],
+    deployment: GraphDeploymentServices | None = None,
 ) -> ApiExchange:
     framework = FastAPI(
         title="kora",
@@ -117,6 +129,31 @@ def create_application(
     framework.add_api_route(
         RouteName.SCHEMA.value, schema, methods=["GET"], include_in_schema=False
     )
+    if deployment is not None:
+        framework.add_api_route(
+            RouteName.GRAPH_VERSIONS.value,
+            deployment_handler(deployment, clock),
+            methods=["POST"],
+            operation_id="deploy_graph",
+            status_code=201,
+            response_model=DeployResponse,
+            responses={
+                200: {
+                    "model": DeployResponse,
+                    "description": "An equal version exists.",
+                }
+            },
+            openapi_extra={
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": DeployRequest.model_json_schema()
+                        }
+                    },
+                }
+            },
+        )
     framework.add_exception_handler(HTTPException, framework_error)
     framework.add_exception_handler(RequestValidationError, validation_error)
     framework.add_exception_handler(Exception, unexpected_error)

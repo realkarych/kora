@@ -14,6 +14,18 @@ RECOGNIZED_METHODS: frozenset[str] = frozenset(
 class RouteName(StrEnum):
     HEALTH = "/healthz"
     SCHEMA = "/api/v1/openapi.json"
+    GRAPH_VERSIONS = "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
+
+
+ROUTE_METHODS: dict[RouteName, frozenset[str]] = {
+    RouteName.HEALTH: frozenset({"GET"}),
+    RouteName.SCHEMA: frozenset({"GET"}),
+    RouteName.GRAPH_VERSIONS: frozenset({"POST"}),
+}
+REQUIRED_ROUTES: frozenset[RouteName] = frozenset({RouteName.HEALTH, RouteName.SCHEMA})
+PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
+    {RouteName.SCHEMA, RouteName.GRAPH_VERSIONS}
+)
 
 
 @dataclass(frozen=True)
@@ -31,13 +43,15 @@ class ActiveCatalog:
     def __init__(self, application: FastAPI) -> None:
         routes: list[ActiveRoute] = []
         for route in application.routes:
-            if not isinstance(route, APIRoute):
+            if not isinstance(route, APIRoute) or route.path not in set(RouteName):
                 raise ValueError("The API handler inventory is invalid.")
-            methods = route.methods
-            if methods is None or methods != {"GET"}:
+            name = RouteName(route.path)
+            methods = frozenset(route.methods or ())
+            if methods != ROUTE_METHODS[name]:
                 raise ValueError("The API handler inventory is invalid.")
-            routes.append(ActiveRoute(route, RouteName(route.path), frozenset(methods)))
-        if len(routes) != 2 or {route.name for route in routes} != set(RouteName):
+            routes.append(ActiveRoute(route, name, methods))
+        names = {route.name for route in routes}
+        if len(names) != len(routes) or not REQUIRED_ROUTES <= names:
             raise ValueError("The API handler inventory is invalid.")
         self.routes = tuple(routes)
 

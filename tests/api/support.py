@@ -9,8 +9,12 @@ from starlette.types import ASGIApp, Message, Scope
 
 from kora.api.application import create_application
 from kora.api.exchange import COMPONENT, ApiExchange
+from kora.api.graph_deployment_route import GraphDeploymentServices
+from kora.cel_eval.thread import Evaluator
 from kora.conformance.capture import Capture, captured
 from kora.db.connection import Database
+from kora.db.identifiers import IdentifierGenerator
+from kora.ir.deployment_checks import DeploymentSelection
 from kora.observability import Level, LoggingSettings
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
 from tests.plugins.authentication.support import AuthorityClock
@@ -36,12 +40,28 @@ def api_capture() -> Generator[Capture, None, None]:
         yield capture
 
 
-def application(database: Database, capture: Capture) -> ApiExchange:
+def application(
+    database: Database,
+    capture: Capture,
+    deployment: GraphDeploymentServices | None = None,
+) -> ApiExchange:
     return create_application(
         StaticTokenAuthenticator({}, database),
         capture.diagnostics,
         AuthorityClock(),
         RequestIds(),
+        deployment,
+    )
+
+
+def deployment_services(
+    database: Database, evaluator: Evaluator, harness: str
+) -> GraphDeploymentServices:
+    return GraphDeploymentServices(
+        database,
+        evaluator,
+        DeploymentSelection(harness),
+        IdentifierGenerator(AuthorityClock().now),
     )
 
 
