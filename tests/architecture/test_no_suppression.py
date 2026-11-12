@@ -1854,6 +1854,7 @@ def test_gate_rule_cannot_expand_the_pinned_ruff_configuration(tmp_path: Path) -
 
 
 REPLACEMENT_GATE: str = "src/kora/runner/gate.py"
+OS_MODULES: frozenset[str] = frozenset({"os", "posix", "nt"})
 REPLACEMENT_APIS: frozenset[str] = frozenset(
     {
         "execl",
@@ -1923,7 +1924,7 @@ def replacement_reference(
     getters: set[str],
 ) -> TypeGuard[ast.Attribute | ast.ImportFrom | ast.Call | ast.Subscript]:
     if isinstance(node, ast.ImportFrom):
-        return node.module == "os" and any(
+        return node.module in OS_MODULES and any(
             alias.name in REPLACEMENT_APIS or alias.name == "*" for alias in node.names
         )
     return isinstance(
@@ -2145,6 +2146,40 @@ GATE_PROCESS_STARTS: dict[str, str] = {
     "multiprocessing_from": "from multiprocessing.pool import Pool\n",
     "posixsubprocess": "import _posixsubprocess\n",
 }
+
+
+def test_replacement_guard_refuses_exec_imports_from_posix_and_nt(
+    tmp_path: Path,
+) -> None:
+    imports = {
+        "posix": "from posix import execv\nexecv('x', ())\n",
+        "posix_alias": "from posix import execv as replace\nreplace('x', ())\n",
+        "posix_star": "from posix import *\n",
+        "nt": "from nt import execv\nexecv('x', ())\n",
+    }
+    for name, source in imports.items():
+        write(tmp_path / f"{name}_other", REPLACEMENT_GATE, GATE_APPROVED_SOURCE)
+        write(tmp_path / f"{name}_other", "src/kora/runner/other.py", source)
+        write(
+            tmp_path / f"{name}_gate", REPLACEMENT_GATE, GATE_APPROVED_SOURCE + source
+        )
+
+    results = {
+        root.name: replacement_violations(root) for root in sorted(tmp_path.iterdir())
+    }
+
+    assert results == {
+        **{
+            f"{name}_other": [
+                "src/kora/runner/other.py:1: unapproved process replacement"
+            ]
+            for name in imports
+        },
+        **{
+            f"{name}_gate": [f"{REPLACEMENT_GATE}:4: unapproved process replacement"]
+            for name in imports
+        },
+    }
 
 
 def test_launch_gate_refuses_every_other_process_start(tmp_path: Path) -> None:
