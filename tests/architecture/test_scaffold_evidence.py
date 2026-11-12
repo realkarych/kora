@@ -663,11 +663,14 @@ def test_plan_outputs_split_lane_rows_by_platform(tmp_path: Path) -> None:
     assert {row["os"] for row in rows["linux"]} == {"ubuntu-24.04"}
     assert {row["os"] for row in rows["macos"]} == {"macos-15"}
     assert [row["lane"] for row in rows["macos"]] == [
+        "static-checks",
         "storage",
         "local-runtime",
         "general-1",
     ]
-    assert rows["macos"][0]["pytest-arguments"] == " ".join(STORAGE_ARGUMENTS)
+    assert [row["lane"] for row in rows["linux"]].count("static-checks") == 2
+    assert rows["macos"][0]["pytest-arguments"] == ""
+    assert rows["macos"][1]["pytest-arguments"] == " ".join(STORAGE_ARGUMENTS)
 
 
 @pytest.mark.parametrize(

@@ -25,14 +25,31 @@ COMPLETION_FIELDS = (
     "FINAL_SYNC_OUTCOME",
 )
 WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipped"}
-WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"}
+WITHOUT_STATIC_CHECKS = {"STATIC_OUTCOME": "skipped"}
+WITHOUT_BUILDS = {**WITHOUT_STATIC_CHECKS, "DISTRIBUTIONS_OUTCOME": "skipped"}
+WITHOUT_TESTS = {"TESTS_OUTCOME": "skipped", "UPLOAD_OUTCOME": "skipped"}
+STATIC_CHECK_LANE = "static-checks"
 LANE_OUTCOMES = {
     "general-1": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "general-8": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "local-runtime": {},
+    "local-runtime": WITHOUT_STATIC_CHECKS,
+    STATIC_CHECK_LANE: {
+        **WITHOUT_FIXTURES,
+        **WITHOUT_TESTS,
+        "DISTRIBUTIONS_OUTCOME": "skipped",
+    },
 }
-UNPLANNED_LANES = ("general-0", "general-9", "general-10", "general-", "conformance")
+UNPLANNED_LANES = (
+    "general-0",
+    "general-9",
+    "general-10",
+    "general-",
+    "conformance",
+    "static",
+    "static-checks-1",
+)
+STATIC_CHECK_OUTCOMES = ("success", "failure", "cancelled", "skipped", "")
 SCAFFOLD_JOIN_FIELDS = (
     "PLAN_RESULT",
     "LANES_RESULT",
@@ -175,7 +192,8 @@ def lane_completion_cases() -> dict[str, GateCase]:
             {**complete, "WORKFLOW_CANCELLED": "true"},
             False,
         )
-        for field, expected in complete.items():
+        steps = {f: v for f, v in complete.items() if f != "STATIC_OUTCOME"}
+        for field, expected in steps.items():
             for outcome in ("success", "failure", "cancelled", "skipped", ""):
                 if outcome != expected:
                     cases[f"{lane}-{field}-{outcome or 'empty'}"] = (
@@ -222,6 +240,30 @@ def test_lane_completion_rejects_every_incomplete_outcome(
     result = run_gate(["scaffold-lane"], values, tmp_path / "output")
 
     assert (result.returncode == 0) is passes
+
+
+def static_check_gate(
+    lane: str, static: str, output: Path
+) -> subprocess.CompletedProcess[bytes]:
+    values: dict[str, str | None] = {
+        "WORKFLOW_CANCELLED": "false",
+        **expected_lane_outcomes(lane),
+        "STATIC_OUTCOME": static,
+        "KORA_SCAFFOLD_LANE": lane,
+    }
+    return run_gate(["scaffold-lane"], values, output)
+
+
+@pytest.mark.parametrize("static", STATIC_CHECK_OUTCOMES)
+@pytest.mark.parametrize("lane", list(LANE_OUTCOMES))
+def test_only_the_static_check_job_runs_static_checks(
+    tmp_path: Path, lane: str, static: str
+) -> None:
+    expected = "success" if lane == STATIC_CHECK_LANE else "skipped"
+
+    result = static_check_gate(lane, static, tmp_path / "output")
+
+    assert (result.returncode == 0) is (static == expected)
 
 
 @pytest.mark.parametrize(

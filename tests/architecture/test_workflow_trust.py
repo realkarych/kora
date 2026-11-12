@@ -9,7 +9,14 @@ from typing import cast
 
 import pytest
 
-from tests.scaffold_evidence import ENVIRONMENTS, environment_key, matrix_rows
+from scripts.ci.lane_plan import MAXIMUM_LANES
+from tests.scaffold_evidence import (
+    ENVIRONMENTS,
+    STATIC_CHECK_LANE,
+    MatrixRow,
+    environment_key,
+    matrix_rows,
+)
 from tests.support.workflows import (
     Workflows,
     action_name,
@@ -21,6 +28,8 @@ from tests.support.workflows import (
 )
 
 Mutation = Callable[[Workflows], None]
+Plan = dict[str, list[MatrixRow]]
+PlanMutation = Callable[[Workflows, Plan], None]
 Leaf = tuple[tuple[str, ...], object]
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -154,6 +163,33 @@ SAMPLE_LANE_COUNTS = {
     environment_key(system, python): 2 for system, python, _ in ENVIRONMENTS
 }
 PLANNED_MATRIX = "${{{{ fromJSON(needs.scaffold-plan.outputs.{platform}) }}}}"
+SCAFFOLD_JOIN = "ci.yml:scaffold"
+STATIC_CHECK_STEP = "static_checks"
+STATIC_CHECK_COMMANDS = (
+    "uv lock --check",
+    "uv run --no-sync ruff format --check .",
+    "uv run --no-sync ruff check --ignore-noqa .",
+    "uv run --no-sync pyright",
+    "pnpm --dir web run typecheck",
+    "pnpm --dir web run lint",
+    "pnpm --dir web run build",
+)
+STATIC_CHECK_MARKERS = (
+    "uv lock --check",
+    "ruff format",
+    "ruff check",
+    "uv run --no-sync pyright",
+)
+STATIC_CHECK_CONDITIONS = {
+    STATIC_CHECK_STEP: f"${{{{ matrix.lane == '{STATIC_CHECK_LANE}' }}}}",
+    "tests": f"${{{{ matrix.lane != '{STATIC_CHECK_LANE}' }}}}",
+}
+STATIC_CHECK_STEP_KEYS = frozenset({"name", "id", "if", "run"})
+LANE_JOB_DEFAULTS = {"run": {"shell": "bash"}}
+PLANNED_LANE_COUNTS = range(1, MAXIMUM_LANES + 1)
+LANE_TEST_COMMAND = "scaffold_lane.sh tests"
+MACOS = "macos-15"
+MACOS_PARALLEL_LIMIT = 2
 MATRIX_REFERENCE = re.compile(r"matrix\.([\w-]+)")
 MATRIX_VALUE = re.compile(r"\$\{\{ matrix\.([\w-]+) \}\}")
 STEP_OUTCOME = re.compile(r"steps\.([\w-]+)\.outcome")
@@ -512,7 +548,8 @@ def expected_outcome(step: dict[str, object], scenario: dict[str, str]) -> str:
     condition = str(step.get("if", ""))
     for key, value in scenario.items():
         admitted = re.findall(rf"matrix\.{re.escape(key)} == '([^']*)'", condition)
-        if admitted and value not in admitted:
+        excluded = re.findall(rf"matrix\.{re.escape(key)} != '([^']*)'", condition)
+        if (admitted and value not in admitted) or value in excluded:
             return "skipped"
     return "success"
 
@@ -1396,6 +1433,350 @@ def test_computed_matrices_come_only_from_their_lane_plan_output() -> None:
     workflows = repository_workflows()
 
     violations = computed_matrix_violations(workflows)
+
+    assert violations == []
+
+
+def ci_jobs(workflows: Workflows) -> dict[str, dict[str, object]]:
+    return dict(jobs_of({"ci.yml": workflows["ci.yml"]}))
+
+
+def sample_plan() -> Plan:
+    return matrix_rows(SAMPLE_LANE_COUNTS)
+
+
+def uniform_plan(count: int) -> Plan:
+    return matrix_rows(
+        {environment_key(system, python): count for system, python, _ in ENVIRONMENTS}
+    )
+
+
+def required_jobs(jobs: dict[str, dict[str, object]], location: str) -> set[str]:
+    workflow = location.partition(":")[0]
+    required: set[str] = set()
+    pending = [location]
+    while pending:
+        for need in needs_of(jobs.get(pending.pop(), {})):
+            needed = f"{workflow}:{need}"
+            if needed not in required:
+                required.add(needed)
+                pending.append(needed)
+    return required
+
+
+def runs_static_checks(step: dict[str, object]) -> bool:
+    run = str(step.get("run", ""))
+    return any(marker in run for marker in STATIC_CHECK_MARKERS)
+
+
+def misplaced_static_checks(jobs: dict[str, dict[str, object]]) -> list[str]:
+    return [
+        f"{location}: static checks in step {item_name(step, index)}"
+        for location, job in jobs.items()
+        for index, step in enumerate(step_list(job))
+        if runs_static_checks(step)
+        and (
+            location not in COMPUTED_MATRIX_ROWS or step.get("id") != STATIC_CHECK_STEP
+        )
+    ]
+
+
+def lane_job_static_violations(location: str, job: dict[str, object]) -> list[str]:
+    steps = {str(step["id"]): step for step in step_list(job) if "id" in step}
+    static = steps.get(STATIC_CHECK_STEP, {})
+    commands = tuple(str(static.get("run", "")).splitlines())
+    return [
+        *(
+            [f"{location}: static check commands {commands}"]
+            if commands != STATIC_CHECK_COMMANDS
+            else []
+        ),
+        *(
+            [f"{location}: static check step keys {sorted(static)}"]
+            if frozenset(static) != STATIC_CHECK_STEP_KEYS
+            else []
+        ),
+        *(
+            [f"{location}: defaults {job.get('defaults')}"]
+            if job.get("defaults") != LANE_JOB_DEFAULTS
+            else []
+        ),
+        *(
+            f"{location}: {identity} runs {steps.get(identity, {}).get('if')}"
+            for identity, condition in STATIC_CHECK_CONDITIONS.items()
+            if steps.get(identity, {}).get("if") != condition
+        ),
+    ]
+
+
+def unrequired_static_check_jobs(
+    jobs: dict[str, dict[str, object]], plan: Plan
+) -> list[str]:
+    required = required_jobs(jobs, SCAFFOLD_JOIN)
+    runners = {
+        platform: location for location, platform in COMPUTED_MATRIX_ROWS.items()
+    }
+    violations: list[str] = []
+    for system, python, _ in ENVIRONMENTS:
+        status = f"Scaffold ({system}, Python {python})"
+        planned = [
+            platform
+            for platform, rows in plan.items()
+            for row in rows
+            if (row["lane"], row["os"], row["python"])
+            == (STATIC_CHECK_LANE, system, python)
+        ]
+        if len(planned) != 1:
+            violations.append(f"{status}: {len(planned)} static-check jobs")
+        violations.extend(
+            f"{status}: does not require {runners[platform]}"
+            for platform in planned
+            if runners[platform] not in required
+        )
+    return violations
+
+
+def static_check_violations(workflows: Workflows, plan: Plan) -> list[str]:
+    jobs = ci_jobs(workflows)
+    return [
+        *misplaced_static_checks(jobs),
+        *(
+            violation
+            for location in COMPUTED_MATRIX_ROWS
+            for violation in lane_job_static_violations(location, jobs[location])
+        ),
+        *unrequired_static_check_jobs(jobs, plan),
+    ]
+
+
+def admitted_macos_parallelism(job: dict[str, object]) -> bool:
+    limit = table(job.get("strategy", {})).get("max-parallel")
+    return type(limit) is int and 1 <= limit <= MACOS_PARALLEL_LIMIT
+
+
+def runs_scaffold_work(job: dict[str, object]) -> bool:
+    return any(
+        runs_static_checks(step) or LANE_TEST_COMMAND in str(step.get("run", ""))
+        for step in step_list(job)
+    )
+
+
+def macos_admission_violations(workflows: Workflows, plan: Plan) -> list[str]:
+    jobs = ci_jobs(workflows)
+    return [
+        *(
+            f"{platform} plan: {row['os']} {row['lane']}"
+            for platform, rows in plan.items()
+            for row in rows
+            if (row["os"] == MACOS) != (platform == "macos")
+        ),
+        *(
+            f"{location}: scaffold work outside the planned lane matrices"
+            for location, job in jobs.items()
+            if location not in COMPUTED_MATRIX_ROWS and runs_scaffold_work(job)
+        ),
+        *(
+            f"{location}: strategy {job.get('strategy')}"
+            for location, job in jobs.items()
+            if COMPUTED_MATRIX_ROWS.get(location) == "macos"
+            and not admitted_macos_parallelism(job)
+        ),
+        *(
+            f"{location}: job concurrency {job['concurrency']}"
+            for location, job in jobs.items()
+            if location in COMPUTED_MATRIX_ROWS and "concurrency" in job
+        ),
+    ]
+
+
+def lane_job_step(workflows: Workflows, job: str, identity: str) -> dict[str, object]:
+    steps = step_list(job_of(workflows, "ci.yml", job))
+    return next(step for step in steps if step.get("id") == identity)
+
+
+def stop_requiring_lanes(workflows: Workflows, job: str, result: str) -> None:
+    evidence = job_of(workflows, "ci.yml", "scaffold-evidence")
+    evidence["needs"] = [need for need in needs_of(evidence) if need != job]
+    del table(step_list(evidence)[-1]["env"])[result]
+
+
+def stop_requiring_the_macos_lanes(workflows: Workflows, plan: Plan) -> None:
+    stop_requiring_lanes(workflows, "scaffold-tests-macos", "MACOS_LANES_RESULT")
+
+
+def stop_requiring_the_linux_lanes(workflows: Workflows, plan: Plan) -> None:
+    stop_requiring_lanes(workflows, "scaffold-tests", "LANES_RESULT")
+
+
+def drop_the_macos_static_check_row(workflows: Workflows, plan: Plan) -> None:
+    plan["macos"] = [row for row in plan["macos"] if row["lane"] != STATIC_CHECK_LANE]
+
+
+def drop_the_newest_python_static_check_row(workflows: Workflows, plan: Plan) -> None:
+    plan["linux"] = [
+        row
+        for row in plan["linux"]
+        if (row["lane"], row["python"]) != (STATIC_CHECK_LANE, "3.15.0")
+    ]
+
+
+def run_the_static_checks_in_the_local_runtime_lane(
+    workflows: Workflows, plan: Plan
+) -> None:
+    step = lane_job_step(workflows, "scaffold-tests-macos", STATIC_CHECK_STEP)
+    step["if"] = "${{ matrix.lane == 'local-runtime' }}"
+
+
+def add_the_static_checks_to_the_test_step(workflows: Workflows, plan: Plan) -> None:
+    step = lane_job_step(workflows, "scaffold-tests", "tests")
+    step["run"] = f"uv run --no-sync pyright\n{step['run']}"
+
+
+def narrow_a_static_check_command(workflows: Workflows, plan: Plan) -> None:
+    step = lane_job_step(workflows, "scaffold-tests-macos", STATIC_CHECK_STEP)
+    rewrite_run(step, "uv run --no-sync pyright", "uv run --no-sync pyright src")
+
+
+def run_tests_in_the_static_check_rows(workflows: Workflows, plan: Plan) -> None:
+    del lane_job_step(workflows, "scaffold-tests", "tests")["if"]
+
+
+def let_only_the_last_static_check_decide(workflows: Workflows, plan: Plan) -> None:
+    step = lane_job_step(workflows, "scaffold-tests-macos", STATIC_CHECK_STEP)
+    step["shell"] = "bash {0}"
+
+
+def run_the_static_checks_in_another_directory(
+    workflows: Workflows, plan: Plan
+) -> None:
+    step = lane_job_step(workflows, "scaffold-tests", STATIC_CHECK_STEP)
+    step["working-directory"] = "web"
+
+
+def override_the_static_check_environment(workflows: Workflows, plan: Plan) -> None:
+    step = lane_job_step(workflows, "scaffold-tests-macos", STATIC_CHECK_STEP)
+    step["env"] = {"KORA_STATIC_CHECKS": "partial"}
+
+
+def run_the_lane_jobs_under_another_shell(workflows: Workflows, plan: Plan) -> None:
+    job_of(workflows, "ci.yml", "scaffold-tests")["defaults"] = {
+        "run": {"shell": "bash {0}"}
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        stop_requiring_the_macos_lanes,
+        stop_requiring_the_linux_lanes,
+        drop_the_macos_static_check_row,
+        drop_the_newest_python_static_check_row,
+        run_the_static_checks_in_the_local_runtime_lane,
+        add_the_static_checks_to_the_test_step,
+        narrow_a_static_check_command,
+        run_tests_in_the_static_check_rows,
+        let_only_the_last_static_check_decide,
+        run_the_static_checks_in_another_directory,
+        override_the_static_check_environment,
+        run_the_lane_jobs_under_another_shell,
+    ],
+)
+def test_static_check_placement_refuses_a_mutated_workflow(
+    mutation: PlanMutation,
+) -> None:
+    workflows, plan = repository_workflows(), sample_plan()
+    mutation(workflows, plan)
+
+    violations = static_check_violations(workflows, plan)
+
+    assert violations
+
+
+@pytest.mark.parametrize("count", PLANNED_LANE_COUNTS)
+def test_each_protected_scaffold_join_requires_its_static_check_job(
+    count: int,
+) -> None:
+    workflows, plan = repository_workflows(), uniform_plan(count)
+
+    violations = static_check_violations(workflows, plan)
+
+    assert violations == []
+
+
+def raise_the_macos_parallel_limit(workflows: Workflows, plan: Plan) -> None:
+    job = job_of(workflows, "ci.yml", "scaffold-tests-macos")
+    table(job["strategy"])["max-parallel"] = MACOS_PARALLEL_LIMIT + 1
+
+
+def drop_the_macos_parallel_limit(workflows: Workflows, plan: Plan) -> None:
+    job = job_of(workflows, "ci.yml", "scaffold-tests-macos")
+    del table(job["strategy"])["max-parallel"]
+
+
+def run_the_macos_static_checks_in_their_own_job(
+    workflows: Workflows, plan: Plan
+) -> None:
+    step = dict(lane_job_step(workflows, "scaffold-tests-macos", STATIC_CHECK_STEP))
+    del step["if"]
+    table(workflows["ci.yml"]["jobs"])["static-checks-macos"] = {
+        "name": "Static checks (macos-15, Python 3.11.17)",
+        "runs-on": MACOS,
+        "steps": [step],
+    }
+
+
+def run_a_macos_lane_in_its_own_job(workflows: Workflows, plan: Plan) -> None:
+    table(workflows["ci.yml"]["jobs"])["storage-macos"] = {
+        "runs-on": MACOS,
+        "steps": [{"run": f"bash scripts/ci/{LANE_TEST_COMMAND}"}],
+    }
+
+
+def plan_the_macos_static_checks_into_the_linux_matrix(
+    workflows: Workflows, plan: Plan
+) -> None:
+    moved = [row for row in plan["macos"] if row["lane"] == STATIC_CHECK_LANE]
+    plan["macos"] = [row for row in plan["macos"] if row not in moved]
+    plan["linux"] = [*moved, *plan["linux"]]
+
+
+def queue_the_macos_lanes_in_a_concurrency_group(
+    workflows: Workflows, plan: Plan
+) -> None:
+    job_of(workflows, "ci.yml", "scaffold-tests-macos")["concurrency"] = {
+        "group": "macos-scaffold"
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        raise_the_macos_parallel_limit,
+        drop_the_macos_parallel_limit,
+        run_the_macos_static_checks_in_their_own_job,
+        run_a_macos_lane_in_its_own_job,
+        plan_the_macos_static_checks_into_the_linux_matrix,
+        queue_the_macos_lanes_in_a_concurrency_group,
+    ],
+)
+def test_macos_admission_check_refuses_a_mutated_workflow(
+    mutation: PlanMutation,
+) -> None:
+    workflows, plan = repository_workflows(), sample_plan()
+    mutation(workflows, plan)
+
+    violations = macos_admission_violations(workflows, plan)
+
+    assert violations
+
+
+@pytest.mark.parametrize("count", PLANNED_LANE_COUNTS)
+def test_macos_scaffold_jobs_and_static_checks_run_at_most_two_at_a_time(
+    count: int,
+) -> None:
+    workflows, plan = repository_workflows(), uniform_plan(count)
+
+    violations = macos_admission_violations(workflows, plan)
 
     assert violations == []
 

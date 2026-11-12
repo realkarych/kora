@@ -12,32 +12,37 @@ require_each() {
   done
 }
 
-require_scaffold_lane() {
-  test "$DEPENDENCIES_OUTCOME" = success
+require_test_lane() {
+  test "$STATIC_OUTCOME" = skipped
   test "$TESTS_OUTCOME" = success
   test "$UPLOAD_OUTCOME" = success
+}
+
+require_scaffold_lane() {
+  test "$DEPENDENCIES_OUTCOME" = success
+  test "$FRONTEND_OUTCOME" = success
   test "$FINAL_SYNC_OUTCOME" = success
   test "$WORKFLOW_CANCELLED" = false
   case "$KORA_SCAFFOLD_LANE" in
-    local-runtime)
-      test "$PREPARATION_OUTCOME" = success
-      test "$TEARDOWN_OUTCOME" = success
-      ;;
-    *)
+    general-[1-8]|storage)
+      require_test_lane
       test "$PREPARATION_OUTCOME" = skipped
       test "$TEARDOWN_OUTCOME" = skipped
-      ;;
-  esac
-  case "$KORA_SCAFFOLD_LANE" in
-    general-[1-8]|storage)
-      test "$FRONTEND_OUTCOME" = success
-      test "$STATIC_OUTCOME" = skipped
       test "$DISTRIBUTIONS_OUTCOME" = skipped
       ;;
     local-runtime)
-      test "$FRONTEND_OUTCOME" = success
-      test "$STATIC_OUTCOME" = success
+      require_test_lane
+      test "$PREPARATION_OUTCOME" = success
+      test "$TEARDOWN_OUTCOME" = success
       test "$DISTRIBUTIONS_OUTCOME" = success
+      ;;
+    static-checks)
+      test "$STATIC_OUTCOME" = success
+      test "$TESTS_OUTCOME" = skipped
+      test "$UPLOAD_OUTCOME" = skipped
+      test "$PREPARATION_OUTCOME" = skipped
+      test "$TEARDOWN_OUTCOME" = skipped
+      test "$DISTRIBUTIONS_OUTCOME" = skipped
       ;;
     *) exit 1 ;;
   esac
