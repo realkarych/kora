@@ -1,8 +1,4 @@
 import sys
-from collections.abc import Generator
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from types import BuiltinFunctionType, CodeType, FrameType, MethodDescriptorType
 from typing import cast
 
 import pytest
@@ -33,6 +29,7 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import DIGEST, Seeder
 from tests.ir.document_cases import document
 from tests.ir.support import deep_data
+from tests.support.call_observation import ObservedCalls, observing_calls
 
 INTERPRETATION = "kora.graph-parameters.v1"
 CLOSED_EMPTY: JsonObject = {
@@ -204,50 +201,16 @@ def test_graph_parameter_binding_requires_positive_integer_budget(budget: int) -
     )
 
 
-@dataclass
-class BindingCalls:
-    functions: list[CodeType] = field(default_factory=list[CodeType])
-    builtins: list[str] = field(default_factory=list[str])
-
-
-def kora_frame(frame: FrameType) -> bool:
-    module: object = frame.f_globals.get("__name__")
-    return isinstance(module, str) and (module == "kora" or module.startswith("kora."))
-
-
-def made_by_binding(caller: FrameType | None) -> bool:
-    while caller is not None and kora_frame(caller):
-        if caller.f_code is build_graph_parameter_binding.__code__:
-            return True
-        caller = caller.f_back
-    return False
-
-
-@contextmanager
-def observing_binding(calls: BindingCalls) -> Generator[None]:
-    previous = sys.getprofile()
-
-    def observe(frame: FrameType, event: str, argument: object) -> None:
-        if event == "call" and made_by_binding(frame.f_back):
-            calls.functions.append(frame.f_code)
-        elif event == "c_call" and made_by_binding(frame):
-            assert isinstance(argument, BuiltinFunctionType | MethodDescriptorType)
-            calls.builtins.append(argument.__qualname__)
-
-    sys.setprofile(observe)
-    try:
-        yield
-    finally:
-        sys.setprofile(previous)
-
-
 def test_graph_parameter_binding_admits_root_before_copy_or_visitation() -> None:
     pinned = parameter_document({str(index): 0 for index in range(10_000)})
     assert pinned.graph.params is not MISSING
     cast(dict[str, object], pinned.graph.params)["late invalid"] = object()
-    calls = BindingCalls()
+    calls = ObservedCalls()
 
-    with pytest.raises(GraphValueRejected) as failure, observing_binding(calls):
+    with (
+        pytest.raises(GraphValueRejected) as failure,
+        observing_calls(calls, build_graph_parameter_binding.__code__),
+    ):
         build_graph_parameter_binding(pinned, max_encoded_bytes=64)
 
     assert failure.value.reason is GraphValueFailure.BUDGET
