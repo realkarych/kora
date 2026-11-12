@@ -3,12 +3,20 @@ import pytest
 from kora.cel import PathSet
 from kora.ir import export_ir
 from kora.ir.approval_compilation import ApprovalPrerequisite, checked_approval_sites
-from kora.ir.branch_expressions import checked_branch_sites
+from kora.ir.branch_expressions import (
+    BranchExpressionResult,
+    checked_branch_sites,
+    validate_branch_expressions,
+)
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import FieldPath
 from kora.ir.json import JsonObject
-from kora.ir.retry_expressions import checked_retry_sites
+from kora.ir.retry_expressions import (
+    RetryExpressionResult,
+    checked_retry_sites,
+    validate_retry_expressions,
+)
 from kora.ir.trigger_expressions import (
     checked_sensor_trigger_sites,
     validate_sensor_trigger_expressions,
@@ -84,6 +92,26 @@ def unused_failures(*failures: dict[str, object]) -> GraphDocument:
 
 def approval_path(*owner: str) -> FieldPath:
     return (*owner, "config", "approve_when")
+
+
+def branch_with_unused_failure(
+    failure: dict[str, object], *, schema: bool = False
+) -> GraphDocument:
+    return document_for(
+        params=PRIVATE_SCHEMA if schema else None,
+        nodes={"first": branch('"x".matches("^x$")')},
+        bodies={"unused": {"nodes": {"failure": failure}}},
+    )
+
+
+def retry_with_unused_failure(
+    failure: dict[str, object], *, schema: bool = False
+) -> GraphDocument:
+    return document_for(
+        params=PRIVATE_SCHEMA if schema else None,
+        nodes={"first": retrying('"x".matches("^x$")')},
+        bodies={"unused": {"nodes": {"failure": failure}}},
+    )
 
 
 def test_approval_sites_anchor_generated_defaults_and_owning_bodies() -> None:
@@ -241,6 +269,51 @@ def test_branch_sites_include_dormant_reasons_and_every_stored_body() -> None:
     assert export_ir(document) == original
 
 
+def test_branch_sites_return_the_ordinary_diagnostic_without_a_partial_inventory() -> (
+    None
+):
+    typed = branch_with_unused_failure(branch("1"))
+    syntax = branch_with_unused_failure(branch("true &&"))
+    context = branch_with_unused_failure(
+        branch("inputs.missing", inputs=unavailable_inputs())
+    )
+    schema = branch_with_unused_failure(branch("params.ok"), schema=True)
+
+    typed_result = checked_branch_sites(typed, max_declarations=6)
+    syntax_result = checked_branch_sites(syntax, max_declarations=6)
+    context_result = checked_branch_sites(context, max_declarations=6)
+    schema_result = checked_branch_sites(schema, max_declarations=6)
+
+    assert typed_result == validate_branch_expressions(typed)
+    assert syntax_result == validate_branch_expressions(syntax)
+    assert context_result == validate_branch_expressions(context)
+    assert schema_result == validate_branch_expressions(schema)
+    assert isinstance(typed_result, BranchExpressionResult)
+    assert typed_result.branch_expressions_complete
+    assert not typed_result.branch_expressions_valid
+    assert len(typed_result.diagnostics.errors) == 1
+    assert typed_result.diagnostics.errors[0].path == (
+        "graph",
+        "subgraphs",
+        "unused",
+        "nodes",
+        "failure",
+        "config",
+        "cases",
+        0,
+        "when",
+    )
+    assert isinstance(syntax_result, BranchExpressionResult)
+    assert syntax_result.syntax_unresolved == 1
+    assert isinstance(context_result, BranchExpressionResult)
+    assert context_result.context_unresolved == 1
+    assert isinstance(schema_result, BranchExpressionResult)
+    assert schema_result.schema_unresolved == 1
+    assert not syntax_result.branch_expressions_valid
+    assert not context_result.branch_expressions_valid
+    assert not schema_result.branch_expressions_valid
+
+
 def test_wait_sites_check_event_and_poll_fields_and_keep_omitted_matches_absent() -> (
     None
 ):
@@ -343,6 +416,64 @@ def test_retry_sites_check_node_and_body_predicates_and_keep_omissions_absent() 
     assert MARKER not in repr(sites)
     assert over_capacity is None
     assert export_ir(document) == original
+
+
+def test_retry_sites_return_the_ordinary_diagnostic_without_a_partial_inventory() -> (
+    None
+):
+    typed = retry_with_unused_failure(retrying("1"))
+    syntax = retry_with_unused_failure(retrying("true &&"))
+    context = retry_with_unused_failure(
+        retrying("inputs.missing", inputs=unavailable_inputs())
+    )
+    schema = retry_with_unused_failure(retrying("params.ok"), schema=True)
+    body = document_for(
+        nodes={"first": retrying('"x".matches("^x$")')},
+        bodies={
+            "unused": {
+                "retry": {"max_attempts": 1, "predicate": "has(outputs.value)"},
+                "nodes": {"timer": node()},
+            }
+        },
+    )
+
+    typed_result = checked_retry_sites(typed, max_declarations=4)
+    syntax_result = checked_retry_sites(syntax, max_declarations=4)
+    context_result = checked_retry_sites(context, max_declarations=4)
+    schema_result = checked_retry_sites(schema, max_declarations=4)
+    body_result = checked_retry_sites(body, max_declarations=4)
+
+    assert typed_result == validate_retry_expressions(typed)
+    assert syntax_result == validate_retry_expressions(syntax)
+    assert context_result == validate_retry_expressions(context)
+    assert schema_result == validate_retry_expressions(schema)
+    assert body_result == validate_retry_expressions(body)
+    assert isinstance(typed_result, RetryExpressionResult)
+    assert typed_result.retry_expressions_complete
+    assert not typed_result.retry_expressions_valid
+    assert len(typed_result.diagnostics.errors) == 1
+    assert typed_result.diagnostics.errors[0].path == (
+        "graph",
+        "subgraphs",
+        "unused",
+        "nodes",
+        "failure",
+        "retry",
+        "predicate",
+    )
+    assert isinstance(syntax_result, RetryExpressionResult)
+    assert syntax_result.syntax_unresolved == 1
+    assert isinstance(context_result, RetryExpressionResult)
+    assert context_result.context_unresolved == 1
+    assert isinstance(schema_result, RetryExpressionResult)
+    assert schema_result.schema_unresolved == 1
+    assert isinstance(body_result, RetryExpressionResult)
+    assert body_result.context_unresolved == 1
+    assert not body_result.retry_expressions_complete
+    assert not syntax_result.retry_expressions_valid
+    assert not context_result.retry_expressions_valid
+    assert not schema_result.retry_expressions_valid
+    assert not body_result.retry_expressions_valid
 
 
 def test_sensor_trigger_sites_admit_every_trigger_before_checking() -> None:
