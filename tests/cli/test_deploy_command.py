@@ -7,19 +7,19 @@ from pathlib import Path
 
 import pytest
 
-from kora.cel_eval.thread import Evaluator
+from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.ir.json import JsonObject
 from kora.models.errors import ApiErrorEnvelope
 from kora.models.graphs import DeployResponse
-from tests.api.deployment_cases import HARNESS, NAMESPACE, evaluator, skeleton_ir
+from tests.api.deployment_cases import HARNESS, NAMESPACE, preparer, skeleton_ir
 from tests.api.support import api_capture, application, deployment_services
 from tests.client.support import running_app
 from tests.plugins.authentication.support import seed_case
 from tests.support.observability import ProcessResult
 
-__all__ = ["api_capture", "evaluator"]
+__all__ = ["api_capture", "preparer"]
 
 PROCESS_DEADLINE_SECONDS = 60.0
 
@@ -63,11 +63,14 @@ def closed_origin() -> str:
 
 @pytest.mark.asyncio
 async def test_cli_deploy_without_files(
-    database: Database, evaluator: Evaluator, api_capture: Capture, tmp_path: Path
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    tmp_path: Path,
 ) -> None:
     token = await bearer(database)
     app = application(
-        database, api_capture, deployment_services(database, evaluator, HARNESS)
+        database, api_capture, deployment_services(database, preparer, HARNESS)
     )
     graph = written(tmp_path, "skeleton.ir.json", skeleton_ir())
     refused = written(tmp_path, "refused.ir.json", skeleton_ir(harness="claude"))

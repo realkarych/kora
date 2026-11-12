@@ -6,6 +6,7 @@ from typing import cast
 import pytest_asyncio
 
 from kora.api.graph_deployment import PreparedDeployment, prepare_graph_deployment
+from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.api.graph_deployment_writer import (
     GraphDeploymentTarget,
     PublishedGraphVersion,
@@ -21,6 +22,7 @@ from kora.ir.json import JsonObject
 from kora.protocols.authentication import NamespaceGrant, Principal
 from tests.cel_eval.pattern_validation_scenarios import assert_settled
 from tests.db.seed import FakeClock, Seeder
+from tests.plugins.authentication.support import AuthorityClock
 
 HARNESS = "fake"
 NAMESPACE = "example"
@@ -166,3 +168,11 @@ async def publish(
         identifiers=IdentifierGenerator(FakeClock(AT).now),
         at=AT,
     )
+
+
+@pytest_asyncio.fixture
+async def preparer() -> AsyncGenerator[DeploymentPreparer]:
+    owner = EvaluationThread(load_binding())
+    async with DeploymentPreparer(AuthorityClock(), owner) as opened:
+        yield opened
+    assert_settled(owner)

@@ -5,7 +5,7 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
-from kora.cel_eval.thread import Evaluator
+from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.db.tables import graph, graph_version
@@ -16,7 +16,7 @@ from tests.api.deployment_cases import (
     GRAPH,
     HARNESS,
     NAMESPACE,
-    evaluator,
+    preparer,
     skeleton_ir,
 )
 from tests.api.support import (
@@ -27,7 +27,7 @@ from tests.api.support import (
 )
 from tests.plugins.authentication.support import seed_case
 
-__all__ = ["api_capture", "evaluator"]
+__all__ = ["api_capture", "preparer"]
 
 PATH = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/versions"
 EMPTY_FILE: JsonObject = {
@@ -71,11 +71,11 @@ def error_of(response: httpx.Response) -> ApiErrorEnvelope:
 
 @pytest.mark.asyncio
 async def test_deploy_route_publishes_and_reuses(
-    database: Database, evaluator: Evaluator, api_capture: Capture
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
 ) -> None:
     headers = await authorized(database)
     app = application(
-        database, api_capture, deployment_services(database, evaluator, HARNESS)
+        database, api_capture, deployment_services(database, preparer, HARNESS)
     )
 
     async with client_for(app) as client:
@@ -93,11 +93,11 @@ async def test_deploy_route_publishes_and_reuses(
 
 @pytest.mark.asyncio
 async def test_deploy_route_refuses_selector_mismatch(
-    database: Database, evaluator: Evaluator, api_capture: Capture
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
 ) -> None:
     headers = await authorized(database)
     app = application(
-        database, api_capture, deployment_services(database, evaluator, HARNESS)
+        database, api_capture, deployment_services(database, preparer, HARNESS)
     )
     mismatches = (
         (f"/api/v1/namespaces/{NAMESPACE}/graphs/other/versions", body()),
@@ -119,13 +119,13 @@ async def test_deploy_route_refuses_selector_mismatch(
 
 @pytest.mark.asyncio
 async def test_deploy_route_authorizes_before_body(
-    database: Database, evaluator: Evaluator, api_capture: Capture
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
 ) -> None:
     user = await authorized(database)
     service = await authorized(database, "service")
     foreign = await seed_case(database, "other")
     app = application(
-        database, api_capture, deployment_services(database, evaluator, HARNESS)
+        database, api_capture, deployment_services(database, preparer, HARNESS)
     )
     malformed = b"{not json"
     foreign_path = "/api/v1/namespaces/other/graphs/skeleton/versions"
@@ -154,11 +154,11 @@ async def test_deploy_route_authorizes_before_body(
 
 @pytest.mark.asyncio
 async def test_deploy_route_returns_document_findings(
-    database: Database, evaluator: Evaluator, api_capture: Capture
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
 ) -> None:
     headers = await authorized(database)
     app = application(
-        database, api_capture, deployment_services(database, evaluator, HARNESS)
+        database, api_capture, deployment_services(database, preparer, HARNESS)
     )
     oversized = json.dumps(body() | {"padding": "x" * (4 * 1024 * 1024)}).encode()
     requests: tuple[tuple[bytes, str | None], ...] = (

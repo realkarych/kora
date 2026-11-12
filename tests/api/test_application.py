@@ -6,14 +6,14 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from sqlalchemy import update
 
-from kora.cel_eval.thread import Evaluator
+from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.db.tables import api_token
 from kora.db.tokens import REVOKED
 from kora.ir.json import parse_json_object
 from kora.models.errors import ApiErrorEnvelope
-from tests.api.deployment_cases import HARNESS, evaluator
+from tests.api.deployment_cases import HARNESS, preparer
 from tests.api.support import (
     POISON,
     HttpCall,
@@ -27,7 +27,7 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import START
 from tests.plugins.authentication.support import seed_case
 
-__all__ = ["api_capture", "evaluator"]
+__all__ = ["api_capture", "preparer"]
 
 
 @pytest.mark.asyncio
@@ -379,11 +379,11 @@ async def test_catalog_and_dispatch_preserve_root_path(
 
 @pytest.mark.asyncio
 async def test_route_authorization_table_covers_every_operation(
-    api_capture: Capture, database: Database, evaluator: Evaluator
+    api_capture: Capture, database: Database, preparer: DeploymentPreparer
 ) -> None:
     probes = application(database, api_capture)
     app = application(
-        database, api_capture, deployment_services(database, evaluator, HARNESS)
+        database, api_capture, deployment_services(database, preparer, HARNESS)
     )
     framework = app.application
 
@@ -409,10 +409,10 @@ async def test_route_authorization_table_covers_every_operation(
 
 @pytest.mark.asyncio
 async def test_parity_client_side_operations(
-    api_capture: Capture, database: Database, evaluator: Evaluator
+    api_capture: Capture, database: Database, preparer: DeploymentPreparer
 ) -> None:
     framework = application(
-        database, api_capture, deployment_services(database, evaluator, HARNESS)
+        database, api_capture, deployment_services(database, preparer, HARNESS)
     ).application
     assert isinstance(framework, FastAPI)
 

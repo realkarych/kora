@@ -10,7 +10,7 @@ from starlette.types import ASGIApp, Message, Scope
 from kora.api.application import create_application
 from kora.api.exchange import COMPONENT, ApiExchange
 from kora.api.graph_deployment_route import GraphDeploymentServices
-from kora.cel_eval.thread import Evaluator
+from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.conformance.capture import Capture, captured
 from kora.db.connection import Database
 from kora.db.identifiers import IdentifierGenerator
@@ -55,11 +55,11 @@ def application(
 
 
 def deployment_services(
-    database: Database, evaluator: Evaluator, harness: str
+    database: Database, preparer: DeploymentPreparer, harness: str
 ) -> GraphDeploymentServices:
     return GraphDeploymentServices(
         database,
-        evaluator,
+        preparer,
         DeploymentSelection(harness),
         IdentifierGenerator(AuthorityClock().now),
     )

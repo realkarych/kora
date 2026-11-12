@@ -3,16 +3,16 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 
-from kora.cel_eval.thread import Evaluator
+from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.ir.json import parse_json_object
-from tests.api.deployment_cases import HARNESS, evaluator
+from tests.api.deployment_cases import HARNESS, preparer
 from tests.api.support import api_capture, application, deployment_services
 from tests.support.ast_modules import write_module
 from tests.support.parity import schema_operations, uncovered_operations
 
-__all__ = ["api_capture", "evaluator"]
+__all__ = ["api_capture", "preparer"]
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src"
 DEPLOY = ("POST", "/api/v1/namespaces/{}/graphs/{}/versions")
@@ -44,10 +44,10 @@ def synthetic_tree(root: Path, *, cli: bool, mcp: bool) -> Path:
 
 @pytest.mark.asyncio
 async def test_parity_operations_are_reachable(
-    api_capture: Capture, database: Database, evaluator: Evaluator
+    api_capture: Capture, database: Database, preparer: DeploymentPreparer
 ) -> None:
     app = application(
-        database, api_capture, deployment_services(database, evaluator, HARNESS)
+        database, api_capture, deployment_services(database, preparer, HARNESS)
     )
     framework = app.application
     assert isinstance(framework, FastAPI)

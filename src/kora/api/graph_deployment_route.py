@@ -17,19 +17,15 @@ from kora.api.errors import (
     request_rejection,
 )
 from kora.api.exchange import current_exchange
-from kora.api.graph_deployment import (
-    DeploymentFindings,
-    DeploymentRefusal,
-    prepare_graph_deployment,
-)
+from kora.api.graph_deployment import DeploymentFindings, DeploymentRefusal
 from kora.api.graph_deployment_limits import MAX_REQUEST_BYTES
+from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.api.graph_deployment_writer import (
     GraphDeploymentTarget,
     publish_graph_deployment,
 )
 from kora.api.responses import error_response
 from kora.cel_eval.errors import EvaluatorUnavailable
-from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.namespace_reads import granted_namespace_id
@@ -44,7 +40,7 @@ from kora.protocols.time import Clock
 @dataclass(frozen=True, slots=True)
 class GraphDeploymentServices:
     database: Database
-    evaluator: Evaluator
+    preparer: DeploymentPreparer
     selection: DeploymentSelection
     identifiers: IdentifierGenerator
 
@@ -102,6 +98,7 @@ async def _authorized_namespace(
 DeploymentHandler = Callable[[Request, str, str], Awaitable[Response]]
 REFUSALS: dict[DeploymentRefusal, RequestRejection] = {
     DeploymentRefusal.DOCUMENT: RequestRejection.DOCUMENT,
+    DeploymentRefusal.TOO_LARGE: RequestRejection.BYTE_LIMIT,
     DeploymentRefusal.SELECTORS: RequestRejection.SELECTORS,
 }
 
@@ -130,8 +127,8 @@ async def _deploy(
         request_graph=body.graph,
     )
     try:
-        outcome = await prepare_graph_deployment(
-            dict(body.ir), selectors, services.selection, services.evaluator
+        outcome = await services.preparer.prepare(
+            dict(body.ir), selectors, services.selection
         )
     except EvaluatorUnavailable:
         return dependency_unavailable(
@@ -146,7 +143,7 @@ async def _deploy(
     published = await publish_graph_deployment(
         services.database,
         outcome,
-        GraphDeploymentTarget(namespace_id, graph, principal),
+        GraphDeploymentTarget(namespace_id, principal),
         identifiers=services.identifiers,
         at=clock.now(),
     )
