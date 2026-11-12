@@ -2,7 +2,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-from kora.db.types import POSTGRESQL, collated_text
+from kora.db.types import POSTGRESQL, SQLITE, collated_text
 from kora.db.worker_registration_v1 import (
     DOMAIN_TABLE,
     EVENT_NAMESPACE_SCOPE,
@@ -18,11 +18,19 @@ depends_on: Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    if op.get_bind().dialect.name == POSTGRESQL:
+    dialect = op.get_bind().dialect.name
+    if dialect == POSTGRESQL:
         for column in ("incarnation_id", "execution_domain_id"):
             op.alter_column("worker", column, type_=collated_text(256))
     op.create_table(DOMAIN_TABLE, *domain_elements())
     op.create_table(INCARNATION_TABLE, *incarnation_elements())
+    if dialect == SQLITE:
+        with op.batch_alter_table(
+            "notification_delivery", reflect_kwargs={"resolve_fks": False}
+        ) as batch:
+            batch.drop_constraint(
+                "fk_notification_delivery_event_id_event", type_="foreignkey"
+            )
     with op.batch_alter_table("event", reflect_kwargs={"resolve_fks": False}) as batch:
         batch.alter_column(
             "namespace_id", existing_type=collated_text(26), nullable=True
@@ -30,6 +38,13 @@ def upgrade() -> None:
         batch.create_check_constraint(
             op.f("ck_event_namespace_scope"), EVENT_NAMESPACE_SCOPE
         )
+    if dialect == SQLITE:
+        with op.batch_alter_table(
+            "notification_delivery", reflect_kwargs={"resolve_fks": False}
+        ) as batch:
+            batch.create_foreign_key(
+                "fk_notification_delivery_event_id_event", "event", ["event_id"], ["id"]
+            )
 
 
 def downgrade() -> None:

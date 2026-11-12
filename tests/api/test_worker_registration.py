@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
+from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.client import KoraClient
 from kora.client.errors import ApiError
 from kora.conformance.capture import Capture
@@ -20,7 +21,8 @@ from kora.db.tables import (
 from kora.db.tokens import REVOKED
 from kora.engine.worker_registration import Registration, register_worker
 from kora.models.workers import WorkerRegistration
-from tests.api.support import HttpCall, api_capture, client_for
+from tests.api.deployment_cases import HARNESS, preparer
+from tests.api.support import HttpCall, api_capture, client_for, deployment_services
 from tests.api.worker_support import (
     CAPABILITIES,
     bearer,
@@ -32,7 +34,7 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import START
 from tests.plugins.authentication.support import AuthorityClock, seed_case
 
-__all__ = ["api_capture"]
+__all__ = ["api_capture", "preparer"]
 
 
 def changed(body: WorkerRegistration, **values: object) -> WorkerRegistration:
@@ -206,11 +208,16 @@ async def test_worker_registration_refuses_foreign_token_runtime_or_domain(
 
 @pytest.mark.asyncio
 async def test_worker_route_principal_separation(
-    database: Database, api_capture: Capture
+    database: Database, api_capture: Capture, preparer: DeploymentPreparer
 ) -> None:
     personal = await seed_case(database, "personal")
     service = await seed_case(database, "service", "service")
-    app = worker_application(database, api_capture, AuthorityClock())
+    app = worker_application(
+        database,
+        api_capture,
+        AuthorityClock(),
+        deployment=deployment_services(database, preparer, HARNESS),
+    )
     call = HttpCall(
         path="/api/v1/workers",
         method="POST",
@@ -218,15 +225,36 @@ async def test_worker_route_principal_separation(
             (b"authorization", (personal.request.authorization or "").encode()),
         ],
     )
+    deploy_call = HttpCall(
+        path="/api/v1/namespaces/example/graphs/example/versions",
+        method="POST",
+        headers=[
+            (b"authorization", (service.request.authorization or "").encode()),
+        ],
+    )
 
     await call.run(app)
+    await deploy_call.run(app)
     async with KoraClient("http://127.0.0.1", bearer(service), asgi_app=app) as client:
         with pytest.raises(ApiError) as refusal:
             await client.openapi()
+        registered = await client.register_worker(registration(service))
+    async with KoraClient("http://127.0.0.1", bearer(personal), asgi_app=app) as client:
+        schema = await client.openapi()
 
     assert call.status == 403
     assert call.receives == 0
+    assert deploy_call.status == 403
+    assert deploy_call.receives == 0
     assert refusal.value.code == "API005"
+    assert registered.worker_id == service.principal.owner
+    paths = schema["paths"]
+    assert isinstance(paths, dict)
+    assert set(paths) == {
+        "/healthz",
+        "/api/v1/namespaces/{ns}/graphs/{graph}/versions",
+        "/api/v1/workers",
+    }
 
 
 @pytest.mark.asyncio

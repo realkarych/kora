@@ -1,12 +1,17 @@
 import pytest
 from alembic import command
-from sqlalchemy import Connection, insert, select
+from sqlalchemy import Connection, delete, insert, select
 from sqlalchemy.exc import IntegrityError
 
 from kora.db.connection import Database, DatabaseSettings
 from kora.db.migrations import upgrade_database
 from kora.db.migrations.environment import alembic_config
-from kora.db.tables import event, worker
+from kora.db.tables import (
+    event,
+    notification_delivery,
+    notification_subscription,
+    worker,
+)
 from tests.db.seed import START, Seeder
 from tests.plugins.authentication.support import seed_case
 
@@ -27,9 +32,11 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
         async with database.transaction() as connection:
             seed = Seeder(connection)
             await seed.worker(case.principal.token_id)
+            event_id = seed.new_id()
+            subscription_id = seed.new_id()
             await connection.execute(
                 insert(event).values(
-                    id=seed.new_id(),
+                    id=event_id,
                     namespace_id=case.principal.namespaces[0].namespace_id,
                     kind="fixture.original",
                     actor={"kind": "system"},
@@ -38,8 +45,36 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
                     **seed.stamps(),
                 )
             )
+            await connection.execute(
+                insert(notification_subscription).values(
+                    id=subscription_id,
+                    namespace_id=case.principal.namespaces[0].namespace_id,
+                    revision=1,
+                    kinds=["fixture.original"],
+                    destination={},
+                    enabled=True,
+                    state="active",
+                    **seed.stamps(),
+                )
+            )
+            await connection.execute(
+                insert(notification_delivery).values(
+                    id=seed.new_id(),
+                    subscription_id=subscription_id,
+                    event_id=event_id,
+                    state="pending",
+                    attempts=0,
+                    subscription_revision_used=1,
+                    **seed.stamps(),
+                )
+            )
             before_worker = (await connection.execute(select(worker))).mappings().one()
             before_event = (await connection.execute(select(event))).mappings().one()
+            before_delivery = (
+                (await connection.execute(select(notification_delivery)))
+                .mappings()
+                .one()
+            )
 
         await database.close()
         result = await upgrade_database(empty_database_settings)
@@ -47,11 +82,20 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
         async with database.read_transaction() as connection:
             after_worker = (await connection.execute(select(worker))).mappings().one()
             after_event = (await connection.execute(select(event))).mappings().one()
+            after_delivery = (
+                (await connection.execute(select(notification_delivery)))
+                .mappings()
+                .one()
+            )
 
         assert result.from_revision == "0021"
         assert result.to_revision == "0022"
         assert after_worker == before_worker
         assert after_event == before_event
+        assert after_delivery == before_delivery
+        with pytest.raises(IntegrityError):
+            async with database.transaction() as connection:
+                await connection.execute(delete(event).where(event.c.id == event_id))
     finally:
         await database.close()
 

@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from kora.api.application import create_application
 from kora.api.exchange import ApiExchange
+from kora.api.graph_deployment_route import GraphDeploymentServices
 from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.conformance.authentication import AuthenticationCase
 from kora.conformance.capture import Capture
@@ -50,12 +51,15 @@ def worker_application(
     capture: Capture,
     clock: AuthorityClock,
     capabilities: RuntimeCapabilities = CAPABILITIES,
+    *,
+    deployment: GraphDeploymentServices | None = None,
 ) -> ApiExchange:
     return create_application(
         StaticTokenAuthenticator({}, database),
         capture.diagnostics,
         clock,
         RequestIds(),
+        deployment,
         worker_registration=WorkerRegistrationRoute(
             database,
             {"local": capabilities},
