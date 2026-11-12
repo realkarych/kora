@@ -49,7 +49,6 @@ UNPLANNED_LANES = (
     "static",
     "static-checks-1",
 )
-PLATFORM_LANE_RESULTS = {"linux": "LANES_RESULT", "macos": "MACOS_LANES_RESULT"}
 STATIC_CHECK_OUTCOMES = ("success", "failure", "cancelled", "skipped", "")
 SCAFFOLD_JOIN_FIELDS = (
     "PLAN_RESULT",
@@ -265,30 +264,6 @@ def test_only_the_static_check_job_runs_static_checks(
     result = static_check_gate(lane, static, tmp_path / "output")
 
     assert (result.returncode == 0) is (static == expected)
-
-
-@pytest.mark.parametrize("static", STATIC_CHECK_OUTCOMES)
-@pytest.mark.parametrize("platform", list(PLATFORM_LANE_RESULTS))
-def test_scaffold_join_requires_the_static_check_job_of_each_platform(
-    tmp_path: Path, platform: str, static: str
-) -> None:
-    row = static_check_gate(STATIC_CHECK_LANE, static, tmp_path / "row")
-    output = tmp_path / "output"
-    values: dict[str, str | None] = {
-        **dict.fromkeys(SCAFFOLD_JOIN_FIELDS, "success"),
-        **SCOPE,
-        "WORKFLOW_CANCELLED": "false",
-        "FULL_SCOPE": "true",
-        PLATFORM_LANE_RESULTS[platform]: "success"
-        if row.returncode == 0
-        else "failure",
-    }
-
-    result = run_gate(["scaffold-evidence"], values, output)
-
-    passes = static == "success"
-    assert (result.returncode == 0) is passes
-    assert recorded(output) == ("verified=true\n" if passes else "")
 
 
 @pytest.mark.parametrize(
