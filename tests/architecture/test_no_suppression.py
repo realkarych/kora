@@ -1948,7 +1948,7 @@ def gate_process_start(
         )
     if isinstance(node, ast.Call) and call_name(node) in DYNAMIC_IMPORT_CALLS:
         target = first_string_argument(node) or ""
-        return not GATE_PROCESS_START_MODULES.isdisjoint(target.split("."))
+        return not GATE_PROCESS_START_NAMES.isdisjoint(re.split(r"[.:]", target))
     return isinstance(
         node, ast.Attribute | ast.Call | ast.Subscript
     ) and named_api_reference(node, getters, GATE_PROCESS_START_NAMES)
@@ -2141,6 +2141,9 @@ GATE_PROCESS_STARTS: dict[str, str] = {
     "subprocess_getter": "getattr(asyncio, 'subprocess')\n",
     "subprocess_dunder_import": "__import__('subprocess')\n",
     "subprocess_import_module": "importlib.import_module('subprocess')\n",
+    "subprocess_resolve_name": "pkgutil.resolve_name('subprocess:run')\n",
+    "fork_resolve_name": "pkgutil.resolve_name('os:fork')\n",
+    "fork_resolve_dotted": "pkgutil.resolve_name('os.fork')\n",
     "pty": "import pty\n",
     "multiprocessing": "import multiprocessing.pool\n",
     "multiprocessing_from": "from multiprocessing.pool import Pool\n",
