@@ -51,13 +51,14 @@ fi
 
 acquire="$(dirname -- "${BASH_SOURCE[0]}")/acquire.py"
 store="${RUNNER_TEMP:?}/kora-acquisitions"
-archive=$(python3 "$acquire" fetch "$store" "uv-$version-$target")
 python3 "$acquire" fetch "$store" "cpython-$python_version-$target" > /dev/null
 printf 'UV_PYTHON_INSTALL_MIRROR=file://%s\n' "$store" >> "${GITHUB_ENV:?}"
 if [[ $existing == true ]]; then
   printf 'Using the existing uv %s tool cache entry\n' "$version"
   exit 0
 fi
+
+archive=$(python3 "$acquire" fetch "$store" "uv-$version-$target")
 
 mkdir -p -- "$version_dir"
 staging=$(mktemp -d "$version_dir/.kora-uv.XXXXXXXX")

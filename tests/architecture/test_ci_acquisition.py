@@ -1,7 +1,11 @@
 import asyncio
 import hashlib
 import io
+import os
+import re
 import shutil
+import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -12,12 +16,19 @@ import pytest
 from scripts.ci.acquire import (
     ARTIFACTS,
     ATTEMPTS,
+    BUDGET_LEDGER,
+    COMMAND_RESERVE_SECONDS,
+    FETCH_RESERVE_SECONDS,
+    JOB_BUDGET_SECONDS,
+    MAX_COMMAND_SECONDS,
     RETRY_SPACING_SECONDS,
     AcquisitionError,
     Artifact,
     Transport,
+    bounded,
     fetch,
     main,
+    opened_budget,
     run_bounded,
 )
 from tests.support.https_fixture import (
@@ -31,10 +42,44 @@ from tests.support.https_fixture import (
     create_authority,
     https_server,
 )
+from tests.support.workflows import jobs_of, repository_workflows, step_list
 
 CONTENT = b"pinned fixture archive bytes"
 PLANTED_CREDENTIAL = "kora-fixture-credential-value"
 NAME = "fixture"
+ROOT = Path(__file__).resolve().parents[2]
+COMMAND_LIMIT = re.compile(r'acquire\.py"? run (\d+) --')
+FETCHING_SCRIPTS = {
+    "scripts/ci/setup_scaffold_node.sh": ("node-",),
+    "scripts/ci/setup_uv_cache.sh": ("uv-", "cpython-"),
+    "scripts/ci/check_links.sh": ("lychee-",),
+}
+COMMAND_SCRIPTS = {
+    "scripts/ci/apt_install.sh": "scripts/ci/apt_install.sh",
+    "prepare-local-runtime-fixtures.sh prepare": "scripts/ci/apt_install.sh",
+}
+DEADLINE_MARGIN_SECONDS = 120.0
+INVOCATION_ALLOWANCE_SECONDS = 5.0
+STOP_DEADLINE_SECONDS = 10.0
+LEADER = """import os
+import signal
+import subprocess
+import sys
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+follower = subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        "import signal\\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+        "signal.pause()\\n",
+    ]
+)
+with open(sys.argv[1], "w") as record:
+    record.write(f"{os.getpid()} {follower.pid}\\n")
+signal.pause()
+"""
 
 
 @dataclass
@@ -87,6 +132,7 @@ def acquire(
             pauses,
             output,
             errors,
+            store.parent / BUDGET_LEDGER,
         )
     )
     return Outcome(code, output.getvalue(), errors.getvalue())
@@ -262,6 +308,7 @@ def test_credentials_are_never_forwarded(tmp_path: Path, authority: Authority) -
                     Transport(curl(), home, authority.bundle),
                     RecordedPauses(),
                     io.StringIO(),
+                    opened_budget(tmp_path / BUDGET_LEDGER),
                 )
             )
 
@@ -334,18 +381,190 @@ def test_pinned_artifacts_name_exact_sources_and_hosts() -> None:
     assert all(artifact.url.startswith("https://") for artifact in ARTIFACTS.values())
     assert all(len(artifact.sha256) == 64 for artifact in ARTIFACTS.values())
     assert all(
-        artifact.attempt_seconds * ATTEMPTS + RETRY_SPACING_SECONDS * (ATTEMPTS - 1)
-        < 300
+        artifact.attempt_seconds + FETCH_RESERVE_SECONDS < JOB_BUDGET_SECONDS
         for artifact in ARTIFACTS.values()
+    )
+    assert MAX_COMMAND_SECONDS + COMMAND_RESERVE_SECONDS < JOB_BUDGET_SECONDS
+
+
+def test_job_budget_caps_attempts_across_invocations(
+    tmp_path: Path, authority: Authority
+) -> None:
+    ledger = tmp_path / BUDGET_LEDGER
+    ledger.write_text(f"{JOB_BUDGET_SECONDS - FETCH_RESERVE_SECONDS - 2}\n")
+    pauses = RecordedPauses()
+    started = time.monotonic()
+
+    with https_server(authority, [Stall(len(CONTENT))]) as origin:
+        outcome = acquire(
+            tmp_path / "store",
+            artifact_for(origin, attempt_seconds=30.0),
+            authority,
+            pauses,
+        )
+        elapsed = time.monotonic() - started
+
+    spent = float(ledger.read_text())
+    assert outcome.code == 1
+    assert outcome.errors.endswith(
+        f"The job acquisition budget of {JOB_BUDGET_SECONDS:g} s is exhausted; "
+        f"{NAME} was not acquired.\n"
+    )
+    assert len(origin.requests) == 1
+    assert pauses.seconds == []
+    assert elapsed < 15.0
+    assert JOB_BUDGET_SECONDS - FETCH_RESERVE_SECONDS <= spent <= JOB_BUDGET_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("ledger_text", "message"),
+    [
+        (f"{JOB_BUDGET_SECONDS}\n", "acquisition budget of 240 s is exhausted"),
+        ("not a duration\n", "is invalid"),
+        ("-1\n", "is invalid"),
+    ],
+    ids=["exhausted", "invalid", "negative"],
+)
+@pytest.mark.parametrize("mode", ["fetch", "run"])
+def test_spent_or_invalid_budget_refuses_before_any_acquisition(
+    tmp_path: Path, authority: Authority, ledger_text: str, message: str, mode: str
+) -> None:
+    ledger = tmp_path / BUDGET_LEDGER
+    ledger.write_text(ledger_text)
+    marker = tmp_path / "ran"
+    command = (
+        "run",
+        "10",
+        "--",
+        sys.executable,
+        "-c",
+        "import pathlib, sys\npathlib.Path(sys.argv[1]).touch()\n",
+        str(marker),
+    )
+    errors = io.StringIO()
+
+    with https_server(authority, [Body(200, CONTENT)]) as origin:
+        code = asyncio.run(
+            main(
+                ("fetch", str(tmp_path / "store"), NAME)
+                if mode == "fetch"
+                else command,
+                {NAME: artifact_for(origin)},
+                authority.bundle,
+                RecordedPauses(),
+                io.StringIO(),
+                errors,
+                ledger,
+            )
+        )
+
+    assert code == 1
+    assert message in errors.getvalue()
+    assert origin.requests == []
+    assert not marker.exists()
+
+
+def test_missing_job_directory_is_refused() -> None:
+    errors = io.StringIO()
+
+    code = asyncio.run(
+        main(
+            ("run", "10", "--", "true"),
+            ARTIFACTS,
+            None,
+            RecordedPauses(),
+            io.StringIO(),
+            errors,
+            None,
+        )
+    )
+
+    assert code == 1
+    assert errors.getvalue().startswith("RUNNER_TEMP must name")
+
+
+def worst_case(limit: float, reserve: float) -> float:
+    return ATTEMPTS * (limit + reserve) + (ATTEMPTS - 1) * RETRY_SPACING_SECONDS
+
+
+def command_worst_cases(text: str) -> list[float]:
+    return [
+        worst_case(float(limit), COMMAND_RESERVE_SECONDS)
+        for limit in COMMAND_LIMIT.findall(text)
+    ]
+
+
+def fetch_worst_case(prefix: str) -> float:
+    return max(
+        worst_case(artifact.attempt_seconds, FETCH_RESERVE_SECONDS)
+        for name, artifact in ARTIFACTS.items()
+        if name.startswith(prefix)
     )
 
 
+def step_worst_cases(run: str) -> list[float]:
+    cases = command_worst_cases(run)
+    for script, prefixes in FETCHING_SCRIPTS.items():
+        if script in run:
+            cases.extend(fetch_worst_case(prefix) for prefix in prefixes)
+    for marker, script in COMMAND_SCRIPTS.items():
+        if marker in run:
+            cases.extend(command_worst_cases((ROOT / script).read_text()))
+    return cases
+
+
+def test_every_acquiring_script_is_accounted_for() -> None:
+    scripts = sorted((ROOT / "scripts/ci").glob("*.sh"))
+
+    acquiring = {
+        str(path.relative_to(ROOT))
+        for path in scripts
+        if "acquire.py" in path.read_text()
+    }
+    installing = {
+        str(path.relative_to(ROOT))
+        for path in scripts
+        if "apt_install.sh" in path.read_text()
+    }
+
+    assert acquiring == {*FETCHING_SCRIPTS, "scripts/ci/apt_install.sh"}
+    assert installing == {"scripts/ci/prepare-local-runtime-fixtures.sh"}
+
+
+def test_every_job_acquisition_worst_case_fits_its_deadline() -> None:
+    jobs = [
+        (
+            location,
+            job,
+            [
+                case
+                for step in step_list(job)
+                for case in step_worst_cases(str(step.get("run", "")))
+            ],
+        )
+        for location, job in jobs_of(repository_workflows())
+    ]
+
+    acquiring = [(location, job, cases) for location, job, cases in jobs if cases]
+    exceeding = [
+        (location, sum(cases))
+        for location, job, cases in acquiring
+        if min(sum(cases), JOB_BUDGET_SECONDS)
+        + len(cases) * INVOCATION_ALLOWANCE_SECONDS
+        > float(str(job["timeout-minutes"])) * 60 - DEADLINE_MARGIN_SECONDS
+    ]
+    assert len(acquiring) >= 10
+    assert exceeding == []
+
+
 def run_command(
-    command: tuple[str, ...], seconds: float, pauses: RecordedPauses
+    command: tuple[str, ...], seconds: float, pauses: RecordedPauses, ledger: Path
 ) -> tuple[str | None, str]:
     errors = io.StringIO()
     try:
-        asyncio.run(run_bounded(command, seconds, pauses, errors))
+        asyncio.run(
+            run_bounded(command, seconds, pauses, errors, opened_budget(ledger))
+        )
     except AcquisitionError as error:
         return str(error), errors.getvalue()
     return None, errors.getvalue()
@@ -363,7 +582,10 @@ def test_command_is_retried_until_it_succeeds(tmp_path: Path) -> None:
     pauses = RecordedPauses()
 
     failure, errors = run_command(
-        (sys.executable, "-c", program, str(marker)), 10.0, pauses
+        (sys.executable, "-c", program, str(marker)),
+        10.0,
+        pauses,
+        tmp_path / BUDGET_LEDGER,
     )
 
     assert failure is None
@@ -371,11 +593,14 @@ def test_command_is_retried_until_it_succeeds(tmp_path: Path) -> None:
     assert pauses.seconds == [RETRY_SPACING_SECONDS]
 
 
-def test_command_exhausted_attempts_fail_with_a_clear_message() -> None:
+def test_command_exhausted_attempts_fail_with_a_clear_message(tmp_path: Path) -> None:
     pauses = RecordedPauses()
 
     failure, errors = run_command(
-        (sys.executable, "-c", "raise SystemExit(3)"), 10.0, pauses
+        (sys.executable, "-c", "raise SystemExit(3)"),
+        10.0,
+        pauses,
+        tmp_path / BUDGET_LEDGER,
     )
 
     assert failure is not None
@@ -384,17 +609,65 @@ def test_command_exhausted_attempts_fail_with_a_clear_message() -> None:
     assert pauses.seconds == [RETRY_SPACING_SECONDS] * (ATTEMPTS - 1)
 
 
-def test_command_time_limit_stops_each_attempt() -> None:
+def test_command_time_limit_applies_to_each_attempt(tmp_path: Path) -> None:
     pauses = RecordedPauses()
     started = time.monotonic()
 
     failure, errors = run_command(
-        (sys.executable, "-c", "import signal\nsignal.pause()\n"), 1.0, pauses
+        (sys.executable, "-c", "import signal\nsignal.pause()\n"),
+        1.0,
+        pauses,
+        tmp_path / BUDGET_LEDGER,
     )
 
     assert failure is not None
     assert errors.count("(time limit of 1 s reached)") == ATTEMPTS
     assert time.monotonic() - started < 20.0
+
+
+def running(pid: int) -> bool:
+    status = shutil.which("ps")
+    assert status is not None
+    state = subprocess.run(
+        (status, "-o", "stat=", "-p", str(pid)),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    ).stdout.strip()
+    return state != "" and not state.startswith("Z")
+
+
+def stopped(pid: int) -> bool:
+    deadline = time.monotonic() + STOP_DEADLINE_SECONDS
+    while running(pid):
+        if time.monotonic() > deadline:
+            return False
+    return True
+
+
+def stop_leftover(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
+def test_command_time_limit_kills_the_whole_process_group(tmp_path: Path) -> None:
+    leader = tmp_path / "leader.py"
+    leader.write_text(LEADER)
+    record = tmp_path / "processes"
+
+    try:
+        failure = asyncio.run(bounded((sys.executable, str(leader), str(record)), 2.0))
+        processes = [int(value) for value in record.read_text().split()]
+
+        assert failure == "time limit of 2 s reached"
+        assert len(processes) == 2
+        assert [pid for pid in processes if not stopped(pid)] == []
+    finally:
+        for value in record.read_text().split() if record.exists() else ():
+            stop_leftover(int(value))
 
 
 @pytest.mark.parametrize(
@@ -403,7 +676,7 @@ def test_command_time_limit_stops_each_attempt() -> None:
         (),
         ("fetch", "store"),
         ("run", "0", "--", "true"),
-        ("run", "151", "--", "true"),
+        ("run", str(MAX_COMMAND_SECONDS + 1), "--", "true"),
         ("run", "10", "true"),
         ("run", "1.5", "--", "true"),
     ],
@@ -412,7 +685,7 @@ def test_invalid_usage_is_refused(arguments: tuple[str, ...]) -> None:
     errors = io.StringIO()
 
     code = asyncio.run(
-        main(arguments, ARTIFACTS, None, RecordedPauses(), io.StringIO(), errors)
+        main(arguments, ARTIFACTS, None, RecordedPauses(), io.StringIO(), errors, None)
     )
 
     assert code == 2

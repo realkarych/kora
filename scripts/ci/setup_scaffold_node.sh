@@ -42,22 +42,20 @@ for directory in "$cache_root/node" "$version_dir"; do
   fi
 done
 
-existing=false
 if [[ -d $destination && ! -L $destination && -f $complete && ! -L $complete &&
       -d $destination/bin && ! -L $destination/bin &&
       -f $destination/bin/node && -x $destination/bin/node && ! -L $destination/bin/node ]]; then
-  existing=true
-elif ! absent "$destination" || ! absent "$complete"; then
+  printf 'Using the existing Scaffold Node %s cache entry\n' "$version"
+  exit 0
+fi
+
+if ! absent "$destination" || ! absent "$complete"; then
   printf 'Incomplete or invalid Scaffold Node cache entry\n' >&2
   exit 1
 fi
 
 archive=$(python3 "$(dirname -- "${BASH_SOURCE[0]}")/acquire.py" fetch \
   "${RUNNER_TEMP:?}/kora-acquisitions" "node-$version-$platform-$architecture")
-if [[ $existing == true ]]; then
-  printf 'Using the existing Scaffold Node %s cache entry\n' "$version"
-  exit 0
-fi
 
 mkdir -p -- "$version_dir"
 staging=$(mktemp -d "$version_dir/.kora-node.XXXXXXXX")

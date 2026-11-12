@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 import shlex
 import shutil
@@ -20,7 +21,11 @@ ATTEMPTS = 3
 RETRY_SPACING_SECONDS = 5.0
 CONNECT_SECONDS = 15.0
 STOP_GRACE_SECONDS = 5.0
-MAX_COMMAND_SECONDS = 150
+FETCH_RESERVE_SECONDS = STOP_GRACE_SECONDS
+COMMAND_RESERVE_SECONDS = 2 * STOP_GRACE_SECONDS
+JOB_BUDGET_SECONDS = 240.0
+BUDGET_LEDGER = "kora-acquisition-budget"
+MAX_COMMAND_SECONDS = 120
 MAX_LOCATION_BYTES = 8192
 READ_BYTES = 1 << 20
 SUCCESS_STATUS = "200"
@@ -79,7 +84,7 @@ class Artifact:
 
 def node_archive(platform: str, size: int, sha256: str) -> Artifact:
     filename = f"node-v24.22.0-{platform}.tar.gz"
-    return Artifact(NODE_RELEASE + filename, filename, size, sha256, None, 60.0)
+    return Artifact(NODE_RELEASE + filename, filename, size, sha256, None, 45.0)
 
 
 def uv_archive(target: str, size: int, sha256: str) -> Artifact:
@@ -153,6 +158,52 @@ ARTIFACTS: Mapping[str, Artifact] = {
         30.0,
     ),
 }
+
+
+@dataclass(frozen=True)
+class Budget:
+    ledger: Path
+    spent: float
+    started: float
+
+    def remaining(self) -> float:
+        return JOB_BUDGET_SECONDS - self.spent - (time.monotonic() - self.started)
+
+    def exhausted(self, subject: str) -> AcquisitionError:
+        return AcquisitionError(
+            f"The job acquisition budget of {JOB_BUDGET_SECONDS:g} s is exhausted; "
+            f"{subject} was not acquired."
+        )
+
+    def allowance(self, limit: float, reserve: float, subject: str) -> float:
+        seconds = min(limit, self.remaining() - reserve)
+        if seconds <= 0:
+            raise self.exhausted(subject)
+        return seconds
+
+    async def pause(self, pause: Pause, reserve: float, subject: str) -> None:
+        if self.remaining() - reserve <= RETRY_SPACING_SECONDS:
+            raise self.exhausted(subject)
+        await pause(RETRY_SPACING_SECONDS)
+
+    def record(self) -> None:
+        spent = self.spent + time.monotonic() - self.started
+        partial = self.ledger.with_name(f".{self.ledger.name}.{os.getpid()}")
+        partial.write_text(f"{spent:.3f}\n")
+        os.replace(partial, self.ledger)
+
+
+def opened_budget(ledger: Path) -> Budget:
+    text = ledger.read_text() if ledger.exists() else "0"
+    try:
+        spent = float(text)
+    except ValueError:
+        raise AcquisitionError(
+            f"The acquisition budget ledger {ledger} is invalid."
+        ) from None
+    if not math.isfinite(spent) or spent < 0:
+        raise AcquisitionError(f"The acquisition budget ledger {ledger} is invalid.")
+    return Budget(ledger, spent, time.monotonic())
 
 
 @dataclass(frozen=True)
@@ -256,8 +307,10 @@ def admitted_redirect(location: str, host: str | None) -> str:
     return location
 
 
-async def download(transport: Transport, artifact: Artifact, candidate: Path) -> None:
-    deadline = time.monotonic() + artifact.attempt_seconds
+async def download(
+    transport: Transport, artifact: Artifact, candidate: Path, seconds: float
+) -> None:
+    deadline = time.monotonic() + seconds
     status, location = await transport.request(
         artifact.url, candidate, artifact.size, deadline, True
     )
@@ -325,6 +378,7 @@ async def fetch(
     transport: Transport,
     pause: Pause,
     errors: TextIO,
+    budget: Budget,
 ) -> Path:
     if not safe_url(artifact.url):
         raise AcquisitionError(f"The pinned source of {name} is not a safe URL.")
@@ -337,13 +391,16 @@ async def fetch(
             )
         return destination
     for attempt in range(1, ATTEMPTS + 1):
+        seconds = budget.allowance(
+            artifact.attempt_seconds, FETCH_RESERVE_SECONDS, name
+        )
         descriptor, partial = tempfile.mkstemp(
             prefix=".partial-", dir=destination.parent
         )
         os.close(descriptor)
         candidate = Path(partial)
         try:
-            await download(transport, artifact, candidate)
+            await download(transport, artifact, candidate, seconds)
             if not verified(candidate, artifact):
                 raise Refused("its size or SHA-256 differs from the pin")
             os.replace(candidate, destination)
@@ -361,7 +418,7 @@ async def fetch(
         finally:
             candidate.unlink(missing_ok=True)
         if attempt < ATTEMPTS:
-            await pause(RETRY_SPACING_SECONDS)
+            await budget.pause(pause, FETCH_RESERVE_SECONDS, name)
     raise AcquisitionError(f"Acquisition of {name} failed after {ATTEMPTS} attempts.")
 
 
@@ -394,14 +451,19 @@ async def bounded(command: Sequence[str], seconds: float) -> str | None:
 
 
 async def run_bounded(
-    command: Sequence[str], seconds: float, pause: Pause, errors: TextIO
+    command: Sequence[str],
+    seconds: float,
+    pause: Pause,
+    errors: TextIO,
+    budget: Budget,
 ) -> None:
     executable = shutil.which(command[0])
     if executable is None:
         raise AcquisitionError(f"The acquisition command {command[0]} is unavailable.")
     line = shlex.join(command)
     for attempt in range(1, ATTEMPTS + 1):
-        failure = await bounded((executable, *command[1:]), seconds)
+        limit = budget.allowance(seconds, COMMAND_RESERVE_SECONDS, line)
+        failure = await bounded((executable, *command[1:]), limit)
         if failure is None:
             return
         report(
@@ -409,7 +471,7 @@ async def run_bounded(
             f"Acquisition attempt {attempt} of {ATTEMPTS} failed ({failure}): {line}",
         )
         if attempt < ATTEMPTS:
-            await pause(RETRY_SPACING_SECONDS)
+            await budget.pause(pause, COMMAND_RESERVE_SECONDS, line)
     raise AcquisitionError(f"Acquisition failed after {ATTEMPTS} attempts: {line}")
 
 
@@ -420,6 +482,7 @@ async def fetch_named(
     authorities: Path | None,
     pause: Pause,
     errors: TextIO,
+    budget: Budget,
 ) -> Path:
     artifact = artifacts.get(name)
     if artifact is None:
@@ -429,12 +492,47 @@ async def fetch_named(
         raise AcquisitionError("curl is required to acquire pinned artifacts.")
     with tempfile.TemporaryDirectory(prefix="kora-acquisition-") as home:
         transport = Transport(curl, Path(home), authorities)
-        return await fetch(store, name, artifact, transport, pause, errors)
+        return await fetch(store, name, artifact, transport, pause, errors, budget)
 
 
 def command_seconds(value: str) -> int | None:
     seconds = int(value) if value.isascii() and value.isdigit() else 0
     return seconds if 1 <= seconds <= MAX_COMMAND_SECONDS else None
+
+
+async def perform(
+    arguments: Sequence[str],
+    artifacts: Mapping[str, Artifact],
+    authorities: Path | None,
+    pause: Pause,
+    output: TextIO,
+    errors: TextIO,
+    budget: Budget,
+) -> None:
+    if arguments[0] == "fetch":
+        path = await fetch_named(
+            Path(arguments[1]),
+            arguments[2],
+            artifacts,
+            authorities,
+            pause,
+            errors,
+            budget,
+        )
+        output.write(f"{path}\n")
+        return
+    await run_bounded(arguments[3:], int(arguments[1]), pause, errors, budget)
+
+
+def well_formed(arguments: Sequence[str]) -> bool:
+    if len(arguments) == 3 and arguments[0] == "fetch":
+        return True
+    return (
+        len(arguments) > 3
+        and arguments[0] == "run"
+        and arguments[2] == "--"
+        and command_seconds(arguments[1]) is not None
+    )
 
 
 async def main(
@@ -444,28 +542,46 @@ async def main(
     pause: Pause,
     output: TextIO,
     errors: TextIO,
+    ledger: Path | None,
 ) -> int:
+    if not well_formed(arguments):
+        errors.write(USAGE)
+        return 2
     try:
-        if len(arguments) == 3 and arguments[0] == "fetch":
-            path = await fetch_named(
-                Path(arguments[1]), arguments[2], artifacts, authorities, pause, errors
+        if ledger is None:
+            raise AcquisitionError(
+                "RUNNER_TEMP must name the job's temporary directory, "
+                "which holds its acquisition budget."
             )
-            output.write(f"{path}\n")
-            return 0
-        seconds = command_seconds(arguments[1]) if len(arguments) > 3 else None
-        if seconds is not None and arguments[0] == "run" and arguments[2] == "--":
-            await run_bounded(arguments[3:], seconds, pause, errors)
-            return 0
+        budget = opened_budget(ledger)
+        try:
+            await perform(
+                arguments, artifacts, authorities, pause, output, errors, budget
+            )
+        finally:
+            budget.record()
     except AcquisitionError as error:
         report(errors, str(error))
         return 1
-    errors.write(USAGE)
-    return 2
+    return 0
+
+
+def job_ledger() -> Path | None:
+    temporary = os.environ.get("RUNNER_TEMP")
+    return None if not temporary else Path(temporary) / BUDGET_LEDGER
 
 
 if __name__ == "__main__":
     raise SystemExit(
         asyncio.run(
-            main(sys.argv[1:], ARTIFACTS, None, asyncio.sleep, sys.stdout, sys.stderr)
+            main(
+                sys.argv[1:],
+                ARTIFACTS,
+                None,
+                asyncio.sleep,
+                sys.stdout,
+                sys.stderr,
+                job_ledger(),
+            )
         )
     )

@@ -213,7 +213,7 @@ jobs:
         if: ${{ matrix.lane == 'local-runtime' }}
         run: |
           SECONDS=0
-          sudo scripts/ci/prepare-local-runtime-fixtures.sh prepare
+          sudo --preserve-env=RUNNER_TEMP scripts/ci/prepare-local-runtime-fixtures.sh prepare
           printf 'Host fixture preparation took %s s\n' "$SECONDS"
       - name: Collect and execute the exact test lane
         id: tests
@@ -636,7 +636,7 @@ jobs:
           test -f /etc/apt/apt-mirrors.txt
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           pnpm --dir web install --frozen-lockfile
-          python3 scripts/ci/acquire.py run 150 -- \
+          python3 scripts/ci/acquire.py run 120 -- \
             pnpm --dir web exec playwright install --with-deps --only-shell chromium
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Check and build browser sources
@@ -735,9 +735,9 @@ jobs:
           node-version-file: web/.node-version
           package-manager-cache: false
       - name: Install diagram discovery tool
-        run: sudo bash scripts/ci/apt_install.sh ripgrep
+        run: sudo --preserve-env=RUNNER_TEMP bash scripts/ci/apt_install.sh ripgrep
       - name: Install pinned Mermaid renderer
-        run: python3 scripts/ci/acquire.py run 120 -- npx --yes @mermaid-js/mermaid-cli@12.0.0 --version
+        run: python3 scripts/ci/acquire.py run 90 -- npx --yes @mermaid-js/mermaid-cli@12.0.0 --version
       - name: Parse every Mermaid diagram
         shell: bash
         env:
