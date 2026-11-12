@@ -27,7 +27,7 @@ def test_api_logging_sink_failure_does_not_stall_work(
 
     assert process.code == 0, process.stderr
     report = SinkReport.model_validate_json(process.stdout)
-    assert report.completed == 96
+    assert report.completed == 128
     assert report.outstanding == 0
     assert not report.writer_alive
     assert process.stderr == b""

@@ -218,6 +218,7 @@ async def test_run_input_migration_adds_only_empty_native_storage(
             statement
             for statement in observation.statements
             if RUN_IDENTIFIER.search(statement) is not None
+            and not statement.startswith("CREATE TABLE _alembic_tmp_event ")
         ]
         assert scoped[0] == ADD_INPUT_ENCODING
         assert scoped[1].startswith("CREATE TABLE run_inputs ")

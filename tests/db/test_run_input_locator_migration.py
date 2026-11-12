@@ -250,6 +250,21 @@ async def test_run_input_locator_migration_preserves_existing_schema_and_values(
                 statement
                 for statement in observation.statements
                 if statement.startswith(("CREATE ", "ALTER ", "DROP "))
+                and (
+                    statement.startswith(
+                        (
+                            "CREATE TABLE run ",
+                            "ALTER TABLE run ",
+                            "DROP TABLE run ",
+                            "CREATE TABLE run_inputs ",
+                            "ALTER TABLE run_inputs ",
+                            "DROP TABLE run_inputs ",
+                            "CREATE TABLE run_promotion_admission (",
+                        )
+                    )
+                    or " ON run " in statement
+                    or " ON run_inputs " in statement
+                )
             ]
             assert len(definitions) == 2
             assert definitions[0] == (

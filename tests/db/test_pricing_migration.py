@@ -98,7 +98,7 @@ async def test_price_schema_upgrade_preserves_history(
         assert differences == []
         assert retry.steps == 0
         assert reflected_tables == (
-            ['"price_table"', '"usage_record"']
+            ['"price_table"', '"usage_record"', '"event"']
             if database.dialect is Dialect.SQLITE
             else []
         )

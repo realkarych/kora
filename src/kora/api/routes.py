@@ -15,16 +15,18 @@ class RouteName(StrEnum):
     HEALTH = "/healthz"
     SCHEMA = "/api/v1/openapi.json"
     GRAPH_VERSIONS = "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
+    WORKERS = "/api/v1/workers"
 
 
 ROUTE_METHODS: dict[RouteName, frozenset[str]] = {
     RouteName.HEALTH: frozenset({"GET"}),
     RouteName.SCHEMA: frozenset({"GET"}),
     RouteName.GRAPH_VERSIONS: frozenset({"POST"}),
+    RouteName.WORKERS: frozenset({"POST"}),
 }
 REQUIRED_ROUTES: frozenset[RouteName] = frozenset({RouteName.HEALTH, RouteName.SCHEMA})
 PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
-    {RouteName.SCHEMA, RouteName.GRAPH_VERSIONS}
+    {RouteName.SCHEMA, RouteName.GRAPH_VERSIONS, RouteName.WORKERS}
 )
 
 

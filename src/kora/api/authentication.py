@@ -1,3 +1,5 @@
+from typing import Literal
+
 from starlette.requests import Request
 
 from kora.api.errors import (
@@ -20,8 +22,11 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.time import Clock
 
 
-async def personal_authentication(
-    request: Request, authenticator: Authenticator, clock: Clock
+async def authenticate_route(
+    request: Request,
+    authenticator: Authenticator,
+    clock: Clock,
+    kind: Literal["user", "service"],
 ) -> Principal | ApiErrorEnvelope:
     exchange = current_exchange()
     headers = [
@@ -44,6 +49,6 @@ async def personal_authentication(
         exchange.failure(error)
         return internal_error(request_id=exchange.request_id)
     principal = Principal.model_validate(principal)
-    if principal.kind != "user":
+    if principal.kind != kind:
         return definitive_error(ApiErrorCode.FORBIDDEN, request_id=exchange.request_id)
     return principal

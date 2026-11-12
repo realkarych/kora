@@ -19,6 +19,12 @@ from anyio.lowlevel import checkpoint_if_cancelled
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_core import PydanticCustomError
 
+from kora.client.asgi import (
+    ASGIApp,
+    AsgiResponseIncomplete,
+    AsgiResponseLimit,
+    InProcessTransport,
+)
 from kora.client.errors import (
     ApiError,
     ApiErrorFields,
@@ -31,6 +37,7 @@ from kora.client.network import DirectTransport
 from kora.ir.json import JsonObject, JsonShapeError, parse_json_object
 from kora.models.errors import HTTP_STATUSES, ApiErrorCode, require_api_error_fields
 from kora.models.graphs import DeployRequest, DeployResponse
+from kora.models.workers import RegisteredWorker, WorkerRegistration
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, ProcessDiagnostics
 
 OPENAPI_PATH: str = "/api/v1/openapi.json"
@@ -92,6 +99,12 @@ class DeployedGraphVersion:
 
 def deployed_graph_version(value: JsonObject) -> DeployedGraphVersion:
     return DeployedGraphVersion(DeployResponse.model_validate(value), value)
+
+
+def registered_worker(value: JsonObject) -> RegisteredWorker:
+    return RegisteredWorker.model_validate(
+        {key: value[key] for key in RegisteredWorker.model_fields if key in value}
+    )
 
 
 def direct_origin(value: str) -> httpx.URL:
@@ -165,6 +178,9 @@ class Exchange:
     tls_failed: bool = False
     sending: bool = False
 
+    def mark_sending(self) -> None:
+        self.sending = True
+
     def failure(self, reason: Failure) -> ClientError:
         outcome = Outcome.UNKNOWN if self.sending else Outcome.NOT_SENT
         return ClientError(reason, outcome, Correlation(self.request_id))
@@ -198,6 +214,7 @@ class KoraClient:
         ca_bundle: Path | None = None,
         proxy: str | None = None,
         diagnostics: ProcessDiagnostics | None = None,
+        asgi_app: ASGIApp | None = None,
     ) -> None:
         if proxy is not None:
             raise ClientError(Failure.PROXY_POLICY, Outcome.NOT_SENT)
@@ -213,7 +230,15 @@ class KoraClient:
         self._logger = (
             diagnostics.logger(COMPONENT) if diagnostics is not None else None
         )
-        self._transport = DirectTransport(verified_context(ca_bundle), max_connections)
+        if asgi_app is not None and (
+            origin != "http://127.0.0.1" or ca_bundle is not None
+        ):
+            raise ClientError(Failure.DESTINATION_POLICY, Outcome.NOT_SENT)
+        self._transport = (
+            DirectTransport(verified_context(ca_bundle), max_connections)
+            if asgi_app is None
+            else InProcessTransport(asgi_app, max_connections)
+        )
         self._active: dict[asyncio.Task[object], CancelScope] = {}
         self._closing: asyncio.Task[None] | None = None
 
@@ -257,6 +282,18 @@ class KoraClient:
             response_limit=DEPLOY_RESPONSE_BYTES,
             body=request.model_dump(mode="json"),
             success=CREATED_OR_OK,
+        )
+
+    async def register_worker(
+        self, registration: WorkerRegistration
+    ) -> RegisteredWorker:
+        body = parse_json_object(registration.model_dump(mode="json"))
+        return await self._request_json(
+            "POST",
+            "/api/v1/workers",
+            registered_worker,
+            response_limit=16 * 1024,
+            body=body,
         )
 
     async def _request_json(
@@ -357,7 +394,12 @@ class KoraClient:
         exchange: Exchange,
     ) -> tuple[int, bytes]:
         try:
-            response = await self._transport.handle_async_request(request)
+            if isinstance(self._transport, InProcessTransport):
+                response = await self._transport.receive(
+                    request, response_limit, exchange.mark_sending
+                )
+            else:
+                response = await self._transport.handle_async_request(request)
             try:
                 exchange.status = response.status_code
                 ids = response.headers.get_list("X-Request-ID")
@@ -367,6 +409,10 @@ class KoraClient:
             finally:
                 with CancelScope(shield=True):
                     await response.aclose()
+        except AsgiResponseLimit:
+            raise exchange.failure(Failure.RESPONSE_LIMIT) from None
+        except AsgiResponseIncomplete:
+            raise exchange.failure(Failure.STREAM) from None
         except httpcore.ConnectError:
             reason = Failure.TLS if exchange.tls_failed else Failure.CONNECTION
             raise exchange.failure(reason) from None
