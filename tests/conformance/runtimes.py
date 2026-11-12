@@ -29,6 +29,7 @@ from kora.protocols.runtime import (
     RawEvent,
     RuntimeCapabilities,
     RuntimeStatus,
+    SessionObservation,
     TransferItem,
     Workload,
 )
@@ -166,6 +167,11 @@ class ReferenceRuntime:
     async def quiescence(
         self, handle: Handle, ctx: ProtocolContext
     ) -> NormalCompletionQuiescence:
+        unsupported()
+
+    async def session_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> SessionObservation:
         unsupported()
 
     async def record_dispatcher_quiescence(

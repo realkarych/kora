@@ -8,13 +8,14 @@ import sys
 import tempfile
 import threading
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from types import TracebackType
-from typing import TYPE_CHECKING, Annotated
+from types import FrameType, TracebackType
+from typing import TYPE_CHECKING, Annotated, TypeVar
 
 import typer
 import typer.main
@@ -29,6 +30,13 @@ from kora.cli import (
     build_app,
 )
 from kora.cli.conformance import CONFORMANCE_FINISHED, CommandResult
+from kora.cli.doctor import (
+    DOCTOR_CHECK_FINISHED,
+    DOCTOR_FINISHED,
+    CheckName,
+    CheckResult,
+    DoctorReport,
+)
 from kora.cli.plugins import (
     LISTING_FINISHED,
     LISTING_RETAINED,
@@ -86,6 +94,16 @@ MCP_DISTRIBUTIONS: frozenset[str] = frozenset({"mcp", "mcp_types"})
 
 class McpServerName(StrEnum):
     AUTHORING = "authoring"
+
+
+DOCTOR_DATABASE_DEADLINE_SECONDS: float = 5.0
+Outcome = TypeVar("Outcome")
+
+
+@dataclass(frozen=True)
+class DoctorSettings:
+    database_deadline_seconds: float = DOCTOR_DATABASE_DEADLINE_SECONDS
+    home: Callable[[], Path] = Path.home
 
 
 def write_stderr(text: str) -> None:
@@ -536,6 +554,31 @@ class InstalledPluginDiscovery:
         owner.release(started + 14_000_000_000)
 
 
+async def run_interruptible(
+    work: Coroutine[object, object, Outcome],
+) -> tuple[Outcome | None, bool]:
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(work)
+    interrupted = asyncio.Event()
+
+    def interrupt(number: int, frame: FrameType | None) -> None:
+        interrupted.set()
+        loop.call_soon_threadsafe(task.cancel)
+
+    previous = {
+        value: signal.signal(value, interrupt)
+        for value in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        try:
+            return await task, interrupted.is_set()
+        except asyncio.CancelledError:
+            return None, True
+    finally:
+        for value, handler in previous.items():
+            signal.signal(value, handler)
+
+
 def conformance(
     diagnostics: ProcessDiagnostics,
     protocol: str,
@@ -577,24 +620,10 @@ def conformance(
         return await ConformanceCommand(diagnostics).run(request)
 
     async def interrupted() -> CommandResult:
-        loop = asyncio.get_running_loop()
-        task = asyncio.create_task(invoke())
-        previous = {
-            value: signal.getsignal(value) for value in (signal.SIGINT, signal.SIGTERM)
-        }
-        try:
-            for value in previous:
-                loop.add_signal_handler(value, task.cancel)
-            try:
-                return await task
-            except asyncio.CancelledError:
-                return CommandResult(
-                    outcome=OriginalOutcome.CANCELLED, reason="cancelled"
-                )
-        finally:
-            for value, handler in previous.items():
-                loop.remove_signal_handler(value)
-                signal.signal(value, handler)
+        completed, _ = await run_interruptible(invoke())
+        if completed is None:
+            return CommandResult(outcome=OriginalOutcome.CANCELLED, reason="cancelled")
+        return completed
 
     result = asyncio.run(interrupted())
     diagnostics.logger(CLI_COMPONENT).emit(
@@ -631,8 +660,92 @@ def serve_mcp(
     asyncio.run(serve_authoring(settings, diagnostics))
 
 
+def cel_check() -> CheckResult:
+    from kora.cel_eval.binding import BindingUnavailable, load_binding
+
+    try:
+        binding = load_binding()
+    except BindingUnavailable as refused:
+        return CheckResult.failed(CheckName.CEL, refused.refusal.value)
+    return CheckResult.passed(CheckName.CEL, binding.version)
+
+
+async def database_check(
+    environment: Mapping[str, str], settings: DoctorSettings
+) -> CheckResult:
+    from kora.db.probe import DatabaseProbeFailure, probe_database
+
+    probe = await probe_database(environment, settings.database_deadline_seconds)
+    if isinstance(probe, DatabaseProbeFailure):
+        return CheckResult.failed(CheckName.DATABASE, probe.value)
+    return CheckResult.passed(CheckName.DATABASE, probe.value)
+
+
+def state_root_check(
+    environment: Mapping[str, str], settings: DoctorSettings
+) -> CheckResult:
+    from kora.plugins.runtime.local.state_probe import (
+        StateRootFailure,
+        probe_state_root,
+    )
+
+    probe = probe_state_root(environment, settings.home)
+    if isinstance(probe, StateRootFailure):
+        return CheckResult.failed(CheckName.STATE_ROOT, probe.value)
+    return CheckResult.passed(CheckName.STATE_ROOT, str(probe))
+
+
+async def doctor_checks(
+    environment: Mapping[str, str],
+    settings: DoctorSettings,
+    log: ComponentLogger,
+) -> DoctorReport:
+    from kora.cli.app import kora_version
+
+    checks: list[CheckResult] = []
+
+    def record(check: CheckResult) -> None:
+        checks.append(check)
+        log.emit(
+            DOCTOR_CHECK_FINISHED,
+            check=check.name.value,
+            status=check.status.value,
+            **({} if check.reason is None else {"reason": check.reason}),
+        )
+
+    record(CheckResult.passed(CheckName.VERSION, kora_version()))
+    record(cel_check())
+    record(await database_check(environment, settings))
+    record(state_root_check(environment, settings))
+    return DoctorReport(tuple(checks))
+
+
+def doctor(
+    diagnostics: ProcessDiagnostics,
+    environment: Mapping[str, str],
+    settings: DoctorSettings,
+    as_json: bool,
+) -> None:
+    log = diagnostics.logger(CLI_COMPONENT)
+    report, interrupted = asyncio.run(
+        run_interruptible(doctor_checks(environment, settings, log))
+    )
+    if report is None or interrupted:
+        raise typer.Exit(EXIT_INTERRUPT)
+    log.emit(
+        DOCTOR_FINISHED,
+        passed=report.passed,
+        failed=report.failed,
+        exit_code=report.exit_code,
+    )
+    typer.echo(report.render(as_json=as_json))
+    raise typer.Exit(report.exit_code)
+
+
 def compose_application(
-    environment: Mapping[str, str], diagnostics: ProcessDiagnostics
+    environment: Mapping[str, str],
+    diagnostics: ProcessDiagnostics,
+    doctor_settings: DoctorSettings | None = None,
 ) -> typer.Typer:
     app = build_app()
     app.add_typer(build_database_app(environment), name=DATABASE_GROUP)
@@ -667,6 +780,17 @@ def compose_application(
         fixture_data: str | None = typer.Option(None, "--fixture-data"),
     ) -> None:
         conformance(diagnostics, protocol, name, config, fixtures, fixture_data)
+
+    @app.command(name="doctor", help="Check the local installation prerequisites.")
+    def check_installation(
+        as_json: bool = typer.Option(False, "--json"),
+    ) -> None:
+        doctor(
+            diagnostics,
+            environment,
+            doctor_settings if doctor_settings is not None else DoctorSettings(),
+            as_json,
+        )
 
     return app
 
@@ -751,6 +875,7 @@ def main(
     argv: Sequence[str] | None = None,
     environ: Mapping[str, str] | None = None,
     application: typer.Typer | None = None,
+    doctor_settings: DoctorSettings | None = None,
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     environment = os.environ if environ is None else environ
@@ -768,7 +893,8 @@ def main(
         with ThreadFailureHook(log):
             try:
                 exit_code = run_application(
-                    application or compose_application(environment, diagnostics),
+                    application
+                    or compose_application(environment, diagnostics, doctor_settings),
                     arguments,
                 )
             except KeyboardInterrupt:

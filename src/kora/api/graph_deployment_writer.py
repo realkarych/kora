@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.api.exchange import COMPONENT
@@ -24,16 +23,19 @@ from kora.api.graph_publication_values import (
     prepare_graph_publication_binds,
 )
 from kora.db.connection import Database, Dialect
+from kora.db.graph_deployment_reads import (
+    active_version_by_deployment_digest,
+    graph_id_by_name,
+    latest_version_number,
+)
 from kora.db.graph_read_admission import GraphVersionReadAdmission
 from kora.db.identifiers import IdentifierGenerator
-from kora.db.tables import graph, graph_version
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_version_identity import GraphVersionDigests
 from kora.engine.locks import Scope, ScopeKind, TransitionLocks
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 from kora.protocols.authentication import Principal
 
-ACTIVE = "active"
 METADATA_BYTES = 4096
 POSTGRESQL_FIXED_COLUMN_BYTES = 1024
 COMPLETED: EventSpec = CATALOG.register(
@@ -100,14 +102,11 @@ async def _graph_id(
     identifiers: IdentifierGenerator,
     at: datetime,
 ) -> tuple[str, bool]:
-    existing = await connection.scalar(
-        select(graph.c.id).where(
-            graph.c.namespace_id == target.namespace_id,
-            graph.c.name == target.graph_name,
-        )
+    existing = await graph_id_by_name(
+        connection, target.namespace_id, target.graph_name
     )
     if existing is not None:
-        return str(existing), False
+        return existing, False
     graph_id = identifiers.new()
     await connection.execute(
         first_graph_insert_statement(dialect),
@@ -135,26 +134,12 @@ async def _publish(
     digests = deployment.inputs.logical.digests
     graph_id, created = await _graph_id(connection, dialect, target, identifiers, at)
     if not created:
-        equal = (
-            await connection.execute(
-                select(graph_version.c.id, graph_version.c.number)
-                .where(
-                    graph_version.c.graph_id == graph_id,
-                    graph_version.c.deployment_digest == digests.deployment_digest,
-                    graph_version.c.status == ACTIVE,
-                )
-                .order_by(graph_version.c.number)
-                .limit(1)
-            )
-        ).first()
-        if equal is not None:
-            return PublishedGraphVersion(str(equal[0]), int(equal[1]), digests, True)
-    latest = await connection.scalar(
-        select(func.max(graph_version.c.number)).where(
-            graph_version.c.graph_id == graph_id
+        equal = await active_version_by_deployment_digest(
+            connection, graph_id, digests.deployment_digest
         )
-    )
-    number = 1 if latest is None else int(latest) + 1
+        if equal is not None:
+            return PublishedGraphVersion(equal.version_id, equal.number, digests, True)
+    number = await latest_version_number(connection, graph_id) + 1
     version_id = identifiers.new()
     attachment = attach_graph_deployment_references(
         deployment.inputs,
