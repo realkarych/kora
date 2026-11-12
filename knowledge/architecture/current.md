@@ -2,7 +2,7 @@
 
 Start every task here. This page says what exists on `master`, what runs, what is still only designed, where the trust boundaries are drawn, and which specification and decision records to read next. It is a map, not a contract: the [decision records](../../docs/decisions/README.md) and [specifications](../README.md) govern, and a decision record wins over a specification. Words that look ordinary but have a kora-specific meaning are in the [glossary](detailed.md#glossary).
 
-Checked against `master` at commit `4368f4c` on 2026-11-11. Statements about what runs come from the code at that commit, not from the specifications. Sections [2](#2-what-runs-today) and [5](#5-the-walking-skeleton-and-the-first-slice) change most often; when they disagree with the code, the code is right and this page is stale.
+Checked against `master` at commit `12e1912` on 2026-11-12. Statements about what runs come from the code at that commit, not from the specifications. Sections [2](#2-what-runs-today) and [5](#5-the-walking-skeleton-and-the-first-slice) change most often; when they disagree with the code, the code is right and this page is stale.
 
 ## 1. What kora is
 
@@ -65,7 +65,7 @@ The [package layer table](detailed.md#package-layers) lists packages that do not
 
 ### Size
 
-`src/kora` holds 448 Python modules and about 101,000 lines. The metadata schema has 38 tables and 21 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel`, `kora.cel_eval`, `kora.client`, `kora.models` or the harness packages.
+`src/kora` holds 446 Python modules and about 100,500 lines. The metadata schema has 38 tables and 21 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel`, `kora.cel_eval`, `kora.client`, `kora.models` or the harness packages.
 
 ## 3. How the existing pieces connect
 
@@ -160,20 +160,13 @@ Work-item numbers refer to the [implementation plan](../../docs/implementation-p
 
 ## 5. The walking skeleton and the first slice
 
-This section changes most often. It describes the owner decisions of 2026-11-11 in [#1356](https://github.com/realkarych/kora/issues/1356) and the skeleton plan under [#1357](https://github.com/realkarych/kora/issues/1357). [ADR-0001](../../docs/decisions/0001-own-control-plane.md), the [implementation plan](../../docs/implementation-plan.md) and the [first-slice contract](../specs/first-slice.md) remain the authority; the #1357 pull request, [#1387](https://github.com/realkarych/kora/pull/1387), records the #1357 decisions there, and once it merges this section only points to those documents for them.
+This section changes most often. It summarizes the owner decisions of 2026-11-11 in [#1356](https://github.com/realkarych/kora/issues/1356); the documents linked below are the authority.
 
-**The walking skeleton** is an intermediate milestone of the first slice, reached before the first-slice gates apply: one graph runs end to end on SQLite through kora's public surfaces, with deliberately simple implementations.
+**The walking skeleton** is an intermediate milestone of the first slice, reached before the first-slice gates apply: one graph is deployed, triggered through the CLI and the HTTP API, advanced by a scheduler tick, claimed by a worker over HTTP, runs an agent node on the fake harness and a command node on the local runtime, waits for an approval through the CLI and completes, on SQLite. Only the depth of each component is simplified, and no first-slice gate is weakened. Read:
 
-1. Deploy a graph.
-2. Trigger it through the CLI and the HTTP API.
-3. A scheduler tick advances the run.
-4. A worker claims it over HTTP.
-5. An agent node runs on the fake harness in its own runner.
-6. A command node runs on the local runtime.
-7. A person approves through the CLI.
-8. The run completes.
-
-The architecture stays as designed: the worker reaches the control plane only through the HTTP API, the agent runs in its own runner, and the CLI and MCP are thin clients. Only depth is simplified. The skeleton is not first-slice-ready. No first-slice gate is weakened; the gates apply when the path is extended to slice acceptance. #1387 proposes the depth of each step, for example a fake agent that returns structured output without publishing a commit, and a deploy writer without the durable preparation record. The Claude adapter is assembled in parallel so that the same path also runs with a real Claude session on a developer machine, while CI keeps the fake harness. The owners also decided that deeper work on graph publication, manual-start parameter evaluation and macOS native qualification of the runner pauses until the skeleton runs.
+- the [walking-skeleton amendment of ADR-0001](../../docs/decisions/0001-own-control-plane.md#walking-skeleton-amendment-of-2026-11-11) for the decision, including what pauses until the skeleton runs;
+- the [walking-skeleton steps of the implementation plan](../../docs/implementation-plan.md#walking-skeleton) for each step, its depth, its owning work item and its order;
+- the [walking skeleton and narrowed depth](../specs/first-slice.md#walking-skeleton-and-narrowed-depth) section of the first-slice contract for the skeleton's depth and the narrowed first slice: live-session adoption stays required outside the skeleton, local process identity uses the process group and start time, isolated crash and diagnostic file I/O and macOS native qualification of the runner move out, and `kora doctor` is minimal.
 
 **The first slice** is defined by ADR-0001 and the first-slice contract:
 
@@ -187,8 +180,6 @@ Further owner decisions of 2026-11-11 reach the slice through their own sub-issu
 
 | Decision | Sub-issue |
 |---|---|
-| Live-session adoption after a worker restart stays required for the slice and outside the skeleton. The hardening around it is deferred, and local process identity uses the process group and start time. | [#1357](https://github.com/realkarych/kora/issues/1357) |
-| `kora doctor` checks only the version, the CEL binding, the harness binaries, database reachability and a writable state root. | [#1357](https://github.com/realkarych/kora/issues/1357) |
 | Codex's fail-closed tool-policy decision point becomes native app-server approval requests under an untrusted project. | [#1360](https://github.com/realkarych/kora/issues/1360) |
 | Effective JSON Schema validation uses the pinned `jsonschema` library behind input limits. | [#1361](https://github.com/realkarych/kora/issues/1361) |
 | A second slice showing the outer loop, then the pilot, come before the scheduler-prototype milestone and the second runtime and VCS pair. | [#1359](https://github.com/realkarych/kora/issues/1359) |
@@ -217,5 +208,5 @@ The operator, the host and installed providers are trusted. Package layers are a
 1. For a specific change, find the task in the [task index](../README.md#current-contracts-by-task) and load only the sections it names.
 2. Read the decision records those sections cite; they govern.
 3. For component maps, deployment shapes, the stack and unresolved mechanics, use the [architecture reference](detailed.md).
-4. For implementation order and owners, use the [implementation plan](../../docs/implementation-plan.md) and the [roadmap](../../docs/roadmap.md). The owner decisions of 2026-11-11 in #1356, summarized in [section 5](#5-the-walking-skeleton-and-the-first-slice), change parts of both; #1357 records them there.
+4. For implementation order and owners, use the [implementation plan](../../docs/implementation-plan.md) and the [roadmap](../../docs/roadmap.md). Both describe the walking skeleton; the remaining decisions of #1356 listed in [section 5](#5-the-walking-skeleton-and-the-first-slice) reach them through their own sub-issues.
 5. For how changes are made and verified, read [AGENTS.md](../../AGENTS.md) and the [development guide](../../docs/development.md).
