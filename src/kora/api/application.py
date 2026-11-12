@@ -5,12 +5,12 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from kora.api.authentication import authenticate_route
-from kora.api.errors import definitive_error
+from kora.api.errors import RequestRejection, definitive_error, request_rejection
 from kora.api.exchange import ApiExchange, current_exchange, method_of
 from kora.api.graph_deployment_route import (
     GraphDeploymentServices,
@@ -92,16 +92,25 @@ class ApiDispatch:
             return
         if matched is not None and matched.name == RouteName.WORKERS:
             body = bytearray()
-            async for chunk in Request(scope, receive).stream():
-                if len(chunk) > 4 * 1024 * 1024 - len(body):
-                    await error_response(
-                        definitive_error(
-                            ApiErrorCode.VALIDATION, request_id=exchange.request_id
-                        ),
-                        method=method,
-                    )(scope, receive, send)
-                    return
-                body.extend(chunk)
+            try:
+                async for chunk in Request(scope, receive).stream():
+                    if len(chunk) > 4 * 1024 * 1024 - len(body):
+                        await error_response(
+                            definitive_error(
+                                ApiErrorCode.VALIDATION, request_id=exchange.request_id
+                            ),
+                            method=method,
+                        )(scope, receive, send)
+                        return
+                    body.extend(chunk)
+            except ClientDisconnect:
+                await error_response(
+                    request_rejection(
+                        RequestRejection.INCOMPLETE_BODY, request_id=exchange.request_id
+                    ),
+                    method=method,
+                )(scope, receive, send)
+                return
 
             async def received_body() -> Message:
                 return {"type": "http.request", "body": bytes(body), "more_body": False}

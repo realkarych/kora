@@ -5,6 +5,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
+from starlette.types import Message
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.client import KoraClient
@@ -39,6 +40,43 @@ __all__ = ["api_capture", "preparer"]
 
 def changed(body: WorkerRegistration, **values: object) -> WorkerRegistration:
     return WorkerRegistration.model_validate({**body.model_dump(mode="json"), **values})
+
+
+class DisconnectedWorkerBody(HttpCall):
+    async def receive(self) -> Message:
+        self.receives += 1
+        if self.receives == 1:
+            return {"type": "http.request", "body": b"{", "more_body": True}
+        return {"type": "http.disconnect"}
+
+
+@pytest.mark.asyncio
+async def test_registration_disconnected_body_is_a_content_free_refusal(
+    database: Database, api_capture: Capture
+) -> None:
+    service = await seed_case(database, "service", "service")
+    app = worker_application(database, api_capture, AuthorityClock())
+    call = DisconnectedWorkerBody(
+        path="/api/v1/workers",
+        method="POST",
+        headers=[(b"authorization", (service.request.authorization or "").encode())],
+    )
+
+    await call.run(app)
+    async with database.read_transaction() as connection:
+        workers = (
+            await connection.execute(select(func.count()).select_from(worker))
+        ).scalar_one()
+        events = (
+            await connection.execute(select(func.count()).select_from(event))
+        ).scalar_one()
+    records = api_capture.finish()
+
+    assert call.status == 422
+    assert call.receives == 2
+    assert b"API003" in call.body
+    assert workers == events == 0
+    assert "api.request.failed" not in {record["event"] for record in records}
 
 
 @pytest.mark.asyncio
