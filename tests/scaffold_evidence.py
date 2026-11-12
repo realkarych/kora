@@ -3,16 +3,33 @@ import json
 import re
 import stat
 import sys
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from pydantic import Field, StrictStr
 
 from kora.protocols.common import BoundaryModel
+from scripts.ci.lane_plan import (
+    CHILDREN,
+    MAXIMUM_LANES,
+    SPECIAL_LANES,
+    Child,
+    Durations,
+    Table,
+    assign,
+    identity,
+    junit_milliseconds,
+    lane_count,
+    load_table,
+    module_of,
+)
 from tests.measurements.storage_evidence_common import (
     EvidenceFailure,
     junit_nodes,
     read_json,
+    unique_object,
 )
 
 ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
@@ -20,38 +37,7 @@ ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
     ("macos-15", "3.11.17", "sqlite"),
 )
-LANE_CHILDREN: dict[str, dict[str, tuple[str, ...]]] = {
-    "ubuntu-24.04": {
-        "conformance": ("first", "second", "third"),
-        "remainder": ("measurements", "other", "graph", "engine"),
-        "integration": ("integration", "surface"),
-        "storage": (),
-        "local-runtime": (),
-    },
-    "macos-15": {
-        "conformance": ("first", "second", "third", "surface"),
-        "remainder": ("measurements", "integration", "other"),
-        "storage": (),
-        "local-runtime": (),
-    },
-}
-COHORTS = (
-    "first",
-    "second",
-    "measurements",
-    "integration",
-    "other",
-    "graph",
-    "third",
-    "engine",
-    "surface",
-)
-GENERAL_ARGUMENTS = (
-    "--ignore=tests/plugins/storage",
-    "--ignore=tests/conformance/test_artifact_storage_conformance.py",
-    "--ignore=tests/conformance/test_installed_conformance.py",
-    "--ignore=tests/plugins/runtime/local",
-)
+CHILD_NAMES = tuple(f"child-{index}" for index in range(1, CHILDREN + 1))
 STORAGE_ARGUMENTS = (
     "tests/plugins/storage",
     "tests/conformance/test_artifact_storage_conformance.py",
@@ -59,12 +45,10 @@ STORAGE_ARGUMENTS = (
 )
 LOCAL_RUNTIME_PATH = "tests/plugins/runtime/local"
 LOCAL_RUNTIME_ARGUMENTS = ("-m", "not measurement", LOCAL_RUNTIME_PATH)
-LANE_ARGUMENTS: dict[str, tuple[str, ...]] = {
-    "conformance": GENERAL_ARGUMENTS,
-    "remainder": GENERAL_ARGUMENTS,
-    "integration": GENERAL_ARGUMENTS,
-    "storage": STORAGE_ARGUMENTS,
-    "local-runtime": LOCAL_RUNTIME_ARGUMENTS,
+SPECIAL_PATHS = (*STORAGE_ARGUMENTS, LOCAL_RUNTIME_PATH)
+SPECIAL_MATRIX_ARGUMENTS = {
+    "storage": " ".join(STORAGE_ARGUMENTS),
+    "local-runtime": LOCAL_RUNTIME_PATH,
 }
 SCHEDULED_LIFETIME_MODULES = (
     "tests/conformance/test_lifetime_cleanup_controls.py",
@@ -101,6 +85,8 @@ LOCAL_RUNTIME_CONTRACTS = (
     "test_lock.test_local_runtime_releases_resources",
     "test_platform.test_platform_mechanisms",
 )
+COUNT = re.compile(r"[1-9][0-9]*")
+MatrixRow = dict[str, str | int]
 
 
 def scheduled_modules(operating_system: str) -> tuple[str, ...]:
@@ -112,11 +98,31 @@ def scheduled_modules(operating_system: str) -> tuple[str, ...]:
     )
 
 
+def environment_key(operating_system: str, python: str) -> str:
+    return f"{operating_system}-{python}"
+
+
+def artifact_name(operating_system: str, python: str, lane: str) -> str:
+    return f"scaffold-tests-{operating_system}-{python}-{lane}"
+
+
+def general_lanes(count: int) -> tuple[str, ...]:
+    return tuple(f"general-{index}" for index in range(1, count + 1))
+
+
+def environment_lanes(count: int) -> tuple[str, ...]:
+    return ("storage", "local-runtime", *general_lanes(count))
+
+
 def lane_arguments(operating_system: str, lane: str) -> tuple[str, ...]:
     if (operating_system, lane) == ("macos-15", "storage"):
         ignored = tuple(f"--ignore={path}" for path in SCHEDULED_MACOS_STORAGE_MODULES)
         return (*ignored, *STORAGE_ARGUMENTS)
-    return LANE_ARGUMENTS[lane]
+    if lane == "storage":
+        return STORAGE_ARGUMENTS
+    if lane == "local-runtime":
+        return LOCAL_RUNTIME_ARGUMENTS
+    return ()
 
 
 def module_identity(path: str) -> str:
@@ -182,10 +188,13 @@ def validate_local_runtime(operating_system: str, selected: frozenset[str]) -> N
 Digest = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 Revision = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{40}$")]
 Identifier = Annotated[StrictStr, Field(pattern=r"^[1-9][0-9]*$")]
+Lane = Annotated[
+    StrictStr, Field(pattern=r"^(?:general-[1-9][0-9]*|storage|local-runtime)$")
+]
 
 
 class LaneReceipt(BoundaryModel):
-    version: Literal[1]
+    version: Literal[2]
     run_id: Identifier
     run_attempt: Identifier
     checkout_revision: Revision
@@ -193,9 +202,26 @@ class LaneReceipt(BoundaryModel):
     operating_system: Literal["ubuntu-24.04", "macos-15"]
     python: Literal["3.11.17", "3.15.0"]
     databases: Literal["sqlite", "sqlite,postgresql"]
-    lane: Literal["conformance", "remainder", "integration", "storage", "local-runtime"]
+    lane: Lane
     arguments: tuple[StrictStr, ...]
     files: dict[StrictStr, Digest]
+
+
+@dataclass(frozen=True)
+class ChildTiming:
+    environment: str
+    lane: str
+    child: str
+    planned: int
+    recorded: int
+
+
+@dataclass(frozen=True)
+class Verification:
+    environments: int
+    lanes: int
+    tests: int
+    timings: tuple[ChildTiming, ...]
 
 
 def evidence_bytes(path: Path, maximum: int = 16777216) -> bytes:
@@ -209,7 +235,7 @@ def evidence_bytes(path: Path, maximum: int = 16777216) -> bytes:
     return encoded
 
 
-def collection(path: Path) -> frozenset[str]:
+def collection_order(path: Path) -> tuple[str, ...]:
     if not path.is_file():
         raise ValueError("missing ordinary collection")
     lines = [line for line in evidence_bytes(path).decode("utf-8").splitlines() if line]
@@ -225,7 +251,7 @@ def collection(path: Path) -> frozenset[str]:
     selected = int(summary[1])
     total = int(summary[2]) if summary[2] is not None else selected
     deselected = int(summary[3]) if summary[3] is not None else 0
-    nodes = lines[:-1]
+    nodes = tuple(lines[:-1])
     if (
         total != selected + deselected
         or (summary[2] is None) != (summary[3] is None)
@@ -237,55 +263,74 @@ def collection(path: Path) -> frozenset[str]:
         or len(frozenset(nodes)) != selected
     ):
         raise ValueError("invalid ordinary collection inventory")
-    return frozenset(nodes)
+    return nodes
+
+
+def collection(path: Path) -> frozenset[str]:
+    return frozenset(collection_order(path))
+
+
+def identities(nodes: Iterable[str]) -> frozenset[str]:
+    result: set[str] = set()
+    for node in nodes:
+        named = identity(node)
+        if named in result:
+            raise EvidenceFailure("scaffold collection contains duplicate tests")
+        result.add(named)
+    if not result:
+        raise EvidenceFailure("scaffold collection is empty")
+    return frozenset(result)
+
+
+def validated_collection(path: Path) -> tuple[str, ...]:
+    try:
+        return collection_order(path)
+    except ValueError:
+        raise EvidenceFailure("scaffold collection is incomplete") from None
 
 
 def collection_nodes(path: Path) -> frozenset[str]:
-    nodes: set[str] = set()
-    try:
-        collected = collection(path)
-    except ValueError:
-        raise EvidenceFailure("scaffold collection is incomplete") from None
-    for line in collected:
-        if not line:
-            continue
-        if re.fullmatch(r"[0-9]+(?:/[0-9]+)? tests? collected.*", line):
-            continue
-        filename, delimiter, test = line.partition("::")
-        if (
-            not delimiter
-            or not filename.startswith("tests/")
-            or not filename.endswith(".py")
-        ):
-            raise EvidenceFailure("scaffold collection contains unexpected output")
-        name, parameter, suffix = test.partition("[")
-        identity = filename[:-3].replace("/", ".") + "." + name.replace("::", ".")
-        if parameter:
-            identity += parameter + suffix
-        if identity in nodes:
-            raise EvidenceFailure("scaffold collection contains duplicate tests")
-        nodes.add(identity)
-    if not nodes:
-        raise EvidenceFailure("scaffold collection is empty")
-    return frozenset(nodes)
+    return identities(validated_collection(path))
 
 
-def expected_files(operating_system: str, lane: str) -> frozenset[str]:
-    children = LANE_CHILDREN[operating_system][lane]
+def is_general(node: str) -> bool:
+    module = module_of(node)
+    return not any(
+        module == path or module.startswith(f"{path}/") for path in SPECIAL_PATHS
+    )
+
+
+def general_nodes(nodes: Iterable[str]) -> tuple[str, ...]:
+    return tuple(node for node in nodes if is_general(node))
+
+
+def environment_durations(table: Table, key: str) -> Durations:
+    durations = table.environments.get(key)
+    if durations is None:
+        raise EvidenceFailure("the lane duration table lacks an environment")
+    return durations
+
+
+def expected_files(lane: str) -> frozenset[str]:
     files = {"tests.stdout", "tests.stderr", "tests.exit"}
-    if lane == "conformance":
-        files.update({"complete.txt", "complete.stderr", "complete.exit"})
-    if children:
-        files.update(
-            f"{name}.{suffix}" for name in children for suffix in ("log", "xml", "exit")
-        )
-    else:
+    if lane in SPECIAL_LANES:
         files.add("junit.xml")
+    else:
+        files.update({"complete.txt", "complete.stderr", "complete.exit"})
+        files.update(
+            f"{name}.{suffix}"
+            for name in CHILD_NAMES
+            for suffix in ("log", "xml", "exit")
+        )
     return frozenset(files)
 
 
-def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
-    expected = expected_files(receipt.operating_system, receipt.lane)
+def report_names(lane: str) -> tuple[str, ...]:
+    return ("junit",) if lane in SPECIAL_LANES else CHILD_NAMES
+
+
+def validate_lane(directory: Path, receipt: LaneReceipt) -> dict[str, frozenset[str]]:
+    expected = expected_files(receipt.lane)
     if receipt.files.keys() != expected:
         raise EvidenceFailure("scaffold receipt has unexpected file coverage")
     if frozenset(path.name for path in directory.iterdir()) != expected | {
@@ -300,17 +345,15 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
             raise EvidenceFailure("scaffold evidence hash differs from its receipt")
         if filename.endswith(".exit") and encoded != b"0\n":
             raise EvidenceFailure("scaffold execution did not succeed")
-    children = LANE_CHILDREN[receipt.operating_system][receipt.lane]
-    reports = tuple(f"{name}.xml" for name in children) or ("junit.xml",)
-    selected: set[str] = set()
-    for filename in reports:
-        nodes = junit_nodes(directory / filename, 16777216)
-        if not nodes or nodes & selected:
-            raise EvidenceFailure("ordinary cohorts overlap or are empty")
-        selected.update(nodes)
+    reports: dict[str, frozenset[str]] = {}
+    for name in report_names(receipt.lane):
+        nodes = junit_nodes(directory / f"{name}.xml", 16777216)
+        if not nodes or any(nodes & other for other in reports.values()):
+            raise EvidenceFailure("lane children overlap or are empty")
+        reports[name] = nodes
     if receipt.lane == "local-runtime":
-        validate_local_runtime(receipt.operating_system, frozenset(selected))
-    return frozenset(selected)
+        validate_local_runtime(receipt.operating_system, reports["junit"])
+    return reports
 
 
 def record_lane(
@@ -326,12 +369,12 @@ def record_lane(
     arguments: tuple[str, ...],
 ) -> LaneReceipt:
     if (operating_system, python, databases) not in ENVIRONMENTS or (
-        lane not in LANE_CHILDREN[operating_system]
+        lane not in environment_lanes(MAXIMUM_LANES)
     ):
         raise EvidenceFailure("scaffold execution has an unknown environment or lane")
     receipt = LaneReceipt.model_validate(
         {
-            "version": 1,
+            "version": 2,
             "run_id": run_id,
             "run_attempt": run_attempt,
             "checkout_revision": checkout_revision,
@@ -345,7 +388,7 @@ def record_lane(
                 filename: hashlib.sha256(
                     evidence_bytes(directory / filename)
                 ).hexdigest()
-                for filename in expected_files(operating_system, lane)
+                for filename in expected_files(lane)
             },
         }
     )
@@ -354,95 +397,258 @@ def record_lane(
     return receipt
 
 
+def planned_count(text: str) -> int:
+    if COUNT.fullmatch(text) is None or int(text) > MAXIMUM_LANES:
+        raise EvidenceFailure("the planned general lane count is invalid")
+    return int(text)
+
+
+def planned_counts(text: str) -> dict[str, int]:
+    document: object = json.loads(text, object_pairs_hook=unique_object)
+    if not isinstance(document, dict):
+        raise EvidenceFailure("the planned lane counts are not an object")
+    expected = {environment_key(system, python) for system, python, _ in ENVIRONMENTS}
+    counts: dict[str, int] = {}
+    for key, value in cast(dict[str, object], document).items():
+        if key not in expected or type(value) is not int:
+            raise EvidenceFailure("the planned lane counts are invalid")
+        if not 1 <= value <= MAXIMUM_LANES:
+            raise EvidenceFailure("the planned general lane count is invalid")
+        counts[key] = value
+    if counts.keys() != expected:
+        raise EvidenceFailure("the planned lane counts lack an environment")
+    return counts
+
+
+def environment_counts(
+    collections: Mapping[str, tuple[str, ...]], table: Table
+) -> dict[str, int]:
+    return {
+        key: lane_count(
+            general_nodes(collections[key]), environment_durations(table, key)
+        )
+        for key in (
+            environment_key(system, python) for system, python, _ in ENVIRONMENTS
+        )
+    }
+
+
+def matrix_rows(counts: Mapping[str, int]) -> dict[str, list[MatrixRow]]:
+    rows: dict[str, list[MatrixRow]] = {"linux": [], "macos": []}
+    for system, python, databases in ENVIRONMENTS:
+        count = counts[environment_key(system, python)]
+        for lane in environment_lanes(count):
+            rows["macos" if system == "macos-15" else "linux"].append(
+                {
+                    "os": system,
+                    "python": python,
+                    "databases": databases,
+                    "lane": lane,
+                    "lanes": count,
+                    "pytest-arguments": SPECIAL_MATRIX_ARGUMENTS.get(lane, ""),
+                }
+            )
+    return rows
+
+
+def compact(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def plan_outputs(linux: Path, macos: Path, table: Table) -> dict[str, str]:
+    collections = {
+        environment_key(system, python): validated_collection(
+            macos if system == "macos-15" else linux
+        )
+        for system, python, _ in ENVIRONMENTS
+    }
+    counts = environment_counts(collections, table)
+    rows = matrix_rows(counts)
+    for key, count in counts.items():
+        nodes = general_nodes(collections[key])
+        plan = assign(nodes, environment_durations(table, key), count)
+        largest = max(child.milliseconds for lane in plan for child in lane)
+        planned = sum(child.milliseconds for lane in plan for child in lane)
+        sys.stderr.write(
+            f"{key}: {len(nodes)} general tests, {planned / 1000:.1f} s planned in "
+            f"{count} lanes, largest child {largest / 1000:.1f} s\n"
+        )
+    return {
+        "linux": compact({"include": rows["linux"]}),
+        "macos": compact({"include": rows["macos"]}),
+        "lanes": compact(counts),
+    }
+
+
+def write_assignment(
+    complete: Path,
+    operating_system: str,
+    python: str,
+    lane: str,
+    lanes: str,
+    output: Path,
+    table: Table,
+) -> tuple[Child, ...]:
+    count = planned_count(lanes)
+    if lane not in general_lanes(count):
+        raise EvidenceFailure("the general lane is outside its planned count")
+    if (operating_system, python) not in {(s, p) for s, p, _ in ENVIRONMENTS}:
+        raise EvidenceFailure("scaffold execution has an unknown environment or lane")
+    nodes = general_nodes(validated_collection(complete))
+    durations = environment_durations(table, environment_key(operating_system, python))
+    children = assign(nodes, durations, count)[general_lanes(count).index(lane)]
+    for name, child in zip(CHILD_NAMES, children, strict=True):
+        (output / f"{name}.args").write_text(
+            "".join(f"{node}\n" for node in nodes if node in child.nodes)
+        )
+    return children
+
+
+def lane_receipt(directory: Path, provenance: tuple[str, ...]) -> LaneReceipt:
+    if directory.is_symlink() or not directory.is_dir():
+        raise EvidenceFailure("scaffold lane is not an owned directory")
+    evidence_bytes(directory / "receipt.json", 16384)
+    receipt = LaneReceipt.model_validate(read_json(directory / "receipt.json", 16384))
+    actual = (
+        receipt.run_id,
+        receipt.run_attempt,
+        receipt.checkout_revision,
+        receipt.requested_revision,
+        receipt.operating_system,
+        receipt.python,
+        receipt.databases,
+        receipt.lane,
+    )
+    if actual != provenance:
+        raise EvidenceFailure("scaffold receipt has mismatched provenance")
+    return receipt
+
+
+def planned_children(
+    key: str,
+    directory: Path,
+    lane: str,
+    children: tuple[Child, ...],
+    reports: Mapping[str, frozenset[str]],
+) -> list[ChildTiming]:
+    timings: list[ChildTiming] = []
+    for name, child in zip(CHILD_NAMES, children, strict=True):
+        if reports[name] != frozenset(identity(node) for node in child.nodes):
+            raise EvidenceFailure("a general lane child differs from its assignment")
+        recorded = sum(junit_milliseconds(directory / f"{name}.xml").values())
+        timings.append(ChildTiming(key, lane, name, child.milliseconds, recorded))
+    return timings
+
+
 def verify_scaffold(
     root: Path,
     run_id: str,
     run_attempt: str,
     checkout_revision: str,
     requested_revision: str,
-) -> dict[str, int]:
+    counts: Mapping[str, int],
+    table: Table,
+) -> Verification:
     expected = {
-        f"scaffold-tests-{operating_system}-{python}-{lane}"
-        for operating_system, python, _ in ENVIRONMENTS
-        for lane in LANE_CHILDREN[operating_system]
+        artifact_name(system, python, lane)
+        for system, python, _ in ENVIRONMENTS
+        for lane in environment_lanes(counts[environment_key(system, python)])
     }
     if {path.name for path in root.iterdir()} != expected:
-        raise EvidenceFailure("scaffold evidence does not cover exactly fourteen lanes")
+        raise EvidenceFailure(
+            "scaffold evidence does not cover exactly the planned lanes"
+        )
     total = 0
-    for operating_system, python, databases in ENVIRONMENTS:
-        inventories: dict[str, frozenset[str]] = {}
-        complete: frozenset[str] = frozenset()
-        for lane in LANE_CHILDREN[operating_system]:
-            directory = root / f"scaffold-tests-{operating_system}-{python}-{lane}"
-            if directory.is_symlink() or not directory.is_dir():
-                raise EvidenceFailure("scaffold lane is not an owned directory")
-            evidence_bytes(directory / "receipt.json", 16384)
-            receipt = LaneReceipt.model_validate(
-                read_json(directory / "receipt.json", 16384)
-            )
-            actual = (
-                receipt.run_id,
-                receipt.run_attempt,
-                receipt.checkout_revision,
-                receipt.requested_revision,
-                receipt.operating_system,
-                receipt.python,
-                receipt.databases,
-                receipt.lane,
-            )
-            if actual != (
+    timings: list[ChildTiming] = []
+    for system, python, databases in ENVIRONMENTS:
+        key = environment_key(system, python)
+        lanes = environment_lanes(counts[key])
+        reports: dict[str, dict[str, frozenset[str]]] = {}
+        collections: list[tuple[str, ...]] = []
+        for lane in lanes:
+            directory = root / artifact_name(system, python, lane)
+            provenance = (
                 run_id,
                 run_attempt,
                 checkout_revision,
                 requested_revision,
-                operating_system,
+                system,
                 python,
                 databases,
                 lane,
-            ):
-                raise EvidenceFailure("scaffold receipt has mismatched provenance")
-            inventories[lane] = validate_lane(directory, receipt)
-            if lane == "conformance":
-                complete = collection_nodes(directory / "complete.txt")
-        scheduled = scheduled_modules(operating_system)
+            )
+            reports[lane] = validate_lane(
+                directory, lane_receipt(directory, provenance)
+            )
+            if lane not in SPECIAL_LANES:
+                collections.append(validated_collection(directory / "complete.txt"))
+        if any(nodes != collections[0] for nodes in collections):
+            raise EvidenceFailure("general lanes collected different tests")
+        complete = identities(collections[0])
+        scheduled = scheduled_modules(system)
         if any(scheduled_owner(node, scheduled) for node in complete):
             raise EvidenceFailure("scaffold collection contains scheduled modules")
-        combined = frozenset[str]().union(*inventories.values())
-        if sum(len(nodes) for nodes in inventories.values()) != len(combined):
+        plan = assign(
+            general_nodes(collections[0]),
+            environment_durations(table, key),
+            counts[key],
+        )
+        for lane, children in zip(general_lanes(counts[key]), plan, strict=True):
+            directory = root / artifact_name(system, python, lane)
+            timings.extend(
+                planned_children(key, directory, lane, children, reports[lane])
+            )
+        inventories = [nodes for lane in reports.values() for nodes in lane.values()]
+        combined = frozenset[str]().union(*inventories)
+        if sum(len(nodes) for nodes in inventories) != len(combined):
             raise EvidenceFailure("scaffold lanes contain duplicate tests")
         if combined != complete:
             raise EvidenceFailure("scaffold lanes do not partition the complete suite")
-        if "integration" in inventories and inventories["integration"] != frozenset(
-            node
-            for node in complete
-            if node.startswith(
-                (
-                    "tests.api.",
-                    "tests.cli.",
-                    "tests.ir.test_structured_schema_string_lengths.",
-                )
-            )
-        ):
-            raise EvidenceFailure(
-                "Linux integration lane differs from its inventory subset"
-            )
         total += len(complete)
-    return {"environments": len(ENVIRONMENTS), "lanes": len(expected), "tests": total}
+    return Verification(len(ENVIRONMENTS), len(expected), total, tuple(timings))
 
 
-def main() -> None:
-    if sys.argv[1:2] == ["scheduled"] and len(sys.argv) == 5:
-        report, operating_system, lane = sys.argv[2:]
-        result = verify_scheduled(Path(report), operating_system, lane)
-        sys.stdout.write(json.dumps(result) + "\n")
-        return
-    operation, directory, run_id, attempt, checkout, requested, *environment = sys.argv[
-        1:
-    ]
-    if operation == "record" and len(environment) >= 4:
-        operating_system, python, databases, lane, *arguments = environment
-        record_lane(
-            Path(directory),
+def timing_lines(timing: ChildTiming) -> str:
+    planned, recorded = timing.planned / 1000, timing.recorded / 1000
+    child = f"{timing.environment} {timing.lane} {timing.child}"
+    line = f"{child}: planned {planned:.1f} s, recorded {recorded:.1f} s\n"
+    if timing.recorded * 4 > timing.planned * 5:
+        line += (
+            f"::notice title=Scaffold lane plan::{child} "
+            f"recorded {recorded:.1f} s against a plan of {planned:.1f} s; "
+            "refresh scripts/ci/lane_durations.json\n"
+        )
+    return line
+
+
+def main(arguments: list[str]) -> None:
+    match arguments:
+        case ["scheduled", report, operating_system, lane]:
+            result = verify_scheduled(Path(report), operating_system, lane)
+            sys.stdout.write(json.dumps(result) + "\n")
+        case ["matrix", linux, macos]:
+            outputs = plan_outputs(Path(linux), Path(macos), load_table())
+            sys.stdout.write(
+                "".join(f"{name}={value}\n" for name, value in outputs.items())
+            )
+        case ["assign", complete, operating_system, python, lane, lanes, output]:
+            children = write_assignment(
+                Path(complete),
+                operating_system,
+                python,
+                lane,
+                lanes,
+                Path(output),
+                load_table(),
+            )
+            for name, child in zip(CHILD_NAMES, children, strict=True):
+                sys.stdout.write(
+                    f"{lane} {name}: {len(child.nodes)} tests, "
+                    f"{child.milliseconds / 1000:.1f} s planned\n"
+                )
+        case [
+            "record",
+            directory,
             run_id,
             attempt,
             checkout,
@@ -451,14 +657,40 @@ def main() -> None:
             python,
             databases,
             lane,
-            tuple(arguments),
-        )
-    elif operation == "verify" and not environment:
-        result = verify_scaffold(Path(directory), run_id, attempt, checkout, requested)
-        sys.stdout.write(json.dumps(result) + "\n")
-    else:
-        raise EvidenceFailure("unknown scaffold evidence operation")
+            *selection,
+        ]:
+            record_lane(
+                Path(directory),
+                run_id,
+                attempt,
+                checkout,
+                requested,
+                operating_system,
+                python,
+                databases,
+                lane,
+                tuple(selection),
+            )
+        case ["verify", directory, run_id, attempt, checkout, requested, lanes]:
+            verification = verify_scaffold(
+                Path(directory),
+                run_id,
+                attempt,
+                checkout,
+                requested,
+                planned_counts(lanes),
+                load_table(),
+            )
+            sys.stdout.write("".join(map(timing_lines, verification.timings)))
+            summary = {
+                "environments": verification.environments,
+                "lanes": verification.lanes,
+                "tests": verification.tests,
+            }
+            sys.stdout.write(json.dumps(summary) + "\n")
+        case _:
+            raise EvidenceFailure("unknown scaffold evidence operation")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

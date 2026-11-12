@@ -31,7 +31,11 @@ def write_junit(path: Path, identities: frozenset[str]) -> None:
     suite = Element("testsuite")
     for identity in sorted(identities):
         module, test = identity.rsplit(".test_", 1)
-        SubElement(suite, "testcase", {"classname": module, "name": "test_" + test})
+        SubElement(
+            suite,
+            "testcase",
+            {"classname": module, "name": "test_" + test, "time": "0.010"},
+        )
     path.write_bytes(tostring(suite))
 
 

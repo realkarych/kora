@@ -29,17 +29,7 @@ require_scaffold_lane() {
       ;;
   esac
   case "$KORA_SCAFFOLD_LANE" in
-    conformance)
-      test "$FRONTEND_OUTCOME" = success
-      test "$STATIC_OUTCOME" = skipped
-      test "$DISTRIBUTIONS_OUTCOME" = skipped
-      ;;
-    remainder|integration)
-      test "$FRONTEND_OUTCOME" = success
-      test "$STATIC_OUTCOME" = skipped
-      test "$DISTRIBUTIONS_OUTCOME" = skipped
-      ;;
-    storage)
+    general-[1-8]|storage)
       test "$FRONTEND_OUTCOME" = success
       test "$STATIC_OUTCOME" = skipped
       test "$DISTRIBUTIONS_OUTCOME" = skipped
@@ -58,7 +48,9 @@ require_scaffold_evidence() {
   test "$SCOPE_VERIFIED" = true
   test "$WORKFLOW_CANCELLED" = false
   if test "$FULL_SCOPE" = false; then
+    test "$PLAN_RESULT" = skipped
     test "$LANES_RESULT" = skipped
+    test "$MACOS_LANES_RESULT" = skipped
     test "$DEPENDENCIES_OUTCOME" = skipped
     test "$DOWNLOAD_OUTCOME" = skipped
     test "$VERIFICATION_OUTCOME" = skipped
@@ -66,7 +58,9 @@ require_scaffold_evidence() {
     exit 0
   fi
   test "$FULL_SCOPE" = true
+  test "$PLAN_RESULT" = success
   test "$LANES_RESULT" = success
+  test "$MACOS_LANES_RESULT" = success
   test "$DEPENDENCIES_OUTCOME" = success
   test "$DOWNLOAD_OUTCOME" = success
   test "$VERIFICATION_OUTCOME" = success

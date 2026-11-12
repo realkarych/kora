@@ -9,6 +9,7 @@ from typing import cast
 
 import pytest
 
+from tests.scaffold_evidence import ENVIRONMENTS, environment_key, matrix_rows
 from tests.support.workflows import (
     Workflows,
     action_name,
@@ -104,6 +105,7 @@ GATING_JOB_CONDITIONS = {
 GATE_SCRIPT = "scripts/ci/require_outcomes.sh"
 GATE_JOBS = {
     "ci.yml:scaffold-tests": "scaffold-lane",
+    "ci.yml:scaffold-tests-macos": "scaffold-lane",
     "ci.yml:scaffold-evidence": "scaffold-evidence",
     "ci.yml:scaffold": "check",
     "ci.yml:cel-producer": "verify",
@@ -130,9 +132,20 @@ UNGATED_STEPS = {
         "apart from macOS lanes; its failure fails the lane job itself"
     ),
     "ci.yml:scaffold-tests:cohort_evidence": (
-        "copies cohort evidence that the shared Scaffold evidence job verifies; "
-        "its failure fails the lane job itself"
+        "copies general lane evidence that the shared Scaffold evidence job "
+        "verifies; its failure fails the lane job itself"
     ),
+    "ci.yml:scaffold-tests-macos:cohort_evidence": (
+        "copies general lane evidence that the shared Scaffold evidence job "
+        "verifies; its failure fails the lane job itself"
+    ),
+}
+COMPUTED_MATRIX_ROWS = {
+    "ci.yml:scaffold-tests": "linux",
+    "ci.yml:scaffold-tests-macos": "macos",
+}
+SAMPLE_LANE_COUNTS = {
+    environment_key(system, python): 2 for system, python, _ in ENVIRONMENTS
 }
 MATRIX_REFERENCE = re.compile(r"matrix\.([\w-]+)")
 MATRIX_VALUE = re.compile(r"\$\{\{ matrix\.([\w-]+) \}\}")
@@ -318,10 +331,29 @@ def unsafe_interpolations(workflows: Workflows) -> list[str]:
     return [*in_scripts, *unlisted]
 
 
+def matrix_document(job: dict[str, object]) -> object:
+    return table(job.get("strategy", {})).get("matrix", {})
+
+
+def static_rows(job: dict[str, object]) -> list[dict[str, object]]:
+    matrix = matrix_document(job)
+    if isinstance(matrix, str):
+        return []
+    return [table(row) for row in cast(list[object], table(matrix).get("include", []))]
+
+
+def gate_rows(location: str, job: dict[str, object]) -> list[dict[str, object]] | None:
+    if not isinstance(matrix_document(job), str):
+        return static_rows(job)
+    platform = COMPUTED_MATRIX_ROWS.get(location)
+    if platform is None:
+        return None
+    return [dict(row) for row in matrix_rows(SAMPLE_LANE_COUNTS)[platform]]
+
+
 def status_names(job: dict[str, object]) -> list[str]:
     template = str(job.get("name", ""))
-    matrix = table(table(job.get("strategy", {})).get("matrix", {}))
-    rows = [table(row) for row in cast(list[object], matrix.get("include", []))]
+    rows = static_rows(job)
     suffix = REUSABLE_WORKFLOW_JOBS.get(action_name(job.get("uses", "")))
     names: list[str] = []
     for row in rows or [{}]:
@@ -426,11 +458,14 @@ def run_gate(
     )
 
 
-def matrix_scenarios(job: dict[str, object]) -> list[dict[str, str]]:
+def matrix_scenarios(
+    location: str, job: dict[str, object]
+) -> list[dict[str, str]] | None:
     conditions = " ".join(str(step.get("if", "")) for step in step_list(job))
     keys = sorted(set(MATRIX_REFERENCE.findall(conditions)))
-    matrix = table(table(job.get("strategy", {})).get("matrix", {}))
-    rows = [table(row) for row in cast(list[object], matrix.get("include", []))]
+    rows = gate_rows(location, job)
+    if rows is None:
+        return None
     scenarios: list[dict[str, str]] = []
     for row in rows or [{}]:
         scenario = {key: str(row.get(key, "")) for key in keys}
@@ -477,8 +512,11 @@ def misbehaving_gate(
     location: str, job: dict[str, object], gate: dict[str, object], workspace: Path
 ) -> list[str]:
     proof = "verified=true\n" if "verified" in table(job.get("outputs", {})) else ""
+    scenarios = matrix_scenarios(location, job)
+    if scenarios is None:
+        return [f"{location}: computed matrix without reviewed rows"]
     violations: list[str] = []
-    for scenario in matrix_scenarios(job):
+    for scenario in scenarios:
         label = "-".join([location, *scenario.values()])
         context = matrix_context(job, scenario)
         passing = passing_values(job, gate, scenario)
@@ -1127,6 +1165,20 @@ def skip_the_static_checks(workflows: Workflows) -> None:
     step["if"] = "false"
 
 
+def replace_the_macos_lane_gate_with_success(workflows: Workflows) -> None:
+    step_list(job_of(workflows, "ci.yml", "scaffold-tests-macos"))[-1]["run"] = "exit 0"
+
+
+def compute_an_unreviewed_gate_matrix(workflows: Workflows) -> None:
+    strategy = table(job_of(workflows, "daily-lanes.yml", "lifetime-tests")["strategy"])
+    strategy["matrix"] = "${{ fromJSON(needs.plan.outputs.rows) }}"
+
+
+def ignore_the_macos_lanes(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "scaffold-evidence"))[-1]
+    del table(gate["env"])["MACOS_LANES_RESULT"]
+
+
 def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
     job = job_of(workflows, "conformance-lifetime.yml", "lifetime-evidence")
     job["needs"] = [*needs_of(job), "storage-probe"]
@@ -1147,6 +1199,9 @@ def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
         replace_the_lane_gate_with_success,
         drop_the_static_check_outcome,
         skip_the_static_checks,
+        replace_the_macos_lane_gate_with_success,
+        compute_an_unreviewed_gate_matrix,
+        ignore_the_macos_lanes,
     ],
 )
 def test_gate_check_refuses_a_mutated_workflow(
