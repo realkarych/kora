@@ -77,7 +77,9 @@ async def test_cli_deploy_without_files(
 
     async with running_app(app) as origin:
         environment = {"KORA_URL": origin, "KORA_TOKEN": token}
-        human = await kora(["deploy", str(graph)], environment)
+        human = await kora(
+            ["deploy", str(graph)], environment | {"KORA_LOG_LEVEL": "DEBUG"}
+        )
         machine = await kora(["deploy", str(graph), "--json"], environment)
         refusal = await kora(["deploy", str(refused), "--json"], environment)
 
@@ -87,6 +89,9 @@ async def test_cli_deploy_without_files(
     assert human.stdout.decode().startswith(
         f"published graph version {response.graph_version_id} (number 1"
     )
+    records = {str(record["event"]): record for record in human.records()}
+    assert records["cli.deploy.finished"]["outcome"] == "ok"
+    assert str(records["client.request.completed"]["request_id"]).startswith("req_")
     assert response.reused
     assert envelope.error.code == "API003"
     assert b"KORA_TOKEN" not in human.stderr + machine.stderr + refusal.stderr

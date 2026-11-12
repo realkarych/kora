@@ -23,6 +23,10 @@ class DeploymentPreparer:
         self._slot = asyncio.Semaphore(1)
         self._evaluator: Evaluator | None = None
 
+    @property
+    def busy(self) -> bool:
+        return self._slot.locked()
+
     def _serve(self) -> None:
         asyncio.set_event_loop(self._loop)
         try:

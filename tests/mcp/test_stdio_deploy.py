@@ -123,7 +123,9 @@ async def test_mcp_deploy_without_files(
     refused = written(tmp_path, "refused.ir.json", skeleton_ir(harness="claude"))
 
     async with running_app(app) as origin:
-        session = await start({"KORA_URL": origin, "KORA_MCP_TOKEN": token})
+        session = await start(
+            {"KORA_URL": origin, "KORA_MCP_TOKEN": token, "KORA_LOG_LEVEL": "DEBUG"}
+        )
         listed = await session.request("tools/list", {})
         published = await session.call(graph)
         rejected = await session.call(refused)
@@ -141,7 +143,18 @@ async def test_mcp_deploy_without_files(
     assert cast("JsonObject", rejected_content["error"])["code"] == "API003"
     assert malformed["isError"] is True
     assert all(line["jsonrpc"] == "2.0" for line in session.lines)
+    events = [
+        cast("JsonObject", json.loads(line))
+        for line in stderr.splitlines()
+        if line.startswith(b"{")
+    ]
+    finished = [event for event in events if event["event"] == "mcp.tool.finished"]
     assert code == 0
+    assert [event["outcome"] for event in finished] == [
+        "ok",
+        "api_error",
+        "document_error",
+    ]
     assert token.encode() not in stderr
 
 
