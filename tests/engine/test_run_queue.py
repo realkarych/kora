@@ -12,7 +12,6 @@ from kora.db.connection import Database, Dialect
 from kora.db.run_queue_index_v1 import (
     POSTGRES_QUEUE_INDEX,
     SQLITE_QUEUE_INDEX,
-    SQLITE_QUEUE_INDEX_STATE,
 )
 from kora.db.tables import run
 from kora.db.transactions import managed_writer
@@ -273,7 +272,7 @@ async def sqlite_plan(writer: AsyncConnection, case: QueueCase) -> None:
     locks = await acquire(writer, case)
     with executed_queries(writer) as queries:
         result = await case.observe(writer, locks)
-    [catalog_query, (statement, bindings)] = queries
+    [(statement, bindings)] = queries
     program = await sqlite_instructions(writer, statement, bindings)
     run_root = await writer.scalar(
         text("SELECT rootpage FROM main.sqlite_schema WHERE name = 'run'")
@@ -290,7 +289,6 @@ async def sqlite_plan(writer: AsyncConnection, case: QueueCase) -> None:
     }
 
     assert result is QueueState.CLEAR
-    assert "main.sqlite_schema" in catalog_query[0]
     assert len(index_cursors) == 3
     assert sorted(
         row[5]
@@ -377,37 +375,16 @@ async def test_native_queue_plan_excludes_terminal_run_payloads(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("layout", ["missing", "incompatible"])
-async def test_queue_refuses_when_its_native_index_is_unavailable(
+async def test_queue_uses_owned_schema_without_rechecking_indexes(
     database: Database,
-    layout: str,
 ) -> None:
     case = await queue_case(database)
-    ledger = ConnectionLedger(database)
-    index = (
-        SQLITE_QUEUE_INDEX
-        if database.dialect is Dialect.SQLITE
-        else POSTGRES_QUEUE_INDEX
-    )
 
     async with database.transaction() as writer:
-        await writer.exec_driver_sql(f"DROP INDEX {index}")
-        if layout == "incompatible":
-            await writer.exec_driver_sql(f"CREATE INDEX {index} ON run (status)")
         locks = await acquire(writer, case)
         async with observed_statements(writer) as queries:
-            with pytest.raises(QueueCheckFailed) as refusal:
-                await case.observe(writer, locks)
+            outcome = await case.observe(writer, locks)
 
-    assert refusal.value.reason is QueueCheckFailure.INDEX
-    if database.dialect is Dialect.POSTGRESQL:
-        assert len(queries) == 2
-        assert not any("FROM run " in statement for statement in queries)
-    else:
-        assert queries == [
-            SQLITE_QUEUE_INDEX_STATE.text.replace(":name", "?").replace(
-                ":definition", "?"
-            )
-        ]
-    assert refusal.value.__cause__ is refusal.value.__context__ is None
-    assert database.units_in_flight() == ledger.outstanding == 0
+    assert outcome is QueueState.OLDER_PENDING
+    assert not any("pg_index" in query or "sqlite_schema" in query for query in queries)
+    assert database.units_in_flight() == 0
