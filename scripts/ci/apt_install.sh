@@ -9,7 +9,7 @@ attempt() {
       return 1
     fi
   fi
-  apt-get "${options[@]}" --error-on=any update
+  apt-get "${options[@]}" update
   apt-get "${options[@]}" install --yes --no-install-recommends "$@"
 }
 
