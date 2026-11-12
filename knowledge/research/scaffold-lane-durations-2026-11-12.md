@@ -36,7 +36,19 @@ The refresh accepts only the artifacts of one green `master` push run, so the co
 | Ubuntu 24.04, Python 3.11.17 | 16,616 | 2,257.2 | 482 | 0.136 s | `tests/cli/test_conformance.py` 185.2 s, `tests/engine/test_graph_execution_contract.py` 91.0 s |
 | Ubuntu 24.04, Python 3.15.0 | 16,616 | 2,414.2 | 482 | 0.145 s | `tests/cli/test_conformance.py` 198.5 s, `tests/engine/test_graph_execution_contract.py` 83.5 s |
 
-Its Ubuntu 3.11 total is 22% below the planning basis, which shows the size of run-to-run variance. A local planning run on 2026-11-12 with this table and the current collections gave three general lanes on each Linux interpreter, with largest planned children of 250.3 s and 267.7 s, and four lanes on macOS, with 227.2 s. `tests/cli/test_conformance.py` exceeds the target on macOS, so it is divided into two contiguous chunks of its sorted tests.
+Against the planning basis, its totals are 22% lower on Ubuntu 3.11, 10% lower on Ubuntu 3.15 and 4% higher on macOS, which shows the size of run-to-run variance in a single-run table. `tests/cli/test_conformance.py` exceeds the target on macOS, so it is divided into two contiguous chunks of its sorted tests.
+
+## Lane counts are computed per run
+
+The planning job computes each environment's lane count in every run from that run's collection, so the counts and the number of scaffold jobs change between pull requests as tests are added or removed. They are not a fixed layout. As an example, the planning job of revision `1241f24fcec8a8558c53da72e138f8a2abb8ea39`, after master had added about 92 tests, planned:
+
+| Environment | Estimated seconds | Lanes | Largest planned child |
+|---|---:|---:|---:|
+| Ubuntu 24.04, Python 3.11.17 | 2,278.8 | 3 | 253.2 s |
+| Ubuntu 24.04, Python 3.15.0 | 2,436.3 | 4 | 203.0 s |
+| macOS 15, Python 3.11.17 | 2,651.7 | 4 | 227.2 s |
+
+That is seventeen scaffold jobs. With three lanes, Ubuntu 3.15's largest child would have been 270.7 s, just over the target, so it took a fourth lane. Three lanes of three children hold at most 2,430 s, so Ubuntu 3.11 moves to four lanes after about 6.6% estimate growth. A planning run on a developer machine collects the Linux selection on that machine and can differ from the Linux runners by a few tests, enough to change a count at such a boundary.
 
 ## First balanced run
 
@@ -52,12 +64,12 @@ Diagnostics of that run, never passing guarantees:
 ## Owner decisions of 2026-11-12
 
 - The head-revision planner, cross-checked by the head-revision evidence join, replaces the issue's constraint that trusted planning inputs come from the base revision. Review still guards pull requests that edit the planner, the join or the workflow trust tests.
-- Blocking for the third acceptance criterion: the deterministic planner bound and green final-head CI. The bound is that every planned child estimate is at most 270 s, except a child holding a single test that exceeds the target by itself, with at most eight lanes per environment. Diagnostic only: lane test-step and job durations, queue time and headroom to the 600 s deadline. They are recorded and never reported as a passing guarantee. A lane job prints a GitHub warning when its test step runs longer than 450 s.
+- Blocking for the third acceptance criterion: the deterministic planner bound and green final-head CI. The bound is that every planned child estimate is at most 270 s, except a child holding a single test that exceeds the target by itself, with at most eight lanes per environment. Diagnostic only: lane test-step and job durations, queue time and headroom to the 600 s deadline. They are recorded and never reported as a passing guarantee. A lane job prints a GitHub warning when its test step runs longer than 450 s. Following the performance review of #1411, the warning measures the time since the lane job started, at the end of its test step, so setup and tool acquisition count; it never fails the job.
 - The planning job stays after `Classify verification scope`. Planning in parallel with the classification is a possible later change, triggered if the planning latency hurts feedback.
 
 ## Reading rule and refresh trigger
 
-Recorded time comes from runners with three or four concurrent children and one run's runner speed. Refresh the table from a newer green master push run when the evidence join's over-plan notice or a lane's 450 s headroom warning appears on a master run, or when a test module is added or removed. The ten-minute job deadline and every test deadline remain the hard limits.
+Recorded time comes from runners with three or four concurrent children and one run's runner speed. Refresh the table from a newer green master push run when the evidence join's over-plan notice or a lane's 450 s headroom warning appears on a master run, or when a test module is added or removed. The committed table comes from a run that was about 22% faster than the planning basis on Ubuntu 3.11, so on a day with basis runner speed the 125% over-plan notice is expected there; it alone is not a defect. Do not chase a single fast or slow run: prefer a source run whose recorded child times divided by planned times are close to 1, and compare the previous plan's notices before replacing the table. The ten-minute job deadline and every test deadline remain the hard limits.
 
 ## Node-ID argument files
 

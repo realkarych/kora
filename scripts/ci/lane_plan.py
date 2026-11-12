@@ -92,8 +92,8 @@ def estimates(nodes: Iterable[str], durations: Durations) -> dict[str, int]:
 def module_chunks(
     members: list[str], estimated: Mapping[str, int], target: int
 ) -> list[Item]:
-    total = sum(estimated[node] for node in members)
-    pieces = min(len(members), max(1, math.ceil(total / target)))
+    capacity = max(1, target // max(estimated[node] for node in members))
+    pieces = math.ceil(len(members) / capacity)
     bounds = [len(members) * index // pieces for index in range(pieces + 1)]
     parts = [members[start:end] for start, end in pairwise(bounds)]
     return [

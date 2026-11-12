@@ -99,8 +99,11 @@ def test_lane_shell_admits_only_planned_lane_names(
     assert (result.stdout == b"admitted") is admitted
 
 
+HEADROOM_WARNING = b"::warning title=Scaffold lane headroom::macos-15 Python 3.11.17 "
+
+
 @pytest.mark.parametrize(("elapsed", "warned"), [(400, False), (451, True)])
-def test_lane_warns_when_its_test_step_exceeds_the_headroom_threshold(
+def test_lane_warns_when_its_job_runs_beyond_the_headroom_threshold(
     tmp_path: Path, elapsed: int, warned: bool
 ) -> None:
     environment = {
@@ -109,9 +112,13 @@ def test_lane_warns_when_its_test_step_exceeds_the_headroom_threshold(
         "KORA_SCAFFOLD_PYTHON": "3.11.17",
         "KORA_SCAFFOLD_LANE": "general-2",
     }
+    commands = (
+        f"KORA_LANE_STARTED=$(($(date +%s) - {elapsed}))\n"
+        "require_lane_start\ntrap report_headroom EXIT\nexit 3\n"
+    )
 
     result = subprocess.run(
-        sourced(LANE_SCRIPT, f"trap report_headroom EXIT\nSECONDS={elapsed}\nexit 3\n"),
+        sourced(LANE_SCRIPT, commands),
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -120,8 +127,25 @@ def test_lane_warns_when_its_test_step_exceeds_the_headroom_threshold(
     )
 
     assert result.returncode == 3
-    warning = b"::warning title=Scaffold lane headroom::macos-15 Python 3.11.17 "
-    assert result.stdout.startswith(warning + b"general-2 test step ran") is warned
+    expected = HEADROOM_WARNING + b"general-2 lane job ran"
+    assert result.stdout.startswith(expected) is warned
+
+
+@pytest.mark.parametrize("started", ["", "0", "1.5", "soon"])
+def test_lane_refuses_a_missing_job_start(tmp_path: Path, started: str) -> None:
+    environment = {**os.environ, "KORA_LANE_STARTED": started}
+
+    result = subprocess.run(
+        sourced(LANE_SCRIPT, "require_lane_start\nprintf started\n"),
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == b""
 
 
 def test_children_run_exactly_their_argument_files(tmp_path: Path) -> None:

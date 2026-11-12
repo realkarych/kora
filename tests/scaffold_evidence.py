@@ -7,7 +7,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, cast
-from xml.parsers.expat import ExpatError
 
 from pydantic import Field, StrictStr
 
@@ -90,7 +89,6 @@ LOCAL_RUNTIME_CONTRACTS = (
     "test_platform.test_platform_mechanisms",
 )
 COUNT = re.compile(r"[1-9][0-9]*")
-UNREADABLE = (ValueError, OSError, ExpatError)
 MatrixRow = dict[str, str | int]
 
 
@@ -217,8 +215,8 @@ class ChildTiming:
     environment: str
     lane: str
     child: str
-    planned: int | None
-    recorded: int | None
+    planned: int
+    recorded: int
 
 
 @dataclass(frozen=True)
@@ -352,9 +350,12 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> dict[str, frozenset[
             raise EvidenceFailure("scaffold execution did not succeed")
     reports: dict[str, frozenset[str]] = {}
     for name in report_names(receipt.lane):
-        nodes = junit_nodes(directory / f"{name}.xml", 16777216)
+        report = directory / f"{name}.xml"
+        nodes = junit_nodes(report, 16777216)
         if not nodes or any(nodes & other for other in reports.values()):
             raise EvidenceFailure("lane children overlap or are empty")
+        if receipt.lane not in SPECIAL_LANES:
+            junit_milliseconds(report)
         reports[name] = nodes
     if receipt.lane == "local-runtime":
         validate_local_runtime(receipt.operating_system, reports["junit"])
@@ -537,44 +538,40 @@ def require_assignment(
             raise EvidenceFailure("a general lane child differs from its assignment")
 
 
-def planned_lane(
+def lane_timings(
     directory: Path, key: str, lane: str, count: int, table: Table
-) -> tuple[int | None, ...]:
-    try:
-        nodes = general_nodes(collection_order(directory / "complete.txt"))
-        plan = assign(nodes, environment_durations(table, key), count)
-    except UNREADABLE:
-        return (None,) * len(CHILD_NAMES)
-    return tuple(child.milliseconds for child in plan[general_lanes(count).index(lane)])
-
-
-def recorded_child(report: Path) -> int | None:
-    try:
-        return sum(junit_milliseconds(report).values())
-    except UNREADABLE:
-        return None
+) -> list[ChildTiming]:
+    nodes = general_nodes(validated_collection(directory / "complete.txt"))
+    plan = assign(nodes, environment_durations(table, key), count)
+    return [
+        ChildTiming(
+            key,
+            lane,
+            name,
+            child.milliseconds,
+            sum(junit_milliseconds(directory / f"{name}.xml").values()),
+        )
+        for name, child in zip(
+            CHILD_NAMES, plan[general_lanes(count).index(lane)], strict=True
+        )
+    ]
 
 
 def observed_timings(
     root: Path, counts: Mapping[str, int], table: Table
 ) -> tuple[ChildTiming, ...]:
-    timings: list[ChildTiming] = []
-    for system, python, _ in ENVIRONMENTS:
-        key = environment_key(system, python)
-        for lane in general_lanes(counts[key]):
-            directory = root / artifact_name(system, python, lane)
-            planned = planned_lane(directory, key, lane, counts[key], table)
-            timings.extend(
-                ChildTiming(
-                    key,
-                    lane,
-                    name,
-                    milliseconds,
-                    recorded_child(directory / f"{name}.xml"),
-                )
-                for name, milliseconds in zip(CHILD_NAMES, planned, strict=True)
-            )
-    return tuple(timings)
+    return tuple(
+        timing
+        for system, python, _ in ENVIRONMENTS
+        for lane in general_lanes(counts[environment_key(system, python)])
+        for timing in lane_timings(
+            root / artifact_name(system, python, lane),
+            environment_key(system, python),
+            lane,
+            counts[environment_key(system, python)],
+            table,
+        )
+    )
 
 
 def verify_scaffold(
@@ -641,19 +638,12 @@ def verify_scaffold(
     return Verification(len(ENVIRONMENTS), len(expected), total)
 
 
-def seconds(milliseconds: int | None) -> str:
-    return "unavailable" if milliseconds is None else f"{milliseconds / 1000:.1f} s"
-
-
 def timing_lines(timing: ChildTiming) -> str:
-    planned, recorded = seconds(timing.planned), seconds(timing.recorded)
+    planned = f"{timing.planned / 1000:.1f} s"
+    recorded = f"{timing.recorded / 1000:.1f} s"
     child = f"{timing.environment} {timing.lane} {timing.child}"
     line = f"{child}: planned {planned}, recorded {recorded}\n"
-    if (
-        timing.planned is not None
-        and timing.recorded is not None
-        and timing.recorded * 4 > timing.planned * 5
-    ):
+    if timing.recorded * 4 > timing.planned * 5:
         line += (
             f"::notice title=Scaffold lane plan::{child} "
             f"recorded {recorded} against a plan of {planned}; "
@@ -725,13 +715,20 @@ def main(arguments: list[str]) -> None:
                 sys.stdout.write(
                     f"{key}: {len(durations)} modules, {total / 1000:.1f} s\n"
                 )
-        case ["verify", directory, run_id, attempt, checkout, requested, lanes]:
-            counts, table = planned_counts(lanes), load_table()
-            timings = observed_timings(Path(directory), counts, table)
+        case ["timings", directory, lanes]:
+            timings = observed_timings(
+                Path(directory), planned_counts(lanes), load_table()
+            )
             sys.stdout.write("".join(map(timing_lines, timings)))
-            sys.stdout.flush()
+        case ["verify", directory, run_id, attempt, checkout, requested, lanes]:
             verification = verify_scaffold(
-                Path(directory), run_id, attempt, checkout, requested, counts, table
+                Path(directory),
+                run_id,
+                attempt,
+                checkout,
+                requested,
+                planned_counts(lanes),
+                load_table(),
             )
             summary = {
                 "environments": verification.environments,

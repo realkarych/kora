@@ -104,6 +104,8 @@ jobs:
       KORA_SCAFFOLD_OS: ${{ matrix.os }}
       KORA_SCAFFOLD_PYTHON: ${{ matrix.python }}
     steps:
+      - name: Record lane job start
+        run: printf 'KORA_LANE_STARTED=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
@@ -243,6 +245,8 @@ jobs:
       KORA_SCAFFOLD_OS: ${{ matrix.os }}
       KORA_SCAFFOLD_PYTHON: ${{ matrix.python }}
     steps:
+      - name: Record lane job start
+        run: printf 'KORA_LANE_STARTED=%s\n' "$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
@@ -392,8 +396,16 @@ jobs:
         with:
           pattern: scaffold-tests-*
           path: scaffold-evidence
+      - name: Report planned and recorded lane times
+        if: ${{ always() && needs.change-scope.outputs.full != 'false' }}
+        id: timings
+        env:
+          KORA_SCAFFOLD_LANES: ${{ needs.scaffold-plan.outputs.lanes }}
+        run: |
+          uv run --no-sync python -m tests.scaffold_evidence timings \
+            scaffold-evidence "$KORA_SCAFFOLD_LANES"
       - name: Verify the planned lanes and complete collection coverage
-        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        if: ${{ !cancelled() && needs.change-scope.outputs.full != 'false' }}
         id: verification
         env:
           KORA_SCAFFOLD_RUN: ${{ github.run_id }}

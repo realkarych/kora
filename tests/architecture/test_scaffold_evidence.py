@@ -1,12 +1,20 @@
 import hashlib
 import json
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 import pytest
 from pydantic import ValidationError
 
 from kora.ir.json import parse_json_object
-from scripts.ci.lane_plan import Record, Table, assign, identity, module_of
+from scripts.ci.lane_plan import (
+    PlanFailure,
+    Record,
+    Table,
+    assign,
+    identity,
+    module_of,
+)
 from tests.measurements.storage_evidence_common import EvidenceFailure
 from tests.measurements.storage_evidence_fixture import write_junit
 from tests.scaffold_evidence import (
@@ -196,28 +204,39 @@ def test_observed_timings_cover_every_general_child(tmp_path: Path) -> None:
     assert sum(timing.recorded or 0 for timing in timings) == 3 * 10 * 9
 
 
-def test_observed_timings_survive_evidence_that_fails_verification(
-    tmp_path: Path,
+def untimed_report(path: Path) -> None:
+    text = path.read_text()
+    path.write_text(text.replace(' time="0.010"', ""))
+
+
+@pytest.mark.parametrize(
+    ("corruption", "failure"),
+    [
+        ("truncated report", ExpatError),
+        ("untimed report", PlanFailure),
+        ("interrupted collection", EvidenceFailure),
+    ],
+)
+def test_timings_refuse_evidence_that_verification_also_refuses(
+    tmp_path: Path, corruption: str, failure: type[Exception]
 ) -> None:
     complete_evidence(tmp_path)
-    first = lane_directory(tmp_path, "macos-15", "3.11.17", "general-1")
-    second = lane_directory(tmp_path, "macos-15", "3.11.17", "general-2")
-    (first / "child-2.xml").write_text("<testsuite><testcase")
-    (second / "complete.txt").write_text("interrupted collection\n")
+    directory = lane_directory(tmp_path, "macos-15", "3.11.17", "general-2")
+    if corruption == "truncated report":
+        (directory / "child-2.xml").write_text("<testsuite><testcase")
+        changed = "child-2.xml"
+    elif corruption == "untimed report":
+        untimed_report(directory / "child-2.xml")
+        changed = "child-2.xml"
+    else:
+        (directory / "complete.txt").write_text("interrupted collection\n")
+        changed = "complete.txt"
+    rehash(directory, [changed])
 
-    timings = observed_timings(tmp_path, COUNTS, TABLE)
+    with pytest.raises(failure):
+        observed_timings(tmp_path, COUNTS, TABLE)
 
-    observed = {
-        (timing.lane, timing.child): (timing.planned, timing.recorded)
-        for timing in timings
-        if timing.environment == "macos-15-3.11.17"
-    }
-    assert observed[("general-1", "child-2")][1] is None
-    assert observed[("general-1", "child-1")][1] is not None
-    second_children = [observed[("general-2", name)] for name in CHILD_NAMES]
-    assert [planned for planned, _ in second_children] == [None, None, None]
-    assert all(recorded is not None for _, recorded in second_children)
-    with pytest.raises(EvidenceFailure):
+    with pytest.raises(failure):
         verify(tmp_path)
 
 
@@ -626,11 +645,9 @@ def test_planned_counts_refuse_invalid_lane_counts(text: str) -> None:
         planned_counts(text)
 
 
-@pytest.mark.parametrize(
-    ("recorded", "notice"), [(1250, False), (1251, True), (None, False)]
-)
+@pytest.mark.parametrize(("recorded", "notice"), [(1250, False), (1251, True)])
 def test_timing_lines_mark_children_beyond_their_plan(
-    recorded: int | None, notice: bool
+    recorded: int, notice: bool
 ) -> None:
     timing = ChildTiming("macos-15-3.11.17", "general-1", "child-1", 1000, recorded)
 

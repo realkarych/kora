@@ -6,6 +6,7 @@ import pytest
 from scripts.ci.lane_plan import (
     MAXIMUM_LANES,
     TABLE,
+    TARGET_MILLISECONDS,
     Plan,
     PlanFailure,
     Record,
@@ -117,6 +118,41 @@ def test_oversized_module_is_split_into_contiguous_chunks_of_sorted_tests() -> N
         tuple(small),
     ]
     assert [item.estimate for item in items] == [300, 300, 200, 200, 30]
+
+
+def contiguous(nodes: list[str], part: tuple[str, ...]) -> bool:
+    start = nodes.index(part[0])
+    return part == tuple(nodes[start : start + len(part)])
+
+
+@pytest.mark.parametrize(
+    ("tests", "milliseconds", "sizes"),
+    [(87, 6151, [29, 29, 29]), (7, 100_000, [1, 2, 2, 2]), (5, 100_000, [1, 2, 2])],
+)
+def test_every_chunk_of_an_oversized_module_stays_within_the_target(
+    tests: int, milliseconds: int, sizes: list[int]
+) -> None:
+    nodes = [f"tests/test_large.py::test_value[{index:03d}]" for index in range(tests)]
+    fillers = [f"tests/test_filler_{index:02d}.py::test_value" for index in range(10)]
+    durations = {
+        "tests/test_large.py": Record(tests * milliseconds, tests),
+        **{module_of(node): Record(10_000, 1) for node in fillers},
+    }
+
+    items = packing_items(estimates(nodes, durations), TARGET_MILLISECONDS)
+    lanes = lane_count([*nodes, *fillers], durations)
+
+    plan = assign([*nodes, *fillers], durations, lanes)
+    assert sorted(len(item.nodes) for item in items) == sizes
+    assert all(contiguous(nodes, item.nodes) for item in items)
+    assert all(
+        item.estimate <= TARGET_MILLISECONDS or len(item.nodes) == 1 for item in items
+    )
+    assert all(
+        child.milliseconds <= TARGET_MILLISECONDS or len(child.nodes) == 1
+        for lane in plan
+        for child in lane
+    )
 
 
 def test_unknown_modules_use_the_mean_recorded_test_and_known_modules_scale() -> None:

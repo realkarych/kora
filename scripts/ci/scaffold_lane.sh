@@ -118,10 +118,15 @@ run_special_lane() {
   fi
 }
 
+require_lane_start() {
+  [[ ${KORA_LANE_STARTED:-} =~ ^[1-9][0-9]*$ ]]
+}
+
 report_headroom() {
-  if test "$SECONDS" -gt "$KORA_HEADROOM_WARNING_SECONDS"; then
-    printf '::warning title=Scaffold lane headroom::%s Python %s %s test step ran %s s, more than %s s of the 600 s job deadline\n' \
-      "$KORA_SCAFFOLD_OS" "$KORA_SCAFFOLD_PYTHON" "$KORA_SCAFFOLD_LANE" "$SECONDS" "$KORA_HEADROOM_WARNING_SECONDS"
+  local elapsed=$(($(date +%s) - KORA_LANE_STARTED))
+  if test "$elapsed" -gt "$KORA_HEADROOM_WARNING_SECONDS"; then
+    printf '::warning title=Scaffold lane headroom::%s Python %s %s lane job ran %s s since it started, more than %s s of the 600 s job deadline\n' \
+      "$KORA_SCAFFOLD_OS" "$KORA_SCAFFOLD_PYTHON" "$KORA_SCAFFOLD_LANE" "$elapsed" "$KORA_HEADROOM_WARNING_SECONDS"
   fi
 }
 
@@ -155,6 +160,7 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     dependencies) install_dependencies ;;
     plan) plan_lanes ;;
     tests)
+      require_lane_start
       trap report_headroom EXIT
       run_lane
       ;;

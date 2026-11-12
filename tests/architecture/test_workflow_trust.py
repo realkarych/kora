@@ -136,6 +136,11 @@ UNGATED_STEPS = {
         "copies general lane evidence that the shared Scaffold evidence job "
         "verifies; its failure fails the lane job itself"
     ),
+    "ci.yml:scaffold-evidence:timings": (
+        "prints planned and recorded child times as a diagnostic from evidence "
+        "that the verification step also requires, so it fails only when "
+        "verification fails; the gate reads verification, never this step"
+    ),
     "ci.yml:scaffold-tests-macos:cohort_evidence": (
         "copies general lane evidence that the shared Scaffold evidence job "
         "verifies; its failure fails the lane job itself"
@@ -1297,6 +1302,11 @@ def compute_an_unreviewed_gate_matrix(workflows: Workflows) -> None:
     strategy["matrix"] = "${{ fromJSON(needs.plan.outputs.rows) }}"
 
 
+def report_timings_in_place_of_verification(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "scaffold-evidence"))[-1]
+    table(gate["env"])["VERIFICATION_OUTCOME"] = "${{ steps.timings.outcome }}"
+
+
 def ignore_the_macos_lanes(workflows: Workflows) -> None:
     gate = step_list(job_of(workflows, "ci.yml", "scaffold-evidence"))[-1]
     del table(gate["env"])["MACOS_LANES_RESULT"]
@@ -1325,6 +1335,7 @@ def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
         replace_the_macos_lane_gate_with_success,
         compute_an_unreviewed_gate_matrix,
         ignore_the_macos_lanes,
+        report_timings_in_place_of_verification,
     ],
 )
 def test_gate_check_refuses_a_mutated_workflow(
