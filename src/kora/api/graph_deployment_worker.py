@@ -1,10 +1,16 @@
 import asyncio
 import threading
+from collections.abc import AsyncGenerator
 from concurrent.futures import Future
+from contextlib import asynccontextmanager
 from types import TracebackType
 from typing import Self
 
-from kora.api.graph_deployment import DeploymentPreparation, prepare_graph_deployment
+from kora.api.graph_deployment import (
+    DeploymentPreparation,
+    DeploymentRefusal,
+    prepare_graph_deployment,
+)
 from kora.cel_eval.thread import EvaluationThread, Evaluator
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
 from kora.ir.deployment_checks import DeploymentSelection
@@ -14,34 +20,54 @@ from kora.protocols.time import Clock
 THREAD_NAME = "kora-deploy-preparation"
 
 
+class PreparationThread:
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._serve, name=THREAD_NAME)
+
+    def _serve(self) -> None:
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_forever()
+        finally:
+            self.loop.close()
+
+    def start(self) -> None:
+        self.thread.start()
+
+    async def stop(self) -> None:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        await asyncio.to_thread(self.thread.join)
+
+
 class DeploymentPreparer:
     def __init__(self, clock: Clock, owner: EvaluationThread | None = None) -> None:
         self._clock = clock
         self._owner = owner
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._serve, name=THREAD_NAME)
         self._slot = asyncio.Semaphore(1)
+        self._worker: PreparationThread | None = None
         self._evaluator: Evaluator | None = None
 
     @property
     def busy(self) -> bool:
         return self._slot.locked()
 
-    def _serve(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        try:
-            self._loop.run_forever()
-        finally:
-            self._loop.close()
-
     async def _open(self) -> Evaluator:
         return Evaluator(self._clock.now, self._owner)
 
     async def __aenter__(self) -> Self:
-        self._thread.start()
-        self._evaluator = await asyncio.wrap_future(
-            asyncio.run_coroutine_threadsafe(self._open(), self._loop)
-        )
+        worker = PreparationThread()
+        worker.start()
+        opened = False
+        try:
+            self._evaluator = await asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(self._open(), worker.loop)
+            )
+            opened = True
+        finally:
+            if not opened:
+                await worker.stop()
+        self._worker = worker
         return self
 
     async def __aexit__(
@@ -50,14 +76,23 @@ class DeploymentPreparer:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        worker, self._worker = self._worker, None
+        evaluator, self._evaluator = self._evaluator, None
+        if worker is None:
+            return
+        try:
+            async with self.hold():
+                if evaluator is not None:
+                    await asyncio.wrap_future(
+                        asyncio.run_coroutine_threadsafe(evaluator.close(), worker.loop)
+                    )
+        finally:
+            await worker.stop()
+
+    @asynccontextmanager
+    async def hold(self) -> AsyncGenerator[None]:
         async with self._slot:
-            evaluator, self._evaluator = self._evaluator, None
-            if evaluator is not None:
-                await asyncio.wrap_future(
-                    asyncio.run_coroutine_threadsafe(evaluator.close(), self._loop)
-                )
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            await asyncio.to_thread(self._thread.join)
+            yield
 
     async def prepare(
         self,
@@ -65,18 +100,28 @@ class DeploymentPreparer:
         selectors: GraphDeploymentSelectors,
         selection: DeploymentSelection,
     ) -> DeploymentPreparation:
-        await self._slot.acquire()
-        evaluator = self._evaluator
-        if evaluator is None:
-            self._slot.release()
+        worker, evaluator = self._worker, self._evaluator
+        if worker is None or evaluator is None:
             raise RuntimeError("The deployment preparer is not open.")
+        if self._slot.locked():
+            return DeploymentRefusal.BUSY
+        await self._slot.acquire()
         caller = asyncio.get_running_loop()
-        work = asyncio.run_coroutine_threadsafe(
-            prepare_graph_deployment(ir, selectors, selection, evaluator), self._loop
-        )
+        result: Future[DeploymentPreparation] = Future()
 
-        def settled(_: Future[DeploymentPreparation]) -> None:
+        def finished(task: asyncio.Task[DeploymentPreparation]) -> None:
             caller.call_soon_threadsafe(self._slot.release)
+            error = task.exception()
+            if error is not None:
+                result.set_exception(error)
+            else:
+                result.set_result(task.result())
 
-        work.add_done_callback(settled)
-        return await asyncio.wrap_future(work)
+        def start() -> None:
+            task = worker.loop.create_task(
+                prepare_graph_deployment(ir, selectors, selection, evaluator)
+            )
+            task.add_done_callback(finished)
+
+        worker.loop.call_soon_threadsafe(start)
+        return await asyncio.shield(asyncio.wrap_future(result))

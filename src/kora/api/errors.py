@@ -58,6 +58,7 @@ class RequestRejection(StrEnum):
     FRAMEWORK_SHAPE = "framework_shape"
     DOCUMENT = "document"
     SELECTORS = "selectors"
+    INCOMPLETE_BODY = "incomplete_body"
 
 
 class DependencyRetryContext(StrEnum):

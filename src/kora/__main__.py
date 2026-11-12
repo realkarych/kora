@@ -879,7 +879,8 @@ def main(
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     environment = os.environ if environ is None else environ
-    CATALOG.register_component("conformance.lifetime")
+    for component in ("conformance.lifetime", "client", "mcp"):
+        CATALOG.register_component(component)
     try:
         settings = read_logging_settings(environment, CATALOG.components())
     except LoggingConfigurationError as error:

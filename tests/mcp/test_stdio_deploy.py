@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import socket
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -205,4 +206,37 @@ async def test_mcp_uses_only_its_own_credential(
     assert b"KORA_MCP_TOKEN: missing" in startup[1]
     assert refused["isError"] is True
     assert error["code"] == "API005"
+    assert code == 0
+
+
+@pytest.mark.asyncio
+async def test_mcp_refuses_invalid_calls_and_reports_transport_failures(
+    tmp_path: Path,
+) -> None:
+    graph = written(tmp_path, "skeleton.ir.json", skeleton_ir())
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    session = await start({"KORA_URL": closed, "KORA_MCP_TOKEN": "token"})
+
+    unknown = await session.request(
+        "tools/call", {"name": "kora_trigger", "arguments": {"path": str(graph)}}
+    )
+    extra = await session.request(
+        "tools/call",
+        {"name": "kora_deploy", "arguments": {"path": str(graph), "url": closed}},
+    )
+    null_byte = await session.call(Path(str(tmp_path) + "/\x00.json"))
+    unreachable = await session.call(graph)
+    code, _ = await session.close()
+
+    unknown_result = cast("JsonObject", unknown["result"])
+    extra_result = cast("JsonObject", extra["result"])
+    record = cast("JsonObject", unreachable["structuredContent"])
+    assert unknown_result["isError"] is True
+    assert extra_result["isError"] is True
+    assert null_byte["isError"] is True
+    assert unreachable["isError"] is True
+    assert cast("JsonObject", record["error"])["origin"] == "client"
+    assert cast("JsonObject", record["error"])["code"] == "CLT001"
     assert code == 0

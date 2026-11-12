@@ -35,6 +35,7 @@ class DeploymentRefusal(StrEnum):
     TOO_LARGE = "too_large"
     SELECTORS = "selectors"
     INCOMPLETE = "incomplete"
+    BUSY = "busy"
 
 
 @dataclass(frozen=True, slots=True)

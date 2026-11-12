@@ -2,9 +2,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
-from kora.client.transport import TOKEN
+from kora.client.errors import ClientError
+from kora.client.transport import TOKEN, direct_origin
 
 URL_VARIABLE = "KORA_URL"
+URL_OPTION = "--url"
 CLI_CREDENTIAL_VARIABLE = "KORA_TOKEN"
 MCP_CREDENTIAL_VARIABLE = "KORA_MCP_TOKEN"
 
@@ -33,9 +35,14 @@ class ClientSettings:
 def read_client_settings(
     environment: Mapping[str, str], credential_variable: str, url: str | None = None
 ) -> ClientSettings:
-    origin = url if url is not None else environment.get(URL_VARIABLE, "")
+    source = URL_VARIABLE if url is None else URL_OPTION
+    origin = environment.get(URL_VARIABLE, "") if url is None else url
     if not origin:
-        raise ClientConfigurationError(URL_VARIABLE, ConfigurationProblem.MISSING)
+        raise ClientConfigurationError(source, ConfigurationProblem.MISSING)
+    try:
+        direct_origin(origin)
+    except ClientError:
+        raise ClientConfigurationError(source, ConfigurationProblem.INVALID) from None
     token = environment.get(credential_variable, "")
     if not token:
         raise ClientConfigurationError(

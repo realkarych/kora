@@ -6,6 +6,8 @@ import pytest
 from sqlalchemy import func, select
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
+from kora.cel_eval.binding import load_binding
+from kora.cel_eval.thread import EvaluationThread, Settings
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.db.tables import graph, graph_version
@@ -18,6 +20,7 @@ from tests.api.deployment_cases import (
     NAMESPACE,
     preparer,
     skeleton_ir,
+    unresolved_approval,
 )
 from tests.api.support import (
     api_capture,
@@ -25,7 +28,7 @@ from tests.api.support import (
     client_for,
     deployment_services,
 )
-from tests.plugins.authentication.support import seed_case
+from tests.plugins.authentication.support import AuthorityClock, seed_case
 
 __all__ = ["api_capture", "preparer"]
 
@@ -50,6 +53,16 @@ def with_command_file() -> JsonObject:
         cast("JsonObject", ir["graph"])["nodes"],
     )
     nodes["gate"]["config"]["resources"] = [EMPTY_FILE]
+    return ir
+
+
+def with_prompt(prompt: str) -> JsonObject:
+    ir = skeleton_ir()
+    nodes = cast(
+        "dict[str, dict[str, dict[str, object]]]",
+        cast("JsonObject", ir["graph"])["nodes"],
+    )
+    nodes["agent"]["config"]["prompt"] = prompt
     return ir
 
 
@@ -89,6 +102,23 @@ async def test_deploy_route_publishes_and_reuses(
     assert (published.number, published.reused, published.warnings) == (1, False, ())
     assert reused == published.model_copy(update={"reused": True})
     assert await rows(database) == (1, 1)
+    records = [
+        record
+        for record in api_capture.finish()
+        if record["event"] == "api.request.completed"
+    ]
+    assert {str(record["route"]) for record in records} == {
+        "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
+    }
+    rendered = json.dumps(records)
+    assert all(
+        private not in rendered
+        for private in (
+            NAMESPACE,
+            published.deployment_digest,
+            headers["Authorization"],
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -181,6 +211,13 @@ async def test_deploy_route_returns_document_findings(
             None,
         ),
         ("\udcff".encode("utf-8", "surrogateescape"), None),
+        (
+            json.dumps(body())
+            .replace('"resources": []', '"resources": [1e400]')
+            .encode(),
+            None,
+        ),
+        (json.dumps(body(with_prompt("ж" * 700_000))).encode(), None),
         (oversized, None),
     )
 
@@ -202,4 +239,48 @@ async def test_deploy_route_returns_document_findings(
             assert details == {}
         else:
             assert code in {error["code"] for error in details["errors"]}
+    assert await rows(database) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_reports_operations_that_could_not_complete(
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+) -> None:
+    headers = await authorized(database)
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+
+    async with client_for(app) as client:
+        incomplete = await client.post(
+            PATH, json=body(unresolved_approval()), headers=headers
+        )
+        async with preparer.hold():
+            busy = await client.post(PATH, content=b"{not json", headers=headers)
+        admitted = await client.post(PATH, json=body(), headers=headers)
+
+    assert (incomplete.status_code, error_of(incomplete).error.code) == (500, "API010")
+    assert error_of(incomplete).error.retryable is False
+    assert (busy.status_code, error_of(busy).error.code) == (503, "API011")
+    assert error_of(busy).error.retryable is True
+    assert admitted.status_code == 201
+    assert await rows(database) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_reports_an_unavailable_evaluator(
+    database: Database, api_capture: Capture
+) -> None:
+    headers = await authorized(database)
+    owner = EvaluationThread(load_binding(), Settings(outstanding_bytes=1))
+
+    async with DeploymentPreparer(AuthorityClock(), owner) as constrained:
+        app = application(
+            database, api_capture, deployment_services(database, constrained, HARNESS)
+        )
+        async with client_for(app) as client:
+            response = await client.post(PATH, json=body(), headers=headers)
+
+    assert (response.status_code, error_of(response).error.code) == (503, "API011")
+    assert error_of(response).error.retryable is True
     assert await rows(database) == (0, 0)

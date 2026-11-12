@@ -1,4 +1,8 @@
 import json
+import math
+import os
+import re
+import stat
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -9,6 +13,7 @@ from pydantic import ValidationError
 from kora.models.graphs import DeployRequest
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
+NAMESPACE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 class DocumentProblem(StrEnum):
@@ -41,11 +46,35 @@ def _finite_only(token: str) -> object:
     raise GraphDocumentError(DocumentProblem.NOT_JSON)
 
 
+def _finite_float(token: str) -> float:
+    value = float(token)
+    if not math.isfinite(value):
+        raise GraphDocumentError(DocumentProblem.NOT_JSON)
+    return value
+
+
+def _regular_file_bytes(path: Path) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise GraphDocumentError(DocumentProblem.UNREADABLE)
+        chunks: list[bytes] = []
+        remaining = MAX_DOCUMENT_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
 def _parsed(path: Path) -> object:
     try:
-        with path.open("rb") as stream:
-            data = stream.read(MAX_DOCUMENT_BYTES + 1)
-    except OSError:
+        data = _regular_file_bytes(path)
+    except (OSError, ValueError):
         raise GraphDocumentError(DocumentProblem.UNREADABLE) from None
     if len(data) > MAX_DOCUMENT_BYTES:
         raise GraphDocumentError(DocumentProblem.TOO_LARGE)
@@ -54,6 +83,7 @@ def _parsed(path: Path) -> object:
             data.decode("utf-8"),
             object_pairs_hook=_unique_object,
             parse_constant=_finite_only,
+            parse_float=_finite_float,
         )
     except (ValueError, RecursionError):
         raise GraphDocumentError(DocumentProblem.NOT_JSON) from None
@@ -70,7 +100,7 @@ def read_graph_deployment(path: Path) -> GraphDeployment:
     graph = _object(document.get("graph"))
     identifier = graph.get("id")
     namespace = graph.get("namespace")
-    if not isinstance(namespace, str) or not namespace:
+    if not isinstance(namespace, str) or NAMESPACE.fullmatch(namespace) is None:
         raise GraphDocumentError(DocumentProblem.NOT_A_GRAPH)
     try:
         request = DeployRequest.model_validate(

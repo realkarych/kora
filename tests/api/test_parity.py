@@ -28,6 +28,10 @@ CALLER = """
 async def deploy(client, namespace, request):
     return await client.deploy(namespace, request)
 """
+UNRELATED_CALLER = """
+async def deploy(tools, namespace, request):
+    return await tools.deploy(namespace, request)
+"""
 PATHS: dict[str, object] = {
     "/healthz": {"get": {}},
     "/api/v1/namespaces/{ns}/graphs/{graph}/versions": {"post": {}},
@@ -37,8 +41,8 @@ PATHS: dict[str, object] = {
 def synthetic_tree(root: Path, *, cli: bool, mcp: bool) -> Path:
     write_module(root, "kora.client.transport", CLIENT)
     write_module(root, "kora.__main__", "")
-    write_module(root, "kora.cli.graphs", CALLER if cli else "")
-    write_module(root, "kora.mcp.stdio", CALLER if mcp else "")
+    write_module(root, "kora.cli.graphs", CALLER if cli else UNRELATED_CALLER)
+    write_module(root, "kora.mcp.stdio", CALLER if mcp else UNRELATED_CALLER)
     return root
 
 

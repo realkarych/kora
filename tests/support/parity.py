@@ -9,6 +9,7 @@ from tests.support.ast_modules import SourceModule, parse_module, source_modules
 CLIENT_MODULE = "kora.client.transport"
 CLIENT_CLASS = "KoraClient"
 REQUEST_METHOD = "_request_json"
+CLIENT_RECEIVER = "client"
 PARAMETER = re.compile(r"\{[^}]*\}")
 EXCLUDED_OPERATIONS: frozenset[tuple[str, str]] = frozenset({("GET", "/healthz")})
 
@@ -89,11 +90,21 @@ def client_operations(source_root: Path) -> dict[str, set[tuple[str, str]]]:
     return operations
 
 
+def is_client_receiver(node: ast.expr) -> bool:
+    return (isinstance(node, ast.Name) and node.id == CLIENT_RECEIVER) or (
+        isinstance(node, ast.Attribute) and node.attr == CLIENT_RECEIVER
+    )
+
+
 def called_attributes(modules: list[SourceModule]) -> set[str]:
     names: set[str] = set()
     for module in modules:
         for node in ast.walk(parse_module(module)):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and is_client_receiver(node.func.value)
+            ):
                 names.add(node.func.attr)
     return names
 

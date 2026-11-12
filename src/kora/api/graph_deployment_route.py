@@ -1,10 +1,11 @@
 import json
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response
 
 from kora.api.errors import (
@@ -62,19 +63,32 @@ def _finite_only(token: str) -> object:
     raise BodyRejected(RequestRejection.MALFORMED_JSON)
 
 
+def _finite_float(token: str) -> float:
+    value = float(token)
+    if not math.isfinite(value):
+        raise BodyRejected(RequestRejection.MALFORMED_JSON)
+    return value
+
+
 async def _read_body(request: Request) -> DeployRequest:
     body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > MAX_REQUEST_BYTES:
-            raise BodyRejected(RequestRejection.BYTE_LIMIT)
+    try:
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > MAX_REQUEST_BYTES:
+                raise BodyRejected(RequestRejection.BYTE_LIMIT)
+    except ClientDisconnect:
+        raise BodyRejected(RequestRejection.INCOMPLETE_BODY) from None
     try:
         text = bytes(body).decode("utf-8")
     except UnicodeDecodeError:
         raise BodyRejected(RequestRejection.INVALID_ENCODING) from None
     try:
         parsed: object = json.loads(
-            text, object_pairs_hook=_unique_object, parse_constant=_finite_only
+            text,
+            object_pairs_hook=_unique_object,
+            parse_constant=_finite_only,
+            parse_float=_finite_float,
         )
     except (ValueError, RecursionError):
         raise BodyRejected(RequestRejection.MALFORMED_JSON) from None
@@ -117,6 +131,10 @@ async def _deploy(
     )
     if namespace_id is None:
         return definitive_error(ApiErrorCode.FORBIDDEN, request_id=request_id)
+    if services.preparer.busy:
+        return dependency_unavailable(
+            DependencyRetryContext.PROVEN_PRE_EFFECT, request_id=request_id
+        )
     try:
         body = await _read_body(request)
     except BodyRejected as rejected:
@@ -138,6 +156,10 @@ async def _deploy(
         return deployment_validation_error(outcome.diagnostics, request_id=request_id)
     if outcome is DeploymentRefusal.INCOMPLETE:
         return internal_error(request_id=request_id)
+    if outcome is DeploymentRefusal.BUSY:
+        return dependency_unavailable(
+            DependencyRetryContext.PROVEN_PRE_EFFECT, request_id=request_id
+        )
     if isinstance(outcome, DeploymentRefusal):
         return request_rejection(REFUSALS[outcome], request_id=request_id)
     published = await publish_graph_deployment(

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import cast
 
@@ -87,7 +88,7 @@ class AuthoringTools:
         if not isinstance(path, str) or not path:
             return usage_error("The path argument must be a nonempty string.")
         try:
-            deployment = read_graph_deployment(Path(path))
+            deployment = await asyncio.to_thread(read_graph_deployment, Path(path))
             deployed = await self.client.deploy(
                 deployment.namespace, deployment.request
             )

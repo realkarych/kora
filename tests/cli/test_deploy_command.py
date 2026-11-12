@@ -82,6 +82,7 @@ async def test_cli_deploy_without_files(
         )
         machine = await kora(["deploy", str(graph), "--json"], environment)
         refusal = await kora(["deploy", str(refused), "--json"], environment)
+        plain_refusal = await kora(["deploy", str(refused)], environment)
 
     response = DeployResponse.model_validate_json(machine.stdout)
     envelope = ApiErrorEnvelope.model_validate_json(refusal.stdout)
@@ -94,6 +95,11 @@ async def test_cli_deploy_without_files(
     assert str(records["client.request.completed"]["request_id"]).startswith("req_")
     assert response.reused
     assert envelope.error.code == "API003"
+    assert plain_refusal.code == 1
+    assert (
+        ApiErrorEnvelope.model_validate_json(plain_refusal.stdout).error.code
+        == "API003"
+    )
     assert b"KORA_TOKEN" not in human.stderr + machine.stderr + refusal.stderr
     assert token.encode() not in human.stderr + machine.stderr + refusal.stderr
 
@@ -112,6 +118,18 @@ async def test_cli_deploy_refuses_locally_before_sending(tmp_path: Path) -> None
     unreachable = await kora(
         ["deploy", str(graph), "--json"], {"KORA_URL": origin, "KORA_TOKEN": "token"}
     )
+    refused_origin = await kora(
+        ["deploy", str(graph)],
+        {"KORA_URL": "http://localhost:9", "KORA_TOKEN": "token"},
+    )
+    levelled = await kora(
+        ["deploy", str(graph)],
+        {
+            "KORA_URL": origin,
+            "KORA_TOKEN": "token",
+            "KORA_LOG_COMPONENT_LEVELS": "client=DEBUG,mcp=DEBUG",
+        },
+    )
     quiet = await kora(
         ["deploy", str(graph)], {"KORA_URL": origin, "KORA_TOKEN": "token"}
     )
@@ -125,4 +143,7 @@ async def test_cli_deploy_refuses_locally_before_sending(tmp_path: Path) -> None
     assert record["error"]["origin"] == "client"
     assert record["error"]["code"] == "CLT001"
     assert (quiet.code, quiet.stdout) == (1, b"")
+    assert (refused_origin.code, refused_origin.stdout) == (78, b"")
+    assert b"KORA_URL: invalid" in refused_origin.stderr
+    assert levelled.code == 1
     assert b"CLT001" in quiet.stderr
