@@ -3,8 +3,9 @@ from hashlib import sha256
 from typing import cast
 
 import pytest
-from sqlalchemy import BigInteger, LargeBinary, func, select
+from sqlalchemy import BigInteger, LargeBinary, Text, func, select
 from sqlalchemy import cast as sql_cast
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -51,6 +52,9 @@ from tests.db.seed import FakeClock, Seeder, fixed_randomness
 
 __all__ = ["evaluator"]
 
+DOCUMENT_COLUMNS = frozenset(
+    {"ir", "execution_contract", "resolved_digests", "resources"}
+)
 EMPTY_RESOURCES: JsonObject = {
     "interpretation": "kora.graph-resource-refs.v1",
     "commands": [],
@@ -81,7 +85,12 @@ def stored_widths(dialect: Dialect) -> tuple[ColumnElement[int], ColumnElement[i
     if dialect is Dialect.POSTGRESQL:
         total = sum(
             (
-                func.pg_column_size(column, type_=BigInteger())
+                func.pg_column_size(
+                    sql_cast(sql_cast(column, Text()), JSONB())
+                    if column.name in DOCUMENT_COLUMNS
+                    else column,
+                    type_=BigInteger(),
+                )
                 for column in graph_version.columns
             ),
             start=cast("ColumnElement[int]", sql_cast(0, BigInteger())),
