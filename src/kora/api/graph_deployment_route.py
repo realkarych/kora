@@ -1,5 +1,4 @@
 import json
-import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -32,6 +31,7 @@ from kora.db.identifiers import IdentifierGenerator
 from kora.db.namespace_reads import granted_namespace_id
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
 from kora.ir.deployment_checks import DeploymentSelection
+from kora.ir.vcs_ref_json import finite_float, refuse_constant, unique_object
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import GRAPH_VERSION_PREFIX, DeployRequest, DeployResponse
 from kora.protocols.authentication import Principal
@@ -52,24 +52,6 @@ class BodyRejected(ValueError):
         self.reason = reason
 
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    document = dict(pairs)
-    if len(document) != len(pairs):
-        raise BodyRejected(RequestRejection.MALFORMED_JSON)
-    return document
-
-
-def _finite_only(token: str) -> object:
-    raise BodyRejected(RequestRejection.MALFORMED_JSON)
-
-
-def _finite_float(token: str) -> float:
-    value = float(token)
-    if not math.isfinite(value):
-        raise BodyRejected(RequestRejection.MALFORMED_JSON)
-    return value
-
-
 async def _read_body(request: Request) -> DeployRequest:
     body = bytearray()
     try:
@@ -86,9 +68,9 @@ async def _read_body(request: Request) -> DeployRequest:
     try:
         parsed: object = json.loads(
             text,
-            object_pairs_hook=_unique_object,
-            parse_constant=_finite_only,
-            parse_float=_finite_float,
+            object_pairs_hook=unique_object,
+            parse_constant=refuse_constant,
+            parse_float=finite_float,
         )
     except (ValueError, RecursionError):
         raise BodyRejected(RequestRejection.MALFORMED_JSON) from None

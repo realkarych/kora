@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import re
 import stat
@@ -10,6 +9,7 @@ from typing import cast
 
 from pydantic import ValidationError
 
+from kora.ir.vcs_ref_json import finite_float, refuse_constant, unique_object
 from kora.models.graphs import DeployRequest
 
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
@@ -33,24 +33,6 @@ class GraphDocumentError(ValueError):
 class GraphDeployment:
     namespace: str
     request: DeployRequest
-
-
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    document = dict(pairs)
-    if len(document) != len(pairs):
-        raise GraphDocumentError(DocumentProblem.NOT_JSON)
-    return document
-
-
-def _finite_only(token: str) -> object:
-    raise GraphDocumentError(DocumentProblem.NOT_JSON)
-
-
-def _finite_float(token: str) -> float:
-    value = float(token)
-    if not math.isfinite(value):
-        raise GraphDocumentError(DocumentProblem.NOT_JSON)
-    return value
 
 
 def _regular_file_bytes(path: Path) -> bytes:
@@ -81,9 +63,9 @@ def _parsed(path: Path) -> object:
     try:
         return json.loads(
             data.decode("utf-8"),
-            object_pairs_hook=_unique_object,
-            parse_constant=_finite_only,
-            parse_float=_finite_float,
+            object_pairs_hook=unique_object,
+            parse_constant=refuse_constant,
+            parse_float=finite_float,
         )
     except (ValueError, RecursionError):
         raise GraphDocumentError(DocumentProblem.NOT_JSON) from None

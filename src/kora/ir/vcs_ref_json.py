@@ -60,6 +60,13 @@ def refuse_constant(value: str) -> Never:
     raise ValueError("nonfinite JSON constant")
 
 
+def finite_float(token: str) -> float:
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError("nonfinite JSON number")
+    return value
+
+
 def valid_scalars(value: object) -> bool:
     if type(value) is str:
         return INVALID_SCALAR.search(value) is None
