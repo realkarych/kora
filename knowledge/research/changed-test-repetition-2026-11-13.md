@@ -45,7 +45,7 @@ On this faster machine the #1429 race appears only when several copies of the mo
 
 The approved plan first proposed four concurrent copies of the selection. The implementation executes one fresh process at a time instead, for two reasons:
 
-- `tests/plugins/runtime/local` shares one set of prepared host fixtures: a 16 MB filesystem that tests fill, an NFS export and a single service session. Copies of one module running at once can fail for reasons unrelated to the change, and a blocking check must not add failures of its own.
+- The lanes run different tests at once, never two copies of one test. Nothing establishes that a test is safe beside a copy of itself: storage pressure tests, for example, attach loop devices and mount filesystems on the runner. Copies of one module running at once could fail for reasons unrelated to the change, and a blocking check must not add failures of its own.
 - The hosted-runner history above shows the motivating races in single-process executions, and the container measurement shows that synthetic CPU load adds nothing.
 
 General lanes run three test processes at once, so a general-lane module sees less contention in this job than in its lane. A race that needs that contention can pass the job. See the limits below.
@@ -54,8 +54,8 @@ General lanes run three test processes at once, so a general-lane module sees le
 
 `Changed test repetition` in `.github/workflows/ci.yml`, implemented by `tests/changed_test_repetition.py`:
 
-- **Selection.** `tests/**/test_*.py` files that the pull request's merge commit adds, modifies or renames relative to its first parent, without the modules the daily workflow runs on Linux and without modules whose tests the repository's default selection, `not measurement and not host_fixture`, leaves out entirely. A module that cannot be collected, a collection listing that names none of the changed modules, and a changed test module path with characters outside letters, digits, `_`, `.`, `/` and `-` each fail the job.
-- **Execution.** One fresh pytest process per module execution, with the launcher of the module's ordinary Linux lane and the default selection: local-runtime modules through `scripts/ci/run-local-runtime-tests.sh`, storage modules with plain pytest, general modules through `tests.support.ordinary_pytest`. The job prepares no host fixtures and runs nothing as root.
+- **Selection.** `tests/**/test_*.py` files that the pull request's merge commit adds, modifies or renames relative to its first parent, without the modules the daily workflow runs on Linux and without modules whose tests the repository's default selection, `not measurement and not host_fixture`, leaves out entirely. A module that cannot be collected, a successful collection whose listing is empty or names a file other than the changed modules, and a changed test module path with characters outside letters, digits, `_`, `.`, `/` and `-` each fail the job.
+- **Execution.** One fresh pytest process per module execution, with the launcher of the module's ordinary Linux lane and the default selection: local-runtime modules through `scripts/ci/run-local-runtime-tests.sh`, storage modules with plain pytest, general modules through `tests.support.ordinary_pytest`. The job prepares no host fixtures and its steps invoke no `sudo`. Selected tests run as they do in their lane; the Linux storage pressure tests, for example, call `sudo` themselves to attach loop devices.
 - **Host-fixture tests are not repeated.** `scripts/ci/prepare-local-runtime-fixtures.sh` starts one service session and refuses a second preparation. `test_runner_survives_worker_service_restart[session]` in `tests/plugins/runtime/local/test_service_survival.py` closes that session, so a second execution against the same preparation would fail without any defect in the change. The independent correctness review of this change found this in an earlier revision that repeated host-fixture tests.
 - **Schedule.** Rounds over the selection, added modules first, then modified ones by ascending recorded duration; at most 40 rounds. An execution starts only when its expected end lies within a 300-second window. The expectation is the module's longest execution in this job or, before its first one, its duration in `scripts/ci/lane_durations.json`; an unrecorded module counts as the table's median. The table records general lanes only, so every storage and local-runtime module starts from the median, the order among modified ones falls back to their paths, and the window check has no effect before their first execution.
 - **Result.** The first failed execution ends the job with an error that names the module, and nothing is retried. A module that never fits the window is named in a warning annotation and in the job summary and does not fail the job. The job summary lists the executions per module and the changed modules that were not selected, and states an empty selection.
@@ -82,4 +82,16 @@ The schedule and execution functions of the job's program, `repetition` and `pro
 
 ## Evidence from a hosted runner
 
-The pull request that adds the job changes only general-lane test modules. To exercise the local-runtime launcher and a storage module on a hosted runner, an intermediate revision of that pull request carried a temporary, behaviour-neutral edit of one local-runtime module, of `test_service_survival.py` and of one storage module. The pull request records that run and its result; the final revision does not contain the edits.
+The pull request that adds the job changes only general-lane test modules. To exercise the local-runtime launcher and a storage module on a hosted runner, its intermediate revision `eeba25f` appended one unused constant to `tests/plugins/runtime/local/test_command_capture.py`, `tests/plugins/runtime/local/test_service_survival.py` and `tests/plugins/storage/test_deadline.py`. The final revision does not contain these edits.
+
+In [run 43330075132](https://github.com/realkarych/kora/actions/runs/43330075132) the job succeeded in 5 min 22 s, of which the repetition step took 303 s:
+
+| Module | Lane | Executions |
+|---|---|---|
+| `tests/architecture/test_changed_test_repetition.py` | general | 9 |
+| `tests/plugins/runtime/local/test_command_capture.py` | local-runtime | 9 |
+| `tests/plugins/runtime/local/test_service_survival.py` | local-runtime | 9 |
+| `tests/plugins/storage/test_deadline.py` | storage | 10 |
+| `tests/architecture/test_workflow_trust.py` | general | 9 |
+
+This is one execution of three special-lane modules. It shows that the launcher works without host-fixture preparation and that these modules pass when repeated; it says nothing about the other local-runtime and storage modules.

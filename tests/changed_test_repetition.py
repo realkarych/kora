@@ -267,7 +267,7 @@ def summary(report: Report, unselected: Sequence[str]) -> str:
     lines = [
         f"## {ANNOTATION}",
         "",
-        f"{len(report.executions)} changed test modules, {total} executions.",
+        f"{len(report.executions)} selected test modules, {total} executions.",
         "",
     ]
     if report.executions:

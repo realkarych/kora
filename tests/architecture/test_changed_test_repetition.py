@@ -29,7 +29,13 @@ from tests.changed_test_repetition import (
     summary,
 )
 from tests.scaffold_evidence import scheduled_modules
-from tests.support.workflows import Workflows, job_of, repository_workflows, step_list
+from tests.support.workflows import (
+    Workflows,
+    action_name,
+    job_of,
+    repository_workflows,
+    step_list,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -54,6 +60,28 @@ FIXTURE_CONFIGURATION = (
 )
 PULL_REQUEST_ONLY = "${{ github.event_name == 'pull_request' }}"
 REPETITION_COMMAND = "uv run --no-sync python -m tests.changed_test_repetition repeat"
+REPETITION_STEP_KEYS = frozenset({"name", "id", "if", "run"})
+REPETITION_JOB_SETTINGS = {
+    "defaults": {"run": {"shell": "bash"}},
+    "env": {
+        "KORA_TEST_DATABASES": "sqlite,postgresql",
+        "TESTCONTAINERS_RYUK_DISABLED": "true",
+    },
+}
+REPETITION_JOB_ACTIONS = (
+    "actions/checkout",
+    "actions/cache",
+    "actions/setup-node",
+    "pnpm/action-setup",
+    "astral-sh/setup-uv",
+)
+REPETITION_JOB_COMMANDS = (
+    "bash scripts/ci/setup_scaffold_node.sh",
+    "bash scripts/ci/setup_uv_cache.sh 3.11.17",
+    "bash scripts/ci/scaffold_lane.sh dependencies",
+    "pnpm --dir web install --frozen-lockfile",
+    REPETITION_COMMAND,
+)
 Mutation = Callable[[Workflows], None]
 
 
@@ -444,7 +472,7 @@ def test_the_report_lists_executions_and_modules_that_were_not_repeated() -> Non
     rendered = summary(report, ["tests/test_daily.py"])
     emitted = annotations(report)
 
-    assert "2 changed test modules, 12 executions." in rendered
+    assert "2 selected test modules, 12 executions." in rendered
     assert "| `tests/test_new.py` | 12 |" in rendered
     assert "| `tests/test_large.py` | 0 |" in rendered
     assert "- `tests/test_daily.py`" in rendered
@@ -458,7 +486,7 @@ def test_the_report_states_an_empty_selection() -> None:
     rendered = summary(report, [])
     emitted = annotations(report)
 
-    assert "0 changed test modules, 0 executions." in rendered
+    assert "0 selected test modules, 0 executions." in rendered
     assert "| Module |" not in rendered
     assert emitted == ""
 
@@ -503,7 +531,26 @@ def repetition_job_violations(workflows: Workflows) -> list[str]:
         ),
         *(
             ["the last step does not repeat the changed test modules"]
-            if not steps or steps[-1].get("run") != REPETITION_COMMAND
+            if not steps
+            or steps[-1].get("run") != REPETITION_COMMAND
+            or frozenset(steps[-1]) != REPETITION_STEP_KEYS
+            else []
+        ),
+        *(
+            f"job changes its {key}"
+            for key, expected in REPETITION_JOB_SETTINGS.items()
+            if job.get(key) != expected
+        ),
+        *(
+            ["job uses other actions"]
+            if tuple(action_name(step["uses"]) for step in steps if "uses" in step)
+            != REPETITION_JOB_ACTIONS
+            else []
+        ),
+        *(
+            ["job runs other commands"]
+            if tuple(step["run"] for step in steps if "run" in step)
+            != REPETITION_JOB_COMMANDS
             else []
         ),
         *(
@@ -543,6 +590,25 @@ def append_a_step_after_the_repetition(workflows: Workflows) -> None:
     list_of(job["steps"]).append({"if": PULL_REQUEST_ONLY, "run": "true"})
 
 
+def run_the_repetition_under_another_shell(workflows: Workflows) -> None:
+    repetition_step(workflows)["shell"] = "true {0}"
+
+
+def run_the_job_under_another_shell(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "changed-test-repetition")
+    job["defaults"] = {"run": {"shell": "true {0}"}}
+
+
+def drop_a_database_from_the_job(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "changed-test-repetition")
+    job["env"] = {**REPETITION_JOB_SETTINGS["env"], "KORA_TEST_DATABASES": "sqlite"}
+
+
+def insert_a_command_before_the_repetition(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "changed-test-repetition")
+    list_of(job["steps"]).insert(-1, {"if": PULL_REQUEST_ONLY, "run": "true"})
+
+
 def skip_the_job_on_master_pushes(workflows: Workflows) -> None:
     job = job_of(workflows, "ci.yml", "changed-test-repetition")
     job["if"] = "${{ github.event_name == 'pull_request' }}"
@@ -575,6 +641,10 @@ def detach_the_scaffold_join(workflows: Workflows) -> None:
         disable_the_repetition,
         replace_the_repetition_command,
         append_a_step_after_the_repetition,
+        run_the_repetition_under_another_shell,
+        run_the_job_under_another_shell,
+        drop_a_database_from_the_job,
+        insert_a_command_before_the_repetition,
         skip_the_job_on_master_pushes,
         make_the_job_wait_for_the_scope,
         let_the_job_continue_on_error,
