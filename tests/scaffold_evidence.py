@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, cast
+from xml.parsers.expat import ExpatError
 
 from pydantic import Field, StrictStr
 
@@ -15,6 +16,7 @@ from scripts.ci.lane_plan import (
     CHILDREN,
     MAXIMUM_LANES,
     SPECIAL_LANES,
+    TABLE,
     Child,
     Durations,
     Table,
@@ -24,6 +26,8 @@ from scripts.ci.lane_plan import (
     lane_count,
     load_table,
     module_of,
+    recorded_table,
+    table_text,
 )
 from tests.measurements.storage_evidence_common import (
     EvidenceFailure,
@@ -86,6 +90,7 @@ LOCAL_RUNTIME_CONTRACTS = (
     "test_platform.test_platform_mechanisms",
 )
 COUNT = re.compile(r"[1-9][0-9]*")
+UNREADABLE = (ValueError, OSError, ExpatError)
 MatrixRow = dict[str, str | int]
 
 
@@ -212,8 +217,8 @@ class ChildTiming:
     environment: str
     lane: str
     child: str
-    planned: int
-    recorded: int
+    planned: int | None
+    recorded: int | None
 
 
 @dataclass(frozen=True)
@@ -221,7 +226,6 @@ class Verification:
     environments: int
     lanes: int
     tests: int
-    timings: tuple[ChildTiming, ...]
 
 
 def evidence_bytes(path: Path, maximum: int = 16777216) -> bytes:
@@ -243,7 +247,8 @@ def collection_order(path: Path) -> tuple[str, ...]:
         raise ValueError("empty ordinary collection")
     summary = re.fullmatch(
         r"([1-9][0-9]*)(?:/([1-9][0-9]*))? tests? collected"
-        r"(?: \(([1-9][0-9]*) deselected\))? in [0-9]+\.[0-9]+s",
+        r"(?: \(([1-9][0-9]*) deselected\))? in [0-9]+\.[0-9]+s"
+        r"(?: \([0-9]+:[0-5][0-9]:[0-5][0-9]\))?",
         lines[-1],
     )
     if summary is None:
@@ -524,20 +529,52 @@ def lane_receipt(directory: Path, provenance: tuple[str, ...]) -> LaneReceipt:
     return receipt
 
 
-def planned_children(
-    key: str,
-    directory: Path,
-    lane: str,
-    children: tuple[Child, ...],
-    reports: Mapping[str, frozenset[str]],
-) -> list[ChildTiming]:
-    timings: list[ChildTiming] = []
+def require_assignment(
+    children: tuple[Child, ...], reports: Mapping[str, frozenset[str]]
+) -> None:
     for name, child in zip(CHILD_NAMES, children, strict=True):
         if reports[name] != frozenset(identity(node) for node in child.nodes):
             raise EvidenceFailure("a general lane child differs from its assignment")
-        recorded = sum(junit_milliseconds(directory / f"{name}.xml").values())
-        timings.append(ChildTiming(key, lane, name, child.milliseconds, recorded))
-    return timings
+
+
+def planned_lane(
+    directory: Path, key: str, lane: str, count: int, table: Table
+) -> tuple[int | None, ...]:
+    try:
+        nodes = general_nodes(collection_order(directory / "complete.txt"))
+        plan = assign(nodes, environment_durations(table, key), count)
+    except UNREADABLE:
+        return (None,) * len(CHILD_NAMES)
+    return tuple(child.milliseconds for child in plan[general_lanes(count).index(lane)])
+
+
+def recorded_child(report: Path) -> int | None:
+    try:
+        return sum(junit_milliseconds(report).values())
+    except UNREADABLE:
+        return None
+
+
+def observed_timings(
+    root: Path, counts: Mapping[str, int], table: Table
+) -> tuple[ChildTiming, ...]:
+    timings: list[ChildTiming] = []
+    for system, python, _ in ENVIRONMENTS:
+        key = environment_key(system, python)
+        for lane in general_lanes(counts[key]):
+            directory = root / artifact_name(system, python, lane)
+            planned = planned_lane(directory, key, lane, counts[key], table)
+            timings.extend(
+                ChildTiming(
+                    key,
+                    lane,
+                    name,
+                    milliseconds,
+                    recorded_child(directory / f"{name}.xml"),
+                )
+                for name, milliseconds in zip(CHILD_NAMES, planned, strict=True)
+            )
+    return tuple(timings)
 
 
 def verify_scaffold(
@@ -559,12 +596,11 @@ def verify_scaffold(
             "scaffold evidence does not cover exactly the planned lanes"
         )
     total = 0
-    timings: list[ChildTiming] = []
     for system, python, databases in ENVIRONMENTS:
         key = environment_key(system, python)
         lanes = environment_lanes(counts[key])
         reports: dict[str, dict[str, frozenset[str]]] = {}
-        collections: list[tuple[str, ...]] = []
+        collections: list[frozenset[str]] = []
         for lane in lanes:
             directory = root / artifact_name(system, python, lane)
             provenance = (
@@ -581,23 +617,20 @@ def verify_scaffold(
                 directory, lane_receipt(directory, provenance)
             )
             if lane not in SPECIAL_LANES:
-                collections.append(validated_collection(directory / "complete.txt"))
+                collected = validated_collection(directory / "complete.txt")
+                collections.append(frozenset(collected))
         if any(nodes != collections[0] for nodes in collections):
             raise EvidenceFailure("general lanes collected different tests")
-        complete = identities(collections[0])
+        ordered = sorted(collections[0])
+        complete = identities(ordered)
         scheduled = scheduled_modules(system)
         if any(scheduled_owner(node, scheduled) for node in complete):
             raise EvidenceFailure("scaffold collection contains scheduled modules")
         plan = assign(
-            general_nodes(collections[0]),
-            environment_durations(table, key),
-            counts[key],
+            general_nodes(ordered), environment_durations(table, key), counts[key]
         )
         for lane, children in zip(general_lanes(counts[key]), plan, strict=True):
-            directory = root / artifact_name(system, python, lane)
-            timings.extend(
-                planned_children(key, directory, lane, children, reports[lane])
-            )
+            require_assignment(children, reports[lane])
         inventories = [nodes for lane in reports.values() for nodes in lane.values()]
         combined = frozenset[str]().union(*inventories)
         if sum(len(nodes) for nodes in inventories) != len(combined):
@@ -605,20 +638,34 @@ def verify_scaffold(
         if combined != complete:
             raise EvidenceFailure("scaffold lanes do not partition the complete suite")
         total += len(complete)
-    return Verification(len(ENVIRONMENTS), len(expected), total, tuple(timings))
+    return Verification(len(ENVIRONMENTS), len(expected), total)
+
+
+def seconds(milliseconds: int | None) -> str:
+    return "unavailable" if milliseconds is None else f"{milliseconds / 1000:.1f} s"
 
 
 def timing_lines(timing: ChildTiming) -> str:
-    planned, recorded = timing.planned / 1000, timing.recorded / 1000
+    planned, recorded = seconds(timing.planned), seconds(timing.recorded)
     child = f"{timing.environment} {timing.lane} {timing.child}"
-    line = f"{child}: planned {planned:.1f} s, recorded {recorded:.1f} s\n"
-    if timing.recorded * 4 > timing.planned * 5:
+    line = f"{child}: planned {planned}, recorded {recorded}\n"
+    if (
+        timing.planned is not None
+        and timing.recorded is not None
+        and timing.recorded * 4 > timing.planned * 5
+    ):
         line += (
             f"::notice title=Scaffold lane plan::{child} "
-            f"recorded {recorded:.1f} s against a plan of {planned:.1f} s; "
+            f"recorded {recorded} against a plan of {planned}; "
             "refresh scripts/ci/lane_durations.json\n"
         )
     return line
+
+
+def refresh_durations(artifacts: Path) -> Table:
+    table = recorded_table(artifacts, validated_collection)
+    TABLE.write_text(table_text(table))
+    return table
 
 
 def main(arguments: list[str]) -> None:
@@ -671,17 +718,21 @@ def main(arguments: list[str]) -> None:
                 lane,
                 tuple(selection),
             )
+        case ["durations", artifacts]:
+            table = refresh_durations(Path(artifacts))
+            for key, durations in sorted(table.environments.items()):
+                total = sum(record.milliseconds for record in durations.values())
+                sys.stdout.write(
+                    f"{key}: {len(durations)} modules, {total / 1000:.1f} s\n"
+                )
         case ["verify", directory, run_id, attempt, checkout, requested, lanes]:
+            counts, table = planned_counts(lanes), load_table()
+            timings = observed_timings(Path(directory), counts, table)
+            sys.stdout.write("".join(map(timing_lines, timings)))
+            sys.stdout.flush()
             verification = verify_scaffold(
-                Path(directory),
-                run_id,
-                attempt,
-                checkout,
-                requested,
-                planned_counts(lanes),
-                load_table(),
+                Path(directory), run_id, attempt, checkout, requested, counts, table
             )
-            sys.stdout.write("".join(map(timing_lines, verification.timings)))
             summary = {
                 "environments": verification.environments,
                 "lanes": verification.lanes,

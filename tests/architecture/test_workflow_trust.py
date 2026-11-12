@@ -147,6 +147,7 @@ COMPUTED_MATRIX_ROWS = {
 SAMPLE_LANE_COUNTS = {
     environment_key(system, python): 2 for system, python, _ in ENVIRONMENTS
 }
+PLANNED_MATRIX = "${{{{ fromJSON(needs.scaffold-plan.outputs.{platform}) }}}}"
 MATRIX_REFERENCE = re.compile(r"matrix\.([\w-]+)")
 MATRIX_VALUE = re.compile(r"\$\{\{ matrix\.([\w-]+) \}\}")
 STEP_OUTCOME = re.compile(r"steps\.([\w-]+)\.outcome")
@@ -349,6 +350,27 @@ def gate_rows(location: str, job: dict[str, object]) -> list[dict[str, object]] 
     if platform is None:
         return None
     return [dict(row) for row in matrix_rows(SAMPLE_LANE_COUNTS)[platform]]
+
+
+def computed_matrix_violations(workflows: Workflows) -> list[str]:
+    computed = {
+        location: matrix
+        for location, job in jobs_of(workflows)
+        if isinstance(matrix := matrix_document(job), str)
+    }
+    return [
+        *(
+            f"{location}: computed matrix {matrix}"
+            for location, matrix in computed.items()
+            if location not in COMPUTED_MATRIX_ROWS
+            or matrix != PLANNED_MATRIX.format(platform=COMPUTED_MATRIX_ROWS[location])
+        ),
+        *(
+            f"{location}: missing planned matrix"
+            for location in COMPUTED_MATRIX_ROWS
+            if location not in computed
+        ),
+    ]
 
 
 def status_names(job: dict[str, object]) -> list[str]:
@@ -1221,6 +1243,47 @@ def test_gates_require_every_need_and_step_and_fail_on_each_input(
     workflows = repository_workflows()
 
     violations = unsound_gates(workflows, tmp_path)
+
+    assert violations == []
+
+
+def compute_a_matrix_for_a_job_without_a_gate(workflows: Workflows) -> None:
+    strategy = table(job_of(workflows, "ci.yml", "mutation-tooling")["strategy"])
+    strategy["matrix"] = "${{ fromJSON(needs.scaffold-plan.outputs.linux) }}"
+
+
+def point_the_linux_lanes_at_the_macos_plan(workflows: Workflows) -> None:
+    strategy = table(job_of(workflows, "ci.yml", "scaffold-tests")["strategy"])
+    strategy["matrix"] = "${{ fromJSON(needs.scaffold-plan.outputs.macos) }}"
+
+
+def list_the_linux_lanes_statically(workflows: Workflows) -> None:
+    strategy = table(job_of(workflows, "ci.yml", "scaffold-tests")["strategy"])
+    strategy["matrix"] = {"include": matrix_rows(SAMPLE_LANE_COUNTS)["linux"]}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        compute_a_matrix_for_a_job_without_a_gate,
+        point_the_linux_lanes_at_the_macos_plan,
+        compute_an_unreviewed_gate_matrix,
+        list_the_linux_lanes_statically,
+    ],
+)
+def test_computed_matrix_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = computed_matrix_violations(workflows)
+
+    assert violations
+
+
+def test_computed_matrices_come_only_from_their_lane_plan_output() -> None:
+    workflows = repository_workflows()
+
+    violations = computed_matrix_violations(workflows)
 
     assert violations == []
 

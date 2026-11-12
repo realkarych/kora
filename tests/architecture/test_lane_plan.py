@@ -16,10 +16,13 @@ from scripts.ci.lane_plan import (
     lane_count,
     load_table,
     module_of,
+    packing_items,
     parsed_table,
     recorded_table,
     table_text,
 )
+from tests.measurements.storage_evidence_common import EvidenceFailure
+from tests.scaffold_evidence import validated_collection
 
 REVISION = "c" * 40
 
@@ -96,6 +99,26 @@ def test_module_above_the_target_is_split_across_children() -> None:
     assert [child.milliseconds for child in plan[0]] == [230, 200, 200]
 
 
+def test_oversized_module_is_split_into_contiguous_chunks_of_sorted_tests() -> None:
+    large = module_nodes("tests/test_large.py", 10)
+    small = module_nodes("tests/test_small.py", 3)
+    durations = {
+        "tests/test_large.py": Record(1000, 10),
+        "tests/test_small.py": Record(30, 3),
+    }
+
+    items = packing_items(estimates([*small, *reversed(large)], durations), 300)
+
+    assert [item.nodes for item in items] == [
+        tuple(large[2:5]),
+        tuple(large[7:10]),
+        tuple(large[0:2]),
+        tuple(large[5:7]),
+        tuple(small),
+    ]
+    assert [item.estimate for item in items] == [300, 300, 200, 200, 30]
+
+
 def test_unknown_modules_use_the_mean_recorded_test_and_known_modules_scale() -> None:
     durations = {
         "tests/test_fast.py": Record(10, 10),
@@ -133,10 +156,14 @@ def test_assignment_is_independent_of_collection_order(order: str) -> None:
 
 
 def test_a_single_test_above_the_target_gets_a_child_of_its_own() -> None:
-    nodes = ["tests/test_long.py::test_value", *module_nodes("tests/test_short.py", 30)]
+    short = [f"tests/test_short_{index:02d}.py" for index in range(30)]
+    nodes = [
+        "tests/test_long.py::test_value",
+        *(f"{module}::test_value" for module in short),
+    ]
     durations = {
         "tests/test_long.py": Record(500, 1),
-        "tests/test_short.py": Record(300, 30),
+        **{module: Record(10, 1) for module in short},
     }
 
     lanes = lane_count(nodes, durations, 3, 100)
@@ -247,14 +274,26 @@ COLLECTED = [
 ]
 
 
+def write_receipt(directory: Path, run: str = "77", requested: str = REVISION) -> None:
+    (directory / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": run,
+                "run_attempt": "1",
+                "checkout_revision": REVISION,
+                "requested_revision": requested,
+            }
+        )
+    )
+
+
 def recorded_lane(
     root: Path, lane: str, nodes: list[str], seconds: float, run: str = "77"
 ) -> None:
     directory = root / f"scaffold-tests-ubuntu-24.04-3.11.17-{lane}"
     directory.mkdir()
-    (directory / "receipt.json").write_text(
-        json.dumps({"run_id": run, "checkout_revision": REVISION})
-    )
+    write_receipt(directory, run)
+    (directory / "child-1.exit").write_text("0\n")
     (directory / "complete.txt").write_text(
         "\n".join(COLLECTED) + f"\n\n{len(COLLECTED)} tests collected in 0.10s\n"
     )
@@ -267,12 +306,10 @@ def test_refresh_records_milliseconds_and_tests_per_module(tmp_path: Path) -> No
     recorded_lane(tmp_path, "general-2", ["tests/test_b.py::test_value"], 1.5)
     storage = tmp_path / "scaffold-tests-ubuntu-24.04-3.11.17-storage"
     storage.mkdir()
-    (storage / "receipt.json").write_text(
-        json.dumps({"run_id": "77", "checkout_revision": REVISION})
-    )
+    write_receipt(storage)
     (storage / "junit.xml").write_text(junit_text({"tests.plugins.storage.x": 9.0}))
 
-    table = recorded_table(tmp_path)
+    table = recorded_table(tmp_path, validated_collection)
 
     assert table == Table(
         "77",
@@ -286,31 +323,47 @@ def test_refresh_records_milliseconds_and_tests_per_module(tmp_path: Path) -> No
     )
 
 
+GREEN_PUSH_RUN = "one green master push run"
+
+
 @pytest.mark.parametrize(
-    ("corruption", "match"),
+    ("corruption", "failure", "match"),
     [
-        ("foreign test", "not in the collection"),
-        ("two runs", "one complete run"),
-        ("document type", "document type"),
-        ("missing duration", "finite duration"),
-        ("unexpected entry", "unexpected entry"),
+        ("foreign test", PlanFailure, "not in the collection"),
+        ("two runs", PlanFailure, GREEN_PUSH_RUN),
+        ("pull request merge", PlanFailure, GREEN_PUSH_RUN),
+        ("failed child", PlanFailure, GREEN_PUSH_RUN),
+        ("missing receipt", PlanFailure, "not a regular file"),
+        ("document type", PlanFailure, "document type"),
+        ("missing duration", PlanFailure, "finite duration"),
+        ("unexpected entry", PlanFailure, "unexpected entry"),
+        ("incomplete collection", EvidenceFailure, "collection is incomplete"),
     ],
 )
-def test_refresh_refuses_inconsistent_artifacts(
-    tmp_path: Path, corruption: str, match: str
+def test_refresh_refuses_artifacts_outside_one_green_push_run(
+    tmp_path: Path, corruption: str, failure: type[Exception], match: str
 ) -> None:
     recorded_lane(tmp_path, "general-1", module_nodes("tests/test_a.py", 2), 0.25)
-    report = tmp_path / "scaffold-tests-ubuntu-24.04-3.11.17-general-1" / "child-1.xml"
+    directory = tmp_path / "scaffold-tests-ubuntu-24.04-3.11.17-general-1"
+    report = directory / "child-1.xml"
     if corruption == "foreign test":
         report.write_text(junit_text({"tests.test_other.test_value": 1.0}))
     elif corruption == "two runs":
         recorded_lane(tmp_path, "general-2", ["tests/test_b.py::test_value"], 1, "78")
+    elif corruption == "pull request merge":
+        write_receipt(directory, requested="d" * 40)
+    elif corruption == "failed child":
+        (directory / "child-1.exit").write_text("1\n")
+    elif corruption == "missing receipt":
+        (directory / "receipt.json").unlink()
     elif corruption == "document type":
         report.write_text('<!DOCTYPE x [<!ENTITY a "b">]><testsuite/>')
     elif corruption == "missing duration":
         report.write_text('<testsuite><testcase classname="a" name="b"/></testsuite>')
-    else:
+    elif corruption == "unexpected entry":
         (tmp_path / "notes.txt").write_text("unexpected")
+    else:
+        (directory / "complete.txt").write_text("\n".join(COLLECTED) + "\n")
 
-    with pytest.raises(PlanFailure, match=match):
-        recorded_table(tmp_path)
+    with pytest.raises(failure, match=match):
+        recorded_table(tmp_path, validated_collection)

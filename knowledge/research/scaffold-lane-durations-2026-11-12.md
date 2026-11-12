@@ -1,12 +1,10 @@
 # Scaffold lane durations, 2026-11-12
 
-This record holds the measured basis of the duration-balanced scaffold lanes under [issue #1348](https://github.com/realkarych/kora/issues/1348), checked on 2026-11-12. The numbers are hosted-runner observations from one run, not a portable benchmark.
+This record holds the measured basis of the duration-balanced scaffold lanes under [issue #1348](https://github.com/realkarych/kora/issues/1348), checked on 2026-11-12, and the owner decisions of that day. The numbers are hosted-runner observations from single runs, not a portable benchmark.
 
-## Source run
+## Planning basis
 
-[Run 43116408596](https://github.com/realkarych/kora/actions/runs/43116408596) is the most recent complete green `CI` run after the daily-lane move of #1397. It tested pull-request merge `f6434603aa88372f77ba1366c16f937f462b7bed` with all fourteen scaffold lanes successful, before balancing. The master run [43116004152](https://github.com/realkarych/kora/actions/runs/43116004152) of #1397 itself was cancelled at the ten-minute deadline in the macOS remainder lane.
-
-`scripts/ci/lane_durations.json` was generated from that run's `scaffold-tests-*` artifacts. It sums the JUnit `time` of every test in the conformance, remainder and integration lanes per module; storage and local-runtime lanes are excluded.
+[Run 43116408596](https://github.com/realkarych/kora/actions/runs/43116408596) was the most recent complete green `CI` run after the daily-lane move of #1397 when the plan was made. It tested pull-request merge `f6434603aa88372f77ba1366c16f937f462b7bed` with all fourteen scaffold lanes successful, before balancing. The master run [43116004152](https://github.com/realkarych/kora/actions/runs/43116004152) of #1397 itself was cancelled at the ten-minute deadline in the macOS remainder lane. The target and child count were chosen from this run.
 
 | Environment | General tests | Recorded seconds | Modules | Largest modules |
 |---|---:|---:|---:|---|
@@ -24,26 +22,43 @@ Lane jobs on the same run, in seconds:
 | storage | 316 / 272 | 187 / 166 | 228 / 194 |
 | local-runtime | 300 / 159 | 275 / 172 | 274 / 168 |
 
-Setup before the test step took 15–33 s, and 91–122 s in the local-runtime lanes, which prepare host fixtures. Each child's JUnit total was 1–17 s below its pytest wall time; the difference is the child's own collection. The slowest children were macOS remainder measurements, 487.9 s recorded, and Ubuntu 3.11 remainder engine, 460.0 s.
+Setup before the test step took 15–33 s, and 91–122 s in the local-runtime lanes, which prepare host fixtures. Each child's JUnit total was 1–17 s below its pytest wall time; the difference is the child's own collection.
 
-## Plan from the table
+The mean recorded time per test was 0.160 s on macOS, 0.173 s on Ubuntu 3.11 and 0.162 s on Ubuntu 3.15. The median of the per-module rates was 0.056 s on macOS, so a median default for unrecorded modules would underestimate a new heavy module by about a factor of three; the planner uses the mean. With three children per lane and a 270-second target, this run's table gave four general lanes in each environment. A 240-second target would have needed five lanes on Ubuntu 3.11; four children per lane would have needed three lanes per environment for the same twelve children, with one more concurrent child on each runner.
 
-The planner estimates each test as its module's recorded milliseconds divided by its recorded test count, rounded up. A module without a record uses the environment's mean recorded time per test: 0.160 s on macOS, 0.173 s on Ubuntu 3.11 and 0.162 s on Ubuntu 3.15. The median of the per-module rates is 0.056 s on macOS, so a median default would underestimate a new heavy module by about a factor of three.
+## Committed table
 
-With three children per lane and a 270-second target, the planner uses four general lanes in each environment on the source run's collections:
+The refresh accepts only the artifacts of one green `master` push run, so the committed `scripts/ci/lane_durations.json` comes from master [run 43132494211](https://github.com/realkarych/kora/actions/runs/43132494211), revision `90968d663e591b24ac7feaed4cc36d4c9d3e4388`, which ran the earlier fourteen lanes:
 
-| Environment | Estimated seconds | Lanes | Largest planned child |
-|---|---:|---:|---:|
-| macOS 15, Python 3.11.17 | 2,521.9 | 4 | 210.2 s |
-| Ubuntu 24.04, Python 3.11.17 | 2,893.1 | 4 | 241.1 s |
-| Ubuntu 24.04, Python 3.15.0 | 2,705.0 | 4 | 233.9 s |
+| Environment | General tests | Recorded seconds | Modules | Mean per test | Largest modules |
+|---|---:|---:|---:|---:|---|
+| macOS 15, Python 3.11.17 | 15,679 | 2,600.8 | 482 | 0.166 s | `tests/cli/test_conformance.py` 289.3 s, `tests/conformance/test_conformance_cases_detect_broken_providers.py` 227.1 s |
+| Ubuntu 24.04, Python 3.11.17 | 16,616 | 2,257.2 | 482 | 0.136 s | `tests/cli/test_conformance.py` 185.2 s, `tests/engine/test_graph_execution_contract.py` 91.0 s |
+| Ubuntu 24.04, Python 3.15.0 | 16,616 | 2,414.2 | 482 | 0.145 s | `tests/cli/test_conformance.py` 198.5 s, `tests/engine/test_graph_execution_contract.py` 83.5 s |
 
-`tests/cli/test_conformance.py` exceeds the target on macOS, so its tests are packed individually there. A 240-second target would need five lanes on Ubuntu 3.11. Four children per lane would need three lanes per environment for the same twelve children per environment, with one more concurrent child on each runner.
+Its Ubuntu 3.11 total is 22% below the planning basis, which shows the size of run-to-run variance. A local planning run on 2026-11-12 with this table and the current collections gave three general lanes on each Linux interpreter, with largest planned children of 250.3 s and 267.7 s, and four lanes on macOS, with 227.2 s. `tests/cli/test_conformance.py` exceeds the target on macOS, so it is divided into two contiguous chunks of its sorted tests.
+
+## First balanced run
+
+[Run 43129307528](https://github.com/realkarych/kora/actions/runs/43129307528) tested the first balanced revision with the planning-basis table, four general lanes per environment and tests of an oversized module packed individually. Every lane and test passed; the evidence join refused the run because pytest ordered the parameters of `tests/cel/test_cel_checker_binding.py::test_cel_checker_overloads_evaluate_in_binding` differently in different processes. The parametrisation iterates a frozenset of enum members, whose hashes follow string hash randomisation. The join now compares the sets of collected tests, still refuses duplicates and different membership, and plans from the sorted tests.
+
+Diagnostics of that run, never passing guarantees:
+
+- Recorded child time divided by planned child time ranged from 0.39 to 1.24, with a mean of 0.97 over 36 children. No child exceeded the 125% notice threshold.
+- The longest general test step took 334 s (Ubuntu 3.11 `general-3`), the longest general job 361 s and the longest scaffold job 389 s (macOS local-runtime), against the 600 s deadline.
+- The planning job queued for 289 s after `Classify verification scope` finished and ran for 51 s; the lanes were created 340 s after the classification. The plan had estimated about one minute.
+- The six macOS scaffold jobs ran from 560 s to 2,243 s after run creation, with gaps of up to 284 s between one macOS job ending and the next starting. On green master run 43132494211, the four macOS jobs of the earlier layout ran from 256 s to 1,482 s.
+
+## Owner decisions of 2026-11-12
+
+- The head-revision planner, cross-checked by the head-revision evidence join, replaces the issue's constraint that trusted planning inputs come from the base revision. Review still guards pull requests that edit the planner, the join or the workflow trust tests.
+- Blocking for the third acceptance criterion: the deterministic planner bound and green final-head CI. The bound is that every planned child estimate is at most 270 s, except a child holding a single test that exceeds the target by itself, with at most eight lanes per environment. Diagnostic only: lane test-step and job durations, queue time and headroom to the 600 s deadline. They are recorded and never reported as a passing guarantee. A lane job prints a GitHub warning when its test step runs longer than 450 s.
+- The planning job stays after `Classify verification scope`. Planning in parallel with the classification is a possible later change, triggered if the planning latency hurts feedback.
+
+## Reading rule and refresh trigger
+
+Recorded time comes from runners with three or four concurrent children and one run's runner speed. Refresh the table from a newer green master push run when the evidence join's over-plan notice or a lane's 450 s headroom warning appears on a master run, or when a test module is added or removed. The ten-minute job deadline and every test deadline remain the hard limits.
 
 ## Node-ID argument files
 
-On 2026-11-12, a local collection on macOS with SQLite selected the same 15,706 general tests as the source run's macOS lanes. All 15,706 node IDs, written one per line to a file and passed as `pytest --collect-only -q @file`, were collected in the same order in 9.4 s, against 10.0 s for the path-based collection. Parameter IDs with spaces, `::`, escaped bytes and lengths up to 4 MiB round-tripped unchanged. A node ID that no longer exists is reported by pytest as `ERROR: not found`, not skipped.
-
-## Reading rule
-
-Recorded time comes from runners with three or four concurrent children and the source run's runner speed. A child that later records more than 25% above its plan indicates a stale table, not a test failure; refresh the table from a newer green run. The ten-minute job deadline and every test deadline remain the hard limits.
+On 2026-11-12, a local collection on macOS with SQLite selected the same 15,706 general tests as the planning-basis macOS lanes. All 15,706 node IDs, written one per line to a file and passed as `pytest --collect-only -q @file`, were collected in the same order in 9.4 s, against 10.0 s for the path-based collection. Parameter IDs with spaces, `::`, escaped bytes and lengths up to 4 MiB round-tripped unchanged. A node ID that no longer exists is reported by pytest as `ERROR: not found`, not skipped.

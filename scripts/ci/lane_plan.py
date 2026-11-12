@@ -2,9 +2,9 @@ import heapq
 import json
 import math
 import re
-import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import cast
 from xml.parsers.expat import ParserCreate
@@ -20,6 +20,7 @@ ARTIFACT = re.compile(
 )
 REVISION = re.compile(r"[0-9a-f]{40}")
 IDENTIFIER = re.compile(r"[1-9][0-9]*")
+PUSH_RUN_ONLY = "lane durations come only from one green master push run"
 
 
 class PlanFailure(ValueError):
@@ -49,6 +50,7 @@ class Child:
 
 
 Plan = tuple[tuple[Child, ...], ...]
+Collection = Callable[[Path], Iterable[str]]
 
 
 @dataclass(frozen=True)
@@ -87,17 +89,28 @@ def estimates(nodes: Iterable[str], durations: Durations) -> dict[str, int]:
     return {node: per_node(durations.get(module_of(node), default)) for node in nodes}
 
 
+def module_chunks(
+    members: list[str], estimated: Mapping[str, int], target: int
+) -> list[Item]:
+    total = sum(estimated[node] for node in members)
+    pieces = min(len(members), max(1, math.ceil(total / target)))
+    bounds = [len(members) * index // pieces for index in range(pieces + 1)]
+    parts = [members[start:end] for start, end in pairwise(bounds)]
+    return [
+        Item(sum(estimated[node] for node in part), part[0], tuple(part))
+        for part in parts
+    ]
+
+
 def packing_items(estimated: Mapping[str, int], target: int) -> list[Item]:
     modules: dict[str, list[str]] = {}
     for node in sorted(estimated):
         modules.setdefault(module_of(node), []).append(node)
-    items: list[Item] = []
-    for module, members in modules.items():
-        total = sum(estimated[node] for node in members)
-        if total <= target:
-            items.append(Item(total, module, tuple(members)))
-        else:
-            items.extend(Item(estimated[node], node, (node,)) for node in members)
+    items = [
+        item
+        for members in modules.values()
+        for item in module_chunks(members, estimated, target)
+    ]
     return sorted(items, key=lambda item: (-item.estimate, item.key))
 
 
@@ -190,22 +203,33 @@ def junit_milliseconds(path: Path) -> dict[str, int]:
     return durations
 
 
-def collected_modules(path: Path) -> dict[str, str]:
-    lines = bounded_bytes(path).decode("utf-8").splitlines()
-    return {identity(line): module_of(line) for line in lines if "::" in line}
+def receipt_field(
+    fields: Mapping[str, object], name: str, form: re.Pattern[str]
+) -> str:
+    value = fields.get(name)
+    if not isinstance(value, str) or form.fullmatch(value) is None:
+        raise PlanFailure("a lane receipt has no run or revision")
+    return value
 
 
-def receipt_source(path: Path) -> tuple[str, str]:
+def receipt_source(path: Path) -> tuple[str, str, str]:
     document: object = json.loads(bounded_bytes(path))
     if not isinstance(document, dict):
         raise PlanFailure("a lane receipt is not an object")
     fields = cast(dict[str, object], document)
-    run, revision = fields.get("run_id"), fields.get("checkout_revision")
-    if not isinstance(run, str) or IDENTIFIER.fullmatch(run) is None:
-        raise PlanFailure("a lane receipt has no run")
-    if not isinstance(revision, str) or REVISION.fullmatch(revision) is None:
-        raise PlanFailure("a lane receipt has no revision")
-    return run, revision
+    checkout = receipt_field(fields, "checkout_revision", REVISION)
+    if receipt_field(fields, "requested_revision", REVISION) != checkout:
+        raise PlanFailure(PUSH_RUN_ONLY)
+    return (
+        receipt_field(fields, "run_id", IDENTIFIER),
+        receipt_field(fields, "run_attempt", IDENTIFIER),
+        checkout,
+    )
+
+
+def require_success(directory: Path) -> None:
+    if any(bounded_bytes(path) != b"0\n" for path in directory.glob("*.exit")):
+        raise PlanFailure(PUSH_RUN_ONLY)
 
 
 def general_lane_directories(root: Path) -> dict[str, list[Path]]:
@@ -219,7 +243,9 @@ def general_lane_directories(root: Path) -> dict[str, list[Path]]:
     return environments
 
 
-def environment_durations(directories: list[Path]) -> dict[str, Record]:
+def environment_durations(
+    directories: list[Path], collection: Collection
+) -> dict[str, Record]:
     collections = [
         directory / "complete.txt"
         for directory in directories
@@ -227,7 +253,7 @@ def environment_durations(directories: list[Path]) -> dict[str, Record]:
     ]
     if not collections:
         raise PlanFailure("an environment has no recorded collection")
-    owners = collected_modules(collections[0])
+    owners = {identity(node): module_of(node) for node in collection(collections[0])}
     totals: dict[str, tuple[int, int]] = {}
     for directory in directories:
         for report in sorted(directory.glob("*.xml")):
@@ -239,20 +265,22 @@ def environment_durations(directories: list[Path]) -> dict[str, Record]:
     return {module: Record(*total) for module, total in sorted(totals.items())}
 
 
-def recorded_table(root: Path) -> Table:
+def recorded_table(root: Path, collection: Collection) -> Table:
     environments = general_lane_directories(root)
     sources = {
         receipt_source(directory / "receipt.json")
         for directory in sorted(root.iterdir())
     }
+    for directory in sorted(root.iterdir()):
+        require_success(directory)
     if len(sources) != 1 or not environments:
-        raise PlanFailure("the timing input does not come from one complete run")
-    run, revision = sources.pop()
+        raise PlanFailure(PUSH_RUN_ONLY)
+    run, _, revision = sources.pop()
     return Table(
         run,
         revision,
         {
-            environment: environment_durations(directories)
+            environment: environment_durations(directories, collection)
             for environment, directories in sorted(environments.items())
         },
     )
@@ -328,18 +356,3 @@ def parsed_table(text: str) -> Table:
 
 def load_table(path: Path = TABLE) -> Table:
     return parsed_table(bounded_bytes(path).decode("utf-8"))
-
-
-def main(arguments: list[str]) -> None:
-    if len(arguments) not in (2, 3) or arguments[0] != "durations":
-        raise PlanFailure("usage: durations <artifact-directory> [<table>]")
-    table = recorded_table(Path(arguments[1]))
-    output = Path(arguments[2]) if len(arguments) == 3 else TABLE
-    output.write_text(table_text(table))
-    for environment, durations in sorted(table.environments.items()):
-        seconds = sum(record.milliseconds for record in durations.values()) / 1000
-        sys.stdout.write(f"{environment}: {len(durations)} modules, {seconds:.1f} s\n")
-
-
-if __name__ == "__main__":
-    main(sys.argv[1:])

@@ -99,6 +99,31 @@ def test_lane_shell_admits_only_planned_lane_names(
     assert (result.stdout == b"admitted") is admitted
 
 
+@pytest.mark.parametrize(("elapsed", "warned"), [(400, False), (451, True)])
+def test_lane_warns_when_its_test_step_exceeds_the_headroom_threshold(
+    tmp_path: Path, elapsed: int, warned: bool
+) -> None:
+    environment = {
+        **os.environ,
+        "KORA_SCAFFOLD_OS": "macos-15",
+        "KORA_SCAFFOLD_PYTHON": "3.11.17",
+        "KORA_SCAFFOLD_LANE": "general-2",
+    }
+
+    result = subprocess.run(
+        sourced(LANE_SCRIPT, f"trap report_headroom EXIT\nSECONDS={elapsed}\nexit 3\n"),
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 3
+    warning = b"::warning title=Scaffold lane headroom::macos-15 Python 3.11.17 "
+    assert result.stdout.startswith(warning + b"general-2 test step ran") is warned
+
+
 def test_children_run_exactly_their_argument_files(tmp_path: Path) -> None:
     source = tmp_path / "test_planned.py"
     source.write_text(

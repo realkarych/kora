@@ -2,6 +2,8 @@ set -eo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/scheduled_lanes.sh"
 
+KORA_HEADROOM_WARNING_SECONDS=450
+
 admit_lane() {
   case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
     ubuntu-24.04:general-[1-8]|ubuntu-24.04:storage|ubuntu-24.04:local-runtime) ;;
@@ -116,6 +118,13 @@ run_special_lane() {
   fi
 }
 
+report_headroom() {
+  if test "$SECONDS" -gt "$KORA_HEADROOM_WARNING_SECONDS"; then
+    printf '::warning title=Scaffold lane headroom::%s Python %s %s test step ran %s s, more than %s s of the 600 s job deadline\n' \
+      "$KORA_SCAFFOLD_OS" "$KORA_SCAFFOLD_PYTHON" "$KORA_SCAFFOLD_LANE" "$SECONDS" "$KORA_HEADROOM_WARNING_SECONDS"
+  fi
+}
+
 run_lane() {
   admit_lane
   KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
@@ -145,7 +154,10 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   case "$*" in
     dependencies) install_dependencies ;;
     plan) plan_lanes ;;
-    tests) run_lane ;;
+    tests)
+      trap report_headroom EXIT
+      run_lane
+      ;;
     preserve)
       test -n "${KORA_ORDINARY_OUTPUT:-}"
       preserve_ordinary_evidence

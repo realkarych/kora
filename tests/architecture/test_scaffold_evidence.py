@@ -21,6 +21,7 @@ from tests.scaffold_evidence import (
     general_nodes,
     lane_arguments,
     matrix_rows,
+    observed_timings,
     plan_outputs,
     planned_counts,
     record_lane,
@@ -162,11 +163,62 @@ def test_scaffold_receipts_prove_complete_planned_execution(tmp_path: Path) -> N
 
     result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED, COUNTS, TABLE)
 
-    assert (result.environments, result.lanes) == (3, 12)
+    assert (result.environments, result.lanes, result.tests) == (
+        3,
+        12,
+        30 + local_total(),
+    )
+
+
+@pytest.mark.parametrize("environment", ["ubuntu-24.04-3.15.0", "macos-15-3.11.17"])
+def test_general_lanes_may_collect_the_same_tests_in_another_order(
+    tmp_path: Path, environment: str
+) -> None:
+    complete_evidence(tmp_path)
+    system, _, python = environment.rpartition("-")
+    second = lane_directory(tmp_path, system, python, "general-2")
+    reordered = complete_nodes(system)[::-1]
+    (second / "complete.txt").write_text(collection_text(reordered))
+    rehash(second, ["complete.txt"])
+
+    result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED, COUNTS, TABLE)
+
     assert result.tests == 30 + local_total()
-    assert len(result.timings) == 3 * LANES * len(CHILD_NAMES)
-    assert sum(timing.planned for timing in result.timings) == 3 * 4500
-    assert sum(timing.recorded for timing in result.timings) == 3 * 10 * 9
+
+
+def test_observed_timings_cover_every_general_child(tmp_path: Path) -> None:
+    complete_evidence(tmp_path)
+
+    timings = observed_timings(tmp_path, COUNTS, TABLE)
+
+    assert len(timings) == 3 * LANES * len(CHILD_NAMES)
+    assert sum(timing.planned or 0 for timing in timings) == 3 * 4500
+    assert sum(timing.recorded or 0 for timing in timings) == 3 * 10 * 9
+
+
+def test_observed_timings_survive_evidence_that_fails_verification(
+    tmp_path: Path,
+) -> None:
+    complete_evidence(tmp_path)
+    first = lane_directory(tmp_path, "macos-15", "3.11.17", "general-1")
+    second = lane_directory(tmp_path, "macos-15", "3.11.17", "general-2")
+    (first / "child-2.xml").write_text("<testsuite><testcase")
+    (second / "complete.txt").write_text("interrupted collection\n")
+
+    timings = observed_timings(tmp_path, COUNTS, TABLE)
+
+    observed = {
+        (timing.lane, timing.child): (timing.planned, timing.recorded)
+        for timing in timings
+        if timing.environment == "macos-15-3.11.17"
+    }
+    assert observed[("general-1", "child-2")][1] is None
+    assert observed[("general-1", "child-1")][1] is not None
+    second_children = [observed[("general-2", name)] for name in CHILD_NAMES]
+    assert [planned for planned, _ in second_children] == [None, None, None]
+    assert all(recorded is not None for _, recorded in second_children)
+    with pytest.raises(EvidenceFailure):
+        verify(tmp_path)
 
 
 @pytest.mark.parametrize("operating_system", ["macos-26", "ubuntu-24.04"])
@@ -237,7 +289,7 @@ def test_general_child_evidence_refuses_rehashed_semantic_corruption(
         ("more planned", "exactly the planned lanes"),
         ("reassigned", "differs from its assignment"),
         ("relabelled", "mismatched provenance"),
-        ("reordered collection", "collected different tests"),
+        ("different collection", "collected different tests"),
     ],
 )
 def test_scaffold_evidence_requires_exactly_the_planned_general_lanes(
@@ -267,8 +319,8 @@ def test_scaffold_evidence_requires_exactly_the_planned_general_lanes(
         data["lane"] = "general-1"
         (second / "receipt.json").write_text(json.dumps(data))
     else:
-        reordered = complete_nodes("ubuntu-24.04")[::-1]
-        (second / "complete.txt").write_text(collection_text(reordered))
+        fewer = complete_nodes("ubuntu-24.04")[1:]
+        (second / "complete.txt").write_text(collection_text(fewer))
         rehash(second, ["complete.txt"])
 
     with pytest.raises(EvidenceFailure, match=match):
@@ -574,9 +626,11 @@ def test_planned_counts_refuse_invalid_lane_counts(text: str) -> None:
         planned_counts(text)
 
 
-@pytest.mark.parametrize(("recorded", "notice"), [(1250, False), (1251, True)])
+@pytest.mark.parametrize(
+    ("recorded", "notice"), [(1250, False), (1251, True), (None, False)]
+)
 def test_timing_lines_mark_children_beyond_their_plan(
-    recorded: int, notice: bool
+    recorded: int | None, notice: bool
 ) -> None:
     timing = ChildTiming("macos-15-3.11.17", "general-1", "child-1", 1000, recorded)
 
