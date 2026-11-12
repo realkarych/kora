@@ -1,6 +1,8 @@
 # kora knowledge index
 
-This is the section-by-section reference behind [human-facing documentation](../docs/README.md). Start with the [technical introduction](../docs/technical-introduction.md) for orientation, then the component sections and cited ADRs below. ADRs govern when a specification disagrees. Research and review records supply evidence and disposition, not new decisions. Design requirements are not evidence that the corresponding implementation exists.
+Start every task with the [current architecture](architecture/current.md). It says what exists and runs on `master`, what is only designed, where the trust boundaries are, and which specification and decision records cover each component.
+
+This is the section-by-section reference behind [human-facing documentation](../docs/README.md). For the designed core, read the [technical introduction](../docs/technical-introduction.md), then the component sections and cited ADRs below. ADRs govern when a specification disagrees. Research and review records supply evidence and disposition, not new decisions. Design requirements are not evidence that the corresponding implementation exists.
 
 <a id="which-file-to-load-for-which-task"></a>
 

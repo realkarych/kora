@@ -29,19 +29,10 @@ from kora.cel.tree import (
 from kora.cel_eval.errors import EvaluatorUnavailable
 from kora.cel_eval.evaluate import PatternCompilation
 from kora.cel_eval.thread import Evaluator
-from kora.ir.approval_compilation import ApprovalPrerequisite, checked_approval_sites
-from kora.ir.branch_expressions import BranchExpressionResult, checked_branch_sites
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import DiagnosticPath, from_cel, path_sequence
-from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import CheckedCelSite as CheckedPatternSite
 from kora.ir.expression_fields import FieldPath
-from kora.ir.retry_expressions import RetryExpressionResult, checked_retry_sites
-from kora.ir.trigger_expressions import (
-    SensorTriggerExpressionResult,
-    checked_sensor_trigger_sites,
-)
-from kora.ir.wait_expressions import WaitExpressionResult, checked_wait_sites
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
 COMPLETED: EventSpec = CATALOG.register(
@@ -276,122 +267,3 @@ async def validate_prepared_patterns(
         raise
     finally:
         pattern = None
-
-
-async def validate_sensor_trigger_patterns(
-    document: GraphDocument, evaluator: Evaluator, *, max_triggers: int, max_work: int
-) -> PatternCheck | SensorTriggerExpressionResult:
-    if type(max_triggers) is not int or max_triggers < 0:
-        return announce(IncompletePatternCheck.INVALID_INVENTORY)
-    inventory = checked_sensor_trigger_sites(document, max_triggers=max_triggers)
-    if inventory is None:
-        return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
-    if isinstance(inventory, SensorTriggerExpressionResult):
-        return inventory
-    verification = validate_cel_patterns(
-        tuple(CheckedPatternSite(site.path, site.checked, True) for site in inventory),
-        evaluator,
-        max_work=max_work,
-    )
-    del document, inventory
-    return await verification
-
-
-async def validate_approval_patterns(
-    document: GraphDocument,
-    evaluator: Evaluator,
-    *,
-    max_declarations: int,
-    max_work: int,
-) -> PatternCheck | DiagnosticCollection | ApprovalPrerequisite:
-    if type(max_declarations) is not int or max_declarations < 0:
-        return announce(IncompletePatternCheck.INVALID_INVENTORY)
-    inventory = checked_approval_sites(document, max_declarations=max_declarations)
-    if inventory is None:
-        return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
-    if isinstance(inventory, ApprovalPrerequisite | DiagnosticCollection):
-        emit_completion(
-            inventory.value
-            if isinstance(inventory, ApprovalPrerequisite)
-            else "typed_refused"
-        )
-        return inventory
-    verification = validate_cel_patterns(
-        tuple(
-            CheckedPatternSite(site.path, site.checked, site.authored)
-            for site in inventory
-        ),
-        evaluator,
-        max_work=max_work,
-    )
-    del document, inventory
-    return await verification
-
-
-async def validate_branch_patterns(
-    document: GraphDocument,
-    evaluator: Evaluator,
-    *,
-    max_declarations: int,
-    max_work: int,
-) -> PatternCheck | BranchExpressionResult:
-    if type(max_declarations) is not int or max_declarations < 0:
-        return announce(IncompletePatternCheck.INVALID_INVENTORY)
-    inventory = checked_branch_sites(document, max_declarations=max_declarations)
-    if inventory is None:
-        return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
-    if isinstance(inventory, BranchExpressionResult):
-        return inventory
-    verification = validate_cel_patterns(
-        tuple(CheckedPatternSite(site.path, site.checked, True) for site in inventory),
-        evaluator,
-        max_work=max_work,
-    )
-    del document, inventory
-    return await verification
-
-
-async def validate_wait_patterns(
-    document: GraphDocument,
-    evaluator: Evaluator,
-    *,
-    max_declarations: int,
-    max_work: int,
-) -> PatternCheck | WaitExpressionResult:
-    if type(max_declarations) is not int or max_declarations < 0:
-        return announce(IncompletePatternCheck.INVALID_INVENTORY)
-    inventory = checked_wait_sites(document, max_declarations=max_declarations)
-    if inventory is None:
-        return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
-    if isinstance(inventory, WaitExpressionResult):
-        return inventory
-    verification = validate_cel_patterns(
-        tuple(CheckedPatternSite(site.path, site.checked, True) for site in inventory),
-        evaluator,
-        max_work=max_work,
-    )
-    del document, inventory
-    return await verification
-
-
-async def validate_retry_patterns(
-    document: GraphDocument,
-    evaluator: Evaluator,
-    *,
-    max_declarations: int,
-    max_work: int,
-) -> PatternCheck | RetryExpressionResult:
-    if type(max_declarations) is not int or max_declarations < 0:
-        return announce(IncompletePatternCheck.INVALID_INVENTORY)
-    inventory = checked_retry_sites(document, max_declarations=max_declarations)
-    if inventory is None:
-        return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
-    if isinstance(inventory, RetryExpressionResult):
-        return inventory
-    verification = validate_cel_patterns(
-        tuple(CheckedPatternSite(site.path, site.checked, True) for site in inventory),
-        evaluator,
-        max_work=max_work,
-    )
-    del document, inventory
-    return await verification
