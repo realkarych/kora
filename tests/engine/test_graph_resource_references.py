@@ -1,6 +1,4 @@
 import pickle
-import sqlite3
-from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from traceback import walk_tb
@@ -8,7 +6,7 @@ from typing import Literal, cast
 
 import pytest
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import insert, select
+from sqlalchemy import select
 
 from kora.db.connection import Database, Dialect
 from kora.db.graph_resource_owner_reads import (
@@ -47,7 +45,7 @@ from kora.engine.graph_version_identity import (
 from kora.ir.json import JsonObject, JsonValue
 from kora.protocols.storage_models import ContentAddress, ContentRef, StorageIdentity
 from tests.db.closing import ConnectionLedger
-from tests.db.seed import DIGEST, Seeder
+from tests.db.seed import Seeder
 from tests.engine.graph_output_cases import child, output_document
 from tests.engine.test_graph_command_manifests import (
     ZERO,
@@ -56,7 +54,7 @@ from tests.engine.test_graph_command_manifests import (
     command_document,
     resource,
 )
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings
 
 LIMITS = GraphResourceReferenceLimits(
     CommandManifestLimits(100_000, 1_000_000, 2_000_000),
@@ -612,26 +610,16 @@ async def verify_native_references(
     encoded, digests = prepared.values, prepared.digests
     pin = GraphVersionPin(graph, version, digests.execution_contract_digest)
     async with database.transaction() as connection:
-        seeder = Seeder(connection)
-        await connection.execute(
-            insert(graph_version).values(
-                id=version,
-                graph_id=graph,
-                number=1,
-                ir=encoded.ir,
-                execution_contract=encoded.execution_contract,
-                value_encoding_version=encoded.value_encoding_version,
-                ir_digest=digests.ir_digest,
-                source_digest=DIGEST,
-                execution_contract_digest=digests.execution_contract_digest,
-                deployment_digest=digests.deployment_digest,
-                resolved_digests={},
-                resources=native,
-                deployed_by="owner",
-                deployed_at=seeder.clock.now(),
-                status="active",
-                **seeder.stamps(),
-            )
+        await Seeder(connection).graph_version(
+            graph,
+            ir=encoded.ir,
+            version_id=version,
+            execution_contract=encoded.execution_contract,
+            value_encoding_version=encoded.value_encoding_version,
+            ir_digest=digests.ir_digest,
+            execution_contract_digest=digests.execution_contract_digest,
+            deployment_digest=digests.deployment_digest,
+            resources=native,
         )
     before_read = ledger.checkouts
 
@@ -706,17 +694,7 @@ async def test_physical_references_match_native_rows_after_release(
 async def test_native_physical_references_match_sqlite_utf16(
     tmp_path: Path, encoding: NativeResourceEncoding
 ) -> None:
-    path = tmp_path / "resources.db"
-    with closing(sqlite3.connect(path)) as raw:
-        raw.execute(
-            "PRAGMA encoding = 'UTF-16le'"
-            if encoding == "utf-16le"
-            else "PRAGMA encoding = 'UTF-16be'"
-        )
-        raw.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        raw.execute("DROP TABLE encoding_seed")
-        raw.commit()
-    settings = sqlite_settings(path)
+    settings = encoded_sqlite_settings(tmp_path / "resources.db", encoding)
     await upgrade_database(settings)
     database = Database(settings)
 

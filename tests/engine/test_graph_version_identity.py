@@ -3,13 +3,11 @@ from dataclasses import asdict, dataclass, replace
 
 import pytest
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import insert
 
 from kora.db.connection import Database
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.db.graph_values import EncodedGraphValues
 from kora.db.reads import GraphVersionRow, graph_version_by_number
-from kora.db.tables import graph_version
 from kora.engine.graph_version_identity import (
     CheckedGraphVersionIdentity,
     GraphVersionDigests,
@@ -146,30 +144,18 @@ def test_graph_version_digest_streams_exact_large_canonical_texts() -> None:
 async def insert_version(
     seeder: Seeder, graph: str, number: int, prepared: PreparedGraphVersionIdentity
 ) -> str:
-    version = seeder.new_id()
     values = prepared.values
     digests = prepared.digests
-    await seeder.connection.execute(
-        insert(graph_version).values(
-            id=version,
-            graph_id=graph,
-            number=number,
-            ir=values.ir,
-            ir_digest=digests.ir_digest,
-            source_digest=DIGEST,
-            execution_contract=values.execution_contract,
-            value_encoding_version=values.value_encoding_version,
-            execution_contract_digest=digests.execution_contract_digest,
-            deployment_digest=digests.deployment_digest,
-            resolved_digests={},
-            resources={},
-            deployed_by="owner",
-            deployed_at=seeder.clock.now(),
-            status="active",
-            **seeder.stamps(),
-        )
+    return await seeder.graph_version(
+        graph,
+        number,
+        values.ir,
+        execution_contract=values.execution_contract,
+        value_encoding_version=values.value_encoding_version,
+        ir_digest=digests.ir_digest,
+        execution_contract_digest=digests.execution_contract_digest,
+        deployment_digest=digests.deployment_digest,
     )
-    return version
 
 
 @pytest.mark.asyncio

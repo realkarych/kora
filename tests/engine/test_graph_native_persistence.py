@@ -2,7 +2,6 @@ import math
 from typing import cast
 
 import pytest
-from sqlalchemy import insert
 
 from kora.db.connection import Database
 from kora.db.graph_value_json import (
@@ -16,15 +15,13 @@ from kora.db.graph_values import (
     prepare_graph_values,
     read_graph_values,
 )
-from kora.db.reads import graph_version_by_number
-from kora.db.tables import graph_version
 from kora.engine.graph_native_outputs import (
     build_graph_native_output_contract,
     read_graph_native_output_contract,
 )
 from kora.ir.json import JsonValue
 from tests.db.closing import ConnectionLedger
-from tests.db.seed import DIGEST, Seeder
+from tests.db.seed import stored_graph_version
 from tests.engine.graph_native_cases import native_arguments, native_document
 from tests.engine.graph_output_cases import LIMIT, child
 
@@ -46,35 +43,9 @@ async def test_native_output_contract_round_trip(database: Database, name: str) 
         raw, ObjectReader(expected.text).object(), max_encoded_bytes=LIMIT
     )
     assert ledger.checkouts == database.units_in_flight() == 0
-    async with database.transaction() as connection:
-        seeder = Seeder(connection)
-        namespace = await seeder.namespace()
-        foreign_namespace = await seeder.namespace("foreign")
-        graph = await seeder.graph(namespace)
-        await connection.execute(
-            insert(graph_version).values(
-                id=seeder.new_id(),
-                graph_id=graph,
-                number=1,
-                ir=encoded.ir,
-                execution_contract=encoded.execution_contract,
-                value_encoding_version=1,
-                ir_digest=DIGEST,
-                source_digest=DIGEST,
-                execution_contract_digest=expected.digest,
-                deployment_digest=DIGEST,
-                resolved_digests={},
-                resources={},
-                deployed_by="owner",
-                deployed_at=seeder.clock.now(),
-                status="active",
-                **seeder.stamps(),
-            )
-        )
-
-    async with database.read_transaction() as connection:
-        row = await graph_version_by_number(connection, namespace, graph, 1)
-        foreign = await graph_version_by_number(connection, foreign_namespace, graph, 1)
+    row, foreign = await stored_graph_version(
+        database, encoded, execution_contract_digest=expected.digest
+    )
     assert ledger.outstanding == database.units_in_flight() == 0
     assert row is not None
     decoded = read_graph_values(

@@ -2,7 +2,6 @@ from dataclasses import replace
 from typing import cast
 
 import pytest
-from sqlalchemy import insert
 
 from kora.db.connection import Database
 from kora.db.graph_value_json import (
@@ -18,7 +17,6 @@ from kora.db.graph_values import (
     read_graph_values,
 )
 from kora.db.reads import graph_version_by_number
-from kora.db.tables import graph_version
 from kora.engine.graph_cel_facts import (
     GraphCelReadLimits,
     read_graph_cel_facts,
@@ -33,7 +31,7 @@ from kora.ir.graph_cel_inventory import checked_graph_sites
 from kora.ir.json import JsonObject
 from kora.ir.structured_schema_input import StructuredSchemaPreparationRefusal
 from tests.db.closing import ConnectionLedger
-from tests.db.seed import DIGEST, Seeder
+from tests.db.seed import Seeder
 from tests.engine.graph_inventory_cases import (
     complete_inventory,
     inventory_arguments,
@@ -117,25 +115,12 @@ async def test_saved_cel_facts_match_the_pinned_version_on_both_databases(
         foreign_namespace = await seeder.namespace("foreign")
         graph = await seeder.graph(namespace)
         for number, pair in enumerate(prepared, start=1):
-            await connection.execute(
-                insert(graph_version).values(
-                    id=seeder.new_id(),
-                    graph_id=graph,
-                    number=number,
-                    ir=pair.ir,
-                    execution_contract=pair.execution_contract,
-                    value_encoding_version=pair.value_encoding_version,
-                    ir_digest=DIGEST,
-                    source_digest=DIGEST,
-                    execution_contract_digest=DIGEST,
-                    deployment_digest=DIGEST,
-                    resolved_digests={},
-                    resources={},
-                    deployed_by="owner",
-                    deployed_at=seeder.clock.now(),
-                    status="active",
-                    **seeder.stamps(),
-                )
+            await seeder.graph_version(
+                graph,
+                number,
+                pair.ir,
+                execution_contract=pair.execution_contract,
+                value_encoding_version=pair.value_encoding_version,
             )
     async with database.read_transaction() as connection:
         row = await graph_version_by_number(connection, namespace, graph, 1)

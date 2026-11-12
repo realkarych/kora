@@ -574,25 +574,17 @@ async def insert_case(
     refs: JsonObject,
 ) -> None:
     pair, hashes = prepared.values, prepared.digests
-    await seeder.connection.execute(
-        insert(graph_version).values(
-            id=scope.version_id,
-            graph_id=scope.graph_id,
-            number=number,
-            ir=pair.ir,
-            ir_digest=hashes.ir_digest,
-            source_digest=DIGEST,
-            execution_contract=pair.execution_contract,
-            value_encoding_version=pair.value_encoding_version,
-            execution_contract_digest=hashes.execution_contract_digest,
-            deployment_digest=hashes.deployment_digest,
-            resolved_digests={},
-            resources=refs,
-            deployed_by="owner",
-            deployed_at=seeder.clock.now(),
-            status="active",
-            **seeder.stamps(),
-        )
+    await seeder.graph_version(
+        scope.graph_id,
+        number,
+        pair.ir,
+        version_id=scope.version_id,
+        execution_contract=pair.execution_contract,
+        value_encoding_version=pair.value_encoding_version,
+        ir_digest=hashes.ir_digest,
+        execution_contract_digest=hashes.execution_contract_digest,
+        deployment_digest=hashes.deployment_digest,
+        resources=refs,
     )
 
 
