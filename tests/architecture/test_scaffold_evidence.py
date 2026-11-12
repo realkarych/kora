@@ -1,5 +1,7 @@
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 from xml.parsers.expat import ExpatError
 
@@ -40,6 +42,7 @@ from tests.scaffold_evidence import (
     write_assignment,
 )
 
+ROOT = Path(__file__).resolve().parents[2]
 REVISION = "a" * 40
 REQUESTED = "b" * 40
 GENERAL_NODES = (
@@ -197,11 +200,53 @@ def test_general_lanes_may_collect_the_same_tests_in_another_order(
 def test_observed_timings_cover_every_general_child(tmp_path: Path) -> None:
     complete_evidence(tmp_path)
 
-    timings = observed_timings(tmp_path, COUNTS, TABLE)
+    lanes = list(observed_timings(tmp_path, COUNTS, TABLE))
 
+    timings = [timing for lane in lanes for timing in lane]
+    assert len(lanes) == 3 * LANES
     assert len(timings) == 3 * LANES * len(CHILD_NAMES)
-    assert sum(timing.planned or 0 for timing in timings) == 3 * 4500
-    assert sum(timing.recorded or 0 for timing in timings) == 3 * 10 * 9
+    assert sum(timing.planned for timing in timings) == 3 * 4500
+    assert sum(timing.recorded for timing in timings) == 3 * 10 * 9
+
+
+def test_timings_print_readable_lanes_before_failing_on_a_missing_one(
+    tmp_path: Path,
+) -> None:
+    complete_evidence(tmp_path)
+    missing = lane_directory(tmp_path, "macos-15", "3.11.17", "general-2")
+    for path in missing.iterdir():
+        path.unlink()
+    missing.rmdir()
+    command = [sys.executable, "-m", "tests.scaffold_evidence", "timings"]
+
+    result = subprocess.run(
+        [*command, str(tmp_path), json.dumps(COUNTS)],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    printed = [
+        line.partition(":")[0].rpartition(" ")[0]
+        for line in result.stdout.decode().splitlines()
+        if ": planned " in line
+    ]
+    assert result.returncode != 0
+    assert b"EvidenceFailure" in result.stderr
+    assert (
+        printed
+        == [
+            f"{key} {lane}"
+            for key in (
+                "ubuntu-24.04-3.11.17",
+                "ubuntu-24.04-3.15.0",
+                "macos-15-3.11.17",
+            )
+            for lane in ("general-1", "general-2")
+            for _ in CHILD_NAMES
+        ][: 5 * len(CHILD_NAMES)]
+    )
 
 
 def untimed_report(path: Path) -> None:
@@ -234,7 +279,7 @@ def test_timings_refuse_evidence_that_verification_also_refuses(
     rehash(directory, [changed])
 
     with pytest.raises(failure):
-        observed_timings(tmp_path, COUNTS, TABLE)
+        list(observed_timings(tmp_path, COUNTS, TABLE))
 
     with pytest.raises(failure):
         verify(tmp_path)

@@ -137,9 +137,9 @@ UNGATED_STEPS = {
         "verifies; its failure fails the lane job itself"
     ),
     "ci.yml:scaffold-evidence:timings": (
-        "prints planned and recorded child times as a diagnostic from evidence "
-        "that the verification step also requires, so it fails only when "
-        "verification fails; the gate reads verification, never this step"
+        "prints planned and recorded child times as a diagnostic; its failure "
+        "fails the evidence job, whose success the Scaffold joins require; the "
+        "gate reads verification, never this step"
     ),
     "ci.yml:scaffold-tests-macos:cohort_evidence": (
         "copies general lane evidence that the shared Scaffold evidence job "

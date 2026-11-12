@@ -397,7 +397,7 @@ jobs:
           pattern: scaffold-tests-*
           path: scaffold-evidence
       - name: Report planned and recorded lane times
-        if: ${{ always() && needs.change-scope.outputs.full != 'false' }}
+        if: ${{ !cancelled() && needs.change-scope.outputs.full != 'false' }}
         id: timings
         env:
           KORA_SCAFFOLD_LANES: ${{ needs.scaffold-plan.outputs.lanes }}

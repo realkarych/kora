@@ -3,10 +3,10 @@ import json
 import re
 import stat
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, TextIO, cast
 
 from pydantic import Field, StrictStr
 
@@ -559,19 +559,20 @@ def lane_timings(
 
 def observed_timings(
     root: Path, counts: Mapping[str, int], table: Table
-) -> tuple[ChildTiming, ...]:
-    return tuple(
-        timing
-        for system, python, _ in ENVIRONMENTS
-        for lane in general_lanes(counts[environment_key(system, python)])
-        for timing in lane_timings(
-            root / artifact_name(system, python, lane),
-            environment_key(system, python),
-            lane,
-            counts[environment_key(system, python)],
-            table,
-        )
-    )
+) -> Iterator[list[ChildTiming]]:
+    for system, python, _ in ENVIRONMENTS:
+        key = environment_key(system, python)
+        for lane in general_lanes(counts[key]):
+            directory = root / artifact_name(system, python, lane)
+            yield lane_timings(directory, key, lane, counts[key], table)
+
+
+def report_timings(
+    root: Path, counts: Mapping[str, int], table: Table, output: TextIO
+) -> None:
+    for timings in observed_timings(root, counts, table):
+        output.write("".join(map(timing_lines, timings)))
+        output.flush()
 
 
 def verify_scaffold(
@@ -716,10 +717,9 @@ def main(arguments: list[str]) -> None:
                     f"{key}: {len(durations)} modules, {total / 1000:.1f} s\n"
                 )
         case ["timings", directory, lanes]:
-            timings = observed_timings(
-                Path(directory), planned_counts(lanes), load_table()
+            report_timings(
+                Path(directory), planned_counts(lanes), load_table(), sys.stdout
             )
-            sys.stdout.write("".join(map(timing_lines, timings)))
         case ["verify", directory, run_id, attempt, checkout, requested, lanes]:
             verification = verify_scaffold(
                 Path(directory),
