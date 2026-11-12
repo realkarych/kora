@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from tests.support.local_runtime import (
@@ -14,8 +13,6 @@ from tests.support.local_runtime import (
     runtime_context,
     state_root,
 )
-
-__all__ = ["kora_capture"]
 
 
 def test_local_capability_source_has_no_execution_effects(tmp_path: Path) -> None:

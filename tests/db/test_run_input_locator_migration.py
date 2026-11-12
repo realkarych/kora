@@ -1,5 +1,3 @@
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -24,7 +22,7 @@ from tests.db.seed import Seeder
 from tests.db.test_graph_publication_digest_migration import assert_sqlite_index
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 from tests.db.test_run_input_storage_migration import SENTINEL, UpgradeObservation
-from tests.support.databases import sqlite_settings
+from tests.support.databases import encoded_sqlite_settings, sqlite_settings
 
 PREDECESSOR = "0020"
 REVISION = "0021"
@@ -144,12 +142,7 @@ async def point_lookup(
 async def test_run_input_locators_exclude_noncanonical_historical_keys(
     tmp_path: Path, encoding: str
 ) -> None:
-    settings = sqlite_settings(tmp_path / "locators.db")
-    with closing(sqlite3.connect(settings.sqlite_path)) as native:
-        native.execute(f"PRAGMA encoding = '{encoding}'")
-        native.execute("CREATE TABLE encoding_seed (value INTEGER)")
-        native.execute("DROP TABLE encoding_seed")
-        native.commit()
+    settings = encoded_sqlite_settings(tmp_path / "locators.db", encoding)
     width_fitting_nul = (
         encode(20) + "\x00" + "X" * 25
         if encoding == "UTF-8"

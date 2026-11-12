@@ -3,7 +3,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 from tests.plugins.storage.pressure_controller import read_manifest, save
 from tests.plugins.storage.pressure_holders import Native, process_comm
@@ -40,9 +40,28 @@ def reported_process(value: int) -> int | None:
     return value if value > 0 else None
 
 
+class NativeClock(Protocol):
+    def now(self) -> float: ...
+
+    def callback_time(self) -> float: ...
+
+
+class MonotonicClock:
+    def now(self) -> float:
+        return time.monotonic()
+
+    def callback_time(self) -> float:
+        return time.monotonic()
+
+
 class NativeCall:
-    def __init__(self, request: NativeRequest) -> None:
+    def __init__(
+        self, request: NativeRequest, clock: NativeClock | None = None
+    ) -> None:
         self.request: NativeRequest = request
+        self.clock: NativeClock = MonotonicClock() if clock is None else clock
+        self.cutoff: float | None = None
+        self.late: bool = False
         self.submitted: bool = False
         self.finished: bool = False
         self.invalid: bool = False
@@ -99,6 +118,9 @@ class NativeCall:
             ):
                 self.invalid = True
                 return
+            if self.cutoff is None or self.clock.callback_time() >= self.cutoff:
+                self.late = True
+                return
             self.refused = dissenter is not None
             self.code = 0 if dissenter is None else cast(int, status(dissenter))
             string = (
@@ -134,16 +156,19 @@ class NativeCall:
                 raise PressureFailure("native_disk_missing")
             schedule(session, loop, mode)
             scheduled = True
-            deadline = min(self.request.deadline, time.monotonic() + 25)
-            if time.monotonic() >= deadline:
+            self.cutoff = min(self.request.deadline, self.clock.now() + 25)
+            if self.clock.now() >= self.cutoff:
                 raise PressureFailure("native_admission_deadline")
             self.submitted = True
             operation(disk, 0, callback, None)
             while (
-                not self.finished and not self.invalid and time.monotonic() < deadline
+                not self.finished
+                and not self.invalid
+                and not self.late
+                and self.clock.now() < self.cutoff
             ):
-                run_loop(mode, max(0, deadline - time.monotonic()), 1)
-            if self.invalid or not self.finished:
+                run_loop(mode, max(0, self.cutoff - self.clock.now()), 1)
+            if self.invalid or self.late or not self.finished:
                 raise PressureFailure("native_completion_unknown")
             if self.dissenter_pid is not None:
                 self.dissenter_comm = process_comm(native, self.dissenter_pid)
@@ -161,7 +186,7 @@ class NativeCall:
             not self.cf_closed
             or self.request.helper is None
             or self.submitted
-            and (not self.finished or self.invalid)
+            and (not self.finished or self.invalid or self.late)
         ):
             return None
         return NativeOutcome(
@@ -181,6 +206,16 @@ class NativeCall:
             dissenter_pid=self.dissenter_pid,
             dissenter_comm=self.dissenter_comm,
         )
+
+
+def publish(directory: Path, call: NativeCall) -> None:
+    outcome = call.outcome()
+    if outcome is not None:
+        encoded = outcome.model_dump_json().encode()
+        if len(encoded) > 8192:
+            raise PressureFailure("native_outcome_limit")
+        save(directory / "native-text.bin", call.text)
+        save(directory / "native-result.json", encoded)
 
 
 def main() -> None:
@@ -208,13 +243,7 @@ def main() -> None:
             raise PressureFailure("native_admission_deadline")
         call.perform()
     finally:
-        outcome = call.outcome()
-        if outcome is not None:
-            encoded = outcome.model_dump_json().encode()
-            if len(encoded) > 8192:
-                raise PressureFailure("native_outcome_limit")
-            save(directory / "native-text.bin", call.text)
-            save(directory / "native-result.json", encoded)
+        publish(directory, call)
 
 
 if __name__ == "__main__":

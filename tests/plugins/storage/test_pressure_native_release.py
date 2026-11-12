@@ -1,5 +1,6 @@
 import ctypes
 import json
+import math
 import os
 import select
 import subprocess
@@ -22,13 +23,15 @@ from tests.plugins.storage.pressure_controller import (
 from tests.plugins.storage.pressure_disk_arbitration import (
     NativeCall,
     private_text,
+    publish,
     reported_process,
 )
 from tests.plugins.storage.pressure_holders import Native, process_comm
-from tests.plugins.storage.pressure_images import discover, image_name
+from tests.plugins.storage.pressure_images import Attachment, discover, image_name
 from tests.plugins.storage.pressure_models import (
     ImageStamp,
     NativeOutcome,
+    NativePhase,
     NativeRequest,
     PressureFailure,
     PressureManifest,
@@ -360,7 +363,8 @@ def test_completed_result_is_committed_without_fabricating_command_status(
 
 
 @pytest.mark.parametrize(
-    "state", ["not_requested", "pending", "invalid", "open_cf", "success", "refused"]
+    "state",
+    ["not_requested", "pending", "invalid", "late", "open_cf", "success", "refused"],
 )
 def test_native_call_only_publishes_known_closed_outcome(
     tmp_path: Path, closed_helper: ProcessToken, state: str
@@ -369,8 +373,9 @@ def test_native_call_only_publishes_known_closed_outcome(
         request = request_for(controller).model_copy(update={"helper": closed_helper})
         call = NativeCall(request)
         call.submitted = state != "not_requested"
-        call.finished = state in {"invalid", "open_cf", "success", "refused"}
+        call.finished = state in {"invalid", "late", "open_cf", "success", "refused"}
         call.invalid = state == "invalid"
+        call.late = state == "late"
         call.cf_closed = state != "open_cf"
         call.refused = state == "refused"
         call.code = 49168 if call.refused else 0
@@ -382,7 +387,7 @@ def test_native_call_only_publishes_known_closed_outcome(
 
         outcome = call.outcome()
 
-        if state in {"pending", "invalid", "open_cf"}:
+        if state in {"pending", "invalid", "late", "open_cf"}:
             assert outcome is None
         else:
             assert outcome is not None
@@ -697,3 +702,251 @@ def test_matching_result_cannot_settle_while_actual_helper_is_live(
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
                     stream.close()
+
+
+class PinnedCallbackClock:
+    def __init__(self, reading: float, after: float) -> None:
+        self.reading: float = reading
+        self.after: float = after
+        self.observed: bool = False
+
+    def now(self) -> float:
+        return self.after if self.observed else time.monotonic()
+
+    def callback_time(self) -> float:
+        self.observed = True
+        return self.reading
+
+
+def in_process_request(
+    controller: PressureController,
+    attachment: Attachment,
+    phase: NativePhase,
+    helper: ProcessToken,
+) -> NativeRequest:
+    stamp = controller.manifest.image_stamp
+    assert stamp is not None
+    return NativeRequest(
+        version=1,
+        request_id="2" * 32,
+        nonce=controller.manifest.nonce,
+        controller=controller.manifest.controller,
+        image_stamp=stamp,
+        phase=phase,
+        device=attachment.device,
+        volume=attachment.volume,
+        entities=attachment.entities,
+        deadline=time.monotonic() + 20,
+        helper=helper,
+        outcome=None,
+    )
+
+
+def mounted_attachment(controller: PressureController) -> Attachment:
+    controller.acquire("enospc")
+    stamp = controller.manifest.image_stamp
+    assert stamp is not None
+    mounted = discover(controller.directory, stamp)
+    assert mounted is not None
+    assert mounted.mounted
+    return mounted
+
+
+def unmounted_attachment(
+    controller: PressureController, helper: ProcessToken
+) -> Attachment:
+    mounted = mounted_attachment(controller)
+    NativeCall(in_process_request(controller, mounted, "unmount", helper)).perform()
+    stamp = controller.manifest.image_stamp
+    assert stamp is not None
+    released = discover(controller.directory, stamp)
+    assert released is not None
+    assert not released.mounted
+    return released
+
+
+def outcome_or_failure(call: NativeCall) -> tuple[NativeOutcome | None, str | None]:
+    try:
+        call.perform()
+    except PressureFailure as failure:
+        return call.outcome(), failure.code
+    return call.outcome(), None
+
+
+def settle_failure(record: PressureController, request: NativeRequest) -> str | None:
+    bind_request(
+        record,
+        request.model_copy(
+            update={
+                "nonce": record.manifest.nonce,
+                "controller": record.manifest.controller,
+            }
+        ),
+    )
+    try:
+        record.settle_native()
+    except PressureFailure as failure:
+        return failure.code
+    return None
+
+
+def pinned_call(request: NativeRequest, *, timely: bool) -> NativeCall:
+    reading = (
+        math.nextafter(request.deadline, -math.inf) if timely else request.deadline
+    )
+    return NativeCall(request, PinnedCallbackClock(reading, request.deadline))
+
+
+def published_record(directory: Path) -> bytes | None:
+    path = directory / "native-result.json"
+    return path.read_bytes() if path.exists() else None
+
+
+def late_callback_publishes_nothing(
+    tmp_path: Path, helper: ProcessToken, phase: NativePhase
+) -> None:
+    with (
+        create(tmp_path / "cutoff") as controller,
+        create(tmp_path / "record") as record,
+    ):
+        try:
+            attachment = (
+                mounted_attachment(controller)
+                if phase == "unmount"
+                else unmounted_attachment(controller, helper)
+            )
+            request = in_process_request(controller, attachment, phase, helper)
+            call = pinned_call(request, timely=False)
+
+            outcome, failure = outcome_or_failure(call)
+            publish(record.directory, call)
+            settled = settle_failure(record, request)
+        finally:
+            controller.cleanup()
+            controller.finish_report()
+
+        assert failure == "native_completion_unknown"
+        assert outcome is None
+        assert call.late
+        assert call.cf_closed
+        assert published_record(record.directory) is None
+        assert settled == "native_completion_unknown"
+        assert controller.manifest.resources_closed
+
+
+def timely_callback_survives_late_loop(
+    tmp_path: Path, helper: ProcessToken, phase: NativePhase
+) -> None:
+    published = tmp_path / "published"
+    published.mkdir()
+    with create(tmp_path / "timely") as controller:
+        try:
+            attachment = (
+                mounted_attachment(controller)
+                if phase == "unmount"
+                else unmounted_attachment(controller, helper)
+            )
+            stamp = controller.manifest.image_stamp
+            assert stamp is not None
+            request = in_process_request(controller, attachment, phase, helper)
+            call = pinned_call(request, timely=True)
+
+            outcome, failure = outcome_or_failure(call)
+            publish(published, call)
+            remaining = discover(controller.directory, stamp)
+        finally:
+            controller.cleanup()
+            controller.finish_report()
+
+        assert failure is None
+        assert outcome is not None
+        assert published_record(published) == outcome.model_dump_json().encode()
+        if outcome.result == "success":
+            assert outcome.code == 0
+            assert outcome.dissenter_pid is None
+            assert (
+                remaining is None
+                if phase == "eject"
+                else remaining is not None and not remaining.mounted
+            )
+        else:
+            assert outcome.result == "refused"
+            assert outcome.code is not None
+            assert outcome.code != 0
+        assert controller.manifest.resources_closed
+
+
+def test_eject_callback_at_cutoff_publishes_no_outcome(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    late_callback_publishes_nothing(tmp_path, closed_helper, "eject")
+
+
+def test_eject_callback_before_cutoff_survives_late_loop_return(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    timely_callback_survives_late_loop(tmp_path, closed_helper, "eject")
+
+
+def test_unmount_callback_at_cutoff_publishes_no_outcome(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    late_callback_publishes_nothing(tmp_path, closed_helper, "unmount")
+
+
+def test_unmount_callback_before_cutoff_survives_late_loop_return(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    timely_callback_survives_late_loop(tmp_path, closed_helper, "unmount")
+
+
+def test_late_eject_refusal_is_not_published(
+    tmp_path: Path, closed_helper: ProcessToken
+) -> None:
+    if sys.platform != "darwin":
+        assert_native_call_refuses_platform(tmp_path)
+        return
+    published = tmp_path / "published"
+    published.mkdir()
+    with create(tmp_path / "late-refusal") as controller:
+        try:
+            released = unmounted_attachment(controller, closed_helper)
+            stamp = controller.manifest.image_stamp
+            assert stamp is not None
+            holder = open_device("/dev/r" + released.device[5:], controller.directory)
+            try:
+                wait_ready(holder)
+                call = pinned_call(
+                    in_process_request(controller, released, "eject", closed_helper),
+                    timely=False,
+                )
+
+                outcome, failure = outcome_or_failure(call)
+                publish(published, call)
+                remaining = discover(controller.directory, stamp)
+            finally:
+                close_device(holder)
+        finally:
+            controller.cleanup()
+            controller.finish_report()
+
+        assert failure == "native_completion_unknown"
+        assert outcome is None
+        assert call.late
+        assert not call.refused
+        assert call.dissenter_pid is None
+        assert published_record(published) is None
+        assert remaining is not None
+        assert controller.manifest.resources_closed

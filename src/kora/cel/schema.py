@@ -233,20 +233,10 @@ class SchemaTypes:
     ) -> CelType:
         return self.mapped(schema, schema, view)[0]
 
-    def reference(self, uri: str, view: SchemaView = SchemaView.PLAIN) -> CelType:
-        schema, root = self.resolve(None, uri)
-        return self.mapped(schema, root, view)[0]
-
     def variable(
         self, schema: JsonValue, view: SchemaView = SchemaView.PLAIN
     ) -> Variable:
         return variable_of(self.mapped(schema, schema, view))
-
-    def reference_variable(
-        self, uri: str, view: SchemaView = SchemaView.PLAIN
-    ) -> Variable:
-        schema, root = self.resolve(None, uri)
-        return variable_of(self.mapped(schema, root, view))
 
     def resolve(self, root: JsonValue, uri: str) -> Located:
         cache_key = (id(root), uri)

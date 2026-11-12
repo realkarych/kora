@@ -1,6 +1,6 @@
 # ADR-0001: Own control plane, with a Temporal-backed execution backend kept possible
 
-- Status: accepted, 2026-10-15; amended 2026-10-16 (factual corrections to the engine analysis and a dated DBOS note; [architecture critique of 2026-10-16, corrections to the competitor analysis](../../knowledge/reviews/architecture-critique-2026-10-16.md#corrections-to-the-competitor-analysis) and [how to decide about the own scheduler](../../knowledge/reviews/architecture-critique-2026-10-16.md#how-to-decide-about-the-own-scheduler), issue #22); amended 2026-10-19 (the first slice is the minimal roadmap slice; the ten fault checks and the DBOS gate move to the scheduler-prototype milestone; issue #122); amended 2026-10-19 (shared transition functions called by the API and the scheduler; issue #103); amended 2026-10-21 (both Claude and Codex are required in the first slice; issue #172)
+- Status: accepted, 2026-10-15; amended 2026-10-16 (factual corrections to the engine analysis and a dated DBOS note; [architecture critique of 2026-10-16, corrections to the competitor analysis](../../knowledge/reviews/architecture-critique-2026-10-16.md#corrections-to-the-competitor-analysis) and [how to decide about the own scheduler](../../knowledge/reviews/architecture-critique-2026-10-16.md#how-to-decide-about-the-own-scheduler), issue #22); amended 2026-10-19 (the first slice is the minimal roadmap slice; the ten fault checks and the DBOS gate move to the scheduler-prototype milestone; issue #122); amended 2026-10-19 (shared transition functions called by the API and the scheduler; issue #103); amended 2026-10-21 (both Claude and Codex are required in the first slice; issue #172); amended 2026-10-23 (first-slice capability and refusal boundary; issue #140); amended 2026-11-11 (walking skeleton before the first-slice gates, narrower first-slice depth; issue #1357)
 - Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after the desk analysis of existing engines and the design review of 2026-10-15
 - Absorbs: DD-7, requirements decisions 6 and 12, NFR-5.5
@@ -13,6 +13,8 @@
 - Harness-scope amendment dated 2026-10-21: scope and implementation plan approved by the project owner under [issue #172](https://github.com/realkarych/kora/issues/172); wording pending line-by-line owner review.
 
 - First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
+
+- Walking-skeleton amendment dated 2026-11-11: substance decided by the project owner under [issue #1356](https://github.com/realkarych/kora/issues/1356) and [issue #1357](https://github.com/realkarych/kora/issues/1357); wording pending line-by-line owner review.
 
 ## Context
 
@@ -41,6 +43,37 @@ Finite retention and abandoned-upload cleanup, `kora doctor`, provider listing/c
 Local bare Git publication is explicitly credential-free only under a saved trusted binding, and retains late authorization, a stable `local_service` principal, digest/destination matching, closure and durable provenance (ADR-0023). It creates no change request. The included API operations have complete CLI/MCP coverage: ten stdio tools, including a distinct compiled-IR `kora_validate`. The complete future inventory becomes sixteen under ADR-0002. Probe exclusions apply to exactly `GET /healthz`, `GET /readyz` and `GET /metrics`, with no authentication exemption.
 
 Every affected test keeps its required legs; only legs needing an excluded feature wait for that feature's implementation. [The named test matrix](../../knowledge/specs/first-slice.md#required-and-pending-test-cases) and implementation plan record these splits. Both real harness policy/launcher gates, local publication/recovery checks and resource-lifetime methods remain first-slice obligations. This amendment defines scope, not implemented runtime behavior.
+
+## Walking-skeleton amendment of 2026-11-11
+
+A whole-project review of 2026-11-11 found that no part of kora runs a graph. Foundations were hardened ahead of any caller, so their contracts were never exercised by one, and the work items that join them had not started. The project owner decided on the same day ([issue #1356](https://github.com/realkarych/kora/issues/1356), [issue #1357](https://github.com/realkarych/kora/issues/1357)) that the first slice gains an intermediate milestone before its gates apply: the walking skeleton.
+
+The walking skeleton runs one graph end to end through kora's public surfaces, on SQLite:
+
+1. the graph is deployed;
+2. a run is triggered through the CLI and through the HTTP API;
+3. a scheduler tick advances the run;
+4. a worker claims the attempt over HTTP;
+5. the agent node runs on the fake harness;
+6. the command node runs on the local runtime;
+7. a person answers the approval through the CLI;
+8. the run completes.
+
+The architecture stays as designed: the worker reaches the metadata database only through the HTTP API, the agent session runs in its own runner, and the CLI and the MCP server are thin clients over the shared API client. Only the depth of each component is simplified. [The implementation plan](../implementation-plan.md#walking-skeleton) names each step, its owning work item and its order.
+
+The walking skeleton is not first-slice-ready. Apart from the narrowing listed below, this amendment weakens or removes no first-slice gate: the gates of the amendments above, of the [first-slice contract](../../knowledge/specs/first-slice.md) and of the component specifications apply when the skeleton's path is extended to slice acceptance. Until the skeleton runs, deepening of graph publication, of manual-start parameter evaluation and of macOS native qualification pauses.
+
+The `claude` adapter is assembled in a parallel stream, with the minimal runner-side harness hosting of [issue #199](https://github.com/realkarych/kora/issues/199), so that the same path also runs with a real Claude session on a developer machine. CI keeps the fake harness. The `codex` adapter stays required for slice acceptance under the amendment of 2026-10-21.
+
+The same decision narrows the depth of the first slice:
+
+- Live-session adoption after a worker restart stays required for slice acceptance. It is outside the walking skeleton.
+- Local process identity uses the process group and the process start time. Extended platform process identity moves out of the first slice.
+- The isolated crash and diagnostic file I/O of [#616](https://github.com/realkarych/kora/issues/616), [#700](https://github.com/realkarych/kora/issues/700) and [#701](https://github.com/realkarych/kora/issues/701) moves out of the first slice. With #616, the startup durability contract moves out entirely: a runner registers without a durable startup record and checkpoint.
+- macOS native qualification of the runner moves out of the first slice.
+- `kora doctor` is minimal: it checks the kora version, that the CEL binding loads, the configured harness binaries and their versions, that the metadata database is reachable and that the state root is writable.
+
+[The first-slice contract](../../knowledge/specs/first-slice.md#walking-skeleton-and-narrowed-depth) records these changes and the gates they leave unchanged.
 
 ## Decision
 
@@ -78,6 +111,7 @@ Kestra and Airflow become integration targets only: they start kora runs through
 - [scheduler.md §2](../../knowledge/specs/scheduler.md) (the passes) and [scheduler.md §12](../../knowledge/specs/scheduler.md) (execution backend boundary)
 - [scheduler.md §18](../../knowledge/specs/scheduler.md#18-scheduler-prototype-milestone-acceptance) (acceptance of the scheduler-prototype milestone)
 - [roadmap](../roadmap.md) (scope of the first slice and order of the milestones)
+- [implementation plan, walking skeleton](../implementation-plan.md#walking-skeleton) and [first-slice contract, walking skeleton and narrowed depth](../../knowledge/specs/first-slice.md#walking-skeleton-and-narrowed-depth)
 - [data-model.md §1](../../knowledge/specs/data-model.md) (principles) and [data-model.md §9](../../knowledge/specs/data-model.md) (compatibility with a Temporal-backed backend)
 - [verdict.md](../../knowledge/analysis/own-scheduler-vs-existing-engine/verdict.md) with retained findings and immutable source records
 - [NFR-5.5, NFR-1.2, NFR-0.1](../requirements/non-functional.md)

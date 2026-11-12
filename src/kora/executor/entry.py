@@ -165,8 +165,7 @@ def publication_files(plan: PublishPlan) -> tuple[PlanFile, ...]:
 
 
 def signalled(error: ExecutorError) -> bool:
-    position = error.position
-    return position is not None and (position.exit_code or 0) < 0
+    return (error.exit_code or 0) < 0
 
 
 def require_area(path: Path | None, phase: Phase) -> Path:

@@ -10,7 +10,7 @@ The [preregistered follow-up](https://github.com/realkarych/kora/issues/255#issu
 
 ## Observation
 
-The [complete changed traceback groups](storage-type-cache-comparisons-2026-10-26.json) retain positive and negative differences rather than only selected allocations. They were derived with standard `Snapshot.load` and `compare_to(..., "traceback")` from the four raw snapshots.
+The [complete changed traceback groups](https://github.com/realkarych/kora/blob/4368f4c26eee7aa80017ce229d725865ce9fc43b/knowledge/research/storage-type-cache-comparisons-2026-10-26.json) retain positive and negative differences rather than only selected allocations. They were derived with standard `Snapshot.load` and `compare_to(..., "traceback")` from the four raw snapshots.
 
 | Quantity | Observation |
 | --- | --- |
@@ -32,7 +32,7 @@ This source establishes an owner, a structural bound and release conditions for 
 
 ## Provenance
 
-The storage source digest is `9667215027c3e1435d057a9872d1466e4cfdad4eb1bcae273be0f7a8a2e75d08`, matching the completed storage campaign at the stated revision. The external diagnostic script SHA-256 is `e4d87ea597f28fbc0b6eb3b377d64e509d2ba5920d8092c800bb272e73e34a3a`. Its only endpoint intervention is the documented type-cache operation after cycle 100. The retained complete comparison file SHA-256 is `1afcae915e4dcc0146e6b4711e3a01b7890ff8a271beed88af5a9fdddf944fe3`.
+The storage source digest is `9667215027c3e1435d057a9872d1466e4cfdad4eb1bcae273be0f7a8a2e75d08`, matching the completed storage campaign at the stated revision. The external diagnostic script SHA-256 is `e4d87ea597f28fbc0b6eb3b377d64e509d2ba5920d8092c800bb272e73e34a3a`. Its only endpoint intervention is the documented type-cache operation after cycle 100. The complete comparison file is retained at the linked revision; its SHA-256 is `1afcae915e4dcc0146e6b4711e3a01b7890ff8a271beed88af5a9fdddf944fe3`.
 
 | Raw snapshot | Bytes | SHA-256 |
 | --- | ---: | --- |

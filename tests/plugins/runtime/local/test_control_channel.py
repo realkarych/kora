@@ -12,7 +12,6 @@ from typing import Final
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.channel import (
     ENVELOPE_BYTES,
     FrameType,
@@ -58,8 +57,6 @@ from tests.support.local_runtime import (
     runtime_context,
     state_root,
 )
-
-__all__ = ["kora_capture"]
 
 STALE_STAMP_NS: Final[int] = 10**18
 

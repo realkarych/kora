@@ -15,7 +15,6 @@ from kora.plugins.harness.codex.app_server_messages import (
     MessageFailure,
     MessageRefused,
 )
-from kora.plugins.harness.codex.app_server_output import output_candidate
 from kora.plugins.harness.codex.app_server_rpc import Notification, RpcError, RpcFailure
 from kora.plugins.harness.codex.app_server_session import (
     AppServerTurnSession,
@@ -26,6 +25,7 @@ from kora.plugins.harness.codex.app_server_session import (
 from kora.plugins.harness.codex.app_server_tools import ToolObservation
 from kora.plugins.harness.codex.app_server_turn import TerminalStatus
 from kora.plugins.harness.codex.app_server_usage import UsageError, UsageFailure
+from kora.plugins.harness.codex.terminal_result import project_terminal_result
 from tests.plugins.harness.codex.test_app_server_errors import (
     detail,
     error_frame,
@@ -121,7 +121,9 @@ async def test_combined_state_is_published_only_after_matching_acknowledgement(
         await connection.send(*frames)
         completion = await operation
         state = session.snapshot()
-        candidate = output_candidate(completion, thread_id=THREAD)
+        projection = project_terminal_result(
+            state, thread_id=THREAD, output_required=True
+        )
 
         assert request["params"] == {
             "threadId": THREAD,
@@ -146,8 +148,9 @@ async def test_combined_state_is_published_only_after_matching_acknowledgement(
         assert state.terminal_status == "completed"
         assert state.terminal_error is None
         assert state.final_message == completion.final_message
-        assert candidate is not None
-        assert candidate.value == {"ok": True}
+        assert projection is not None
+        assert projection.output is not None
+        assert projection.output.value == {"ok": True}
         assert owned_tasks() == set()
 
 
@@ -510,16 +513,19 @@ async def test_terminal_error_retains_only_closed_details_and_no_output(
         error = detail({"httpConnectionFailed": {"httpStatusCode": 429}})
 
         await connection.send(started(), completed(status=status, error=error))
-        completion = await operation
+        await operation
         state = session.snapshot()
-        candidate = output_candidate(completion, thread_id=THREAD)
+        projection = project_terminal_result(
+            state, thread_id=THREAD, output_required=True
+        )
 
         assert state.terminal_status == status
         assert state.terminal_error is not None
         assert state.terminal_error.code is NativeErrorCode.HTTP_CONNECTION_FAILED
         assert state.terminal_error.http_status_code == 429
         assert state.final_message is None
-        assert candidate is None
+        assert projection is not None
+        assert projection.output is None
         assert "private-error-wire-canary" not in repr(state)
         assert "private-error-wire-canary" not in repr(state.terminal_error)
 
@@ -718,17 +724,20 @@ async def test_terminal_summary_selects_output_without_a_completed_item() -> Non
         await connection.send(
             started(), terminal_frame(terminal_params([item("null")]))
         )
-        completion = await operation
+        await operation
         state = session.snapshot()
-        candidate = output_candidate(completion, thread_id=THREAD)
+        projection = project_terminal_result(
+            state, thread_id=THREAD, output_required=True
+        )
 
         assert state.message_count == 0
         assert state.latest_message is None
         assert state.final_message is not None
         assert state.final_message.text == "null"
         assert state.terminal_status == "completed"
-        assert candidate is not None
-        assert candidate.value is None
+        assert projection is not None
+        assert projection.output is not None
+        assert projection.output.value is None
 
 
 @pytest.mark.asyncio

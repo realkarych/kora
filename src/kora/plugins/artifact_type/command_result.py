@@ -5,8 +5,8 @@ from kora.ir import ContractViolation
 from kora.ir.command_result import (
     CommandResult,
     CommandResultValidationError,
+    command_result_revision_descriptor,
     parse_command_result,
-    require_command_result_revision,
     summarize_command_result,
 )
 from kora.ir.data import detach_ir_data
@@ -23,40 +23,6 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 
 CONFIG_SCHEMA: Final[JsonObject] = {"type": "object", "additionalProperties": False}
-SUPPORTED_DESCRIPTOR: Final[JsonObject] = {
-    "name": "CommandResult",
-    "builtin_revision": "1",
-    "schema": "urn:kora:artifact:CommandResult",
-    "parent": None,
-    "behavior": {
-        "validation": "kora.command-result-validation.v1",
-        "digest_fields": "kora.json-payload.v1",
-        "summary": "kora.json-payload.v1",
-    },
-    "validation": {
-        "max_raw_json_bytes": 1048576,
-        "max_canonical_json_bytes": 1048576,
-        "max_json_depth": 16,
-        "max_count": 9223372036854775807,
-        "max_capture_bytes": 67108864,
-        "max_tail_bytes": 4096,
-        "max_resources": 64,
-        "max_resource_bytes": 262144,
-        "max_resource_name_utf8_bytes": 4096,
-        "max_resource_component_utf8_bytes": 255,
-        "max_protected_paths": 64,
-        "max_protected_path_characters": 4096,
-        "max_protected_path_segments": 32,
-        "max_protected_path_pieces": 8192,
-        "max_protected_path_utf8_bytes": 65536,
-        "max_protected_path_non_ascii_characters": 16384,
-        "max_repo_utf8_bytes": 4096,
-        "max_revision_characters": 255,
-    },
-    "canonicalization": "kora.command-result-json.v1",
-    "digest_selection": [""],
-    "schema_sha256": "8444eeb4d4688b6d059dd7221689dd4c824084c88ff189ee3fbb848153c1f8d4",
-}
 COMPONENT: Final[str] = CATALOG.register_component("artifact_type.command_result")
 OUTCOME: Final[EventSpec] = CATALOG.register(
     EventSpec(
@@ -99,16 +65,10 @@ def checked_binding(
     schema = cast("JsonObject", detach_ir_data(catalogued_schema))
     if not matches_fixed(binding.schema, schema):
         raise binding_error("schema")
-    if not matches_fixed(binding.revision_descriptor, SUPPORTED_DESCRIPTOR):
+    descriptor = command_result_revision_descriptor()
+    if not matches_fixed(binding.revision_descriptor, descriptor):
         raise binding_error("revision_descriptor")
-    compatible = True
-    try:
-        require_command_result_revision(SUPPORTED_DESCRIPTOR)
-    except CommandResultValidationError:
-        compatible = False
-    if not compatible:
-        raise binding_error("revision_descriptor")
-    return schema, deepcopy(SUPPORTED_DESCRIPTOR)
+    return schema, descriptor
 
 
 def parsed(payload: JsonValue) -> CommandResult | ContractViolation:

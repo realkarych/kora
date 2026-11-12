@@ -4,15 +4,12 @@ from typing import Final, Literal
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.environment import (
     CandidateRoleEnvironment,
     bind_candidate_environments,
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope
-
-__all__ = ["kora_capture"]
 
 APP: Final[str] = "app-server"
 EXEC: Final[str] = "exec-server"

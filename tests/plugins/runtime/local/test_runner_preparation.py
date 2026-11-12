@@ -12,7 +12,6 @@ from typing import Final
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT, REVERIFY_NS, ControlServer
 from kora.plugins.runtime.local.supervisor import (
@@ -39,7 +38,6 @@ from tests.support.local_runtime import (
     stopped_holder,
 )
 
-__all__ = ["kora_capture"]
 NONCE: Final[str] = "c" * 32
 
 

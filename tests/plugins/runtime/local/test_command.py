@@ -12,13 +12,13 @@ import sys
 import threading
 from collections.abc import AsyncGenerator, Generator
 from contextlib import ExitStack, asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import LoggingSettings, configure_process
@@ -95,8 +95,6 @@ from tests.support.local_runtime import (
     runtime_context,
     state_root,
 )
-
-__all__ = ["kora_capture"]
 
 HOLD_MARKER = "kora-hold-809"
 FD_REPORT = "\n".join(
@@ -366,6 +364,7 @@ def journal_events(path: Path) -> tuple[RawEvent, ...]:
 async def worker() -> None:
     root = Path(os.environ["KORA_COMMAND_ROOT"])
     sockets = Path(os.environ["KORA_COMMAND_SOCKETS"])
+    start = os.environ["KORA_COMMAND_START"] == "1"
     clock = SystemClock()
     diagnostics = configure_process(
         COMPONENT,
@@ -387,14 +386,67 @@ async def worker() -> None:
         activity=NoActivity(),
     )
     runtime = await open_spawning(root, ctx, sockets)
-    workload = command_workload(runtime, "attempt-1", (binary("sleep"), "60"))
-    handle = await runtime.submit(workload, ctx)
-    await runtime.start(handle, ctx)
+    if start:
+        workload = command_workload(runtime, "attempt-1", (binary("sleep"), "60"))
+        handle = await runtime.submit(workload, ctx)
+        await runtime.start(handle, ctx)
+    else:
+        workload = command_workload(runtime, "attempt-1", (binary("true"),))
+        await runtime.submit(workload, ctx)
     entry = await recorded(runtime, "attempt-1")
     assert isinstance(entry, Running)
     sys.stdout.write(f"{entry.socket_path}\n")
     sys.stdout.flush()
     signal.pause()
+
+
+@dataclass(frozen=True)
+class OrphanedController:
+    process: subprocess.Popen[str]
+    path: str
+    runners: tuple[int, ...]
+
+    def orphan(self) -> ProcessIdentity:
+        os.kill(self.process.pid, signal.SIGKILL)
+        self.process.wait(timeout=10)
+        return identity_of(self.runners[0])
+
+
+@asynccontextmanager
+async def orphaned_controller(
+    root: Path, sockets: Path, *, start: bool
+) -> AsyncGenerator[OrphanedController]:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio\n"
+            "from tests.plugins.runtime.local.test_command import worker\n"
+            "asyncio.run(worker())\n",
+        ],
+        env={
+            **os.environ,
+            "KORA_COMMAND_ROOT": str(root),
+            "KORA_COMMAND_SOCKETS": str(sockets),
+            "KORA_COMMAND_START": "1" if start else "0",
+        },
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        path = await asyncio.to_thread(process.stdout.readline)
+        runners = runner_pids(root)
+        assert len(runners) == 1
+        yield OrphanedController(process, path, runners)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        if process.stdout is not None:
+            process.stdout.close()
+        release_commands(root)
+        reap_runners(root)
 
 
 def test_command_journal_ignores_torn_tail(tmp_path: Path) -> None:
@@ -2058,33 +2110,14 @@ async def test_terminal_journal_enospc_fences_without_losing_exit(
 async def test_controller_process_death_keeps_the_same_command(tmp_path: Path) -> None:
     root = state_root(tmp_path)
     with short_directory() as base:
-        sockets = base / "sockets"
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "import asyncio\n"
-                "from tests.plugins.runtime.local.test_command import worker\n"
-                "asyncio.run(worker())\n",
-            ],
-            env={
-                **os.environ,
-                "KORA_COMMAND_ROOT": str(root),
-                "KORA_COMMAND_SOCKETS": str(sockets),
-            },
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            assert process.stdout is not None
-            path = await asyncio.to_thread(process.stdout.readline)
-            runners = runner_pids(root)
-            assert len(runners) == 1
+        async with orphaned_controller(
+            root, base / "sockets", start=True
+        ) as controller:
+            path = controller.path
+            runners = controller.runners
             await until(lambda: len(child_pids(runners[0])) == 1)
             leader = child_pids(runners[0])
-            os.kill(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
-            identity = identity_of(runners[0])
+            identity = controller.orphan()
             clock = SystemClock()
             source = kernel_source(NativeIdentityReader())
             executor = TransitionExecutor()
@@ -2106,14 +2139,6 @@ async def test_controller_process_death_keeps_the_same_command(tmp_path: Path) -
                 still = child_pids(runners[0])
             finally:
                 await executor.close()
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
-            if process.stdout is not None:
-                process.stdout.close()
-            release_commands(root)
-            reap_runners(root)
 
     assert path.strip()
     assert observed.status.state == "running"
@@ -2279,15 +2304,23 @@ async def test_running_command_is_not_sealed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "create_entry",
+    [
+        "    (root / f'f{index:04d}').write_bytes(b'x')",
+        "    (root / f'd{index:04d}').mkdir()",
+    ],
+    ids=["files", "directories"],
+)
 async def test_seal_stops_at_one_thousand_entries(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path, kora_capture: Capture, create_entry: str
 ) -> None:
     script = "\n".join(
         (
             "from pathlib import Path",
             "root = Path('.')",
             "for index in range(1001):",
-            "    (root / f'f{index:04d}').write_bytes(b'x')",
+            create_entry,
         )
     )
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
@@ -2354,37 +2387,6 @@ async def test_seal_refuses_oversized_encoded_manifest(
     assert records == ((0, "runner.candidate_started"), (1, "command_exited"))
     assert candidate_entries == 1000
     assert not snapshot_present
-
-
-@pytest.mark.asyncio
-async def test_seal_counts_directories_toward_the_entry_bound(
-    tmp_path: Path, kora_capture: Capture
-) -> None:
-    script = "\n".join(
-        (
-            "from pathlib import Path",
-            "root = Path('.')",
-            "for index in range(1001):",
-            "    (root / f'd{index:04d}').mkdir()",
-        )
-    )
-    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
-        handle = await runtime.submit(
-            command_workload(runtime, "attempt-1", (sys.executable, "-c", script)),
-            ctx,
-        )
-        await runtime.start(handle, ctx)
-        await until_exited(runtime, handle, ctx)
-        attempt = attempt_directory(root, runtime, "attempt-1")
-        log = attempt / "runner.log"
-        await until(lambda: seal_outcomes(log) == ["refused"])
-        journal = (attempt / "journal.jsonl").read_text()
-        outcomes = seal_outcomes(log)
-        snapshot = attempt / "output-snapshot"
-
-    assert "runner.outputs_sealed" not in journal
-    assert outcomes == ["refused"]
-    assert not snapshot.exists()
 
 
 @pytest.mark.asyncio

@@ -23,12 +23,14 @@ from kora.protocols.lifetime import (
     OriginalOutcome,
 )
 from kora.protocols.metadata import ProtocolName
+from tests.conformance.progress_guard import Progress, progress_run
 from tests.support.configured_conformance import (
     installed_conformance as installed_conformance,
 )
 from tests.support.configured_conformance import vcs_configuration
 from tests.support.observability import ProcessResult
 from tests.support.provider_tooling import (
+    INSTALLED_COMMAND_SECONDS,
     InstalledTooling,
 )
 
@@ -67,6 +69,13 @@ def assert_undisclosed(process: ProcessResult, *markers: bytes) -> None:
         assert marker not in process.stdout + process.stderr
 
 
+LIFETIME_PROGRESS_EVENTS: Final[frozenset[str]] = frozenset(
+    {
+        "conformance.lifetime.started",
+        "conformance.lifetime.activated",
+        "conformance.lifetime.closed",
+    }
+)
 MAX_VCS_PREPARATION_EVIDENCE: Final[int] = 512
 VCS_PREPARATION_STEPS: Final[tuple[str, ...]] = (
     "init_remote",
@@ -595,24 +604,37 @@ def test_installed_provider_supports_local_tooling(
         )
     )
 
+    progress = Progress()
+
     with ExitStack() as resources:
         probe = (
             resources.enter_context(vcs_preparation_probe(tmp_path))
             if protocol is ProtocolName.VCS
             else None
         )
-        process = installed.run(
-            *conformance_arguments(
-                protocol.value,
-                "configured",
-                config,
-                plugin,
-                probe.fixture_data if probe is not None else None,
-            ),
-            environment={
-                "HOME": str(home),
-                "KORA_LOG_COMPONENT_LEVELS": "protocols.loading=DEBUG",
-            },
+        process = asyncio.run(
+            progress_run(
+                installed.command(
+                    *conformance_arguments(
+                        protocol.value,
+                        "configured",
+                        config,
+                        plugin,
+                        probe.fixture_data if probe is not None else None,
+                    )
+                ),
+                cwd=installed.outside,
+                environment=installed.environment(
+                    {
+                        "HOME": str(home),
+                        "KORA_LOG_COMPONENT_LEVELS": (
+                            "protocols.loading=DEBUG,conformance.lifetime=DEBUG"
+                        ),
+                    }
+                ),
+                progress=progress,
+                seconds=INSTALLED_COMMAND_SECONDS,
+            )
         )
         preparation = probe.observed() if probe is not None else ()
         timed_steps = probe.timed_steps() if probe is not None else ()
@@ -627,9 +649,19 @@ def test_installed_provider_supports_local_tooling(
     assert outcome.completed == outcome.expected == expected
     assert_closed(outcome)
     records = process.records()
-    assert len(records) == 1
-    assert records[0]["event"] == "protocols.loading.provider_loaded"
-    assert records[0]["protocol"] == protocol.value
+    loading = [item for item in records if item["component"] == "protocols.loading"]
+    lifetime = [item for item in records if item["component"] == "conformance.lifetime"]
+    assert len(loading) + len(lifetime) == len(records)
+    assert len(loading) == 1
+    assert loading[0]["event"] == "protocols.loading.provider_loaded"
+    assert loading[0]["protocol"] == protocol.value
+    assert {item["level"] for item in records} == {"DEBUG"}
+    assert {item["event"] for item in lifetime} <= LIFETIME_PROGRESS_EVENTS
+    assert {item["invocation_id"] for item in lifetime} == {outcome.invocation_id}
+    assert [item["event"] for item in lifetime].count(
+        "conformance.lifetime.started"
+    ) == 1
+    assert lifetime[-1]["event"] == "conformance.lifetime.closed"
     assert not list(home.rglob("journal"))
     if protocol is ProtocolName.VCS:
         assert preparation == ("prepare_entered", "prepare_complete")
@@ -860,115 +892,71 @@ def test_installed_conformance_owns_its_environment_and_wheel_copy(
     assert not core_wheel.is_relative_to(root)
 
 
-def test_installed_vcs_ref_artifact_type_conformance(
-    installed_conformance: InstalledTooling, tmp_path: Path
-) -> None:
-    config = tmp_path / "config.json"
-    config.write_text("{}")
-    home = private_home(tmp_path / "home")
-
-    process = installed_conformance.run(
-        *conformance_arguments(
-            "artifact_type", "vcs_ref", config, "fixtures_vcs_ref_artifact_type"
+@pytest.mark.parametrize(
+    ("provider", "fixtures", "markers", "expected"),
+    [
+        pytest.param(
+            "vcs_ref",
+            "fixtures_vcs_ref_artifact_type",
+            (
+                b"private-repository-marker",
+                b"private-branch-marker",
+                b"private-path-marker",
+                b"private-diff-marker",
+                b"private-principal-marker",
+            ),
+            None,
+            id="vcs_ref",
         ),
-        environment={"HOME": str(home)},
-    )
-
-    outcome = CommandResult.model_validate_json(process.stdout)
-    assert process.code == 0, (process.stdout, process.stderr)
-    assert outcome.outcome is OriginalOutcome.COMPLETE
-    assert outcome.completed == outcome.expected
-    assert outcome.expected > 0
-    assert_closed(outcome)
-    assert not list(home.rglob("journal"))
-    assert_undisclosed(
-        process,
-        b"private-repository-marker",
-        b"private-branch-marker",
-        b"private-path-marker",
-        b"private-diff-marker",
-        b"private-principal-marker",
-    )
-
-
-def test_installed_agent_session_artifact_type_conformance(
-    installed_conformance: InstalledTooling, tmp_path: Path
-) -> None:
-    config = tmp_path / "config.json"
-    config.write_text("{}")
-    home = private_home(tmp_path / "home")
-
-    process = installed_conformance.run(
-        *conformance_arguments(
-            "artifact_type",
+        pytest.param(
             "agent_session",
-            config,
             "fixtures_agent_session_artifact_type",
+            (
+                b"private-agent-session-price-marker",
+                b"private-agent-session-usage-marker",
+                b"private-agent-session-coverage-marker",
+                b"private-agent-session-denial-marker",
+            ),
+            None,
+            id="agent_session",
         ),
-        environment={"HOME": str(home)},
-    )
-
-    outcome = CommandResult.model_validate_json(process.stdout)
-    assert process.code == 0, (process.stdout, process.stderr)
-    assert outcome.outcome is OriginalOutcome.COMPLETE
-    assert outcome.completed == outcome.expected
-    assert outcome.expected > 0
-    assert_closed(outcome)
-    assert not list(home.rglob("journal"))
-    assert_undisclosed(
-        process,
-        b"private-agent-session-price-marker",
-        b"private-agent-session-usage-marker",
-        b"private-agent-session-coverage-marker",
-        b"private-agent-session-denial-marker",
-    )
-
-
-def test_installed_structured_output_artifact_type_conformance(
-    installed_conformance: InstalledTooling, tmp_path: Path
-) -> None:
-    config = tmp_path / "config.json"
-    config.write_text("{}")
-    home = private_home(tmp_path / "home")
-
-    process = installed_conformance.run(
-        *conformance_arguments(
-            "artifact_type",
+        pytest.param(
             "structured_output",
-            config,
             "fixtures_structured_output_artifact_type",
+            (
+                b"private-structured-output-payload-marker",
+                b"private-structured-output-key-marker",
+                b"private-structured-output-invalid-marker",
+            ),
+            10,
+            id="structured_output",
         ),
-        environment={"HOME": str(home)},
-    )
-
-    outcome = CommandResult.model_validate_json(process.stdout)
-    assert process.code == 0, (process.stdout, process.stderr)
-    assert outcome.outcome is OriginalOutcome.COMPLETE
-    assert outcome.completed == outcome.expected == 10
-    assert_closed(outcome)
-    assert not list(home.rglob("journal"))
-    assert_undisclosed(
-        process,
-        b"private-structured-output-payload-marker",
-        b"private-structured-output-key-marker",
-        b"private-structured-output-invalid-marker",
-    )
-
-
-def test_installed_command_result_artifact_type_conformance(
-    installed_conformance: InstalledTooling, tmp_path: Path
+        pytest.param(
+            "command_result",
+            "fixtures_command_result_artifact_type",
+            (
+                b"private-command-result-marker",
+                b"cHJpdmF0ZS1jb21tYW5kLXJlc3VsdC1tYXJrZXI=",
+            ),
+            None,
+            id="command_result",
+        ),
+    ],
+)
+def test_installed_artifact_type_conformance(
+    installed_conformance: InstalledTooling,
+    tmp_path: Path,
+    provider: str,
+    fixtures: str,
+    markers: tuple[bytes, ...],
+    expected: int | None,
 ) -> None:
     config = tmp_path / "config.json"
     config.write_text("{}")
     home = private_home(tmp_path / "home")
 
     process = installed_conformance.run(
-        *conformance_arguments(
-            "artifact_type",
-            "command_result",
-            config,
-            "fixtures_command_result_artifact_type",
-        ),
+        *conformance_arguments("artifact_type", provider, config, fixtures),
         environment={"HOME": str(home)},
     )
 
@@ -977,13 +965,10 @@ def test_installed_command_result_artifact_type_conformance(
     assert outcome.outcome is OriginalOutcome.COMPLETE
     assert outcome.completed == outcome.expected
     assert outcome.expected > 0
+    assert expected is None or outcome.expected == expected
     assert_closed(outcome)
     assert not list(home.rglob("journal"))
-    assert_undisclosed(
-        process,
-        b"private-command-result-marker",
-        b"cHJpdmF0ZS1jb21tYW5kLXJlc3VsdC1tYXJrZXI=",
-    )
+    assert_undisclosed(process, *markers)
 
 
 @pytest.mark.parametrize("selected", ["left", "right"])

@@ -42,11 +42,11 @@ def chain(count: int) -> GraphDocument:
     )
 
 
-def dense_faults(count: int, width: int = 3) -> GraphDocument:
+def dense_faults(count: int) -> GraphDocument:
     return model(
         {
             f"n{index}": node(
-                inputs={f"i{offset}": ref("absent") for offset in range(width)}
+                inputs={f"i{offset}": ref("absent") for offset in range(3)}
             )
             for index in range(count)
         }

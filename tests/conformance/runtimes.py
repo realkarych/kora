@@ -32,16 +32,7 @@ from kora.protocols.runtime import (
     TransferItem,
     Workload,
 )
-from kora.protocols.vcs import (
-    CheckoutPlan,
-    CheckoutRequest,
-    CredentialRequest,
-    IssuedCredential,
-    PublishPlan,
-    PublishRequest,
-    VcsCapabilities,
-    WorkspaceTarget,
-)
+from kora.protocols.vcs import WorkspaceTarget
 
 CALL_REFUSED: Final[EventSpec] = CATALOG.register(
     EventSpec(
@@ -195,57 +186,6 @@ class ReferenceRuntime:
         unsupported()
 
 
-class ReferenceVcs:
-    name: str = "test"
-    config_schema: JsonObject = {"type": "object"}
-
-    def capabilities(self) -> VcsCapabilities:
-        return VcsCapabilities(
-            change_requests=False,
-            review_comments=False,
-            ci_status=False,
-            head_sha_watch=False,
-            reviewer_requests=False,
-            plan_executors=frozenset({"runner", "worker_host"}),
-        )
-
-    async def acquire_credential(
-        self, request: CredentialRequest, ctx: ProtocolContext
-    ) -> IssuedCredential:
-        ctx.logger.emit(CALL_REFUSED, reason="unsupported")
-        unsupported()
-
-    async def checkout_plan(
-        self, request: CheckoutRequest, ctx: ProtocolContext
-    ) -> CheckoutPlan:
-        unsupported()
-
-    async def publish_plan(
-        self, request: PublishRequest, ctx: ProtocolContext
-    ) -> PublishPlan:
-        unsupported()
-
-    async def head_sha(self, ref: VcsRef, ctx: ProtocolContext) -> str:
-        unsupported()
-
-
 async def runtime_exercise(ctx: ProtocolContext, marker: str) -> object:
     ctx.logger.emit(CALL_REFUSED, reason="unsupported")
     return await ReferenceRuntime().workspace_target(marker, ctx)
-
-
-async def vcs_exercise(ctx: ProtocolContext, marker: str) -> object:
-    request = CredentialRequest.model_validate(
-        {
-            "binding": "conformance",
-            "binding_revision": 1,
-            "credential_mode": "local_credential_free",
-            "repo": f"/srv/git/{marker}.git",
-            "purpose": "api",
-            "attempt_id": None,
-            "operation_id": None,
-            "prepared_digest": None,
-            "destination_digest": None,
-        }
-    )
-    return await ReferenceVcs().acquire_credential(request, ctx)

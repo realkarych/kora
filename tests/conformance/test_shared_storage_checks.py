@@ -36,6 +36,7 @@ from kora.protocols.storage_models import (
     StorageScanCursor,
     StorageScanKind,
 )
+from tests.conformance.loop_bound import LoopBoundWorker
 from tests.conformance.test_shared_secrets_checks import assert_capture_released
 from tests.plugins.storage.activity import StorageBarrierActivity
 from tests.plugins.storage.inspection import InspectedStorage
@@ -53,20 +54,12 @@ CASES: tuple[StorageCheck, ...] = (
 MARKER: str = "shared-storage-input-marker"
 
 
-class LoopBoundStorage(InspectedStorage):
+class LoopBoundStorage(LoopBoundWorker, InspectedStorage):
     def __init__(self, configuration: LocalStorageConfiguration) -> None:
         super().__init__(configuration)
-        self.loop = asyncio.get_running_loop()
-        self.queue: asyncio.Queue[asyncio.Future[None] | None] = asyncio.Queue()
-        self.worker = asyncio.create_task(self.serve())
+        self.start_loop_worker()
         self.contexts: list[ProtocolContext] = []
         self.operations: list[str] = []
-        self.cleanup_loop: asyncio.AbstractEventLoop | None = None
-
-    async def serve(self) -> None:
-        while (completion := await self.queue.get()) is not None:
-            if not completion.done():
-                completion.set_result(None)
 
     async def dispatch(
         self,
@@ -75,10 +68,7 @@ class LoopBoundStorage(InspectedStorage):
         ctx: ProtocolContext,
         control: bool = False,
     ) -> Result:
-        assert asyncio.get_running_loop() is self.loop
-        completion: asyncio.Future[None] = self.loop.create_future()
-        self.queue.put_nowait(completion)
-        await completion
+        await self.pass_through()
         self.contexts.append(ctx)
         self.operations.append(operation)
         return await super().dispatch(operation, function, ctx, control)

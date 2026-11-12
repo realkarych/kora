@@ -14,9 +14,10 @@ from kora.plugins.harness.codex.app_server_messages import (
 from kora.plugins.harness.codex.app_server_output import (
     OutputFailure,
     OutputRefused,
-    output_candidate,
+    final_message_candidate,
 )
 from kora.plugins.harness.codex.app_server_rpc import Notification, RpcError, RpcFailure
+from kora.plugins.harness.codex.app_server_session import TurnObservations
 from kora.plugins.harness.codex.app_server_turn import (
     TerminalStatus,
     TurnCompletion,
@@ -24,6 +25,10 @@ from kora.plugins.harness.codex.app_server_turn import (
     TurnFailure,
     observe_app_server_turn,
     terminal_observation,
+)
+from kora.plugins.harness.codex.terminal_result import (
+    TerminalResult,
+    project_terminal_result,
 )
 from kora.protocols.harness import OutputCandidate
 from tests.plugins.harness.codex.test_app_server_turn import STARTED, frame, started
@@ -64,10 +69,27 @@ def terminal_frame(params: dict[str, object]) -> bytes:
     return frame({"method": "turn/completed", "params": params})
 
 
-def completion(text: str) -> TurnCompletion:
-    return TurnCompletion(
-        TURN, "completed", None, CompletedMessage(THREAD, TURN, MESSAGE, text, None)
+def summary(text: str) -> CompletedMessage:
+    return CompletedMessage(THREAD, TURN, MESSAGE, text, None)
+
+
+def selected_summary(source: TurnCompletion) -> CompletedMessage:
+    message = source.final_message
+    assert message is not None
+    return message
+
+
+def projected(source: TurnCompletion) -> TerminalResult:
+    observations = TurnObservations(
+        turn_id=source.turn_id,
+        terminal_status=source.status,
+        final_message=source.final_message,
     )
+    result = project_terminal_result(
+        observations, thread_id=THREAD, output_required=True
+    )
+    assert result is not None
+    return result
 
 
 @pytest.mark.parametrize(
@@ -87,23 +109,22 @@ def test_completed_summary_text_uses_the_existing_strict_candidate_domain(
 ) -> None:
     result = terminal_observation(terminal_params([item(text)]), THREAD)
 
-    candidate = output_candidate(result, thread_id=THREAD)
+    candidate = final_message_candidate(
+        selected_summary(result), thread_id=THREAD, turn_id=TURN
+    )
 
-    assert candidate is not None
     assert candidate.source == "result_text"
     assert candidate.value == expected
     assert type(candidate.value) is type(expected)
 
 
 def test_produced_null_is_present_and_candidate_values_are_detached() -> None:
-    source = completion('{"values":[-0.0,1,1.0]}')
-    null_source = completion("null")
+    source = summary('{"values":[-0.0,1,1.0]}')
+    null_source = summary("null")
 
-    first = output_candidate(source, thread_id=THREAD)
-    second = output_candidate(source, thread_id=THREAD)
-    null_value = output_candidate(null_source, thread_id=THREAD)
-    assert first is not None
-    assert second is not None
+    first = final_message_candidate(source, thread_id=THREAD, turn_id=TURN)
+    second = final_message_candidate(source, thread_id=THREAD, turn_id=TURN)
+    null_value = final_message_candidate(null_source, thread_id=THREAD, turn_id=TURN)
     first_value = cast("dict[str, object]", first.value)
     second_value = cast("dict[str, object]", second.value)
     numbers = cast("list[float | int]", first_value["values"])
@@ -112,10 +133,8 @@ def test_produced_null_is_present_and_candidate_values_are_detached() -> None:
 
     assert sign == -1.0
     assert second_value == {"values": [-0.0, 1, 1.0]}
-    assert null_value is not None
     assert null_value.value is None
-    assert source.final_message is not None
-    assert source.final_message.text == '{"values":[-0.0,1,1.0]}'
+    assert source.text == '{"values":[-0.0,1,1.0]}'
 
 
 @pytest.mark.parametrize(
@@ -158,10 +177,10 @@ def test_produced_null_is_present_and_candidate_values_are_detached() -> None:
     ],
 )
 def test_invalid_result_text_never_falls_back_or_exposes_content(text: str) -> None:
-    source = completion(text)
+    source = summary(text)
 
     with pytest.raises(OutputRefused) as caught:
-        output_candidate(source, thread_id=THREAD)
+        final_message_candidate(source, thread_id=THREAD, turn_id=TURN)
 
     assert caught.value.reason is OutputFailure.INVALID_JSON
     assert PRIVATE not in "".join(traceback.format_exception(caught.value))
@@ -176,23 +195,22 @@ def test_invalid_result_text_never_falls_back_or_exposes_content(text: str) -> N
 def test_raw_text_admission_precedes_decoding_and_enforces_utf8_bytes(
     text: str,
 ) -> None:
-    source = completion(text)
+    source = summary(text)
 
     with pytest.raises(OutputRefused) as caught:
-        output_candidate(source, thread_id=THREAD)
+        final_message_candidate(source, thread_id=THREAD, turn_id=TURN)
 
     assert caught.value.reason is OutputFailure.TEXT_LIMIT
 
 
 def test_exact_raw_and_canonical_limits_are_preserved() -> None:
-    exact = completion('"' + "a" * (MAX_JSON_BYTES - 2) + '"')
-    expansion = completion("[" + ",".join(["1e15"] * 60_000) + "]")
+    exact = summary('"' + "a" * (MAX_JSON_BYTES - 2) + '"')
+    expansion = summary("[" + ",".join(["1e15"] * 60_000) + "]")
 
-    accepted = output_candidate(exact, thread_id=THREAD)
+    accepted = final_message_candidate(exact, thread_id=THREAD, turn_id=TURN)
     with pytest.raises(OutputRefused) as caught:
-        output_candidate(expansion, thread_id=THREAD)
+        final_message_candidate(expansion, thread_id=THREAD, turn_id=TURN)
 
-    assert accepted is not None
     assert isinstance(accepted.value, str)
     assert len(accepted.value) == MAX_JSON_BYTES - 2
     assert caught.value.reason is OutputFailure.INVALID_JSON
@@ -204,9 +222,10 @@ def test_non_success_ignores_even_an_invalid_summary(status: TerminalStatus) -> 
         TURN, status, None, CompletedMessage(PRIVATE, PRIVATE, MESSAGE, "NaN", None)
     )
 
-    result = output_candidate(source, thread_id=THREAD)
+    result = projected(source)
 
-    assert result is None
+    assert result.output is None
+    assert result.output_diagnostic is None
 
 
 @pytest.mark.parametrize("status", ["failed", "interrupted"])
@@ -216,7 +235,7 @@ def test_native_non_success_does_not_project_summary_payload(
     params = terminal_params({PRIVATE: PRIVATE}, status=status)
 
     result = terminal_observation(params, THREAD)
-    candidate = output_candidate(result, thread_id=THREAD)
+    candidate = projected(result).output
 
     assert result.status == status
     assert result.final_message is None
@@ -226,7 +245,7 @@ def test_native_non_success_does_not_project_summary_payload(
 def test_legacy_completion_without_summary_has_no_candidate() -> None:
     result = TurnCompletion(TURN, "completed", None)
 
-    candidate = output_candidate(result, thread_id=THREAD)
+    candidate = projected(result).output
 
     assert candidate is None
 
@@ -235,7 +254,7 @@ def test_legacy_completion_without_summary_has_no_candidate() -> None:
 def test_non_summary_views_supply_no_inferred_candidate(view: object) -> None:
     source = terminal_observation(terminal_params([item()], view=view), THREAD)
 
-    result = output_candidate(source, thread_id=THREAD)
+    result = projected(source).output
 
     assert source.final_message is None
     assert result is None
@@ -274,10 +293,9 @@ def test_projection_refuses_mismatched_selected_identity(wrong_thread: bool) -> 
         "null",
         None,
     )
-    source = TurnCompletion(TURN, "completed", None, message)
 
     with pytest.raises(OutputRefused) as caught:
-        output_candidate(source, thread_id=THREAD)
+        final_message_candidate(message, thread_id=THREAD, turn_id=TURN)
 
     assert caught.value.reason is OutputFailure.IDENTITY_MISMATCH
     assert PRIVATE not in str(caught.value)
@@ -321,14 +339,15 @@ async def test_real_wire_schema_and_summary_project_through_the_core(
 
         await connection.send(*events)
         result = await operation
-        candidate = output_candidate(result, thread_id=THREAD)
+        candidate = final_message_candidate(
+            selected_summary(result), thread_id=THREAD, turn_id=TURN
+        )
 
         decoded = cast("dict[str, object]", json.loads(request))
         sent_params = cast("dict[str, object]", decoded["params"])
         assert sent_params["outputSchema"] == schema
         assert result.final_message == state.for_turn(TURN)
         assert state.count == 1
-        assert candidate is not None
         assert candidate.value == {"ok": True}
 
 
@@ -452,7 +471,7 @@ async def test_completed_message_then_eof_does_not_produce_a_terminal_candidate(
                 output_schema=SCHEMA,
                 observe=observe,
             )
-            candidate = output_candidate(result, thread_id=THREAD)
+            candidate = projected(result).output
             if candidate is not None:
                 candidates.append(candidate)
 

@@ -6,7 +6,7 @@ from typing import Never, cast
 
 from kora.ir.diagnostics import ContractViolation
 from kora.ir.json import JsonObject, JsonValue
-from kora.ir.vcs_ref_json import lexical_depth_valid
+from kora.ir.vcs_ref_json import lexical_depth_valid, refuse_constant, unique_object
 
 MAX_JSON_BYTES: int = 1_048_576
 MAX_JSON_DEPTH: int = 16
@@ -161,19 +161,6 @@ def parse_float(token: str) -> float:
     if not math.isfinite(value):
         raise ValueError("invalid JSON number")
     return value
-
-
-def refuse_constant(token: str) -> Never:
-    raise ValueError("invalid JSON constant")
-
-
-def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    document: dict[str, object] = {}
-    for name, value in pairs:
-        if name in document:
-            raise ValueError("duplicate JSON member")
-        document[name] = value
-    return document
 
 
 def valid_unicode(value: JsonValue) -> bool:
