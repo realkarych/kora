@@ -830,6 +830,14 @@ def drop_the_manifest_digest_from_a_cache_key(workflows: Workflows) -> None:
     inputs["key"] = "kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-lychee"
 
 
+def drop_the_manifest_digest_from_the_macos_lane_cache(workflows: Workflows) -> None:
+    step = cache_steps(job_of(workflows, "ci.yml", "scaffold-tests-macos"))[0]
+    table(step["with"])["key"] = (
+        "kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-uv-python-"
+        "${{ matrix.python }}"
+    )
+
+
 def restore_a_prefix_matched_cache(workflows: Workflows) -> None:
     links_cache_inputs(workflows)["restore-keys"] = "kora-acquisitions-"
 
@@ -855,6 +863,7 @@ def restore_through_the_cache_subaction(workflows: Workflows) -> None:
     "mutation",
     [
         drop_the_manifest_digest_from_a_cache_key,
+        drop_the_manifest_digest_from_the_macos_lane_cache,
         restore_a_prefix_matched_cache,
         cache_another_directory,
         share_a_cache_across_operating_systems,
