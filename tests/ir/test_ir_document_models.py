@@ -52,7 +52,7 @@ def test_ir_public_exports_preserve_canonical_leaf_identity() -> None:
 
 
 def test_ir_document_models_accept_examples() -> None:
-    documents = [load_yaml(path) for path in sorted(EXAMPLES.glob("*.ir.yaml"))]
+    documents = [load_yaml(path) for path in sorted(EXAMPLES.rglob("*.ir.yaml"))]
 
     exported = [
         ir.export_ir(ir.GraphDocument.model_validate(value)) for value in documents
