@@ -80,6 +80,9 @@ BUDGET_PRESERVING_SUDO = "sudo --preserve-env=RUNNER_TEMP "
 PLANNED_LANE_JOBS = frozenset(
     {"ci.yml:scaffold-plan", "ci.yml:scaffold-tests", "ci.yml:scaffold-tests-macos"}
 )
+STATIC_CHECK_JOBS = frozenset({"ci.yml:scaffold-tests", "ci.yml:scaffold-tests-macos"})
+STATIC_CHECK_STEP = "static_checks"
+STATIC_CHECK_EXCLUSION = "${{ matrix.lane != 'static-checks' }}"
 DEADLINE_MARGIN_SECONDS = 120.0
 INVOCATION_ALLOWANCE_SECONDS = 5.0
 STOP_DEADLINE_SECONDS = 10.0
@@ -599,8 +602,12 @@ def unverified_setup(
     if not prepared:
         return "without its verified acquisition"
     before = earlier[: earlier.index(prepared[0])]
-    if not any(action_of(step) == "actions/cache" for step in before):
+    caches = [step for step in before if action_of(step) == "actions/cache"]
+    if not caches:
         return "without the acquisition cache"
+    condition = steps[index].get("if")
+    if any(step.get("if") not in (None, condition) for step in (caches[-1], *prepared)):
+        return "after an acquisition under another condition"
     python = table(steps[index].get("with", {})).get("python-version")
     if script.endswith("setup_uv_cache.sh") and prepared_python(prepared[-1]) != str(
         python
@@ -699,6 +706,101 @@ def test_every_ci_tool_setup_follows_its_verified_cached_acquisition() -> None:
 
     violations = unverified_tool_setups(workflows)
 
+    assert violations == []
+
+
+def steps_before_static_checks(job: dict[str, object]) -> list[dict[str, object]]:
+    steps = step_list(job)
+    identities = [step.get("id") for step in steps]
+    if STATIC_CHECK_STEP not in identities:
+        return []
+    return steps[: identities.index(STATIC_CHECK_STEP)]
+
+
+def static_check_jobs(workflows: Workflows) -> dict[str, list[dict[str, object]]]:
+    jobs = jobs_of({"ci.yml": workflows["ci.yml"]})
+    return {
+        location: steps_before_static_checks(job)
+        for location, job in jobs
+        if any(step.get("id") == STATIC_CHECK_STEP for step in step_list(job))
+    }
+
+
+def unverified_static_check_setups(workflows: Workflows) -> list[str]:
+    missing = [
+        f"{location}: static checks without {action}"
+        for location, earlier in static_check_jobs(workflows).items()
+        for action in VERIFIED_SETUPS
+        if action not in {action_of(step) for step in earlier}
+    ]
+    return [*missing, *unverified_tool_setups(workflows)]
+
+
+def skip_the_node_acquisition_in_static_check_rows(workflows: Workflows) -> None:
+    step = lane_step(
+        workflows,
+        "scaffold-tests-macos",
+        lambda step: step.get("name") == "Prepare verified Scaffold Node cache",
+    )
+    step["if"] = STATIC_CHECK_EXCLUSION
+
+
+def skip_the_acquisition_cache_in_static_check_rows(workflows: Workflows) -> None:
+    step = lane_step(
+        workflows, "scaffold-tests", lambda step: action_of(step) == "actions/cache"
+    )
+    step["if"] = STATIC_CHECK_EXCLUSION
+
+
+def drop_the_linux_lane_uv_acquisition(workflows: Workflows) -> None:
+    steps = cast(list[object], job_of(workflows, "ci.yml", "scaffold-tests")["steps"])
+    steps.remove(
+        lane_step(
+            workflows,
+            "scaffold-tests",
+            lambda step: step.get("name") == "Prepare verified uv and Python",
+        )
+    )
+
+
+def sets_up_node(step: dict[str, object]) -> bool:
+    return action_of(step) == "actions/setup-node" or "setup_scaffold_node.sh" in str(
+        step.get("run", "")
+    )
+
+
+def check_with_the_runner_image_node(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "scaffold-tests-macos")
+    job["steps"] = [step for step in step_list(job) if not sets_up_node(step)]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        skip_the_node_acquisition_in_static_check_rows,
+        skip_the_acquisition_cache_in_static_check_rows,
+        drop_the_linux_lane_uv_acquisition,
+        check_with_the_runner_image_node,
+    ],
+)
+def test_static_check_setup_refuses_a_mutated_workflow(
+    mutation: Callable[[Workflows], None],
+) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = unverified_static_check_setups(workflows)
+
+    assert violations
+
+
+def test_static_check_jobs_set_up_node_and_uv_through_verified_acquisition() -> None:
+    workflows = repository_workflows()
+
+    violations = unverified_static_check_setups(workflows)
+
+    assert set(static_check_jobs(workflows)) == STATIC_CHECK_JOBS
+    assert STATIC_CHECK_JOBS <= PLANNED_LANE_JOBS
     assert violations == []
 
 
