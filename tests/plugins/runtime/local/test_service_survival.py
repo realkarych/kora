@@ -453,6 +453,3 @@ async def test_service_fixture_termination_closes_worker_before_runner_sweep(
                     process.terminate()
                 await asyncio.to_thread(process.wait, 10)
             reap_runners(root)
-
-
-TEMPORARY_REPETITION_EVIDENCE = "issue-1440"
