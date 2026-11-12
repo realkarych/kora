@@ -4,6 +4,7 @@ from typing import cast
 import httpx
 import pytest
 from sqlalchemy import func, select
+from starlette.types import Message
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.cel_eval.binding import load_binding
@@ -23,6 +24,7 @@ from tests.api.deployment_cases import (
     unresolved_approval,
 )
 from tests.api.support import (
+    HttpCall,
     api_capture,
     application,
     client_for,
@@ -286,4 +288,36 @@ async def test_deploy_route_reports_an_unavailable_evaluator(
 
     assert (response.status_code, error_of(response).error.code) == (503, "API011")
     assert error_of(response).error.retryable is True
+    assert await rows(database) == (0, 0)
+
+
+class DisconnectingCall(HttpCall):
+    async def receive(self) -> Message:
+        self.receives += 1
+        return {"type": "http.disconnect"}
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_treats_a_disconnected_body_as_a_refusal(
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+) -> None:
+    headers = await authorized(database)
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+    call = DisconnectingCall(
+        path=PATH,
+        method="POST",
+        headers=[
+            (name.lower().encode("ascii"), value.encode("ascii"))
+            for name, value in headers.items()
+        ],
+    )
+
+    await call.run(app)
+
+    events = {str(record["event"]) for record in api_capture.finish()}
+    assert call.status == 422
+    assert ApiErrorEnvelope.model_validate_json(call.body).error.code == "API003"
+    assert "api.request.failed" not in events
     assert await rows(database) == (0, 0)
