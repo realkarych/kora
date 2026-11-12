@@ -61,3 +61,6 @@ def test_expired_storage_call_preserves_replay_and_cleanup(
         assert inventory.entries == ()
 
     asyncio.run(scenario())
+
+
+TEMPORARY_REPETITION_EVIDENCE = "issue-1440"

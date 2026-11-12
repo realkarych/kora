@@ -1054,3 +1054,6 @@ async def released_after_disconnect(tmp_path: Path, capture: Capture) -> None:
     assert declared == len(log_payload("stdout"))
     assert body == log_payload("stdout")
     assert after == before
+
+
+TEMPORARY_REPETITION_EVIDENCE = "issue-1440"
