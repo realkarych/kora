@@ -244,12 +244,7 @@ class SchemaTypes:
         if known is not None:
             return known
         base, _, fragment = uri.partition("#")
-        if base:
-            target = self.load(base)
-        elif root is None:
-            raise SchemaError("a local reference has no document")
-        else:
-            target = root
+        target = self.load(base) if base else root
         located = (self.pointer(target, unquote(fragment)), target)
         self.held.append(target)
         self.references[cache_key] = located

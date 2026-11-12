@@ -81,7 +81,7 @@ def tool_policies(value: object) -> list[object]:
 def test_ir_example_tool_policies_round_trip() -> None:
     policies = [
         policy
-        for path in sorted(EXAMPLES.glob("*.ir.yaml"))
+        for path in sorted(EXAMPLES.rglob("*.ir.yaml"))
         for policy in tool_policies(load_yaml(path))
     ]
 
@@ -114,7 +114,7 @@ def configured_models(document: ir.GraphDocument) -> set[type[object]]:
 def test_ir_examples_carry_representative_configurations() -> None:
     documents = [
         ir.GraphDocument.model_validate(load_yaml(path))
-        for path in sorted(EXAMPLES.glob("*.ir.yaml"))
+        for path in sorted(EXAMPLES.rglob("*.ir.yaml"))
     ]
 
     models = [configured_models(document) for document in documents]
