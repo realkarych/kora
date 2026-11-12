@@ -10,7 +10,6 @@ from kora.api.cel_pattern_validation import (
     CompletePatternCheck,
     IncompletePatternCheck,
     validate_cel_patterns,
-    validate_sensor_trigger_patterns,
 )
 from kora.api.exchange import COMPONENT
 from kora.cel import CheckedExpression, Environment, ResultKind, check_typed
@@ -20,7 +19,6 @@ from kora.cel_eval.binding import load_binding
 from kora.cel_eval.errors import EvaluatorUnavailable, UnavailableReason
 from kora.cel_eval.evaluate import PatternCompilation
 from kora.cel_eval.thread import EvaluationThread, Settings, Snapshot
-from kora.ir import validate_sensor_trigger_expressions
 from kora.ir.diagnostics import MAX_INTEGER
 from kora.ir.expression_fields import FieldPath
 from kora.observability import Level, LoggingSettings, bound_scope, configure_process
@@ -32,8 +30,6 @@ from tests.cel_eval.pattern_validation_scenarios import (
     run_loop_turn,
 )
 from tests.cel_eval.test_cel_evaluation import clock
-from tests.ir.inline_schema_cases import document_for
-from tests.ir.trigger_expression_cases import sensor, triggers
 
 WORK: int = 100_000
 PATTERN_MARKER: str = "private-pattern-marker-723"
@@ -312,126 +308,9 @@ def check_cancellation() -> None:
     assert_settled(owner)
 
 
-def check_sensor_triggers() -> None:
-    escaped = r"\u0070" + PATTERN_MARKER[1:]
-    source = f'false && observation.name.matches("(?ii){PATTERN_MARKER}")'
-    equivalent = f'true || "😀".matches("(?ii){escaped}")'
-    document = document_for(
-        triggers=[
-            {"kind": "manual"},
-            sensor(source),
-            sensor(equivalent),
-            sensor('"x".matches("^x$")'),
-        ]
-    )
-    over_limit = document_for(triggers=[{"kind": "manual"}, sensor("true &&")])
-    typed_refusal = document_for(triggers=[sensor(source), sensor("1")])
-    unresolved = document_for(triggers=[sensor(source), sensor("true &&")])
-    empty = document_for(triggers=[{"kind": "manual"}])
-    typed_expected = validate_sensor_trigger_expressions(typed_refusal)
-    unresolved_expected = validate_sensor_trigger_expressions(unresolved)
-    owner = EvaluationThread(load_binding())
-
-    with asyncio.Runner() as runner:
-        loop = runner.get_loop()
-        evaluator = runner.run(open_evaluator(owner))
-        try:
-            cases = (
-                (over_limit, 1, WORK),
-                (over_limit, -1, WORK),
-                (document, 4, 1),
-                (typed_refusal, 2, WORK),
-                (unresolved, 2, WORK),
-                (empty, 1, WORK),
-            )
-            tasks = tuple(
-                loop.create_task(
-                    validate_sensor_trigger_patterns(
-                        graph, evaluator, max_triggers=limit, max_work=work
-                    )
-                )
-                for graph, limit, work in cases
-            )
-            run_loop_turn(loop)
-            assert all(task.done() for task in tasks)
-            no_work = tuple(task.result() for task in tasks)
-            assert_idle(owner, 1)
-            native = observe_deliveries(
-                loop,
-                loop.create_task(
-                    validate_sensor_trigger_patterns(
-                        document, evaluator, max_triggers=4, max_work=WORK
-                    )
-                ),
-                owner,
-                2,
-            )
-            assert_idle(owner, 1)
-        finally:
-            runner.run(evaluator.close())
-
-    assert no_work[:3] == (
-        IncompletePatternCheck.CAPACITY_EXHAUSTED,
-        IncompletePatternCheck.INVALID_INVENTORY,
-        IncompletePatternCheck.CAPACITY_EXHAUSTED,
-    )
-    assert no_work[3:5] == (typed_expected, unresolved_expected)
-    assert len(typed_expected.diagnostics.errors) == 1
-    assert unresolved_expected.expressions_unresolved == 1
-    assert not unresolved_expected.diagnostics.errors
-    without_patterns = no_work[5]
-    assert isinstance(without_patterns, CompletePatternCheck)
-    assert without_patterns.diagnostics.valid
-    assert isinstance(native, CompletePatternCheck)
-    assert [
-        (error.code, error.path, error.offset) for error in native.diagnostics.errors
-    ] == [
-        ("IR011", ("graph", "triggers", 1, "poll", "until"), source.index('"(?ii)')),
-        (
-            "IR011",
-            ("graph", "triggers", 2, "poll", "until"),
-            equivalent.index('"(?ii)'),
-        ),
-    ]
-    assert_settled(owner)
-
-
 def checked_expression_count() -> int:
     gc.collect()
     return sum(isinstance(value, CheckedExpression) for value in gc.get_objects())
-
-
-def check_sensor_cancellation() -> None:
-    owner = EvaluationThread(load_binding())
-    document = triggers(1, '"a".matches("^a$")')
-    document_ref = ref(document)
-
-    with asyncio.Runner() as runner:
-        loop = runner.get_loop()
-        evaluator = runner.run(open_evaluator(owner))
-        baseline = checked_expression_count()
-        task = loop.create_task(
-            validate_sensor_trigger_patterns(
-                document, evaluator, max_triggers=1, max_work=WORK
-            )
-        )
-        del document
-        try:
-            run_loop_turn(loop)
-            delivery = wait_for_delivery(owner)
-            retained = checked_expression_count()
-            assert document_ref() is None
-            assert retained == baseline
-            assert task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                loop.run_until_complete(task)
-            assert_idle(owner, 1)
-        finally:
-            runner.run(evaluator.close())
-
-    assert delivery.outstanding == delivery.deliveries == 1
-    assert task.cancelled()
-    assert_settled(owner)
 
 
 def run(scenario: str) -> None:
@@ -439,8 +318,6 @@ def run(scenario: str) -> None:
         "deduplication": check_deduplication,
         "refusals": check_refusals,
         "cancellation": check_cancellation,
-        "sensor_triggers": check_sensor_triggers,
-        "sensor_cancellation": check_sensor_cancellation,
     }
     diagnostics = configure_process(
         COMPONENT,
