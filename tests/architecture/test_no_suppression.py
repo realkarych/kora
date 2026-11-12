@@ -1854,6 +1854,7 @@ def test_gate_rule_cannot_expand_the_pinned_ruff_configuration(tmp_path: Path) -
 
 
 REPLACEMENT_GATE: str = "src/kora/runner/gate.py"
+OS_MODULES: frozenset[str] = frozenset({"os", "posix", "nt"})
 REPLACEMENT_APIS: frozenset[str] = frozenset(
     {
         "execl",
@@ -1869,27 +1870,91 @@ REPLACEMENT_APIS: frozenset[str] = frozenset(
 )
 
 
+GATE_PROCESS_START_APIS: frozenset[str] = frozenset(
+    {
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+        "posix_spawn",
+        "posix_spawnp",
+        "fork",
+        "forkpty",
+        "startfile",
+        "system",
+        "popen",
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+        "subprocess_exec",
+        "subprocess_shell",
+        "ProcessPoolExecutor",
+    }
+)
+GATE_PROCESS_START_MODULES: frozenset[str] = frozenset(
+    {"subprocess", "pty", "multiprocessing", "_posixsubprocess"}
+)
+GATE_PROCESS_START_NAMES: frozenset[str] = (
+    GATE_PROCESS_START_APIS | GATE_PROCESS_START_MODULES
+)
+
+
+def named_api_reference(
+    node: ast.Attribute | ast.Call | ast.Subscript,
+    getters: set[str],
+    apis: frozenset[str],
+) -> bool:
+    if isinstance(node, ast.Attribute):
+        return node.attr in apis
+    if isinstance(node, ast.Call):
+        name = call_name(node)
+        if name in getters:
+            return string_value(positional_or_keyword(node, 1, "name")) in apis
+        if name in {"get", "__getitem__", "__getattribute__", "attrgetter"}:
+            return first_string_argument(node) in apis
+        return False
+    return string_value(node.slice) in apis
+
+
 def replacement_reference(
     node: ast.AST,
     getters: set[str],
 ) -> TypeGuard[ast.Attribute | ast.ImportFrom | ast.Call | ast.Subscript]:
-    if isinstance(node, ast.Attribute):
-        return node.attr in REPLACEMENT_APIS
     if isinstance(node, ast.ImportFrom):
-        return node.module == "os" and any(
+        return node.module in OS_MODULES and any(
             alias.name in REPLACEMENT_APIS or alias.name == "*" for alias in node.names
         )
-    if isinstance(node, ast.Call):
-        name = call_name(node)
-        if name in getters:
-            return (
-                string_value(positional_or_keyword(node, 1, "name")) in REPLACEMENT_APIS
-            )
-        if name in {"get", "__getitem__", "__getattribute__", "attrgetter"}:
-            return first_string_argument(node) in REPLACEMENT_APIS
-    if isinstance(node, ast.Subscript):
-        return string_value(node.slice) in REPLACEMENT_APIS
-    return False
+    if isinstance(node, ast.Call) and call_name(node) in DYNAMIC_IMPORT_CALLS:
+        target = first_string_argument(node) or ""
+        return not REPLACEMENT_APIS.isdisjoint(re.split(r"[.:]", target))
+    return isinstance(
+        node, ast.Attribute | ast.Call | ast.Subscript
+    ) and named_api_reference(node, getters, REPLACEMENT_APIS)
+
+
+def gate_process_start(
+    node: ast.AST,
+    getters: set[str],
+) -> TypeGuard[ast.Import | ast.ImportFrom | ast.Attribute | ast.Call | ast.Subscript]:
+    if isinstance(node, ast.Import):
+        return any(
+            not GATE_PROCESS_START_MODULES.isdisjoint(alias.name.split("."))
+            for alias in node.names
+        )
+    if isinstance(node, ast.ImportFrom):
+        module_parts = (node.module or "").split(".")
+        return not GATE_PROCESS_START_MODULES.isdisjoint(module_parts) or any(
+            alias.name in GATE_PROCESS_START_NAMES for alias in node.names
+        )
+    if isinstance(node, ast.Call) and call_name(node) in DYNAMIC_IMPORT_CALLS:
+        target = first_string_argument(node) or ""
+        return not GATE_PROCESS_START_NAMES.isdisjoint(re.split(r"[.:]", target))
+    return isinstance(
+        node, ast.Attribute | ast.Call | ast.Subscript
+    ) and named_api_reference(node, getters, GATE_PROCESS_START_NAMES)
 
 
 def binds_os(node: ast.AST) -> bool:
@@ -1987,6 +2052,12 @@ def replacement_violations(root: Path) -> list[str]:
         rebound = any(binds_os(node) for node in nodes)
         getters = getter_names(nodes)
         for node in nodes:
+            if source.relative == REPLACEMENT_GATE and gate_process_start(
+                node, getters
+            ):
+                violations.add(
+                    Violation(source.relative, node.lineno, "unapproved process start")
+                )
             if not replacement_reference(node, getters):
                 continue
             if allowed_replacement_reference(source, node, parents, unaliased, rebound):
@@ -2032,6 +2103,120 @@ def test_replacement_guard_rejects_aliases_beside_the_approved_call(
         any("unapproved process replacement" in finding for finding in findings)
         for findings in results.values()
     ), results
+
+
+GATE_APPROVED_SOURCE: str = (
+    "import os\ndef execute_workload() -> None:\n    os.execve('x', (), {})\n"
+)
+GATE_PROCESS_STARTS: dict[str, str] = {
+    "spawnl": "os.spawnl(os.P_WAIT, 'x', 'x')\n",
+    "spawnle": "os.spawnle(os.P_WAIT, 'x', 'x', {})\n",
+    "spawnlp": "os.spawnlp(os.P_WAIT, 'x', 'x')\n",
+    "spawnlpe": "os.spawnlpe(os.P_WAIT, 'x', 'x', {})\n",
+    "spawnv": "os.spawnv(os.P_WAIT, 'x', ('x',))\n",
+    "spawnve": "os.spawnve(os.P_WAIT, 'x', ('x',), {})\n",
+    "spawnvp": "os.spawnvp(os.P_WAIT, 'x', ('x',))\n",
+    "spawnvpe": "os.spawnvpe(os.P_WAIT, 'x', ('x',), {})\n",
+    "posix_spawn": "os.posix_spawn('x', ('x',), {})\n",
+    "posix_spawnp": "os.posix_spawnp('x', ('x',), {})\n",
+    "fork": "os.fork()\n",
+    "forkpty": "os.forkpty()\n",
+    "startfile": "os.startfile('x')\n",
+    "system": "os.system('x')\n",
+    "popen": "os.popen('x')\n",
+    "create_subprocess_exec": "asyncio.create_subprocess_exec('x')\n",
+    "create_subprocess_shell": "from asyncio import create_subprocess_shell\n",
+    "subprocess_exec": "asyncio.get_running_loop().subprocess_exec(object, 'x')\n",
+    "subprocess_shell": "asyncio.get_running_loop().subprocess_shell(object, 'x')\n",
+    "ProcessPoolExecutor": "from concurrent.futures import ProcessPoolExecutor\n",
+    "spawn_import_alias": "from os import spawnlp as start\n",
+    "getter": "getattr(os, 'posix_spawn')('x', ('x',), {})\n",
+    "getter_alias": "getter = getattr; getter(os, 'fork')()\n",
+    "accessor": "os.__dict__.get('forkpty')()\n",
+    "subscript": "os.__dict__['spawnv'](os.P_WAIT, 'x', ('x',))\n",
+    "subprocess": "import subprocess\n",
+    "subprocess_from": "from subprocess import run\n",
+    "subprocess_attribute": "asyncio.subprocess.subprocess.run(('x',))\n",
+    "subprocess_submodule": "import asyncio.subprocess\n",
+    "subprocess_from_name": "from asyncio.subprocess import subprocess\n",
+    "subprocess_modules": "sys.modules['subprocess'].run(('x',))\n",
+    "subprocess_modules_get": "sys.modules.get('subprocess')\n",
+    "subprocess_getter": "getattr(asyncio, 'subprocess')\n",
+    "subprocess_dunder_import": "__import__('subprocess')\n",
+    "subprocess_import_module": "importlib.import_module('subprocess')\n",
+    "subprocess_resolve_name": "pkgutil.resolve_name('subprocess:run')\n",
+    "fork_resolve_name": "pkgutil.resolve_name('os:fork')\n",
+    "fork_resolve_dotted": "pkgutil.resolve_name('os.fork')\n",
+    "pty": "import pty\n",
+    "multiprocessing": "import multiprocessing.pool\n",
+    "multiprocessing_from": "from multiprocessing.pool import Pool\n",
+    "posixsubprocess": "import _posixsubprocess\n",
+}
+
+
+def test_replacement_guard_refuses_exec_imports_from_posix_and_nt(
+    tmp_path: Path,
+) -> None:
+    imports = {
+        "posix": "from posix import execv\nexecv('x', ())\n",
+        "posix_alias": "from posix import execv as replace\nreplace('x', ())\n",
+        "posix_star": "from posix import *\n",
+        "nt": "from nt import execv\nexecv('x', ())\n",
+        "resolve_name": "pkgutil.resolve_name('os:execve')('x', (), {})\n",
+        "resolve_name_dotted": "pkgutil.resolve_name('posix.execv')('x', ())\n",
+    }
+    for name, source in imports.items():
+        write(tmp_path / f"{name}_other", REPLACEMENT_GATE, GATE_APPROVED_SOURCE)
+        write(tmp_path / f"{name}_other", "src/kora/runner/other.py", source)
+        write(
+            tmp_path / f"{name}_gate", REPLACEMENT_GATE, GATE_APPROVED_SOURCE + source
+        )
+
+    results = {
+        root.name: replacement_violations(root) for root in sorted(tmp_path.iterdir())
+    }
+
+    assert results == {
+        **{
+            f"{name}_other": [
+                "src/kora/runner/other.py:1: unapproved process replacement"
+            ]
+            for name in imports
+        },
+        **{
+            f"{name}_gate": [f"{REPLACEMENT_GATE}:4: unapproved process replacement"]
+            for name in imports
+        },
+    }
+
+
+def test_launch_gate_refuses_every_other_process_start(tmp_path: Path) -> None:
+    for name, extra in GATE_PROCESS_STARTS.items():
+        write(tmp_path / name, REPLACEMENT_GATE, GATE_APPROVED_SOURCE + extra)
+
+    results = {
+        name: replacement_violations(tmp_path / name) for name in GATE_PROCESS_STARTS
+    }
+
+    assert results == {
+        name: [f"{REPLACEMENT_GATE}:4: unapproved process start"]
+        for name in GATE_PROCESS_STARTS
+    }
+
+
+def test_process_starts_outside_the_launch_gate_keep_their_own_rules(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path, REPLACEMENT_GATE, GATE_APPROVED_SOURCE)
+    write(
+        tmp_path,
+        "src/kora/plugins/runtime/local/spawn.py",
+        "".join(GATE_PROCESS_STARTS.values()),
+    )
+
+    violations = replacement_violations(tmp_path)
+
+    assert violations == []
 
 
 def test_configuration_guard_allows_display_options_and_independent_commands(

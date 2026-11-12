@@ -75,6 +75,8 @@ LANE_NAMES = [
     ("ubuntu-24.04", "conformance", False),
     ("macos-15", "remainder", False),
     ("ubuntu-24.04", "integration", False),
+    ("ubuntu-24.04", "static-checks", False),
+    ("macos-15", "static-checks", False),
     ("ubuntu-24.04", "", False),
     ("macos-26", "general-1", False),
 ]

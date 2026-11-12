@@ -144,7 +144,7 @@ jobs:
         run: pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
         id: static_checks
-        if: ${{ matrix.lane == 'local-runtime' }}
+        if: ${{ matrix.lane == 'static-checks' }}
         run: |
           uv lock --check
           uv run --no-sync ruff format --check .
@@ -168,6 +168,7 @@ jobs:
           printf 'Host fixture preparation took %s s\n' "$SECONDS"
       - name: Collect and execute the exact test lane
         id: tests
+        if: ${{ matrix.lane != 'static-checks' }}
         run: bash scripts/ci/scaffold_lane.sh tests
       - name: Preserve general lane evidence
         id: cohort_evidence
@@ -175,7 +176,7 @@ jobs:
         run: bash scripts/ci/scaffold_lane.sh preserve
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: evidence_upload
-        if: ${{ always() }}
+        if: ${{ always() && matrix.lane != 'static-checks' }}
         with:
           name: scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
           path: ${{ env.KORA_SCAFFOLD_DIRECTORY }}
@@ -285,7 +286,7 @@ jobs:
         run: pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
         id: static_checks
-        if: ${{ matrix.lane == 'local-runtime' }}
+        if: ${{ matrix.lane == 'static-checks' }}
         run: |
           uv lock --check
           uv run --no-sync ruff format --check .
@@ -303,6 +304,7 @@ jobs:
           printf 'Host fixture preparation took %s s\n' "$SECONDS"
       - name: Collect and execute the exact test lane
         id: tests
+        if: ${{ matrix.lane != 'static-checks' }}
         run: bash scripts/ci/scaffold_lane.sh tests
       - name: Preserve general lane evidence
         id: cohort_evidence
@@ -310,7 +312,7 @@ jobs:
         run: bash scripts/ci/scaffold_lane.sh preserve
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: evidence_upload
-        if: ${{ always() }}
+        if: ${{ always() && matrix.lane != 'static-checks' }}
         with:
           name: scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
           path: ${{ env.KORA_SCAFFOLD_DIRECTORY }}

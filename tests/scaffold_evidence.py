@@ -47,6 +47,7 @@ STORAGE_ARGUMENTS = (
     "tests/conformance/test_installed_conformance.py",
 )
 LOCAL_RUNTIME_PATH = "tests/plugins/runtime/local"
+STATIC_CHECK_LANE = "static-checks"
 LOCAL_RUNTIME_ARGUMENTS = ("-m", "not measurement", LOCAL_RUNTIME_PATH)
 SPECIAL_PATHS = (*STORAGE_ARGUMENTS, LOCAL_RUNTIME_PATH)
 SPECIAL_MATRIX_ARGUMENTS = {
@@ -447,7 +448,7 @@ def matrix_rows(counts: Mapping[str, int]) -> dict[str, list[MatrixRow]]:
     rows: dict[str, list[MatrixRow]] = {"linux": [], "macos": []}
     for system, python, databases in ENVIRONMENTS:
         count = counts[environment_key(system, python)]
-        for lane in environment_lanes(count):
+        for lane in (STATIC_CHECK_LANE, *environment_lanes(count)):
             rows["macos" if system == "macos-15" else "linux"].append(
                 {
                     "os": system,
