@@ -3,7 +3,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from pydantic import ValidationError
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -33,7 +32,7 @@ from kora.cel_eval.errors import EvaluatorUnavailable
 from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database
 from kora.db.identifiers import IdentifierGenerator
-from kora.db.tables import namespace
+from kora.db.namespace_reads import granted_namespace_id
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
 from kora.ir.deployment_checks import DeploymentSelection
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
@@ -92,17 +91,10 @@ async def _read_body(request: Request) -> DeployRequest:
 async def _authorized_namespace(
     database: Database, principal: Principal, name: str
 ) -> str | None:
-    granted = [grant.namespace_id for grant in principal.namespaces]
-    if not granted:
-        return None
+    granted = tuple(grant.namespace_id for grant in principal.namespaces)
 
     async def unit(connection: AsyncConnection) -> str | None:
-        found = await connection.scalar(
-            select(namespace.c.id).where(
-                namespace.c.name == name, namespace.c.id.in_(granted)
-            )
-        )
-        return None if found is None else str(found)
+        return await granted_namespace_id(connection, name, granted)
 
     return await database.read(unit)
 

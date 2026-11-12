@@ -64,15 +64,12 @@ def observe_build_tree(
     return pids
 
 
-def test_installed_api_application_uses_only_runtime_dependencies(
-    core_wheel: Path, tmp_path: Path
-) -> None:
-    wheelhouse = tmp_path / "dependencies"
+def installed_core(core_wheel: Path, root: Path) -> Path:
+    wheelhouse = root / "dependencies"
     wheelhouse.mkdir()
     prepare_wheelhouse(wheelhouse)
     wheel = copy_core_wheel(core_wheel, wheelhouse)
-    environment = tmp_path / "environment"
-    python = create_virtual_environment(environment)
+    python = create_virtual_environment(root / "environment")
     run_setup(
         [
             "uv",
@@ -87,6 +84,14 @@ def test_installed_api_application_uses_only_runtime_dependencies(
             str(wheel),
         ]
     )
+    return python
+
+
+def test_installed_api_application_uses_only_runtime_dependencies(
+    core_wheel: Path, tmp_path: Path
+) -> None:
+    python = installed_core(core_wheel, tmp_path)
+    environment = tmp_path / "environment"
     outside = tmp_path / "outside"
     outside.mkdir()
     probe = outside / "probe.py"
@@ -105,6 +110,30 @@ def test_installed_api_application_uses_only_runtime_dependencies(
     assert process.stdout == b"installed-api-ok\n"
     assert process.stderr == b""
     assert len(list(core_wheel.parent.glob("kora-*.tar.gz"))) == 1
+
+
+def test_installed_core_refuses_mcp_without_its_extra(
+    core_wheel: Path, tmp_path: Path
+) -> None:
+    python = installed_core(core_wheel, tmp_path)
+
+    process = subprocess.run(
+        [str(python), "-I", "-m", "kora", "mcp", "--server", "authoring"],
+        cwd=tmp_path,
+        env={
+            "PATH": os.defpath,
+            "KORA_URL": "http://127.0.0.1:9",
+            "KORA_MCP_TOKEN": "token",
+        },
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert process.returncode == 78
+    assert process.stdout == b""
+    assert b"requires the kora[mcp] extra" in process.stderr
 
 
 @pytest.mark.parametrize(

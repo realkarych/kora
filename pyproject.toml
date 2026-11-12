@@ -70,6 +70,9 @@ conformance = [
 ]
 claude = [
     "claude-agent-sdk==0.2.168",
+    "kora[mcp]",
+]
+mcp = [
     "mcp==2.3.0",
 ]
 

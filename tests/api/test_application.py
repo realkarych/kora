@@ -6,25 +6,28 @@ from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from sqlalchemy import update
 
+from kora.cel_eval.thread import Evaluator
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.db.tables import api_token
 from kora.db.tokens import REVOKED
 from kora.ir.json import parse_json_object
 from kora.models.errors import ApiErrorEnvelope
+from tests.api.deployment_cases import HARNESS, evaluator
 from tests.api.support import (
     POISON,
     HttpCall,
     api_capture,
     application,
     client_for,
+    deployment_services,
     lifespan,
 )
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import START
 from tests.plugins.authentication.support import seed_case
 
-__all__ = ["api_capture"]
+__all__ = ["api_capture", "evaluator"]
 
 
 @pytest.mark.asyncio
@@ -374,31 +377,50 @@ async def test_catalog_and_dispatch_preserve_root_path(
     assert json.loads(call.body) == {"status": "ok"}
 
 
-def test_route_authorization_table_covers_every_operation(
-    api_capture: Capture, database: Database
+@pytest.mark.asyncio
+async def test_route_authorization_table_covers_every_operation(
+    api_capture: Capture, database: Database, evaluator: Evaluator
 ) -> None:
-    app = application(database, api_capture)
+    probes = application(database, api_capture)
+    app = application(
+        database, api_capture, deployment_services(database, evaluator, HARNESS)
+    )
     framework = app.application
 
     assert isinstance(framework, FastAPI)
+    assert isinstance(probes.application, FastAPI)
     routes: list[tuple[str, set[str] | None]] = []
     for route in framework.routes:
         assert isinstance(route, APIRoute)
         routes.append((route.path, route.methods))
 
-    assert routes == [("/healthz", {"GET"}), ("/api/v1/openapi.json", {"GET"})]
+    assert routes == [
+        ("/healthz", {"GET"}),
+        ("/api/v1/openapi.json", {"GET"}),
+        ("/api/v1/namespaces/{ns}/graphs/{graph}/versions", {"POST"}),
+    ]
+    assert [
+        route.path for route in probes.application.routes if isinstance(route, APIRoute)
+    ] == ["/healthz", "/api/v1/openapi.json"]
+    assert len(probes.application.routes) == 2
     assert framework.debug is False
     assert framework.router.redirect_slashes is False
 
 
-def test_parity_client_side_operations(
-    api_capture: Capture, database: Database
+@pytest.mark.asyncio
+async def test_parity_client_side_operations(
+    api_capture: Capture, database: Database, evaluator: Evaluator
 ) -> None:
-    framework = application(database, api_capture).application
+    framework = application(
+        database, api_capture, deployment_services(database, evaluator, HARNESS)
+    ).application
     assert isinstance(framework, FastAPI)
 
     schema = parse_json_object(framework.openapi())
 
     assert isinstance(schema["paths"], dict)
-    assert set(schema["paths"]) == {"/healthz"}
+    assert set(schema["paths"]) == {
+        "/healthz",
+        "/api/v1/namespaces/{ns}/graphs/{graph}/versions",
+    }
     assert "servers" not in schema
