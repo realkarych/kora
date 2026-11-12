@@ -3,7 +3,9 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -16,6 +18,7 @@ from tests.changed_test_repetition import (
     Report,
     annotations,
     changed_test_modules,
+    collected_modules,
     lane_command,
     lane_of,
     ordered,
@@ -23,11 +26,12 @@ from tests.changed_test_repetition import (
     pull_request_changes,
     repetition,
     selection,
-    selection_outputs,
     summary,
 )
 from tests.scaffold_evidence import scheduled_modules
-from tests.support.workflows import job_of, repository_workflows, step_list
+from tests.support.workflows import Workflows, job_of, repository_workflows, step_list
+
+ROOT = Path(__file__).resolve().parents[2]
 
 PASSING_TEST = "def test_passes() -> None:\n    assert True\n"
 MEASURED_TEST = (
@@ -43,8 +47,14 @@ THIRD_INVOCATION_FAILS = (
     "    counter.write_text(str(count))\n"
     "    assert count != 3\n"
 )
-FIXTURE_CONFIGURATION = "[pytest]\nmarkers =\n    measurement: fixture marker\n"
-PULL_REQUEST_ONLY = "github.event_name == 'pull_request'"
+FIXTURE_CONFIGURATION = (
+    "[pytest]\n"
+    'addopts = -m "not measurement"\n'
+    "markers =\n    measurement: fixture marker\n"
+)
+PULL_REQUEST_ONLY = "${{ github.event_name == 'pull_request' }}"
+REPETITION_COMMAND = "uv run --no-sync python -m tests.changed_test_repetition repeat"
+Mutation = Callable[[Workflows], None]
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -184,29 +194,59 @@ def test_pull_request_changes_refuse_a_checkout_without_a_merge_commit(
         pull_request_changes(repository)
 
 
+def test_changed_test_modules_refuse_an_unusual_path(tmp_path: Path) -> None:
+    repository = initialized(tmp_path)
+    write(repository, "tests/test_existing.py", PASSING_TEST)
+    base = commit(repository, "base")
+    write(repository, "tests/test_with space.py", PASSING_TEST)
+    head = commit(repository, "head")
+
+    with pytest.raises(RepetitionFailure):
+        changed_test_modules(repository, base, head)
+
+
 @pytest.mark.parametrize(
-    ("path", "lane", "launcher"),
+    ("path", "lane", "command"),
     [
-        ("tests/plugins/runtime/local/test_command.py", "local-runtime", "bash"),
-        ("tests/plugins/storage/test_layout.py", "storage", "uv"),
-        ("tests/conformance/test_installed_conformance.py", "storage", "uv"),
-        ("tests/conformance/test_installed_listing.py", "general", "uv"),
-        ("tests/plugins/runtime/local_peers/test_peer.py", "general", "uv"),
-        ("tests/ir/test_graph.py", "general", "uv"),
+        (
+            "tests/plugins/runtime/local/test_command.py",
+            "local-runtime",
+            ("bash", "scripts/ci/run-local-runtime-tests.sh", "uv", "run", "--no-sync")
+            + ("pytest", "-q", "tests/plugins/runtime/local/test_command.py"),
+        ),
+        (
+            "tests/plugins/storage/test_layout.py",
+            "storage",
+            ("uv", "run", "--no-sync", "pytest", "-q")
+            + ("tests/plugins/storage/test_layout.py",),
+        ),
+        (
+            "tests/conformance/test_installed_conformance.py",
+            "storage",
+            ("uv", "run", "--no-sync", "pytest", "-q")
+            + ("tests/conformance/test_installed_conformance.py",),
+        ),
+        (
+            "tests/plugins/runtime/local_peers/test_peer.py",
+            "general",
+            ("uv", "run", "--no-sync", "python", "-m", "tests.support.ordinary_pytest")
+            + ("-q", "tests/plugins/runtime/local_peers/test_peer.py"),
+        ),
+        (
+            "tests/ir/test_graph.py",
+            "general",
+            ("uv", "run", "--no-sync", "python", "-m", "tests.support.ordinary_pytest")
+            + ("-q", "tests/ir/test_graph.py"),
+        ),
     ],
 )
-def test_modules_run_as_their_ordinary_lane_runs_them(
-    path: str, lane: str, launcher: str
+def test_modules_run_with_the_launcher_of_their_lane_and_the_default_selection(
+    path: str, lane: str, command: tuple[str, ...]
 ) -> None:
-    command = lane_command(path)
+    launched = lane_command(path)
 
     assert lane_of(path) == lane
-    assert command[0] == launcher
-    assert command[-1] == path
-    assert ("scripts/ci/run-local-runtime-tests.sh" in command) is (
-        lane == "local-runtime"
-    )
-    assert ("tests.support.ordinary_pytest" in command) is (lane == "general")
+    assert launched == command
 
 
 def test_selection_keeps_only_modules_the_ordinary_linux_lanes_collect(
@@ -381,34 +421,46 @@ def test_passing_modules_run_in_a_fresh_process_every_round(tmp_path: Path) -> N
     assert len(list(logs.iterdir())) == 4
 
 
-def test_selection_outputs_name_the_count_and_the_host_preparation() -> None:
-    general = Module("tests/ir/test_graph.py", False, 1.0)
-    local = Module("tests/plugins/runtime/local/test_command.py", True, 1.0)
+def test_the_collection_reader_refuses_a_listing_without_the_changed_modules(
+    tmp_path: Path,
+) -> None:
+    silent_collector = (sys.executable, "-c", "pass")
 
-    outputs = [
-        selection_outputs([]),
-        selection_outputs([general]),
-        selection_outputs([general, local]),
-    ]
+    with pytest.raises(RepetitionFailure):
+        collected_modules(["tests/test_changed.py"], silent_collector, tmp_path)
 
-    assert outputs == [
-        "modules=0\nlocal_runtime=false\n",
-        "modules=1\nlocal_runtime=false\n",
-        "modules=2\nlocal_runtime=true\n",
-    ]
+
+def test_the_collection_reader_reads_the_repository_configuration() -> None:
+    module = "tests/architecture/test_ci_gates.py"
+
+    collected = collected_modules([module], (sys.executable, "-m", "pytest"), ROOT)
+
+    assert collected == frozenset({module})
 
 
 def test_the_report_lists_executions_and_modules_that_were_not_repeated() -> None:
     report = Report({"tests/test_new.py": 12, "tests/test_large.py": 0}, None, "")
 
-    rendered = summary(report)
+    rendered = summary(report, ["tests/test_daily.py"])
     emitted = annotations(report)
 
     assert "2 changed test modules, 12 executions." in rendered
     assert "| `tests/test_new.py` | 12 |" in rendered
     assert "| `tests/test_large.py` | 0 |" in rendered
+    assert "- `tests/test_daily.py`" in rendered
     assert emitted.count("::warning ") == 1
     assert "tests/test_large.py was not repeated" in emitted
+
+
+def test_the_report_states_an_empty_selection() -> None:
+    report = Report({}, None, "")
+
+    rendered = summary(report, [])
+    emitted = annotations(report)
+
+    assert "0 changed test modules, 0 executions." in rendered
+    assert "| Module |" not in rendered
+    assert emitted == ""
 
 
 def test_the_report_of_a_failure_names_the_module_as_an_error() -> None:
@@ -416,7 +468,7 @@ def test_the_report_of_a_failure_names_the_module_as_an_error() -> None:
         {"tests/test_new.py": 3, "tests/test_later.py": 0}, "tests/test_new.py", ""
     )
 
-    rendered = summary(report)
+    rendered = summary(report, [])
     emitted = annotations(report)
 
     assert "An execution of `tests/test_new.py` failed." in rendered
@@ -424,16 +476,125 @@ def test_the_report_of_a_failure_names_the_module_as_an_error() -> None:
     assert "::warning " not in emitted
 
 
-def test_the_repetition_job_always_reports_a_result_to_the_scaffold_join() -> None:
-    workflows = repository_workflows()
+def repetition_job_violations(workflows: Workflows) -> list[str]:
     job = job_of(workflows, "ci.yml", "changed-test-repetition")
     join = job_of(workflows, "ci.yml", "scaffold")
+    steps = step_list(job)
+    return [
+        *(
+            f"job declares {key}"
+            for key in ("if", "needs", "continue-on-error")
+            if key in job
+        ),
+        *(
+            ["job leaves its runner or deadline"]
+            if (job.get("runs-on"), job.get("timeout-minutes")) != ("ubuntu-24.04", 10)
+            else []
+        ),
+        *(
+            f"step {index} runs under {step.get('if')}"
+            for index, step in enumerate(steps)
+            if step.get("if") != PULL_REQUEST_ONLY
+        ),
+        *(
+            f"step {index} continues on error"
+            for index, step in enumerate(steps)
+            if "continue-on-error" in step
+        ),
+        *(
+            ["the last step does not repeat the changed test modules"]
+            if not steps or steps[-1].get("run") != REPETITION_COMMAND
+            else []
+        ),
+        *(
+            ["the scaffold join does not wait for the repetition"]
+            if "changed-test-repetition"
+            not in [str(need) for need in list_of(join["needs"])]
+            else []
+        ),
+    ]
 
-    conditions = [str(step.get("if", "")) for step in step_list(job)]
 
-    assert "changed-test-repetition" in str(join["needs"])
-    assert "if" not in job
-    assert "needs" not in job
-    assert "continue-on-error" not in job
-    assert (job["runs-on"], job["timeout-minutes"]) == ("ubuntu-24.04", 10)
-    assert all(PULL_REQUEST_ONLY in condition for condition in conditions)
+def list_of(value: object) -> list[object]:
+    assert isinstance(value, list)
+    return cast(list[object], value)
+
+
+def repetition_step(workflows: Workflows) -> dict[str, object]:
+    return step_list(job_of(workflows, "ci.yml", "changed-test-repetition"))[-1]
+
+
+def let_a_failed_repetition_pass(workflows: Workflows) -> None:
+    repetition_step(workflows)["continue-on-error"] = True
+
+
+def disable_the_repetition(workflows: Workflows) -> None:
+    repetition_step(workflows)["if"] = (
+        "${{ github.event_name == 'pull_request' && false }}"
+    )
+
+
+def replace_the_repetition_command(workflows: Workflows) -> None:
+    repetition_step(workflows)["run"] = "true"
+
+
+def append_a_step_after_the_repetition(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "changed-test-repetition")
+    list_of(job["steps"]).append({"if": PULL_REQUEST_ONLY, "run": "true"})
+
+
+def skip_the_job_on_master_pushes(workflows: Workflows) -> None:
+    job = job_of(workflows, "ci.yml", "changed-test-repetition")
+    job["if"] = "${{ github.event_name == 'pull_request' }}"
+
+
+def make_the_job_wait_for_the_scope(workflows: Workflows) -> None:
+    job_of(workflows, "ci.yml", "changed-test-repetition")["needs"] = ["change-scope"]
+
+
+def let_the_job_continue_on_error(workflows: Workflows) -> None:
+    job_of(workflows, "ci.yml", "changed-test-repetition")["continue-on-error"] = True
+
+
+def run_a_setup_step_on_master_pushes(workflows: Workflows) -> None:
+    del step_list(job_of(workflows, "ci.yml", "changed-test-repetition"))[0]["if"]
+
+
+def move_the_job_to_another_runner(workflows: Workflows) -> None:
+    job_of(workflows, "ci.yml", "changed-test-repetition")["runs-on"] = "macos-15"
+
+
+def detach_the_scaffold_join(workflows: Workflows) -> None:
+    job_of(workflows, "ci.yml", "scaffold")["needs"] = ["scaffold-evidence"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        let_a_failed_repetition_pass,
+        disable_the_repetition,
+        replace_the_repetition_command,
+        append_a_step_after_the_repetition,
+        skip_the_job_on_master_pushes,
+        make_the_job_wait_for_the_scope,
+        let_the_job_continue_on_error,
+        run_a_setup_step_on_master_pushes,
+        move_the_job_to_another_runner,
+        detach_the_scaffold_join,
+    ],
+)
+def test_repetition_job_check_refuses_a_mutated_workflow(mutation: Mutation) -> None:
+    workflows = repository_workflows()
+    mutation(workflows)
+
+    violations = repetition_job_violations(workflows)
+
+    assert violations
+
+
+def test_the_repetition_job_always_runs_and_fails_with_its_repetition() -> None:
+    workflows = repository_workflows()
+
+    violations = repetition_job_violations(workflows)
+
+    assert violations == []

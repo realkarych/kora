@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,8 +24,8 @@ ROUNDS = 40
 WINDOW_SECONDS = 300.0
 OUTPUT_TAIL_BYTES = 65536
 NOTHING_COLLECTED = 5
-ORDINARY_MARKER = ("-m", "not measurement")
 ANNOTATION = "Changed test repetition"
+PLAIN_PATH = re.compile(r"[A-Za-z0-9_./-]+")
 
 Command = tuple[str, ...]
 Launcher = Callable[[str], Command]
@@ -106,6 +107,8 @@ def changed_test_modules(repository: Path, base: str, head: str) -> dict[str, bo
         if status.startswith("R"):
             path = next(fields)
         if is_test_module(path):
+            if PLAIN_PATH.fullmatch(path) is None:
+                raise RepetitionFailure("a changed test module has an unusual path")
             changed[path] = status == "A"
     return dict(sorted(changed.items()))
 
@@ -138,7 +141,6 @@ def lane_command(path: str) -> Command:
             "--no-sync",
             "pytest",
             "-q",
-            *ORDINARY_MARKER,
             path,
         )
     if lane == "storage":
@@ -151,7 +153,6 @@ def lane_command(path: str) -> Command:
         "-m",
         "tests.support.ordinary_pytest",
         "-q",
-        *ORDINARY_MARKER,
         path,
     )
 
@@ -162,7 +163,7 @@ def collected_modules(
     if not paths:
         return frozenset()
     completed = subprocess.run(
-        [*collector, "--collect-only", "-q", *ORDINARY_MARKER, *paths],
+        [*collector, "--collect-only", "-q", *paths],
         cwd=directory,
         check=False,
         capture_output=True,
@@ -176,9 +177,12 @@ def collected_modules(
             "the changed test modules cannot be collected\n"
             + listing[-OUTPUT_TAIL_BYTES:]
         )
-    return frozenset(
+    collected = frozenset(
         line.partition("::")[0] for line in listing.splitlines() if "::" in line
     )
+    if not collected or not collected <= frozenset(paths):
+        raise RepetitionFailure("the collection of changed test modules is unreadable")
+    return collected
 
 
 def ordered(changes: dict[str, bool], durations: Durations) -> tuple[Module, ...]:
@@ -258,18 +262,29 @@ def process_execution(launcher: Launcher, directory: Path, logs: Path) -> Execut
     return execute
 
 
-def summary(report: Report) -> str:
+def summary(report: Report, unselected: Sequence[str]) -> str:
     total = sum(report.executions.values())
     lines = [
         f"## {ANNOTATION}",
         "",
         f"{len(report.executions)} changed test modules, {total} executions.",
         "",
-        "| Module | Executions |",
-        "|---|---|",
-        *(f"| `{path}` | {count} |" for path, count in report.executions.items()),
-        "",
     ]
+    if report.executions:
+        lines += [
+            "| Module | Executions |",
+            "|---|---|",
+            *(f"| `{path}` | {count} |" for path, count in report.executions.items()),
+            "",
+        ]
+    if unselected:
+        lines += [
+            "Changed but not repeated, because the daily workflow runs them or "
+            "the default test selection leaves all their tests out:",
+            "",
+            *(f"- `{path}`" for path in unselected),
+            "",
+        ]
     if report.failed is not None:
         lines += [f"An execution of `{report.failed}` failed.", ""]
     return "\n".join(lines)
@@ -290,43 +305,30 @@ def annotations(report: Report) -> str:
     return "".join(lines)
 
 
-def selection_outputs(modules: Sequence[Module]) -> str:
-    local_runtime = any(lane_of(module.path) == "local-runtime" for module in modules)
-    return (
-        f"modules={len(modules)}\n"
-        f"local_runtime={'true' if local_runtime else 'false'}\n"
-    )
-
-
-def selected(repository: Path) -> tuple[Module, ...]:
+def repeat(repository: Path) -> int:
+    changes = pull_request_changes(repository)
     durations = load_table().environments[environment_key(OPERATING_SYSTEM, PYTHON)]
     collector = ("uv", "run", "--no-sync", "pytest")
-    return selection(pull_request_changes(repository), durations, collector, repository)
-
-
-def repeat(repository: Path) -> int:
-    modules = selected(repository)
+    modules = selection(changes, durations, collector, repository)
     with tempfile.TemporaryDirectory() as logs:
         execute = process_execution(lane_command, repository, Path(logs))
         report = repetition(modules, execute, time.monotonic, Limits())
+    unselected = sorted(changes.keys() - report.executions.keys())
+    rendered = summary(report, unselected)
     sys.stdout.write(report.output)
     sys.stdout.write(annotations(report))
-    sys.stdout.write(summary(report))
+    sys.stdout.write(rendered)
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:
         with Path(step_summary).open("a") as stream:
-            stream.write(summary(report))
+            stream.write(rendered)
     return 0 if report.failed is None else 1
 
 
 def main(arguments: list[str]) -> int:
-    repository = Path.cwd()
     match arguments:
-        case ["select"]:
-            sys.stdout.write(selection_outputs(selected(repository)))
-            return 0
         case ["repeat"]:
-            return repeat(repository)
+            return repeat(Path.cwd())
         case _:
             raise RepetitionFailure("unknown changed test repetition operation")
 

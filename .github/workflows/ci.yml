@@ -408,19 +408,10 @@ jobs:
       - name: Install locked frontend dependencies
         if: ${{ github.event_name == 'pull_request' }}
         run: pnpm --dir web install --frozen-lockfile
-      - name: Select changed test modules
-        id: selection
-        if: ${{ github.event_name == 'pull_request' }}
-        run: uv run --no-sync python -m tests.changed_test_repetition select >> "$GITHUB_OUTPUT"
-      - name: Prepare local runtime host fixtures
-        if: ${{ github.event_name == 'pull_request' && steps.selection.outputs.local_runtime == 'true' }}
-        run: sudo --preserve-env=RUNNER_TEMP scripts/ci/prepare-local-runtime-fixtures.sh prepare
       - name: Repeat changed test modules
-        if: ${{ github.event_name == 'pull_request' && steps.selection.outputs.modules != '0' }}
+        id: repetition
+        if: ${{ github.event_name == 'pull_request' }}
         run: uv run --no-sync python -m tests.changed_test_repetition repeat
-      - name: Remove local runtime host fixtures
-        if: ${{ always() && github.event_name == 'pull_request' && steps.selection.outputs.local_runtime == 'true' }}
-        run: sudo scripts/ci/prepare-local-runtime-fixtures.sh teardown
 
   scaffold-evidence:
     name: Scaffold evidence
