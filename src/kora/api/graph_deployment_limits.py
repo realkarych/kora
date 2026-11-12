@@ -17,7 +17,7 @@ from kora.engine.graph_version_identity import (
 
 MAX_REQUEST_BYTES: int = 4 * 1024 * 1024
 IR_BYTES: int = MAX_REQUEST_BYTES
-PAIR_BYTES: int = 2 * IR_BYTES
+PAIR_BYTES: int = 4 * IR_BYTES
 SECTION_BYTES: int = IR_BYTES
 RESOURCE_RECORD_BYTES: int = 4096
 SCOPE_UNITS: int = 4 * 3 * IDENTIFIER_LENGTH
@@ -55,7 +55,7 @@ READ = ExecutionContractReadLimits(
     RESOURCES,
     RESOURCE_RECORD_BYTES,
     1 << 30,
-    1 << 51,
+    1 << 52,
 )
 EXECUTION = ExecutionPreparationLimits(
     READ, SECTION_BYTES, SECTION_BYTES, SECTION_BYTES, 1 << 31, 1 << 55

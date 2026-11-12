@@ -13,8 +13,10 @@ from kora.api.graph_publication_metadata import (
     prepare_graph_publication_metadata,
 )
 from kora.api.graph_publication_saved import (
+    SAVED_LOCATOR,
     graph_publication_admission_statement,
     graph_publication_insert_statement,
+    graph_publication_saved_statement,
 )
 from kora.api.graph_publication_sqlite import observe_sqlite_graph_publication
 from kora.api.graph_publication_values import (
@@ -29,6 +31,7 @@ from kora.db.graph_deployment_reads import (
     latest_version_number,
 )
 from kora.db.graph_read_admission import GraphVersionReadAdmission
+from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.db.identifiers import IdentifierGenerator
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_version_identity import GraphVersionDigests
@@ -52,7 +55,6 @@ COMPLETED: EventSpec = CATALOG.register(
 @dataclass(frozen=True, slots=True)
 class GraphDeploymentTarget:
     namespace_id: str
-    graph_name: str
     principal: Principal
 
 
@@ -99,12 +101,11 @@ async def _graph_id(
     connection: AsyncConnection,
     dialect: Dialect,
     target: GraphDeploymentTarget,
+    graph_name: str,
     identifiers: IdentifierGenerator,
     at: datetime,
 ) -> tuple[str, bool]:
-    existing = await graph_id_by_name(
-        connection, target.namespace_id, target.graph_name
-    )
+    existing = await graph_id_by_name(connection, target.namespace_id, graph_name)
     if existing is not None:
         return existing, False
     graph_id = identifiers.new()
@@ -113,7 +114,7 @@ async def _graph_id(
         {
             "id": graph_id,
             "namespace_id": target.namespace_id,
-            "name": target.graph_name,
+            "name": graph_name,
             "created_at": at,
             "updated_at": at,
         },
@@ -129,10 +130,15 @@ async def _publish(
     identifiers: IdentifierGenerator,
     at: datetime,
 ) -> PublishedGraphVersion:
+    metadata = prepare_graph_publication_metadata(
+        dialect, target.principal, (), max_metadata_bytes=METADATA_BYTES
+    )
     locks = TransitionLocks(connection)
     await locks.acquire_scopes((Scope(ScopeKind.NAMESPACE, (target.namespace_id,)),))
     digests = deployment.inputs.logical.digests
-    graph_id, created = await _graph_id(connection, dialect, target, identifiers, at)
+    graph_id, created = await _graph_id(
+        connection, dialect, target, deployment.graph_name, identifiers, at
+    )
     if not created:
         equal = await active_version_by_deployment_digest(
             connection, graph_id, digests.deployment_digest
@@ -148,18 +154,22 @@ async def _publish(
         limits=ATTACHMENT,
     )
     binds = prepare_graph_publication_binds(attachment, limits=BINDS)
-    metadata = prepare_graph_publication_metadata(
-        dialect, target.principal, (), max_metadata_bytes=METADATA_BYTES
-    )
     admission = await _read_admission(connection, dialect, binds, metadata)
-    await connection.execute(
-        graph_publication_insert_statement(dialect),
+    values = (
         binds.fixed_values(
             dialect, number=number, source_digest=deployment.source_digest, at=at
         )
         | binds.parameters()
-        | metadata.parameters(),
+        | metadata.parameters()
     )
+    locator: object = await connection.scalar(
+        graph_publication_insert_statement(dialect), values
+    )
+    saved: object = await connection.scalar(
+        graph_publication_saved_statement(dialect), values | {SAVED_LOCATOR: locator}
+    )
+    if saved != 1:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
     await connection.execute(
         graph_publication_admission_statement(dialect),
         binds.admission_values(admission),

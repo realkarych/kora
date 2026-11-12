@@ -6,6 +6,8 @@ from kora.ir.deployment_checks import (
     check_deployment_document,
 )
 from kora.ir.diagnostics import Diagnostic
+from kora.ir.document import GraphDocument
+from tests.api.deployment_cases import HARNESS, unresolved_approval
 from tests.ir.first_slice_configuration_cases import chain_document, chain_nodes
 
 SELECTION = DeploymentSelection("claude")
@@ -93,3 +95,13 @@ def test_deployment_checks_accept_an_empty_command_file_list() -> None:
     result = check_deployment_document(document, SELECTION)
 
     assert result.deployable
+
+
+def test_deployment_checks_report_unresolved_work_as_incomplete() -> None:
+    document = GraphDocument.model_validate(unresolved_approval())
+
+    result = check_deployment_document(document, DeploymentSelection(HARNESS))
+
+    assert not result.complete
+    assert not result.deployable
+    assert result.diagnostics.errors == ()
