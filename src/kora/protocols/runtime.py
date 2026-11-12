@@ -24,6 +24,7 @@ from kora.ir.json import (
     fits_utf8,
 )
 from kora.ir.scalars import ArtifactType, Digest, EnvName, SecretRef
+from kora.ir.vcs_ref import Identity as RevisionIdentity
 from kora.protocols.boundary import refusal_discriminator
 from kora.protocols.common import (
     BoundaryModel,
@@ -61,11 +62,14 @@ from kora.protocols.vcs import (
     Argument,
     Binding,
     BindingRevision,
+    BranchText,
     CheckoutPlan,
     CredentialMode,
     PlanExecutor,
     PreparedPublication,
     PublishPlan,
+    RepoText,
+    RevisionText,
     WorkspaceRef,
     WorkspaceTarget,
     is_bool,
@@ -85,6 +89,9 @@ CAPABILITY_FLAGS: tuple[str, ...] = (
 MAX_TRANSFER_BYTES: Final[int] = 1_073_741_824
 MAX_RESOURCE_BYTES: Final[int] = 262_144
 MAX_RESOURCES: Final[int] = 64
+MAX_PROTECTED_PATHS: Final[int] = 64
+MAX_PROTECTED_PATH_BYTES: Final[int] = 4096
+MAX_CHECKOUT_REQUEST_BYTES: Final[int] = 65_536
 MAX_EVENT_DATA_BYTES: Final[int] = 65_536
 MIN_EXIT_CODE: Final[int] = -255
 MAX_EXIT_CODE: Final[int] = 255
@@ -213,6 +220,36 @@ Checkout = Annotated[
 ]
 
 
+class PinnedRevision(BoundaryModel):
+    commit: RevisionIdentity
+    base_commit: RevisionIdentity
+
+
+ProtectedPath = Annotated[str, StringConstraints(strict=True, min_length=1)]
+
+
+def protected_path_fits(value: str) -> str:
+    require(fits_utf8(value, MAX_PROTECTED_PATH_BYTES), "protected path is bounded")
+    return value
+
+
+class CheckoutSource(BoundaryModel):
+    repo: RepoText
+    rev: RevisionText
+    pinned: PinnedRevision | None
+    branch: BranchText
+    protected_paths: Annotated[
+        tuple[Annotated[ProtectedPath, AfterValidator(protected_path_fits)], ...],
+        Field(max_length=MAX_PROTECTED_PATHS),
+    ]
+
+    @model_validator(mode="after")
+    def bounded_request(self) -> Self:
+        if len(self.model_dump_json().encode("utf-8")) > MAX_CHECKOUT_REQUEST_BYTES:
+            raise runtime_refused()
+        return self
+
+
 class Workload(BoundaryModel):
     attempt_id: Identifier
     execution_domain_id: Identifier
@@ -238,6 +275,7 @@ class Workload(BoundaryModel):
     deadline: ExecutionDeadline | None
     session_spec: SessionSpec | None
     dispatcher_process: ProcessIdentity | None
+    checkout_request: CheckoutSource | None = None
 
 
 class RuntimeStatus(BoundaryModel):

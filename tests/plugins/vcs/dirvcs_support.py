@@ -1,10 +1,13 @@
 import shutil
-from collections.abc import Callable
+import subprocess
+import sys
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Final
 
 from kora.conformance.capture import Capture
+from kora.conformance.vcs import Checkout
 from kora.executor.entry import Executor
 from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.plugins.vcs.fake import DirVcs, store
@@ -15,9 +18,18 @@ from tests.plugins.vcs.dirvcs_checkout_support import (
     set_head,
     stored_revision,
 )
-from tests.plugins.vcs.git_support import PUBLISH_BRANCH, BaseWorld, ManualClock
+from tests.plugins.vcs.git_support import PUBLISH_BRANCH, BaseWorld, ManualClock, write
 
 __all__ = ["configuration", "empty_store", "stored_revision", "set_head"]
+
+
+def residue(root: Path) -> list[str]:
+    return sorted(
+        path.name
+        for pattern in (".tmp-*", "incoming-*")
+        for path in root.rglob(pattern)
+    )
+
 
 SEED_FILES: Final[dict[str, tuple[str, bytes]]] = {
     "a.txt": (store.REGULAR, b"alpha\n"),
@@ -33,6 +45,20 @@ class DirWorld(BaseWorld[DirVcs]):
     def remote_head(self, branch: str = PUBLISH_BRANCH) -> str | None:
         head = self.remote / "heads" / branch
         return head.read_text(encoding="ascii") if head.is_file() else None
+
+    def commit(
+        self, checkout: Checkout, files: Mapping[str, str | None], message: str
+    ) -> str:
+        candidate = self.candidate(checkout)
+        write(candidate, files)
+        completed = subprocess.run(
+            [sys.executable, "-I", store.__file__, "commit", "--message", message],
+            cwd=candidate,
+            env={},
+            capture_output=True,
+            check=True,
+        )
+        return completed.stdout.decode("ascii")
 
 
 def seeded_store(root: Path) -> tuple[Path, str]:

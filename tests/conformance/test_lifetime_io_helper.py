@@ -3,6 +3,7 @@ import fcntl
 import gc
 import os
 import signal
+import socket
 import subprocess
 import sys
 from contextlib import AsyncExitStack, ExitStack
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.io_helper import (
+    DESCRIPTORS_READY,
     MUTATION,
     BootstrapMutation,
     ChildReaper,
@@ -28,8 +30,14 @@ from kora.conformance.io_helper import (
     open_claim,
     read_journal,
 )
-from kora.conformance.journal import JournalSnapshot
-from kora.protocols.lifetime import LifetimeReason, OriginalOutcome
+from kora.conformance.journal import JournalEntry, JournalSnapshot
+from kora.protocols.lifetime import (
+    LifetimeReason,
+    OriginalOutcome,
+    ResourceKind,
+    ResourceState,
+    new_operation_id,
+)
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 from kora.runner.filesystem import DirectoryAnchor
@@ -126,6 +134,7 @@ async def exercise_helper_claim_finalizers(
                 assert result.descriptor_count == 1
                 helper.channel.close()
             elif result.descriptor_count:
+                await helper.channel.write_frame(DESCRIPTORS_READY, deadline)
                 await helper.receive_descriptors(result.descriptor_count, deadline)
                 with ExitStack() as received:
                     descriptors = helper.take_descriptors()
@@ -183,6 +192,93 @@ async def test_fixed_helper_claim_survives_result_error_and_transfer_finalizers(
     tmp_path: Path, effect: str
 ) -> None:
     await exercise_helper_claim_finalizers(tmp_path, effect, None, [])
+
+
+MACOS_STREAM_BUFFER_BYTES = 8192
+
+
+def bootstrap_above_stream_buffer() -> BootstrapMutation:
+    journal = initial_snapshot().model_copy(
+        update={
+            "entries": tuple(
+                JournalEntry(
+                    resource_id=new_operation_id(),
+                    parent_resource_id=None,
+                    kind=ResourceKind.TEMPORARY_TREE,
+                    state=ResourceState.RESERVED,
+                    revision=1,
+                )
+                for _ in range(100)
+            )
+        }
+    )
+    return BootstrapMutation(invocation_id="1" * 32, journal=journal, capacity=32)
+
+
+def claim_released(state_home: Path) -> bool:
+    (claim_path,) = state_home.rglob("1" * 32 + "/claim")
+    with FileIO(os.open(claim_path, os.O_RDWR | os.O_NOFOLLOW), "r+b") as claim:
+        try:
+            fcntl.flock(claim.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledgement", ["withheld", "wrong_frame"])
+async def test_io_helper_sends_descriptors_only_after_result_acknowledgement(
+    tmp_path: Path, acknowledgement: str
+) -> None:
+    clock = SystemClock()
+    cleanup = CleanupDeadline(clock, 5_000_000_000)
+    deadline = clock.monotonic_ns() + 10_000_000_000
+    helper = installed_launcher(tmp_path).start((), clock)
+    try:
+        await helper.channel.write_record(
+            MUTATION.dump_json(bootstrap_above_stream_buffer()), deadline
+        )
+        record = await helper.channel.read_record(deadline, 1048576)
+        result = MutationResult.model_validate_json(record)
+
+        if acknowledgement == "withheld":
+            helper.endpoint.shutdown(socket.SHUT_WR)
+        else:
+            await helper.channel.write_frame(b"listeners_received", deadline)
+        with pytest.raises(HelperError) as refused:
+            await helper.receive_descriptors(result.descriptor_count, deadline)
+
+        assert len(record) > MACOS_STREAM_BUFFER_BYTES
+        assert result.descriptor_count == 3
+        assert refused.value.reason is LifetimeReason.JOURNAL_UNAVAILABLE
+        assert helper.take_descriptors() == ()
+        assert await helper.settle(deadline)
+        assert helper.process.returncode not in (None, 0)
+        assert claim_released(tmp_path)
+    finally:
+        await stop_io_helper(helper, cleanup)
+
+
+@pytest.mark.asyncio
+async def test_io_helper_transfers_descriptors_above_the_macos_socket_buffer(
+    tmp_path: Path,
+) -> None:
+    clock = SystemClock()
+    cleanup = CleanupDeadline(clock, 5_000_000_000)
+    deadline = clock.monotonic_ns() + 10_000_000_000
+    helper = installed_launcher(tmp_path).start((), clock)
+    try:
+        result = await helper.execute(bootstrap_above_stream_buffer(), deadline)
+        descriptors = helper.take_descriptors()
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+        assert len(result.model_dump_json()) > MACOS_STREAM_BUFFER_BYTES
+        assert len(descriptors) == 3
+        assert helper.process.returncode == 0
+        assert claim_released(tmp_path)
+    finally:
+        await stop_io_helper(helper, cleanup)
 
 
 async def assert_helper_barrier_failure(tmp_path: Path, phase: str) -> None:

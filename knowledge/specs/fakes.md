@@ -15,16 +15,18 @@ Every kora fake is a module named `fake` in its plugin family and ships in the o
 | directory-backed VCS, and later the in-process code-host fake | `kora.plugins.vcs.fake` |
 | scenario secrets provider | `kora.plugins.secrets.fake` |
 | fake approval channel | `kora.plugins.approval.fake` |
+| counting artifact storage (issue #106) | `kora.plugins.storage.fake` |
 
 - **`kora.testing`** holds the scenario engine, the testing runner of section 3, `VirtualClock` and `QuiescenceMonitor` (section 6).
 - **Layer table.** The family rows and the `kora.testing` composition root of [ADR-0026](../../docs/decisions/0026-package-layers.md) already cover these modules, so the [package layer table](../architecture/detailed.md#package-layers) gains no row. Section 2 adds one import rule.
+- **The counting artifact storage fake** implements the artifact storage protocol of [protocols.md section 7](protocols.md#7-artifact-storage-fr-44) and passes the protocol-behaviour cases of its conformance suite (section 8). It records reads per range, can hold a reader at a barrier, takes configurable `stage_slots` and `private_bytes`, and spools or counts bytes instead of holding them in memory. Large payloads are generated procedurally inside its validated store, and every read returns identical bytes with the correct digest. It exists for the command-input contracts of [protocols.md section 13](protocols.md#command-input-contracts-issue-106).
 - **The directory-backed VCS is a fake.** It has no remote, no review and no code host, so it is not production-eligible and is excluded with the others. "The fake VCS" in the specifications names `kora.plugins.vcs.fake`.
 
-### Directory VCS checkout and uncommitted publication (#297/#298)
+### Directory VCS checkout, publication and candidate revision chains (#297/#298/#299)
 
 The directory provider uses the shared local VCS configuration, principal,
 credential-binding and pinned repository rules. Checkout and publication of
-uncommitted changes implement `Vcs`; candidate revision chains remain #299.
+uncommitted changes and of candidate revision chains implement `Vcs`.
 There is no provider entry point or serving-process activation.
 
 A repository contains `revisions`, `trees`, `blobs` and `heads` directories.
@@ -44,11 +46,11 @@ case-fold collisions or descendants beneath a file or symlink. Opens are
 descriptor-relative and no-follow; new candidate files are create-only.
 
 The candidate's `.kora/dirvcs` store contains only its checkout tree and checkout
-identity, not other heads or repository history. Candidate commits remain
-unavailable; export requires the candidate head to equal the trusted checkout,
-and prepare requires that head to equal the publication base. A checkout of a
-`VcsRef` whose commit differs from its base therefore fails prepare with
-`artifact_invalid` until candidate chains land under #299. On Linux a publish plan
+identity, not other heads or repository history, until the candidate commits
+into it as described below. Export ships the chain from the checkout revision and
+import requires it to start at the publication base, so a checkout of a `VcsRef`
+whose commit differs from its base fails prepare with `artifact_invalid`, as it did
+before candidate chains. On Linux a publish plan
 without a resolvable `prlimit` is refused as `vcs_config_invalid` with rule
 `tool_missing` and a content-free `vcs.fake.refused` record, covered by
 `test_directory_publish_without_prlimit_logs_its_refusal_on_linux`.
@@ -66,13 +68,18 @@ parser evidence is `test_dirvcs_path_rules_match_the_sealing_rules` and
 every VCS conformance case in `tests/plugins/vcs/test_dirvcs_conformance.py`.
 The reserved-loading and standard-library-only checks also cover this module.
 
-Publication uses the unchanged shared `kora.git.v1` container without a bundle.
-The trusted helper copies bounded base ancestry, imports the sealed working tree,
-builds one content-addressed revision, emits its complete inspection index and
-publishes through create-only head settlement after the executor authorizes it.
-An existing head is never overwritten. The raw inspection source independently
-enumerates newly reachable objects; scanner digest, path and secret checks remain
-unchanged. Base ancestry is limited to 10,000 revisions and 256 MiB of tree data;
+Publication uses the unchanged shared `kora.git.v1` container, with `head.bundle`
+when the candidate head differs from the checkout revision. The trusted helper
+copies bounded base ancestry, imports the chain, imports the sealed working tree,
+builds a content-addressed revision on the chain tip unless the working tree equals
+it, emits its complete inspection index and publishes through create-only head
+settlement after the executor authorizes it. An existing head is never overwritten.
+The raw inspection source and the decoder derive newly reachable objects from the
+same function, `new_objects`, so a defect there removes an object from both sides
+and the scanner's set equality still holds; the only independent derivation is the
+test-owned walk in `test_candidate_revisions_publish_completely`, which covers one
+scenario and gives the runtime scanner no independent check. Scanner digest, path
+and secret checks remain unchanged. Base ancestry is limited to 10,000 revisions and 256 MiB of tree data;
 the content index is limited to 100,000 records and 128 MiB. Linux publisher
 helpers retain the existing prlimit bounds; checkout alone does not require it.
 
@@ -84,8 +91,72 @@ is proportional to entries times depth for a deep chain with many sibling
 directories, so such a tree within these bounds can run until the step timeout; no
 separate work budget exists because this provider runs only in tests.
 
+A candidate store lives in `.kora/dirvcs` of the checkout and holds `revisions`,
+`trees`, `blobs`, `checkout.json` and `head`. `store.py commit --message` stores the
+working tree as a revision on the current head. It runs in candidate authority and
+refuses a special file; it does not validate the tree it writes, because import does.
+A kill between replacing `head` and writing it fails closed at export.
+
+`head.bundle` is a sequence of records, each a `>cQ` header of kind and byte length
+followed by the bytes: revisions (`R`) oldest first, then trees (`T`), then blobs
+(`B`). Import refuses:
+
+- a record out of section order, of an unknown kind, or longer than the bytes left;
+- a revision whose parent is not the previous revision or, for the first, the trusted
+  base, and a chain whose last revision is not the sealed head;
+- a tree no revision names, a blob no tree names, and a repeated tree or blob;
+- a blob whose size differs from what the trees name, sizes that differ between chain
+  trees, and a size that differs from the same digest in base ancestry;
+- a named tree or blob that neither the chain nor base ancestry holds.
+
+Each identifier is recomputed from staged bytes. Records stage into an `incoming-*`
+directory of the prepared store, and nothing settles into the store until the whole
+chain passes, so a refused chain leaves only base objects; an I/O failure while settling
+can leave some content-addressed objects, which the executor discards with the prepared
+directory. A named tree the chain does not carry is accepted when the prepared store
+holds it; at import that store holds only base ancestry, copied by the preceding `base`
+step into a fresh prepared directory. The sealed head document
+is checked before prepared state opens: `bundle` must be true exactly when the head
+differs from the base.
+
+| bound | value |
+|---|---|
+| `head.bundle` size | 512 MiB |
+| revision record | 80 KiB |
+| tree record | 64 MiB |
+| blob record | 256 MiB |
+| revisions in a chain | 1,000 |
+| blobs in a chain | 100,000 |
+| distinct blobs named by chain trees, checked after each tree | 200,000 |
+
+A revision message must have a JSON encoding equal to its text: `"`, `\` and C0 control
+characters are refused at every revision read, including at `commit` and import, and a
+repository already holding such a message fails closed. The scanner matches bytes and
+the decoder's only record of a message is the raw revision document, so an escaped
+message would hide a registered secret from inspection. The fake therefore has no
+multi-line or quoted messages. `COMMIT_MESSAGE` excludes the same characters, so a
+request message is refused before planning.
+
+Accepted limits, because this provider runs only in tests. A chain repeating or
+alternating large trees makes `decode` and `paths` read and compare trees per revision,
+and each can run to the 30-minute step timeout, which surfaces as a timeout rather than
+a refusal. `paths` can build a
+large union before the executor's capture limit refuses it; refusing earlier would
+duplicate executor limits in the helper. `write_chain` has no cumulative bound: an
+oversized chain is refused at sealing after the candidate's own write. On macOS, which
+has no `prlimit`, peak memory is limited only by the chain and ancestry byte bounds.
+On every OS the inspection source's reachable walk, `new_objects` in `reachable_sync`,
+runs in the executor process without `prlimit` and is bounded only by the same byte
+bounds; it parses one tree at a time and checks cancellation between trees.
+
 A helper killed with SIGKILL can leave one `.tmp-*` file of up to 256 MiB in the
-repository store, which nothing sweeps; SIGTERM removes it.
+repository store, which nothing sweeps, and a `.tmp-*` or `incoming-*` in the prepared
+directory, which the executor removes. An `incoming-*` left by a killed chain import
+holds at most the staged records of one 512 MiB chain, about 102,000 files. SIGTERM
+normally removes them; cleanup is proportional to staged records, so at the
+100,000-blob limit it can exceed the kill grace, and a signal that arrives during
+cleanup can leave `incoming-*` behind. In both cases the executor's removal covers
+the prepared directory.
 
 Each inspection source owns at most one background read operation, with no
 queued backlog. Cancellation stops further work and sets cooperative stop;
@@ -97,7 +168,8 @@ is promised. Waiting yields the event loop and does not replace runtime escalati
 or extend useful-work, step or CI deadlines.
 
 `test_dirvcs_publication_releases_resources` retains two cycles of success,
-scan cancellation and cancellation after publication staging, before copy.
+scan cancellation, cancellation after publication staging, before copy, and
+cancellation after the first staged import record.
 The controlled driver uses the same staging, copy, settlement and cleanup as
 the ordinary helper; it is not evidence of interruption within a kernel copy.
 `test_inspection_context_owns_active_read_until_completion` verifies actual
@@ -111,13 +183,23 @@ published objects back through a real checkout;
 `test_helper_refuses_a_mismatched_repository_pin` cover the pinned destination.
 A branch or commit message containing `{` or `}` is refused before planning,
 because the executor expands placeholders after validation. The fake keeps its own commit message pattern,
-`kora: <node path> #<commit number>` with no whitespace or brace in the node path, and does not apply the Git provider's
-`is_node_path` rule from protocols.md, so a test on the fake can accept a commit message the Git provider refuses.
-Candidate-commit/intermediate-history legs remain #299.
+`kora: <node path> #<commit number>` with no whitespace, brace, `"`, `\` or C0 control character in the node path, and
+does not apply the Git provider's `is_node_path` rule from protocols.md, so a test on the fake can accept a commit
+message the Git provider refuses.
+`test_dirvcs_prepare_refuses_foreign_chains` and
+`test_dirvcs_prepare_accepts_an_ordinary_chain` cover the chain rules;
+`test_chain_header_refuses_each_kind_past_its_bound`,
+`test_open_chain_refuses_past_the_byte_bound`,
+`test_chain_refuses_a_blob_past_its_count_bound`,
+`test_chain_refuses_a_tree_past_the_named_blob_bound` and
+`test_index_data_refuses_past_its_byte_limit` cover bounds the executor's sealing or
+an earlier check would otherwise hide. The decoder-fault legs of
+`test_non_git_inspection_stream_scans_intermediate_history` live in
+`test_directory_decoder_faults_fail_before_authorization`.
 
 ## 2. Fakes never reach a serving process
 
-A process that serves the API or runs a worker never selects a fake runtime, harness or VCS. Each rule below closes one path.
+A process that serves the API or runs a worker never selects a fake runtime, harness, VCS or artifact storage. Each rule below closes one path.
 
 - **Never discovered.** No kora fake is a `kora.provider` entry point. `load_provider` refuses the reserved name `fake` in every protocol, an entry whose module lies within `kora.plugins.<family>.fake`, `kora.testing` or `kora.conformance`, and an implementation defined in that set, all with `provider_reserved` ([provider loading](protocols.md#provider-loading-issue-150)). A third-party distribution therefore cannot register a kora fake as a provider. Its own code can still import a fake or subclass one, because installed providers remain trusted cooperative code (TM-12 of the [threat model](../../docs/threat-model.md)).
 - **The static import rule.** Enforced by `tests/architecture/test_import_layers.py` with a seeded self-test:
@@ -327,7 +409,7 @@ Each case below has one of three values for the fakes: **passes**, protocol evid
 | case | value |
 |---|---|
 | `test_publication_destination_is_trusted`, `test_publication_records_uncommitted_changes_once`, `test_finalize_recovers_prepared_revision` (crashes as `lose_worker`), `test_publication_authorization_is_late` | passes |
-| `test_non_git_inspection_stream_scans_intermediate_history` | Directory uncommitted secret-path and decoder-fault legs are implemented under #298; candidate intermediate-history legs remain #299. |
+| `test_non_git_inspection_stream_scans_intermediate_history` | passes for file, message, symlink and path carriers; decoder-fault legs are in `test_directory_decoder_faults_fail_before_authorization`. |
 | `test_publication_preserves_candidate_commits`, `test_publication_sealing_rejects_mutable_aliases` | passes for the protocol legs with real Git; the local process legs are not applicable |
 | `test_candidate_cannot_forge_runner_journal`, `test_candidate_git_configuration_cannot_execute_in_publisher`, `test_agent_descendants_cannot_access_publication_credentials` | never claimed |
 | `test_required_execution_protection_rejects_local`, `test_harness_launcher_preserves_control_boundary` | not applicable: a `local` case and a real-harness case |
@@ -340,6 +422,8 @@ Each case below has one of three values for the fakes: **passes**, protocol evid
 | `test_compile_exit_then_deploy`, `test_resource_set_digest_vector`, `test_changed_content_same_name_is_new_version`, `test_deploy_rejects_missing_or_mismatched_resource` | passes for their runtime legs; the compile and deploy legs do not depend on the runtime |
 | `test_unprotected_runtime_reports_protection_none` | passes: the fake reports `resource_protection: none` |
 | `test_candidate_cannot_alter_resources` | never claimed |
+
+**Counting artifact storage fake (issue #106):** it passes every artifact-storage conformance case that checks protocol behaviour: references, operations, replay, conflicts, bounded range reads and limits. The physical-closure, crash-durability and file-effect legs of the local provider witness are never claimed. In the command-input contracts it is the storage under test for preparation cases; protection and candidate-isolation cases are never claimed on it.
 
 **Local runtime contracts (issue #123):** the fake runtime passes the cases whose behaviour it mirrors: `test_worker_restart_adopts_live_session` (through `lose_worker`), `test_live_old_worker_keeps_adoption_observational`, `test_unconnected_grant_closed_by_process_exit`, `test_worker_child_effect_keeps_dispatcher_open` (through `spawn_effect`), `test_stale_incarnation_claim_binds_its_own_process` and `test_completed_attempt_never_looks_lost`. It passes the protocol legs of `test_lost_runner_is_reported_not_restarted` (through `lose_runner`), `test_receipt_names_its_scope` and `test_registry_states_and_release`; their file, sweep and fallback legs (leftovers, cleared environments, daemons, unverified members, lock and temporary registry files) are not applicable. Every other case of that table tests a local mechanism (host and pid namespace, process groups, the control channel, the journal files, transfer files, the launcher, ownership checks, the service manager) and is not applicable.
 

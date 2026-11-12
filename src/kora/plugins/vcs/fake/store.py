@@ -4,6 +4,7 @@ import os
 import re
 import signal
 import stat
+import struct
 import sys
 import unicodedata
 from bisect import bisect_left
@@ -14,11 +15,15 @@ from typing import Final, NamedTuple, TypeGuard, cast
 
 KIB: Final[int] = 1024
 MIB: Final[int] = 1024 * KIB
+MAX_REVISIONS: Final[int] = 1000
 MAX_MESSAGE_BYTES: Final[int] = 64 * KIB
 MAX_REVISION_BYTES: Final[int] = 80 * KIB
 MAX_TREE_ENTRIES: Final[int] = 50_000
 MAX_TREE_BYTES: Final[int] = 64 * MIB
 MAX_BLOB_BYTES: Final[int] = 256 * MIB
+MAX_CHAIN_BYTES: Final[int] = 512 * MIB
+MAX_CHAIN_BLOBS: Final[int] = 100_000
+MAX_NAMED_BLOBS: Final[int] = 200_000
 MAX_PATH_BYTES: Final[int] = 4096
 MAX_COMPONENT_BYTES: Final[int] = 255
 MAX_SYMLINK_BYTES: Final[int] = 4096
@@ -34,6 +39,16 @@ DIRECTORY_FLAGS: Final[int] = (
 NEW_FLAGS: Final[int] = (
     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 )
+RECORD_HEADER: Final[struct.Struct] = struct.Struct(">cQ")
+REVISION_KIND: Final[bytes] = b"R"
+TREE_KIND: Final[bytes] = b"T"
+BLOB_KIND: Final[bytes] = b"B"
+RECORD_BOUNDS: Final[dict[bytes, int]] = {
+    REVISION_KIND: MAX_REVISION_BYTES,
+    TREE_KIND: MAX_TREE_BYTES,
+    BLOB_KIND: MAX_BLOB_BYTES,
+}
+RECORD_ORDER: Final[tuple[bytes, ...]] = (REVISION_KIND, TREE_KIND, BLOB_KIND)
 REGULAR: Final[str] = "regular"
 EXECUTABLE: Final[str] = "executable"
 SYMLINK: Final[str] = "symlink"
@@ -49,7 +64,7 @@ CHECKOUT_NAME: Final[str] = "checkout.json"
 REFUSED: Final[int] = 3
 FAILED: Final[int] = 4
 
-MAX_PREPARED_REVISIONS: Final[int] = 1
+MAX_PREPARED_REVISIONS: Final[int] = MAX_REVISIONS + 1
 MAX_ANCESTRY: Final[int] = 10_000
 MAX_ANCESTRY_TREE_BYTES: Final[int] = 256 * MIB
 MAX_INDEX_RECORDS: Final[int] = 100_000
@@ -64,7 +79,9 @@ PREPARED_STORE: Final[str] = "store"
 PREPARED_NAME: Final[str] = "prepared"
 INDEX_NAME: Final[str] = "index.jsonl"
 PREPARED_DIGEST_NAME: Final[str] = "prepared_digest"
-COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(r"kora: [^\s{}]+ #[1-9][0-9]*")
+COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(
+    r'kora: [^\s{}"\\\x00-\x1f]+ #[1-9][0-9]*'
+)
 
 
 class Refused(Exception):
@@ -226,7 +243,9 @@ def tree_document(entries: Sequence[Entry]) -> bytes:
 
 def is_message(message: object) -> TypeGuard[str]:
     return (
-        isinstance(message, str) and len(message.encode("utf-8")) <= MAX_MESSAGE_BYTES
+        isinstance(message, str)
+        and len(message.encode("utf-8")) <= MAX_MESSAGE_BYTES
+        and json.dumps(message, ensure_ascii=False) == f'"{message}"'
     )
 
 
@@ -769,10 +788,10 @@ def new_objects(
 ) -> tuple[list[Revision], set[str]]:
     revisions = new_revisions(store, prepared, base, MAX_PREPARED_REVISIONS, cancelled)
     named: set[str] = set()
-    for revision in revisions:
+    for tree in dict.fromkeys(revision.tree for revision in revisions):
         if cancelled():
             raise Failed
-        named.update(entry.sha256 for entry in store.tree(revision.tree))
+        named.update(entry.sha256 for entry in store.tree(tree))
     held = base_sizes(store, ancestry(store, base, cancelled), named, cancelled)
     return revisions, named - held.keys()
 
@@ -818,6 +837,62 @@ def working_files(root: int) -> Iterator[str]:
             os.close(directory)
 
 
+def stored_blob(root: int, blobs: int, path: str, known: set[str]) -> Entry:
+    *directories, name = path.split("/")
+    parent = made_parent(root, directories)
+    try:
+        status = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if stat.S_ISLNK(status.st_mode):
+            target = os.readlink(name, dir_fd=parent).encode("utf-8", "surrogateescape")
+            sha = digest_of(target)
+            if sha not in known:
+                put_bytes(blobs, sha, target)
+            return Entry(path, SYMLINK, len(target), sha)
+        descriptor = open_regular(parent, name)
+    finally:
+        os.close(parent)
+    try:
+        scratch = scratch_file(blobs)
+        sha, size = pump(descriptor, scratch.descriptor, MAX_BLOB_BYTES)
+    finally:
+        os.close(descriptor)
+    if sha in known:
+        discard(scratch)
+    else:
+        settle(scratch, blobs, sha, sha)
+    mode = EXECUTABLE if status.st_mode & stat.S_IXUSR else REGULAR
+    return Entry(path, mode, size, sha)
+
+
+def commit(message: str) -> None:
+    if not is_message(message):
+        raise Refused
+    opened = Opened()
+    try:
+        root = opened.directory(None, ".")
+        store_root = descend(root, CANDIDATE_STORE, opened)
+        candidate = opened.store(store_root)
+        head = checked_id(read_text_file(store_root, HEAD_NAME))
+        known = {
+            entry.sha256 for entry in candidate.tree(checkout_record(store_root)[1])
+        }
+        entries = [
+            stored_blob(root, candidate.blobs, path, known)
+            for path in working_files(root)
+        ]
+        tree_data = tree_document(entries)
+        tree = digest_of(tree_data)
+        put_bytes(candidate.trees, tree, tree_data)
+        document = revision_document(head, message, tree)
+        identifier = digest_of(document)
+        put_bytes(candidate.revisions, identifier, document)
+        os.unlink(HEAD_NAME, dir_fd=store_root)
+        put_bytes(store_root, HEAD_NAME, identifier.encode("ascii"))
+    finally:
+        opened.close()
+    emit(identifier)
+
+
 def checkout_record(store_root: int) -> tuple[str, str]:
     document: object = json.loads(
         read_limited(store_root, CHECKOUT_NAME, MAX_CONTROL_BYTES)
@@ -826,6 +901,51 @@ def checkout_record(store_root: int) -> tuple[str, str]:
         raise Refused
     fields = cast("dict[str, object]", document)
     return checked_id(fields.get("revision")), checked_id(fields.get("tree"))
+
+
+def record(descriptor: int, kind: bytes, data: bytes) -> None:
+    write_all(descriptor, RECORD_HEADER.pack(kind, len(data)))
+    write_all(descriptor, data)
+
+
+def blob_record(descriptor: int, blobs: int, sha: str) -> None:
+    source = open_regular(blobs, sha)
+    try:
+        size = os.fstat(source).st_size
+        write_all(descriptor, RECORD_HEADER.pack(BLOB_KIND, size))
+        pump(source, descriptor, size, size)
+    finally:
+        os.close(source)
+
+
+def write_chain(
+    candidate: Store, head: str, checkout: str, checkout_tree: str, output: int
+) -> None:
+    revisions = new_revisions(candidate, head, checkout, MAX_REVISIONS)
+    known = {entry.sha256 for entry in candidate.tree(checkout_tree)}
+    trees = list(
+        dict.fromkeys(
+            revision.tree for revision in revisions if revision.tree != checkout_tree
+        )
+    )
+    scratch = scratch_file(output)
+    for revision in revisions:
+        record(
+            scratch.descriptor,
+            REVISION_KIND,
+            read_limited(candidate.revisions, revision.identifier, MAX_REVISION_BYTES),
+        )
+    blobs: list[str] = []
+    for tree in trees:
+        data = candidate.tree_bytes(tree)
+        record(scratch.descriptor, TREE_KIND, data)
+        for entry in tree_of(data):
+            if entry.sha256 not in known:
+                known.add(entry.sha256)
+                blobs.append(entry.sha256)
+    for sha in blobs:
+        blob_record(scratch.descriptor, candidate.blobs, sha)
+    settle(scratch, output, "head.bundle", None)
 
 
 def fresh_output(root: int, path: str, opened: Opened) -> int:
@@ -851,10 +971,15 @@ def export(checkout: str, out: str) -> None:
     try:
         root = opened.directory(None, ".")
         store_root = descend(root, CANDIDATE_STORE, opened)
+        candidate = opened.store(store_root)
         head = checked_id(read_text_file(store_root, HEAD_NAME))
-        if checkout_record(store_root)[0] != checkout or head != checkout:
+        recorded, checkout_tree = checkout_record(store_root)
+        if recorded != checkout:
             raise Refused
         output = fresh_output(root, out, opened)
+        bundle = head != checkout
+        if bundle:
+            write_chain(candidate, head, checkout, checkout_tree, output)
         scratch = scratch_file(output)
         size = 0
         for count, path in enumerate(working_files(root), 1):
@@ -869,7 +994,7 @@ def export(checkout: str, out: str) -> None:
         put_bytes(
             output,
             "head.json",
-            json.dumps({"head": head, "bundle": False}).encode("ascii"),
+            json.dumps({"head": head, "bundle": bundle}).encode("ascii"),
         )
     finally:
         opened.close()
@@ -915,6 +1040,172 @@ def read_head_document(sealed: int) -> tuple[str, bool]:
     if not isinstance(bundle, bool):
         raise Refused
     return checked_id(fields.get("head")), bundle
+
+
+class Chain:
+    def __init__(self) -> None:
+        self.revisions: list[Revision] = []
+        self.revision_files: dict[str, Scratch] = {}
+        self.named_trees: set[str] = set()
+        self.trees: dict[str, Scratch] = {}
+        self.blobs: dict[str, Scratch] = {}
+        self.named: dict[str, int] = {}
+
+
+class ChainReader:
+    def __init__(self, descriptor: int, size: int, staging: int) -> None:
+        self.descriptor = descriptor
+        self.remaining = size
+        self.staging = staging
+        self.section = REVISION_KIND
+
+    def header(self) -> tuple[bytes, int] | None:
+        if self.remaining == 0:
+            return None
+        if self.remaining < RECORD_HEADER.size:
+            raise Refused
+        data = os.read(self.descriptor, RECORD_HEADER.size)
+        if len(data) != RECORD_HEADER.size:
+            raise Refused
+        self.remaining -= RECORD_HEADER.size
+        kind, size = cast("tuple[bytes, int]", RECORD_HEADER.unpack(data))
+        bound = RECORD_BOUNDS.get(kind)
+        if bound is None or size > bound or size > self.remaining:
+            raise Refused
+        if RECORD_ORDER.index(kind) < RECORD_ORDER.index(self.section):
+            raise Refused
+        self.section = kind
+        return kind, size
+
+    def staged(self, size: int) -> tuple[Scratch, str]:
+        scratch = scratch_file(self.staging)
+        digest, _ = pump(self.descriptor, scratch.descriptor, size, size)
+        scratch.close()
+        self.remaining -= size
+        return scratch, digest
+
+
+def add_revision(chain: Chain, scratch: Scratch, base: str) -> None:
+    revision = revision_of(
+        read_limited(scratch.directory, scratch.name, MAX_REVISION_BYTES)
+    )
+    expected = chain.revisions[-1].identifier if chain.revisions else base
+    if revision.parent != expected or len(chain.revisions) >= MAX_REVISIONS:
+        raise Refused
+    chain.revisions.append(revision)
+    chain.named_trees.add(revision.tree)
+    chain.revision_files[revision.identifier] = scratch
+
+
+def add_tree(chain: Chain, scratch: Scratch, tree: str) -> None:
+    if tree in chain.trees or tree not in chain.named_trees:
+        raise Refused
+    chain.trees[tree] = scratch
+    for entry in tree_of(read_limited(scratch.directory, scratch.name, MAX_TREE_BYTES)):
+        if chain.named.setdefault(entry.sha256, entry.size) != entry.size:
+            raise Refused
+    if len(chain.named) > MAX_NAMED_BLOBS:
+        raise Refused
+
+
+def add_blob(chain: Chain, scratch: Scratch, sha: str, size: int) -> None:
+    if sha in chain.blobs or chain.named.get(sha) != size:
+        raise Refused
+    if len(chain.blobs) >= MAX_CHAIN_BLOBS:
+        raise Refused
+    chain.blobs[sha] = scratch
+
+
+def read_chain(reader: ChainReader, base: str) -> Generator[Scratch, None, Chain]:
+    chain = Chain()
+    while (header := reader.header()) is not None:
+        kind, size = header
+        scratch, digest = reader.staged(size)
+        yield scratch
+        if kind == REVISION_KIND:
+            add_revision(chain, scratch, base)
+        elif kind == TREE_KIND:
+            add_tree(chain, scratch, digest)
+        else:
+            add_blob(chain, scratch, digest, size)
+    return chain
+
+
+def check_chain(chain: Chain, head: str, prepared: Store, base: str) -> set[str]:
+    if not chain.revisions or chain.revisions[-1].identifier != head:
+        raise Refused
+    if any(
+        not prepared.has(prepared.trees, tree)
+        for tree in chain.named_trees - chain.trees.keys()
+    ):
+        raise Refused
+    held = base_sizes(prepared, ancestry(prepared, base), set(chain.named))
+    for sha, size in chain.named.items():
+        if sha in held:
+            if held[sha] != size:
+                raise Refused
+        elif sha not in chain.blobs:
+            raise Refused
+    return set(held)
+
+
+def open_chain(sealed: int) -> tuple[int, int]:
+    descriptor = open_regular(sealed, "head.bundle")
+    size = os.fstat(descriptor).st_size
+    if size > MAX_CHAIN_BYTES:
+        os.close(descriptor)
+        raise Refused
+    return descriptor, size
+
+
+def settle_chain(chain: Chain, prepared: Store, held: set[str]) -> None:
+    for tree, scratch in chain.trees.items():
+        settle(scratch, prepared.trees, tree, tree)
+    for sha, scratch in chain.blobs.items():
+        if sha not in held:
+            settle(scratch, prepared.blobs, sha, sha)
+    for revision in chain.revisions:
+        scratch = chain.revision_files[revision.identifier]
+        settle(scratch, prepared.revisions, revision.identifier, revision.identifier)
+
+
+def staged_chain(
+    opened: Opened, sealed: int, prepared: Store, head: str, base: str
+) -> Generator[Scratch, None, None]:
+    descriptor, size = open_chain(sealed)
+    opened.descriptors.append(descriptor)
+    name = f"incoming-{os.urandom(8).hex()}"
+    try:
+        staging = opened.directory(prepared.root, name, create=True)
+        chain = yield from read_chain(ChainReader(descriptor, size, staging), base)
+        settle_chain(chain, prepared, check_chain(chain, head, prepared, base))
+    finally:
+        discard_all()
+        try:
+            os.rmdir(name, dir_fd=prepared.root)
+        except FileNotFoundError:
+            pass
+
+
+def importation(input_location: str, base: str) -> Generator[Scratch, None, None]:
+    opened = Opened()
+    try:
+        sealed = opened.directory(None, input_location)
+        head, bundle = read_head_document(sealed)
+        if bundle == (head == base):
+            raise Refused
+        prepared = opened_prepared(opened)
+        if bundle:
+            yield from staged_chain(opened, sealed, prepared, head, base)
+        put_bytes(prepared.root, HEAD_NAME, head.encode("ascii"))
+    finally:
+        opened.close()
+
+
+def import_chain(input_location: str, base: str) -> None:
+    with closing(importation(input_location, base)) as stages:
+        for _ in stages:
+            continue
 
 
 class SealedRecord(NamedTuple):
@@ -1044,19 +1335,16 @@ def index_line(
     )
 
 
-def index_lines(store: Store, base: str, prepared: str) -> list[str]:
+def index_records(store: Store, base: str, prepared: str) -> Iterator[str]:
     _, fresh = new_objects(store, base, prepared)
-    lines: list[str] = []
     seen: set[tuple[str, str]] = set()
     for revision, introduced, _ in history(store, base, prepared):
-        lines.append(
-            index_line(
-                revision.identifier,
-                None,
-                "revision_metadata",
-                revision.identifier,
-                revision.size,
-            )
+        yield index_line(
+            revision.identifier,
+            None,
+            "revision_metadata",
+            revision.identifier,
+            revision.size,
         )
         for entry in introduced:
             key = (entry.sha256, entry.path)
@@ -1064,24 +1352,28 @@ def index_lines(store: Store, base: str, prepared: str) -> list[str]:
                 continue
             seen.add(key)
             kind = "symlink" if entry.mode == SYMLINK else "file"
-            lines.append(
-                index_line(
-                    revision.identifier, entry.path, kind, entry.sha256, entry.size
-                )
+            yield index_line(
+                revision.identifier, entry.path, kind, entry.sha256, entry.size
             )
-        if len(lines) > MAX_INDEX_RECORDS:
+
+
+def index_data(store: Store, base: str, prepared: str, limit: int) -> bytes:
+    lines: list[bytes] = []
+    size = 0
+    for line in index_records(store, base, prepared):
+        data = (line + "\n").encode("utf-8")
+        size += len(data)
+        if size > limit or len(lines) >= MAX_INDEX_RECORDS:
             raise Refused
-    return lines
+        lines.append(data)
+    return b"".join(lines)
 
 
 def decode(base: str, prepared: str) -> None:
     opened = Opened()
     try:
         root = opened.directory(None, ".")
-        lines = index_lines(opened_prepared(opened), base, prepared)
-        data = "".join(line + "\n" for line in lines).encode("utf-8")
-        if len(data) > MAX_INDEX_BYTES:
-            raise Refused
+        data = index_data(opened_prepared(opened), base, prepared, MAX_INDEX_BYTES)
         put_bytes(root, INDEX_NAME, data)
         prepared_digest = read_text_file(root, PREPARED_DIGEST_NAME)
     finally:
@@ -1192,18 +1484,6 @@ def copy_object(source: int, target: int, name: str, limit: int) -> None:
         pass
 
 
-def import_base(input_location: str, base: str) -> None:
-    opened = Opened()
-    try:
-        sealed = opened.directory(None, input_location)
-        if read_head_document(sealed) != (base, False):
-            raise Refused
-        prepared = opened_prepared(opened)
-        put_bytes(prepared.root, HEAD_NAME, base.encode("ascii"))
-    finally:
-        opened.close()
-
-
 class Arguments:
     def __init__(self, options: dict[str, str], revisions: list[str]) -> None:
         self.options = options
@@ -1247,6 +1527,7 @@ COMMANDS: Final[dict[str, tuple[tuple[str, ...], Handler]]] = {
         ("repository", "base", "revision"),
         lambda a: changed(a.text("repository"), a.identifier("base"), a.revision()),
     ),
+    "commit": (("message",), lambda a: commit(a.text("message"))),
     "export": (
         ("checkout", "out"),
         lambda a: export(a.identifier("checkout"), a.text("out")),
@@ -1261,7 +1542,7 @@ COMMANDS: Final[dict[str, tuple[tuple[str, ...], Handler]]] = {
     ),
     "import": (
         ("input", "base"),
-        lambda a: import_base(a.text("input"), a.identifier("base")),
+        lambda a: import_chain(a.text("input"), a.identifier("base")),
     ),
     "build": (
         ("input", "base", "message"),

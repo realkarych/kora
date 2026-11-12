@@ -1,5 +1,6 @@
 import json
 import threading
+from collections.abc import Callable
 from typing import Annotated, Final, NoReturn, Protocol, cast, final
 
 from pydantic import PlainSerializer, PlainValidator, SerializationInfo, ValidationInfo
@@ -11,6 +12,7 @@ from kora.observability import (
     SecretAdmissionError,
     SecretRegistration,
 )
+from kora.observability.redaction import StreamMasker
 
 RENDERED: Final[str] = "SecretValue(<redacted>)"
 TRANSFER_SCOPE_KEY: Final[str] = "secret_scope"
@@ -92,6 +94,14 @@ class SecretScope:
     def registered_count(self) -> int:
         with self._lock:
             return len(self._registrations)
+
+    def stream_masker(self, emit: Callable[[str], None]) -> StreamMasker:
+        diagnostics = self._diagnostics
+        if diagnostics is None:
+            raise SecretAdmissionError("diagnostics are not configured")
+        if self._released:
+            raise SecretAdmissionError("the secret scope is released")
+        return StreamMasker(diagnostics.registry, emit)
 
 
 def admitted_registration(

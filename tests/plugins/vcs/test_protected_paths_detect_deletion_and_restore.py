@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -19,6 +19,7 @@ from kora.ir import VcsRef
 from kora.ir.globs import PathGlob
 from kora.ir.node import ErrorClass
 from kora.protocols.vcs import CheckoutRequest
+from tests.plugins.vcs.dirvcs_support import DirWorld, make_dir_world
 from tests.plugins.vcs.git_support import (
     BARRIER_SECONDS,
     REPO,
@@ -30,11 +31,11 @@ from tests.plugins.vcs.git_support import (
 PROTECTED: tuple[str, ...] = ("keep", "run.sh")
 
 
-def deleted(world: World, checkout: Checkout) -> None:
+def deleted(world: World | DirWorld, checkout: Checkout) -> None:
     world.commit(checkout, {"keep/old.txt": None}, "delete a protected file")
 
 
-def restored(world: World, checkout: Checkout) -> None:
+def restored(world: World | DirWorld, checkout: Checkout) -> None:
     world.commit(checkout, {"run.sh": "#!/bin/sh\necho changed\n"}, "change")
     world.commit(checkout, {"run.sh": "#!/bin/sh\n"}, "restore")
 
@@ -52,14 +53,46 @@ def merged(world: World, checkout: Checkout) -> None:
     world.commit(checkout, {"keep/old.txt": "old\n"}, "restore after the merge")
 
 
-@pytest.mark.parametrize("history", [deleted, restored, merged])
+def on_git(
+    history: Callable[[World, Checkout], None],
+) -> Callable[[Path, Capture], tuple[World, Checkout]]:
+    def built(root: Path, capture: Capture) -> tuple[World, Checkout]:
+        world = make_world(root, capture)
+        checkout = world.checkout()
+        history(world, checkout)
+        return world, checkout
+
+    return built
+
+
+def on_directory(
+    history: Callable[[DirWorld, Checkout], None],
+) -> Callable[[Path, Capture], tuple[DirWorld, Checkout]]:
+    def built(root: Path, capture: Capture) -> tuple[DirWorld, Checkout]:
+        world = make_dir_world(root, capture)
+        checkout = world.checkout()
+        history(world, checkout)
+        return world, checkout
+
+    return built
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param(on_git(deleted), id="git-deleted"),
+        pytest.param(on_git(restored), id="git-restored"),
+        pytest.param(on_git(merged), id="git-merged"),
+        pytest.param(on_directory(deleted), id="directory-deleted"),
+        pytest.param(on_directory(restored), id="directory-restored"),
+    ],
+)
 def test_protected_paths_detect_deletion_and_restore(
-    tmp_path: Path, kora_capture: Capture, history: object
+    tmp_path: Path,
+    kora_capture: Capture,
+    scenario: Callable[[Path, Capture], tuple[World | DirWorld, Checkout]],
 ) -> None:
-    world = make_world(tmp_path, kora_capture)
-    checkout = world.checkout()
-    assert callable(history)
-    history(world, checkout)
+    world, checkout = scenario(tmp_path, kora_capture)
 
     with pytest.raises(ExecutorError) as raised:
         world.prepare(checkout, protected=PROTECTED)

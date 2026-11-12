@@ -2,6 +2,8 @@
 
 Status: Reviewed by the project owner on 2026-10-16. Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
+Command-input amendment dated 2026-11-11 (NFR-3.1): input preparation time under [issue #106](https://github.com/realkarych/kora/issues/106) is attributed separately, like runtime start-up. The project owner [decided](https://github.com/realkarych/kora/issues/106#issuecomment-6776723836) the input content encoding, the stored request-input copy and the 256 MiB per-attempt budget on 2026-11-10 and answered the remaining questions of the plan on 2026-11-11 ([answers](https://github.com/realkarych/kora/issues/106#issuecomment-6784178589)); the project owner [approved](https://github.com/realkarych/kora/issues/106#issuecomment-6803062727) the [plan](https://github.com/realkarych/kora/issues/106#issuecomment-6779253038) on 2026-11-11. Co-owner `klukashka` reviewed this wording line by line on 2026-11-12.
+
 Run-admission amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line owner review. See [ADR-0020](../decisions/0020-execution-capacity-and-bounded-run-acceptance.md).
 
 Immutable-history amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line owner review. See [ADR-0018](../decisions/0018-immutable-attempt-history.md).
@@ -42,7 +44,7 @@ CEL amendment dated 2026-10-19: decisions taken and implementation plan approved
 
 ## 3. Performance
 
-- **NFR-3.1 [MVP]** Scheduling latency from "dependencies satisfied" to "submitted to runtime" under 5 seconds at MVP scale (tens of concurrent nodes); runtime start-up latency (container start, checkout) is reported separately so it is attributable.
+- **NFR-3.1 [MVP]** Scheduling latency from "dependencies satisfied" to "submitted to runtime" under 5 seconds at MVP scale (tens of concurrent nodes); runtime start-up latency (container start, checkout) is reported separately so it is attributable. Command-input preparation (issue #106) is reported separately in the same way and excluded from this measurement.
 - **NFR-3.2 [MVP]** Session event streams are consumed incrementally (the normalised event stream is relayed as it is produced), not buffered until session end, so logs and cost counters are near-real-time and budgets can be enforced mid-session.
 - **NFR-3.3 [MVP]** The IR for a graph with 1,000 nodes (after fan-out materialisation) validates and schedules without pathological cost; topological evaluation is incremental per state change, not a full-graph rescan.
 

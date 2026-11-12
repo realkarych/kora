@@ -343,6 +343,12 @@ class ProcessLauncher(StepLauncher):
         self.kill_grace_ns = kill_grace_ns
         self.eof_bound_ns = eof_bound_ns
 
+    def started(self, pid: int) -> None:
+        return None
+
+    def collected(self, pid: int) -> None:
+        return None
+
     async def run(self, spec: LaunchSpec) -> StepOutcome:
         child = ChildProcess(
             asyncio.get_running_loop(),
@@ -353,6 +359,7 @@ class ProcessLauncher(StepLauncher):
             spec.stdout_limit,
             spec.stderr_limit,
         )
+        self.started(child.pid)
         try:
             return await self._supervise(child, spec.timeout_ns)
         except asyncio.CancelledError as error:
@@ -365,8 +372,11 @@ class ProcessLauncher(StepLauncher):
                 child.kill_now()
             raise
         finally:
-            child.kill_now()
-            child.close()
+            try:
+                child.kill_now()
+                child.close()
+            finally:
+                self.collected(child.pid)
 
     async def _supervise(self, child: ChildProcess, timeout_ns: int) -> StepOutcome:
         ending = Ending.EXITED

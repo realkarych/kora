@@ -119,6 +119,9 @@ class ChildReaper(Protocol):
     def watch(self, pid: int) -> ChildWatch: ...
 
 
+DESCRIPTORS_READY = b"descriptors_ready"
+
+
 class KernelChildReaper:
     def reap(self, pid: int) -> int | None:
         reaped, status = os.waitpid(pid, os.WNOHANG)
@@ -162,6 +165,7 @@ class IOHelper:
             await self.channel.read_record(deadline_ns, 1048576)
         )
         if result.descriptor_count:
+            await self.channel.write_frame(DESCRIPTORS_READY, deadline_ns)
             await self.receive_descriptors(result.descriptor_count, deadline_ns)
             if isinstance(mutation, CreateListenersMutation):
                 await self.channel.write_frame(b"listeners_received", deadline_ns)
@@ -655,6 +659,8 @@ async def respond_mutation(
             result = MutationResult(reason=LifetimeReason.JOURNAL_UNAVAILABLE)
         await channel.write_record(result.model_dump_json().encode(), deadline)
         if returned:
+            if await channel.read_frame(deadline, 32) != DESCRIPTORS_READY:
+                raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
             endpoint.setblocking(True)
             endpoint.sendmsg(
                 [b"d"],

@@ -298,7 +298,7 @@ graph:
             candidate: { type: dwh_core/Candidate }
           limits: { timeout: "5m" }
           config:
-            cmd: ["python3", "{resource_root}/pack_candidate.py", "--change=.kora/inputs/change.json", "--metrics=.kora/inputs/metrics.json", "--hypothesis=.kora/inputs/hypothesis.json", "--out=candidate.json"]
+            cmd: ["python3", "{resource_root}/pack_candidate.py", "--change={input_root}/change.json", "--metrics={input_root}/metrics.json", "--hypothesis={input_root}/hypothesis.json", "--out=candidate.json"]
             resources: [{ name: pack_candidate.py, sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000002", size: 2048, executable: false }]
             resource_set_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000003"
             output_file: candidate.json
@@ -400,7 +400,7 @@ graph:
         best: { type: dwh_core/Candidate }
       limits: { timeout: "5m" }
       config:
-        cmd: ["python3", "{resource_root}/select_best.py", "--candidates=.kora/inputs/candidates.json", "--baseline=.kora/inputs/baseline.json", "--min-gain-pct=15", "--out=best.json"]
+        cmd: ["python3", "{resource_root}/select_best.py", "--candidates={input_root}/candidates.json", "--baseline={input_root}/baseline.json", "--min-gain-pct=15", "--out=best.json"]
         resources: [{ name: select_best.py, sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000004", size: 3072, executable: false }]
         resource_set_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000005"
         output_file: best.json

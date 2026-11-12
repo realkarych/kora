@@ -40,7 +40,7 @@ from kora.plugins.runtime.local.channel import (
     read_delivery,
     read_error_envelope,
 )
-from kora.plugins.runtime.local.command import INCOMING, CommandSession, OpenedOutput
+from kora.plugins.runtime.local.command import INCOMING
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.plugins.runtime.local.control import (
     attested,
@@ -57,6 +57,7 @@ from kora.plugins.runtime.local.spool import (
     SpoolSweepOutcome,
     sweep_spools,
 )
+from kora.plugins.runtime.local.workload_session import OpenedOutput
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
@@ -100,7 +101,7 @@ from tests.plugins.runtime.local.test_command import (
     release_commands,
     running_pid,
 )
-from tests.support.local_delivery import delivery_server
+from tests.support.local_delivery import ReapedSession, delivery_server
 from tests.support.local_peers import identity_of, until
 from tests.support.local_runners import (
     exited_within,
@@ -575,12 +576,14 @@ async def test_start_waits_for_transfer_slot(
     assert candidate_exists is False
     indices = [index for index, _ in records]
     assert indices == list(range(indices[0], indices[0] + len(indices)))
+    kinds = [kind for _, kind in records]
+    through_exit = kinds[: kinds.index("command_exited") + 1]
     suffix = ["transfer.materialised"]
     if replay:
         assert rejected is not None
         assert rejected.code == "integrity_error"
         suffix.append("transfer.rejected")
-    assert [kind for _, kind in records][-len(suffix) - 2 :] == [
+    assert through_exit[-len(suffix) - 2 :] == [
         *suffix,
         "runner.candidate_started",
         "command_exited",
@@ -666,7 +669,7 @@ async def test_disconnected_transfer_closes_exact_incoming_descriptor(
     anchor = open_local_directory(attempt)
     clock = SystemClock()
     scope = SecretScope(kora_capture.diagnostics)
-    command = CommandSession(
+    command = ReapedSession(
         anchor,
         str(attempt / "candidate"),
         scope,
@@ -1994,7 +1997,7 @@ def test_concurrent_spool_close_releases_one_lease(tmp_path: Path) -> None:
             root.close()
 
 
-class HoldingOutput(CommandSession):
+class HoldingOutput(ReapedSession):
     def __init__(
         self,
         attempt: DirectoryAnchor,
@@ -2109,6 +2112,7 @@ async def test_output_declaration_uses_the_message_deadline(tmp_path: Path) -> N
                 message_deadline,
                 None,
                 lambda: None,
+                whole=True,
             )
         )
         await clock.waiting.wait()
@@ -2166,6 +2170,7 @@ async def test_invalid_output_trailer_returns_no_bytes(tmp_path: Path) -> None:
                 clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
                 None,
                 lambda: None,
+                whole=True,
             )
         )
         await sender
@@ -2484,10 +2489,12 @@ async def test_observational_attach_cannot_pull_output(tmp_path: Path) -> None:
                         kernel_source(NativeIdentityReader()),
                         executor,
                         clock,
-                        "pull-1",
                         descriptor,
-                        "payload",
+                        OutputRequest(
+                            op="transfer_out", request_id="pull-1", name="payload"
+                        ),
                         clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
+                        whole=True,
                         close_spool=lambda: None,
                     )
                 )

@@ -7,13 +7,17 @@ from kora.plugins.vcs.fake import store
 
 
 def main() -> None:
-    signal.signal(signal.SIGTERM, store.terminate)
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     _, arguments = store.parsed_arguments(sys.argv[2:])
-    stages = store.publication(
-        arguments.text("repository"),
-        arguments.branch(),
-        arguments.identifier("base"),
-        arguments.identifier("prepared"),
+    stages = (
+        store.importation(arguments.text("input"), arguments.identifier("base"))
+        if sys.argv[2] == "import"
+        else store.publication(
+            arguments.text("repository"),
+            arguments.branch(),
+            arguments.identifier("base"),
+            arguments.identifier("prepared"),
+        )
     )
     with closing(stages):
         for _ in stages:
@@ -22,7 +26,8 @@ def main() -> None:
                 os.write(descriptor, b"ready")
             finally:
                 os.close(descriptor)
-            signal.pause()
+            signal.sigwait({signal.SIGTERM})
+            raise SystemExit(143)
 
 
 if __name__ == "__main__":

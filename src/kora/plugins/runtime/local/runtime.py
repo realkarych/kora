@@ -27,6 +27,10 @@ from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import (
     MESSAGE_PROGRESS_NS,
     SECTION_FRAME_BYTES,
+    LogName,
+    LogRequest,
+    OutputRequest,
+    checked_log,
     checked_output_name,
     delivery_error,
     transfer_cutoff,
@@ -196,7 +200,8 @@ T = TypeVar("T")
 
 
 class OutputPull:
-    def __init__(self) -> None:
+    def __init__(self, gated: bool) -> None:
+        self.gated = gated
         self.lease: SpoolLease | None = None
         self.pending: asyncio.Task[object] | None = None
         self.uncertain = False
@@ -838,6 +843,7 @@ class LocalRuntime:
         clock: Clock,
         expected: Running | None = None,
         captured: int | None = None,
+        gated: bool = True,
     ) -> Running:
         if self._closing is not None:
             raise refusal("runtime_closed")
@@ -852,8 +858,9 @@ class LocalRuntime:
             or entry.socket_path != expected.socket_path
         ):
             raise delivery_error("submitter_superseded")
-        if key in self._expired_outputs or output_deadline_reached(
-            entry, clock, captured
+        if gated and (
+            key in self._expired_outputs
+            or output_deadline_reached(entry, clock, captured)
         ):
             raise delivery_error("deadline_expired")
         return entry
@@ -868,7 +875,9 @@ class LocalRuntime:
     ) -> Running:
         try:
             return await self.executor.run(
-                lambda: self._output_entry(key, ctx.clock, expected, captured),
+                lambda: self._output_entry(
+                    key, ctx.clock, expected, captured, pull.gated
+                ),
                 after_uncertain_submission=pull.dispose,
             )
         except KoraProtocolError as error:
@@ -898,13 +907,42 @@ class LocalRuntime:
     def transfer_out(
         self, handle: Handle, name: str, ctx: ProtocolContext
     ) -> AsyncGenerator[bytes]:
-        return self._transfer_out(handle, checked_output_name(name), ctx)
+        checked = checked_output_name(name)
+        return self._transfer_out(
+            handle,
+            lambda request_id: OutputRequest(
+                op="transfer_out", request_id=request_id, name=checked
+            ),
+            ctx,
+            whole=True,
+            gated=True,
+        )
+
+    def read_log(
+        self, handle: Handle, which: LogName, from_offset: int, ctx: ProtocolContext
+    ) -> AsyncGenerator[bytes]:
+        source = checked_log(which, from_offset)
+        return self._transfer_out(
+            handle,
+            lambda request_id: LogRequest(
+                op="read_log",
+                request_id=request_id,
+                which=source.which,
+                from_offset=source.from_offset,
+            ),
+            ctx,
+            whole=source.from_offset == 0,
+            gated=False,
+        )
 
     async def _transfer_out(
         self,
         handle: Handle,
-        name: str,
+        header: Callable[[str], OutputRequest | LogRequest],
         ctx: ProtocolContext,
+        *,
+        whole: bool,
+        gated: bool,
     ) -> AsyncGenerator[bytes]:
         key = self.key_of(handle, ctx)
         if self._closing is not None:
@@ -912,22 +950,22 @@ class LocalRuntime:
         if len(self._output_pulls) >= OUTPUT_PULLS:
             raise delivery_error("workload_busy")
         deadline = ctx.clock.monotonic_ns() + MESSAGE_PROGRESS_NS
-        pull = OutputPull()
+        pull = OutputPull(gated)
         self._output_pulls.add(pull)
         try:
             entry, size, captured = await pull.run(
-                self._fetch_output(key, name, pull, ctx, deadline),
+                self._fetch_output(key, header, whole, pull, ctx, deadline),
                 ctx.clock,
                 deadline,
             )
 
             def read(length: int, offset: int) -> bytes:
-                self._output_entry(key, ctx.clock, entry, captured)
+                self._output_entry(key, ctx.clock, entry, captured, pull.gated)
                 try:
                     chunk = os.pread(pull.descriptor(), length, offset)
                 except OSError:
                     raise refusal("runner_unreachable") from None
-                self._output_entry(key, ctx.clock, entry, captured)
+                self._output_entry(key, ctx.clock, entry, captured, pull.gated)
                 return chunk
 
             if self._closing is not None:
@@ -973,7 +1011,8 @@ class LocalRuntime:
     async def _fetch_output(
         self,
         key: AttemptKey,
-        name: str,
+        header: Callable[[str], OutputRequest | LogRequest],
+        whole: bool,
         pull: OutputPull,
         ctx: ProtocolContext,
         deadline: int,
@@ -1011,10 +1050,10 @@ class LocalRuntime:
                     self._peers,
                     self.executor,
                     ctx.clock,
-                    self._new_identifier(),
                     pull.descriptor(),
-                    name,
+                    header(self._new_identifier()),
                     deadline,
+                    whole=whole,
                     close_spool=pull.dispose,
                     active=active,
                 )

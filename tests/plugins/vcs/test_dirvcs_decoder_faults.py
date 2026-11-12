@@ -21,6 +21,14 @@ from kora.protocols.vcs import PlanStep, PublicationInput, PublishPlan
 from tests.plugins.vcs.dirvcs_support import DirWorld, make_dir_world
 
 FAULTS = Path(__file__).with_name("dirvcs_decoder_faults.py")
+UNCOMMITTED = "uncommitted"
+CHAIN = "chain"
+SHARED_FAULTS: tuple[tuple[str, str], ...] = (
+    ("truncate", "content_index_incomplete"),
+    ("incomplete", "content_index_incomplete"),
+    ("digest", "content_index_digest_mismatch"),
+    ("corrupt", "content_digest_mismatch"),
+)
 
 
 def faulty(plan: PublishPlan, mode: str) -> PublishPlan:
@@ -38,38 +46,51 @@ class FaultBench:
     sealed: PublicationInput
 
 
+def sealed_bench(world: DirWorld, checkout: Checkout) -> FaultBench:
+    _, sealed = run(
+        sealed_input(
+            world.provider,
+            world.executor,
+            world.remote_fixture(),
+            checkout,
+            world.context(),
+        )
+    )
+    return FaultBench(world, checkout, sealed)
+
+
 @pytest.fixture(scope="module")
-def fault_bench(tmp_path_factory: pytest.TempPathFactory) -> Generator[FaultBench]:
+def fault_benches(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Generator[dict[str, FaultBench]]:
     with captured(
         CONFORMANCE_COMPONENT, LoggingSettings(), INSTANCE_ID, utc_now
     ) as capture:
         world = make_dir_world(tmp_path_factory.mktemp("faults"), capture)
-        checkout = world.checkout()
-        (world.candidate(checkout) / "notes.txt").write_text("draft\n")
-        _, sealed = run(
-            sealed_input(
-                world.provider,
-                world.executor,
-                world.remote_fixture(),
-                checkout,
-                world.context(),
-            )
-        )
-        yield FaultBench(world, checkout, sealed)
+        uncommitted = world.checkout()
+        (world.candidate(uncommitted) / "notes.txt").write_text("draft\n")
+        chain = world.checkout()
+        world.commit(chain, {"notes.txt": "draft\n"}, "intermediate")
+        world.commit(chain, {"notes.txt": "final\n"}, "replacement")
+        (world.candidate(chain) / "fresh.txt").write_text("dirty\n")
+        yield {
+            UNCOMMITTED: sealed_bench(world, uncommitted),
+            CHAIN: sealed_bench(world, chain),
+        }
 
 
 @pytest.mark.parametrize(
-    ("mode", "code"),
+    ("bench", "mode", "code"),
     [
-        ("truncate", "content_index_incomplete"),
-        ("incomplete", "content_index_incomplete"),
-        ("digest", "content_index_digest_mismatch"),
-        ("corrupt", "content_digest_mismatch"),
+        *((UNCOMMITTED, *fault) for fault in SHARED_FAULTS),
+        *((CHAIN, *fault) for fault in SHARED_FAULTS),
+        (CHAIN, "omit", "content_index_incomplete"),
     ],
 )
 def test_directory_decoder_faults_fail_before_authorization(
-    fault_bench: FaultBench, mode: str, code: str
+    fault_benches: dict[str, FaultBench], bench: str, mode: str, code: str
 ) -> None:
+    fault_bench = fault_benches[bench]
     world, checkout = fault_bench.world, fault_bench.checkout
     context = world.context()
     request = publish_request(world.remote_fixture(), checkout)

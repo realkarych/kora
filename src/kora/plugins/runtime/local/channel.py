@@ -33,6 +33,7 @@ from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from kora.runner.registry import TransitionExecutor
 
 PRE_ATTACH_BYTES: Final[int] = 8192
+MAX_LOG_BYTES: Final[int] = 67_108_864
 SECTION_FRAME_BYTES: Final[int] = 65536
 MAX_SECTIONS: Final[int] = 16
 HEADER_DEPTH: Final[int] = 3
@@ -78,6 +79,13 @@ ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
     "workload_busy": EnvelopeEntry("a workload message is already admitted", True),
     "workload_kind_unavailable": EnvelopeEntry(
         "the held workload cannot be executed as a command", False
+    ),
+    "protected_paths_unsupported": EnvelopeEntry(
+        "the workload requires protected paths, which this runner does not check",
+        False,
+    ),
+    "workspace_failed": EnvelopeEntry(
+        "the command workspace could not be prepared", False
     ),
     "execution_unauthorized": EnvelopeEntry(
         "the attached submitter cannot start execution", False
@@ -213,6 +221,22 @@ class OutputRequest(BoundaryModel):
     op: Literal["transfer_out"]
     request_id: Identifier
     name: TransferName
+
+
+LogName = Literal["stdout", "stderr"]
+LogOffset = Annotated[Count, Field(le=MAX_LOG_BYTES)]
+
+
+class LogRequest(BoundaryModel):
+    op: Literal["read_log"]
+    request_id: Identifier
+    which: LogName
+    from_offset: LogOffset
+
+
+class LogSource(BoundaryModel):
+    which: LogName
+    from_offset: LogOffset
 
 
 class OutputName(BoundaryModel):
@@ -485,6 +509,13 @@ def checked_output_name(name: str) -> str:
         raise delivery_error("transfer_refused") from None
 
 
+def checked_log(which: str, from_offset: int) -> LogSource:
+    try:
+        return LogSource.model_validate({"which": which, "from_offset": from_offset})
+    except ValidationError:
+        raise delivery_error("transfer_refused") from None
+
+
 def output_envelope(request_id: str, size: int, digest: str) -> bytes:
     envelope = OutputEnvelope(
         request_id=request_id,
@@ -507,6 +538,14 @@ def read_output(payload: bytes) -> OutputRequest | None:
         return None
     request = json_model(OutputRequest, payload)
     return None if request is None or request.op != "transfer_out" else request
+
+
+def read_log_request(payload: bytes) -> LogRequest | None:
+    if isinstance(
+        decode_strict_json(payload, PRE_ATTACH_BYTES, HEADER_DEPTH), JsonRefusal
+    ):
+        return None
+    return json_model(LogRequest, payload)
 
 
 def read_output_declaration(payload: bytes, request_id: str) -> OutputValue:

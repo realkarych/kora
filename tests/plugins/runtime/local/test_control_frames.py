@@ -13,6 +13,7 @@ from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
     FRAME_PROGRESS_NS,
+    MAX_LOG_BYTES,
     MESSAGE_PROGRESS_NS,
     PRE_ATTACH_BYTES,
     SECTION_FRAME_BYTES,
@@ -31,6 +32,7 @@ from kora.plugins.runtime.local.channel import (
     operation_unknown,
     read_delivery,
     read_error_envelope,
+    read_log_request,
     read_request,
     read_status,
     receive_message,
@@ -41,7 +43,12 @@ from kora.plugins.runtime.local.channel import (
 from kora.protocols.common import BoundaryModel
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.runtime import RuntimeStatus, Workload
+from kora.protocols.runtime import (
+    MAX_CHECKOUT_REQUEST_BYTES,
+    CheckoutSource,
+    RuntimeStatus,
+    Workload,
+)
 from kora.protocols.time import SystemClock
 from kora.runner.channels import (
     MAX_TYPED_FRAME_BYTES,
@@ -498,6 +505,17 @@ async def test_maximal_workload_round_trips_through_the_codec() -> None:
         assert decoded == Workload.model_validate_json(encoded)
 
 
+async def test_maximal_workload_fits_the_section_cap() -> None:
+    document = maximal_workload()
+    request = CheckoutSource.model_validate(document["checkout_request"])
+
+    encoded = canonical_bytes(json.loads(json.dumps(document)))
+
+    assert len(request.model_dump_json()) > MAX_CHECKOUT_REQUEST_BYTES - 4096
+    assert len(encoded) <= WORKLOAD_SECTION_BYTES
+    assert Workload.model_validate_json(encoded).checkout_request == request
+
+
 async def test_sender_refuses_a_section_over_its_cap() -> None:
     async with channel_pair(SystemClock()) as pair:
         sender = BoundedChannel(pair.raw, SystemClock())
@@ -623,6 +641,26 @@ async def test_status_request_and_response_round_trip() -> None:
 )
 async def test_malformed_request_is_refused(payload: bytes) -> None:
     assert read_request(payload) is None
+
+
+async def test_log_request_is_read_within_its_bounds() -> None:
+    template = '{{"from_offset":{},"op":"read_log","request_id":"r","which":"{}"}}'
+    refused = [
+        template.format(-1, "stdout"),
+        template.format(MAX_LOG_BYTES + 1, "stdout"),
+        template.format("true", "stdout"),
+        template.format(0, "runner"),
+        '{"from_offset":0,"op":"read_log","request_id":"r","which":"stdout","x":1}',
+        '{"from_offset":0,"from_offset":1,"op":"read_log","request_id":"r",'
+        '"which":"stdout"}',
+    ]
+
+    accepted = read_log_request(template.format(MAX_LOG_BYTES, "stderr").encode())
+    rejected = [read_log_request(payload.encode()) for payload in refused]
+
+    assert accepted is not None
+    assert (accepted.which, accepted.from_offset) == ("stderr", MAX_LOG_BYTES)
+    assert rejected == [None] * len(refused)
 
 
 @pytest.mark.parametrize(

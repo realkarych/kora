@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 INDEX = Path("index.jsonl")
 
@@ -20,10 +21,20 @@ def rewritten(manifest: dict[str, object], lines: list[bytes]) -> None:
     manifest["content_index_digest"] = "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+def without_intermediate(lines: list[bytes]) -> list[bytes]:
+    paths: list[object] = [
+        cast("dict[str, object]", json.loads(line))["path"] for line in lines
+    ]
+    position = paths.index("notes.txt")
+    return lines[:position] + lines[position + 1 :]
+
+
 def tampered(mode: str, manifest: dict[str, object]) -> dict[str, object]:
     lines = INDEX.read_bytes().splitlines(keepends=True)
     if mode == "truncate":
         rewritten(manifest, lines[:-1])
+    elif mode == "omit":
+        rewritten(manifest, without_intermediate(lines))
     elif mode == "digest":
         manifest["content_index_digest"] = "sha256:" + "0" * 64
     elif mode == "incomplete":
