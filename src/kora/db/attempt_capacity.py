@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from sqlalchemy import case, func, literal_column, select
+from sqlalchemy import String, case, func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.tables import (
@@ -60,7 +60,7 @@ async def read_attempt_capacity(
         .where(
             attempt.c.status.in_(
                 tuple(
-                    literal_column(f"'{status}'")
+                    literal_column(f"'{status}'", String())
                     for status in NON_TERMINAL_ATTEMPT_STATUSES
                 )
             )
