@@ -6,9 +6,9 @@ Checked on 2026-11-13 for [issue #1505](https://github.com/realkarych/kora/issue
 
 On 2026-11-13 the project owner approved four changes to how [kora-verify](../../.claude/skills/kora-verify/SKILL.md) dispatches independent review:
 
-- one independent context may apply both the correctness and security profiles when security is selected only for changed CI, verification policy or agent configuration;
+- one independent context may apply both the correctness and security profiles when security is selected only for changed CI, verification policy or agent configuration, no other security trigger applies and no threat-model entry is affected; the skill states the conditions;
 - Claude Code reviewers are dispatched through one tool-limited agent definition, kept only if it lowers the measured first-turn context by at least 30%;
-- the coordinator saves the complete diff once and reviewers send independent reads and searches together;
+- the coordinator saves the complete diff once, identified by base, head and digest, and reviewers send independent reads and searches together;
 - a reassessment goes to a fresh reviewer when the earlier reviewer's context is 150k tokens or more, or has been idle longer than the host's prompt-cache lifetime.
 
 No profile, trigger, gate or required check is removed, and the reviewer model is unchanged.
@@ -20,7 +20,7 @@ The source is the usage record that the Claude Code desktop application stores w
 - A request is counted once, by its message identifier, with the last usage record stored for it.
 - The context of a turn is the sum of its uncached input, cache-write and cache-read tokens.
 - A reviewer dispatch is a subagent whose brief opens by naming it an independent reviewer. 40 were dispatched; one never started and is excluded, leaving 39.
-- Costs are compared in input-token equivalents: a cache-read token counts 0.1, a cache-write or uncached input token 1.25 and an output token 5. These weights are an assumption about relative price, not a bill.
+- Costs are compared in input-token equivalents: an uncached input token counts 1, a cache-read token 0.1, a cache-write token 1.25 and an output token 5. Uncached input was under 0.1% of all input and was summed with cache writes. These weights are an assumption about relative price, not a bill.
 - Tool output is measured in characters of tool results and attributed by the command or file that produced it.
 
 ## Baseline
@@ -65,11 +65,20 @@ The measurement is one dispatch of each kind with the same brief, which asks for
 | Generic | Claude Code desktop application | branch base `fbdfd8e` plus this change | 60,119 |
 | `kora-reviewer` | not yet measured | | |
 
-A session lists agent definitions when it starts, so the session that wrote the definition could not dispatch it, and the headless command-line surface was not available on 2026-11-13. Until the second row is measured, the 30% criterion is unverified and the definition is unproven.
+A Claude Code session lists agent definitions when it starts, so the second row needs a session started on a revision that contains the definition. Until it is measured, the 30% criterion is unverified and the definition is unproven.
+
+## Prompt-cache lifetime
+
+The reassessment rule depends on how long a host keeps an idle context cached. Checked on 2026-11-13: every cache write in the measured Claude Code reviewer subagents was recorded with a five-minute lifetime, and every cache write in the coordinator sessions with a one-hour lifetime. A reassessment rarely follows a review within five minutes, so on this host the rule sends most reassessments to a fresh reviewer. No value was checked for Codex; under the rule an unknown lifetime means a fresh reviewer.
+
+## Threat-model applicability
+
+The change maps to TM-12 of [the threat model](../../docs/threat-model.md): a contributor changes trusted code, CI or agent instructions, and the asset is review integrity. Its controls still hold as written: independent correctness and security reviewers inspect the complete diff, and descendants inherit the reviewed revision, trusted instruction provenance and read-only restrictions. What changes is below the level the model describes: for the changes the combined assignment covers, the two conclusions come from one context, so one successful prompt injection in a reviewed diff reaches both. The owner's explicit review of verification-policy changes is the compensating control. Whether the model's sentence that native review delegates to "fresh component/profile agents" should mention the combined assignment is the owner's decision; this change edits nothing under `docs/`.
 
 ## Limits and revisit trigger
 
 - The sample is one contributor, one host and four days. Shares differ for other work mixes.
+- The 1.25 weight matches a five-minute cache write. Coordinator cache writes had a one-hour lifetime, which costs more, so the coordinator share is slightly understated.
 - The coordinator sessions are the largest part of the cost. Their median context was 440k to 565k tokens per turn and one session ran 1,082 turns over four changes. Nothing in this change addresses that; working one issue per session does.
 - The 150k-token bound for continuing a reviewer is a judgment from the range above, not a measured optimum.
 - The combined assignment removes the independence of the correctness and security conclusions from each other for the changes it covers. It was observed once before this change.
