@@ -13,17 +13,17 @@ from sqlalchemy import (
     false,
     func,
     literal,
+    literal_column,
     select,
     text,
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
-from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.elements import ColumnElement, TextClause
 
 from kora.db import DB_COMPONENT, DB_LOGGER_NAME
 from kora.db.claim_source_values import ClaimSourcesRejected, SourceAllowance
 from kora.db.claim_sources_v1 import (
-    LOCATORS,
     MAX_SOURCE_COUNT,
     SOURCE_FIELDS,
     SQLITE_ADMISSION_KEY,
@@ -45,6 +45,20 @@ ACQUIRED: EventSpec = CATALOG.register(
         {"acquired": FieldKind.BOOLEAN},
     )
 )
+LOCATED_SOURCES: dict[Table, tuple[TextClause, TextClause]] = {
+    attempt: (
+        text("main.attempt INDEXED BY ix_claim_attempt_locator"),
+        text("ONLY attempt"),
+    ),
+    node_instance: (
+        text("main.node_instance INDEXED BY ix_claim_node_locator"),
+        text("ONLY node_instance"),
+    ),
+    attempt_claim_read_admission: (
+        text("main.attempt_claim_read_admission INDEXED BY ix_claim_admission_locator"),
+        text("ONLY attempt_claim_read_admission"),
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,19 +113,22 @@ class AcquiredClaimSources:
     encoding: str
 
 
-def _located(owner: Table, dialect: str) -> tuple[str, str]:
+def _located(
+    owner: Table, dialect: str, identity: str
+) -> tuple[TextClause, ColumnElement[bool]]:
+    sources = LOCATED_SOURCES.get(owner)
+    if sources is None:
+        raise ClaimSourcesRejected()
+    admission = owner is attempt_claim_read_admission
+    key = column("attempt_id" if admission else "id", Text())
     if dialect == SQLITE:
-        [(key, index)] = [
-            (key, index) for name, key, index in LOCATORS if name == owner.name
-        ]
-        predicate = SQLITE_KEY if key == "id" else SQLITE_ADMISSION_KEY
+        predicate = SQLITE_ADMISSION_KEY if admission else SQLITE_KEY
         return (
-            f"main.{owner.name} INDEXED BY {index}",
-            f"{key} COLLATE BINARY = :identity AND ({predicate})",
+            sources[0],
+            and_(key.collate("BINARY") == identity, literal_column(predicate)),
         )
     if dialect == POSTGRESQL:
-        key = "attempt_id" if owner is attempt_claim_read_admission else "id"
-        return f"ONLY {owner.name}", f"{key} = :identity"
+        return sources[1], key == identity
     raise ClaimSourcesRejected()
 
 
@@ -129,7 +146,7 @@ def _row_statement(
     matches: dict[str, str],
     row_bytes: int,
 ) -> Executable:
-    source, predicate = _located(owner, dialect)
+    source, predicate = _located(owner, dialect, identity)
     match = and_(
         *(
             column(name).collate("BINARY" if dialect == SQLITE else "C") == value
@@ -138,12 +155,7 @@ def _row_statement(
     )
     if dialect == SQLITE:
         match = case((_width(owner) <= row_bytes, match), else_=false())
-    return (
-        select(match)
-        .select_from(text(source))
-        .where(text(predicate))
-        .params(identity=identity)
-    )
+    return select(match).select_from(source).where(predicate)
 
 
 async def verify_claim_source_binding(
@@ -203,7 +215,7 @@ def claim_source_admission_statement(
     dialect: str, attempt_id: str, limits: ClaimSourceReadLimits
 ) -> Executable:
     owner = attempt_claim_read_admission
-    source, predicate = _located(owner, dialect)
+    source, predicate = _located(owner, dialect, attempt_id)
     names = (
         "format_version",
         "source_revision",
@@ -232,9 +244,8 @@ def claim_source_admission_statement(
         valid = case((_width(owner) <= fixed_width, valid), else_=false())
     return (
         select(*(case((valid, value)) for value in fields[1:]))
-        .select_from(text(source))
-        .where(text(predicate))
-        .params(identity=attempt_id)
+        .select_from(source)
+        .where(predicate)
     )
 
 
@@ -260,7 +271,7 @@ def claim_source_value_statement(
 ) -> Executable:
     if name not in SOURCE_FIELDS:
         raise ClaimSourcesRejected()
-    source, predicate = _located(attempt, dialect)
+    source, predicate = _located(attempt, dialect, attempt_id)
     native, transport = quantities
     value = column(name, Text())
     if dialect == SQLITE:
@@ -275,12 +286,7 @@ def claim_source_value_statement(
     if native == 0:
         absent = func.typeof(value) == "null" if dialect == SQLITE else value.is_(None)
         projected = case((absent, literal(b"", type_=LargeBinary())))
-    return (
-        select(projected)
-        .select_from(text(source))
-        .where(text(predicate))
-        .params(identity=attempt_id)
-    )
+    return select(projected).select_from(source).where(predicate)
 
 
 async def _acquire_claim_sources(
