@@ -29,7 +29,11 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
                 lambda sync: command.upgrade(alembic_config(sync), "0026")
             )
         case = await execution_case(database)
-        before = await case.snapshot(database)
+        old_fields = tuple(
+            field for field in attempt.c if field.name != "current_dispatcher_open"
+        )
+        async with database.read_transaction() as reader:
+            before = (await reader.execute(select(*old_fields))).all()
         async with database.transaction() as writer:
             await writer.exec_driver_sql(
                 "CREATE INDEX ix_attempt_due_deadline ON attempt (id)"
@@ -65,15 +69,16 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
 
         report = await upgrade_database(empty_database_settings)
         repeated = await upgrade_database(empty_database_settings)
-        after = await case.snapshot(database)
+        async with database.read_transaction() as reader:
+            after = (await reader.execute(select(*old_fields))).all()
         async with database.read_transaction() as reader:
             with await reader.execute(select(attempt.c.id)) as result:
                 ids = list(result.scalars())
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0026",
-            "0027",
-            1,
+            "0028",
+            2,
         )
         assert repeated.steps == 0
         assert after == before

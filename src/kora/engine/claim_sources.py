@@ -200,7 +200,7 @@ async def _update_claim_sources(
 async def _recheck_claim_sources(
     connection: AsyncConnection,
     locks: TransitionLocks,
-    acquired: AcquiredClaimSources,
+    acquired: AcquiredClaimSources | DecodedClaimSources,
     limits: ClaimSourceReadLimits,
 ) -> bool:
     _require_locks(connection, locks, acquired.binding)
@@ -251,7 +251,7 @@ async def update_claim_sources(
 async def recheck_claim_sources(
     connection: AsyncConnection,
     locks: TransitionLocks,
-    acquired: AcquiredClaimSources,
+    acquired: AcquiredClaimSources | DecodedClaimSources,
     limits: ClaimSourceReadLimits,
 ) -> bool:
     try:
