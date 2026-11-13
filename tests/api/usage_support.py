@@ -1,11 +1,13 @@
 from kora.api.application import create_application
 from kora.api.exchange import ApiExchange
+from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.api.worker_usage_route import WorkerUsageRoute
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.models.worker_usage import UsageReport
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
 from tests.api.support import RequestIds
+from tests.api.worker_support import CAPABILITIES
 from tests.engine.test_graph_execution_contract import LIMITS
 from tests.engine.test_usage_acceptance import coverage, usage
 from tests.engine.worker_usage_support import UsageCase
@@ -23,6 +25,9 @@ def usage_application(
         capture.diagnostics,
         case.clock,
         RequestIds(),
+        worker_registration=WorkerRegistrationRoute(
+            database, {"local": CAPABILITIES}, case.clock, capture.diagnostics
+        ),
         worker_usage=WorkerUsageRoute(
             database,
             LIMITS,

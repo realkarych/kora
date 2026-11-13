@@ -15,10 +15,13 @@ from kora.db.tables import (
     node_instance,
     run,
     usage_record,
+    worker,
 )
 from kora.db.tokens import REVOKED
 from kora.ir.cost import MAX_MONEY, MAX_SUM, MAX_TOKEN
 from kora.ir.json import DEFAULT_MAX_DEPTH, JsonObject
+from kora.models.workers import WorkerRegistration
+from kora.protocols.identity_records import ProcessIdentity
 from tests.api.support import HttpCall, api_capture, client_for
 from tests.api.usage_support import report, usage_application, usage_path
 from tests.api.worker_support import bearer
@@ -29,6 +32,64 @@ from tests.engine.worker_usage_support import usage_case, usage_snapshot
 from tests.plugins.authentication.support import seed_case
 
 __all__ = ["api_capture"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("network", [False, True], ids=["asgi", "http"])
+@pytest.mark.parametrize("new_domain", [False, True])
+async def test_usage_api_accepts_retained_grant_after_worker_reregistration(
+    database: Database, api_capture: Capture, network: bool, new_domain: bool
+) -> None:
+    case = await usage_case(database)
+    async with database.read_transaction() as reader:
+        original_domain = await reader.scalar(
+            select(attempt.c.execution_domain_id).where(attempt.c.id == case.attempt_id)
+        )
+    assert isinstance(original_domain, str)
+    registration = WorkerRegistration(
+        name=case.principal.owner,
+        incarnation_id="replacement-incarnation",
+        runtime="local",
+        execution_domain_id="replacement-domain" if new_domain else original_domain,
+        version="0.1.0",
+        capacity=1,
+        process=ProcessIdentity(
+            host_id="host",
+            boot_id="boot",
+            pid_namespace="namespace",
+            pid=2345,
+            start_time=600,
+            leads_group=True,
+        ),
+    )
+    body = report(case)
+    app = usage_application(database, api_capture, case)
+    ledger = ConnectionLedger(database)
+
+    async with running_app(app) as origin:
+        async with KoraClient(
+            origin if network else "http://127.0.0.1",
+            case.bearer_token,
+            asgi_app=None if network else app,
+        ) as client:
+            registered = await client.register_worker(registration)
+            first = await client.report_usage(case.attempt_id, body)
+            before_replay = await usage_snapshot(database, case)
+            replay = await client.report_usage(case.attempt_id, body)
+            after_replay = await usage_snapshot(database, case)
+    async with database.read_transaction() as reader:
+        latest_incarnation = await reader.scalar(
+            select(worker.c.incarnation_id).where(worker.c.id == case.principal.owner)
+        )
+
+    assert (
+        registered.incarnation_id == latest_incarnation == registration.incarnation_id
+    )
+    assert first.rows[0].usd_estimate == "1"
+    assert first.coverage == body.coverage
+    assert first == replay
+    assert before_replay == after_replay
+    assert ledger.outstanding == database.units_in_flight() == 0
 
 
 @pytest.mark.asyncio

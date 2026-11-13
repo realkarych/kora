@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import and_, insert, select, update
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -27,6 +27,7 @@ from kora.db.tables import (
     run,
     usage_record,
     worker,
+    worker_incarnation,
 )
 from kora.db.usage_context import UsageBinding
 from kora.db.worker_usage import read_attempt_usage
@@ -161,13 +162,23 @@ async def require_usage_grant(
         raise UsageAccessRejected(UsageAccess.STALE_GRANT)
     statement = (
         select(worker.c.id)
-        .select_from(attempt_dispatcher.join(worker))
+        .select_from(
+            attempt_dispatcher.join(worker).join(
+                worker_incarnation,
+                and_(
+                    worker_incarnation.c.worker_id == worker.c.id,
+                    worker_incarnation.c.incarnation_id
+                    == attempt_dispatcher.c.incarnation_id,
+                    worker_incarnation.c.execution_domain_id
+                    == attempt_dispatcher.c.execution_domain_id,
+                ),
+            )
+        )
         .where(
             attempt_dispatcher.c.id == dispatcher_id,
             attempt_dispatcher.c.attempt_id == attempt_id,
             attempt_dispatcher.c.lease_epoch == epoch,
             attempt_dispatcher.c.execution_domain_id == target["execution_domain_id"],
-            attempt_dispatcher.c.incarnation_id == worker.c.incarnation_id,
             worker.c.id == principal.owner,
             worker.c.token_id == principal.token_id,
             worker.c.runtime == principal.runtime,

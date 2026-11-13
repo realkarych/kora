@@ -16,7 +16,7 @@ from kora.db.tables import (
     price_table,
     run,
     usage_record,
-    worker,
+    worker_incarnation,
 )
 from kora.engine.attempt_usage import (
     COMPONENT,
@@ -390,7 +390,16 @@ async def test_usage_accepts_late_history_without_result_authority(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "changed",
-    ["epoch", "dispatcher", "incarnation", "domain", "expiry", "worker", "token"],
+    [
+        "epoch",
+        "dispatcher",
+        "incarnation",
+        "retained_domain",
+        "domain",
+        "expiry",
+        "worker",
+        "token",
+    ],
 )
 async def test_usage_refuses_current_grant_changes_without_writes(
     database: Database, changed: str
@@ -401,7 +410,11 @@ async def test_usage_refuses_current_grant_changes_without_writes(
             await connection.execute(update(attempt).values(lease_epoch=2))
         elif changed == "incarnation":
             await connection.execute(
-                update(worker).values(incarnation_id="new-process")
+                update(attempt_dispatcher).values(incarnation_id="unregistered")
+            )
+        elif changed == "retained_domain":
+            await connection.execute(
+                update(worker_incarnation).values(execution_domain_id="other")
             )
         elif changed == "domain":
             await connection.execute(
