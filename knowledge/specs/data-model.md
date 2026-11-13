@@ -1647,6 +1647,7 @@ Activation requires compatible participating readers and writers and qualified n
 The receipt and timeline values are exactly those of sections 13.2.1 and the manual run header subsection. The real scheduler promotion consumes the accepted run unchanged; `test_accepted_manual_start_is_promoted` checks this on both metadata databases. The remaining focused evidence is in `tests/engine/test_start_acceptance.py` and `tests/observability/test_start_acceptance_logging.py`.
 
 Residuals at skeleton depth:
+
 - **Repeated skips.** Each overlap skip with a fresh key writes one permanent receipt and one `trigger.skipped` event, as sections 13.2 and 13.2.2 specify, and no per-token rate limit applies (TM-10).
 - **Global serialization.** The global scope lock serializes all starts of the installation for the duration of the outstanding-usage query.
 - **Version status.** The `active` status is read in the acquisition snapshot, not under the locks. Nothing retires a version in the first slice.
