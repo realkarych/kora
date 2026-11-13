@@ -91,6 +91,9 @@ LOCAL_RUNTIME_CONTRACTS = (
 )
 LOCAL_CAPTURE_FIXTURE = "test_command_capture.test_command_capture_on_full_disk"
 COUNT = re.compile(r"[1-9][0-9]*")
+MACOS = "macos-15"
+PULL_REQUEST = "pull_request"
+EVENTS = frozenset({PULL_REQUEST, "push"})
 MatrixRow = dict[str, str | int]
 
 
@@ -117,6 +120,24 @@ def general_lanes(count: int) -> tuple[str, ...]:
 
 def environment_lanes(count: int) -> tuple[str, ...]:
     return ("storage", "local-runtime", *general_lanes(count))
+
+
+def evidenced_general_lanes(
+    operating_system: str, count: int, event: str
+) -> tuple[str, ...]:
+    if event not in EVENTS:
+        raise EvidenceFailure("scaffold evidence has an unknown event")
+    if operating_system == MACOS and event == PULL_REQUEST:
+        return ()
+    return general_lanes(count)
+
+
+def evidenced_lanes(operating_system: str, count: int, event: str) -> tuple[str, ...]:
+    return (
+        "storage",
+        "local-runtime",
+        *evidenced_general_lanes(operating_system, count, event),
+    )
 
 
 def lane_arguments(operating_system: str, lane: str) -> tuple[str, ...]:
@@ -445,11 +466,11 @@ def environment_counts(
 
 
 def matrix_rows(counts: Mapping[str, int]) -> dict[str, list[MatrixRow]]:
-    rows: dict[str, list[MatrixRow]] = {"linux": [], "macos": []}
+    rows: dict[str, list[MatrixRow]] = {"linux": [], "macos": [], "macos_general": []}
     for system, python, databases in ENVIRONMENTS:
         count = counts[environment_key(system, python)]
         for lane in (STATIC_CHECK_LANE, *environment_lanes(count)):
-            rows["macos" if system == "macos-15" else "linux"].append(
+            rows[matrix_of(system, lane)].append(
                 {
                     "os": system,
                     "python": python,
@@ -460,6 +481,14 @@ def matrix_rows(counts: Mapping[str, int]) -> dict[str, list[MatrixRow]]:
                 }
             )
     return rows
+
+
+def matrix_of(operating_system: str, lane: str) -> str:
+    if operating_system != MACOS:
+        return "linux"
+    if lane in SPECIAL_LANES or lane == STATIC_CHECK_LANE:
+        return "macos"
+    return "macos_general"
 
 
 def compact(value: object) -> str:
@@ -487,6 +516,7 @@ def plan_outputs(linux: Path, macos: Path, table: Table) -> dict[str, str]:
     return {
         "linux": compact({"include": rows["linux"]}),
         "macos": compact({"include": rows["macos"]}),
+        "macos_general": compact({"include": rows["macos_general"]}),
         "lanes": compact(counts),
     }
 
@@ -563,21 +593,51 @@ def lane_timings(
 
 
 def observed_timings(
-    root: Path, counts: Mapping[str, int], table: Table
+    root: Path, counts: Mapping[str, int], table: Table, event: str
 ) -> Iterator[list[ChildTiming]]:
     for system, python, _ in ENVIRONMENTS:
         key = environment_key(system, python)
-        for lane in general_lanes(counts[key]):
+        for lane in evidenced_general_lanes(system, counts[key], event):
             directory = root / artifact_name(system, python, lane)
             yield lane_timings(directory, key, lane, counts[key], table)
 
 
 def report_timings(
-    root: Path, counts: Mapping[str, int], table: Table, output: TextIO
+    root: Path, counts: Mapping[str, int], table: Table, event: str, output: TextIO
 ) -> None:
-    for timings in observed_timings(root, counts, table):
+    for timings in observed_timings(root, counts, table, event):
         output.write("".join(map(timing_lines, timings)))
         output.flush()
+
+
+def verify_general_lanes(
+    root: Path,
+    operating_system: str,
+    python: str,
+    count: int,
+    table: Table,
+    reports: Mapping[str, Mapping[str, frozenset[str]]],
+) -> frozenset[str]:
+    key = environment_key(operating_system, python)
+    collections = [
+        frozenset(
+            validated_collection(
+                root / artifact_name(operating_system, python, lane) / "complete.txt"
+            )
+        )
+        for lane in general_lanes(count)
+    ]
+    if any(nodes != collections[0] for nodes in collections):
+        raise EvidenceFailure("general lanes collected different tests")
+    ordered = sorted(collections[0])
+    complete = identities(ordered)
+    scheduled = scheduled_modules(operating_system)
+    if any(scheduled_owner(node, scheduled) for node in complete):
+        raise EvidenceFailure("scaffold collection contains scheduled modules")
+    plan = assign(general_nodes(ordered), environment_durations(table, key), count)
+    for lane, children in zip(general_lanes(count), plan, strict=True):
+        require_assignment(children, reports[lane])
+    return complete
 
 
 def verify_scaffold(
@@ -588,11 +648,14 @@ def verify_scaffold(
     requested_revision: str,
     counts: Mapping[str, int],
     table: Table,
+    event: str,
 ) -> Verification:
     expected = {
         artifact_name(system, python, lane)
         for system, python, _ in ENVIRONMENTS
-        for lane in environment_lanes(counts[environment_key(system, python)])
+        for lane in evidenced_lanes(
+            system, counts[environment_key(system, python)], event
+        )
     }
     if {path.name for path in root.iterdir()} != expected:
         raise EvidenceFailure(
@@ -600,11 +663,9 @@ def verify_scaffold(
         )
     total = 0
     for system, python, databases in ENVIRONMENTS:
-        key = environment_key(system, python)
-        lanes = environment_lanes(counts[key])
+        count = counts[environment_key(system, python)]
         reports: dict[str, dict[str, frozenset[str]]] = {}
-        collections: list[frozenset[str]] = []
-        for lane in lanes:
+        for lane in evidenced_lanes(system, count, event):
             directory = root / artifact_name(system, python, lane)
             provenance = (
                 run_id,
@@ -619,28 +680,17 @@ def verify_scaffold(
             reports[lane] = validate_lane(
                 directory, lane_receipt(directory, provenance)
             )
-            if lane not in SPECIAL_LANES:
-                collected = validated_collection(directory / "complete.txt")
-                collections.append(frozenset(collected))
-        if any(nodes != collections[0] for nodes in collections):
-            raise EvidenceFailure("general lanes collected different tests")
-        ordered = sorted(collections[0])
-        complete = identities(ordered)
-        scheduled = scheduled_modules(system)
-        if any(scheduled_owner(node, scheduled) for node in complete):
-            raise EvidenceFailure("scaffold collection contains scheduled modules")
-        plan = assign(
-            general_nodes(ordered), environment_durations(table, key), counts[key]
-        )
-        for lane, children in zip(general_lanes(counts[key]), plan, strict=True):
-            require_assignment(children, reports[lane])
         inventories = [nodes for lane in reports.values() for nodes in lane.values()]
         combined = frozenset[str]().union(*inventories)
         if sum(len(nodes) for nodes in inventories) != len(combined):
             raise EvidenceFailure("scaffold lanes contain duplicate tests")
-        if combined != complete:
-            raise EvidenceFailure("scaffold lanes do not partition the complete suite")
-        total += len(complete)
+        if evidenced_general_lanes(system, count, event):
+            complete = verify_general_lanes(root, system, python, count, table, reports)
+            if combined != complete:
+                raise EvidenceFailure(
+                    "scaffold lanes do not partition the complete suite"
+                )
+        total += len(combined)
     return Verification(len(ENVIRONMENTS), len(expected), total)
 
 
@@ -721,11 +771,11 @@ def main(arguments: list[str]) -> None:
                 sys.stdout.write(
                     f"{key}: {len(durations)} modules, {total / 1000:.1f} s\n"
                 )
-        case ["timings", directory, lanes]:
+        case ["timings", directory, lanes, event]:
             report_timings(
-                Path(directory), planned_counts(lanes), load_table(), sys.stdout
+                Path(directory), planned_counts(lanes), load_table(), event, sys.stdout
             )
-        case ["verify", directory, run_id, attempt, checkout, requested, lanes]:
+        case ["verify", directory, run_id, attempt, checkout, requested, lanes, event]:
             verification = verify_scaffold(
                 Path(directory),
                 run_id,
@@ -734,6 +784,7 @@ def main(arguments: list[str]) -> None:
                 requested,
                 planned_counts(lanes),
                 load_table(),
+                event,
             )
             summary = {
                 "environments": verification.environments,
