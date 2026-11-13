@@ -5,7 +5,7 @@ SQLITE_RUN_LOCATOR_INDEX: str = "ix_run_input_locator"
 SQLITE_RUN_INPUT_LOCATOR_INDEX: str = "ix_run_inputs_locator"
 
 
-def _canonical_key(column: str) -> str:
+def canonical_locator_key(column: str) -> str:
     characters = ascii_predicate(
         SQLITE, column, ULID_ALPHABET, f"= {IDENTIFIER_LENGTH}", "0-7"
     )
@@ -16,5 +16,5 @@ def _canonical_key(column: str) -> str:
     )
 
 
-SQLITE_RUN_KEY: str = _canonical_key("id")
-SQLITE_RUN_INPUT_KEY: str = _canonical_key("run_id")
+SQLITE_RUN_KEY: str = canonical_locator_key("id")
+SQLITE_RUN_INPUT_KEY: str = canonical_locator_key("run_id")

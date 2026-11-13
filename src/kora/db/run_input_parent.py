@@ -35,7 +35,7 @@ POSTGRES_INLINE_VALUES = (run.c.params, run.c.cel_params_projection)
 SQLITE_RUN = text("main.run INDEXED BY ix_run_input_locator")
 
 
-def _sqlite_storage_width(field: ColumnElement[object]) -> ColumnElement[int]:
+def sqlite_storage_width(field: ColumnElement[object]) -> ColumnElement[int]:
     kind = func.typeof(field)
     return case(
         (kind == "null", 0),
@@ -65,7 +65,7 @@ def _sqlite_parent_match(
     namespace_id: str, graph_id: str, version_id: str, max_parent_bytes: int
 ) -> ColumnElement[bool]:
     width = sum(
-        (_sqlite_storage_width(column(field.name)) for field in run.c),
+        (sqlite_storage_width(column(field.name)) for field in run.c),
         literal(SQLITE_RECORD_HEADER_MAX),
     )
     tag = column("input_encoding_version", Integer())
