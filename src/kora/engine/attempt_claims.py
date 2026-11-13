@@ -368,7 +368,12 @@ async def _claim(
             or saved.lease_until <= now
         ):
             raise ClaimAccessRejected("stale")
-    if prepared is None or prepared.snapshot.sources.binding != target.binding():
+    if prepared is None:
+        return ClaimDecision(
+            ClaimOutcome.INELIGIBLE if receipt is None else ClaimOutcome.REDIRECT,
+            redirect=None if receipt is None else receipt.attempt_id,
+        )
+    if prepared.snapshot.sources.binding != target.binding():
         raise ClaimSourcesRejected()
     if not await recheck_claim_sources(
         connection, context.locks, prepared.snapshot.sources, limits
