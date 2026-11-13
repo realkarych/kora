@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from kora.db import BOOTSTRAP_COMPLETED, DB_COMPONENT, DB_LOGGER_NAME
 from kora.db.connection import Database, Dialect
 from kora.db.identifiers import IdentifierGenerator
+from kora.db.native_values import NAMESPACE_POLICY_NATIVE_LIMIT, native_value_bound
 from kora.db.tables import api_token, bootstrap_initialization, namespace
 from kora.db.types import JsonObject
 from kora.observability import current_diagnostics
@@ -246,6 +247,8 @@ async def row_count(connection: AsyncConnection, table: Table) -> int:
 async def insert_namespace(
     connection: AsyncConnection, issued: IssuedBootstrap
 ) -> None:
+    if native_value_bound(DEFAULT_POLICY) > NAMESPACE_POLICY_NATIVE_LIMIT:
+        raise BootstrapMaterialError("the bootstrap policy exceeds its native bound")
     await connection.execute(
         insert(namespace).values(
             id=issued.namespace_id,
