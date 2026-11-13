@@ -24,6 +24,7 @@ from kora.engine.run_input_reads import read_run_input
 from kora.engine.start_records import MAX_PARAMS_BYTES
 from tests.db.closing import CONDITION_DEADLINE_SECONDS, ConnectionLedger
 from tests.db.seed import Seeder
+from tests.db.test_graph_read_admission import sqlite_instructions
 from tests.db.test_run_input_parent import is_parent_query, open_sqlite
 from tests.db.test_run_input_parent import seed as seed_parent
 from tests.engine.test_run_input_values import CANONICAL
@@ -38,6 +39,37 @@ def is_side_query(statement: str) -> bool:
     return (
         "FROM run_inputs" in statement or "FROM main.run_inputs INDEXED BY" in statement
     )
+
+
+def assert_sqlite_side_guards_value_reads(
+    instructions: list[tuple[object, ...]], field: RunInputField
+) -> None:
+    projection = [row for row in instructions if row[1] == "Column" and row[3] == 1]
+    raw = [row for row in instructions if row[1] == "Column" and row[3] == 2]
+    expected_projection = (
+        [0x80, 0x40, 0] if field is RunInputField.PROJECTION else [0x80, 0x40]
+    )
+    assert [row[6] for row in projection] == expected_projection
+    assert [row[6] for row in raw] == (
+        [] if field is RunInputField.PROJECTION else [0x80, 0x40, 0]
+    )
+    for row in projection + raw:
+        if row[6] == 0:
+            address = row[0]
+            assert type(address) is int
+            guard = instructions[address - 1]
+            assert guard[1] == "IfNot"
+            assert type(guard[3]) is int
+            assert guard[3] > address
+    if field is RunInputField.PARAMS:
+        first_raw = raw[0][0]
+        last_raw = raw[-1][0]
+        assert type(first_raw) is int
+        assert type(last_raw) is int
+        predecessor_guard = instructions[first_raw - 1]
+        assert predecessor_guard[1] == "IfNot"
+        assert type(predecessor_guard[3]) is int
+        assert predecessor_guard[3] > last_raw
 
 
 async def seed(
@@ -238,6 +270,10 @@ async def test_run_input_read_uses_the_exact_main_partial_side_index(
                 ]
                 for statement, arguments in statements
             ]
+            instructions = [
+                await sqlite_instructions(reader, statement, arguments)
+                for statement, arguments in statements
+            ]
         captured = tuple(statements)
         async with database.transaction() as writer:
             await writer.exec_driver_sql("DROP INDEX main.ix_run_inputs_locator")
@@ -258,6 +294,8 @@ async def test_run_input_read_uses_the_exact_main_partial_side_index(
         assert refused is None
         assert "params" not in statements[0][0]
         assert "params" in statements[1][0]
+        for program, field in zip(instructions, RunInputField, strict=True):
+            assert_sqlite_side_guards_value_reads(program, field)
         for plan in plans:
             assert len(plan) == 1
             detail: object = plan[0]
@@ -322,57 +360,6 @@ async def test_run_input_read_decodes_only_the_selected_value(
     assert rejected is None
     assert accepted is not None
     assert accepted.field is other
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("compressible", [True, False], ids=["compressed", "external"])
-async def test_run_input_read_uses_logical_bytes_for_large_native_values(
-    database: Database, compressible: bool
-) -> None:
-    width = 65_536
-    value = (
-        b"a" * width
-        if compressible
-        else base64.b64encode(hashlib.shake_256(b"external input").digest(width))
-    )
-    params = b'{"raw":"' + value + b'"}'
-    binding = await seed(database, params=params)
-    exact = replace(LIMITS, params=len(params))
-    over = replace(exact, params=exact.params - 1)
-
-    async with database.read_snapshot() as connection:
-        native_refusal: object = await connection.scalar(
-            run_input_value_statement(
-                database.dialect, binding.run_id, RunInputField.PARAMS, over
-            )
-        )
-        if database.dialect is Dialect.POSTGRESQL:
-            metadata = await connection.execute(
-                select(
-                    func.pg_catalog.pg_column_size(run_inputs.c.params),
-                    func.pg_catalog.pg_column_compression(run_inputs.c.params),
-                ).where(run_inputs.c.run_id == binding.run_id)
-            )
-            physical, compression = tuple(metadata.one())
-        else:
-            physical, compression = None, None
-    rejected = await read_run_input(database, binding, RunInputField.PARAMS, over)
-    accepted = await read_run_input(database, binding, RunInputField.PARAMS, exact)
-    cut = await read_run_input(database, binding, RunInputField.PROJECTION, over)
-
-    assert native_refusal is rejected is None
-    assert accepted is not None
-    assert accepted.value == {"raw": value.decode()}
-    assert cut is not None
-    assert cut.value == {"cut": 1}
-    if database.dialect is Dialect.POSTGRESQL:
-        assert type(physical) is int
-        if compressible:
-            assert compression is not None
-            assert physical < len(params)
-        else:
-            assert compression is None
-            assert physical >= width
 
 
 @pytest.mark.asyncio
@@ -501,3 +488,81 @@ async def test_run_input_read_cancellation_releases_side_snapshot(
     assert reread is not None
     assert ledger.checkouts == 2
     assert ledger.outstanding == database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compressible", [True, False])
+@pytest.mark.parametrize("oversized", [None, *RunInputField])
+async def test_run_input_read_admits_maximum_values_before_driver_transfer(
+    database: Database, compressible: bool, oversized: RunInputField | None
+) -> None:
+    value_width = MAX_PARAMS_BYTES - len(b'{"value":""}')
+    value = (
+        b"a" * value_width
+        if compressible
+        else base64.b64encode(hashlib.shake_256(b"external input").digest(value_width))[
+            :value_width
+        ]
+    )
+    exact = b'{"value":"' + value + b'"}'
+    wide = exact[:-2] + b'a"}'
+    projection = wide if oversized is RunInputField.PROJECTION else exact
+    params = wide if oversized is RunInputField.PARAMS else exact
+    binding = await seed(database, projection=projection, params=params)
+    limits = replace(LIMITS, projection=MAX_PARAMS_BYTES)
+    ledger = ConnectionLedger(database)
+
+    async with database.read_snapshot() as connection:
+        native = [
+            await connection.scalar(
+                run_input_value_statement(
+                    database.dialect, binding.run_id, field, limits
+                )
+            )
+            for field in RunInputField
+        ]
+        if database.dialect is Dialect.POSTGRESQL:
+            metadata = [
+                tuple(
+                    (
+                        await connection.execute(
+                            select(
+                                func.pg_catalog.pg_column_size(column),
+                                func.pg_catalog.pg_column_compression(column),
+                            ).where(run_inputs.c.run_id == binding.run_id)
+                        )
+                    ).one()
+                )
+                for column in (run_inputs.c.cel_projection, run_inputs.c.params)
+            ]
+        else:
+            metadata = []
+    outcomes = [
+        await read_run_input(database, binding, field, limits)
+        for field in RunInputField
+    ]
+
+    assert len(exact) == MAX_PARAMS_BYTES
+    assert len(wide) == MAX_PARAMS_BYTES + 1
+    for field, transferred, checked in zip(
+        RunInputField, native, outcomes, strict=True
+    ):
+        refused = oversized is RunInputField.PROJECTION or field is oversized
+        if refused:
+            assert transferred is checked is None
+        else:
+            assert transferred == exact
+            assert checked is not None
+            assert checked.binding == binding
+            assert checked.field is field
+            assert checked.value == {"value": value.decode()}
+    for physical, compression in metadata:
+        assert type(physical) is int
+        if compressible:
+            assert compression is not None
+            assert physical < MAX_PARAMS_BYTES
+        else:
+            assert compression is None
+            assert physical >= MAX_PARAMS_BYTES
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert database.writer_is_free()
