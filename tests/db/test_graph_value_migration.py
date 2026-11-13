@@ -81,8 +81,8 @@ async def test_graph_version_value_encoding_migration(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0006",
-            "0028",
-            22,
+            "0029",
+            23,
         )
         assert after == before.history
         assert versions == [None]
@@ -248,8 +248,8 @@ async def test_graph_value_migration_recovery_releases_resources(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0006",
-            "0028",
-            22,
+            "0029",
+            23,
         )
         assert differences == []
         assert stage.database is not None
@@ -296,7 +296,7 @@ async def test_graph_value_migration_failure_preserves_history_and_recovers(
         assert schema_after == schema_before
         assert after == before.history
         assert locks == 0
-        assert recovered.to_revision == "0028"
+        assert recovered.to_revision == "0029"
         assert observed.ledger is not None
         assert (
             observed.ledger.outstanding == observed.ledger.closed_while_checked_out == 0
@@ -340,7 +340,7 @@ async def test_graph_value_migration_handles_prepared_schema(
                 differences_ignoring_expression_indexes
             )
 
-        assert report.to_revision == "0028"
+        assert report.to_revision == "0029"
         assert after == before.history
         assert differences == []
     finally:

@@ -25,6 +25,11 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
     empty_database_settings: DatabaseSettings,
 ) -> None:
     database = Database(empty_database_settings)
+    old_worker = tuple(
+        field
+        for field in worker.c
+        if field.name not in ("claim_cursor", "claim_cursor_generation")
+    )
     try:
         async with database.migration_connection() as connection:
             await connection.run_sync(predecessor)
@@ -68,7 +73,9 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
                     **seed.stamps(),
                 )
             )
-            before_worker = (await connection.execute(select(worker))).mappings().one()
+            before_worker = (
+                (await connection.execute(select(*old_worker))).mappings().one()
+            )
             before_event = (await connection.execute(select(event))).mappings().one()
             before_delivery = (
                 (await connection.execute(select(notification_delivery)))
@@ -80,7 +87,14 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
         result = await upgrade_database(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
-            after_worker = (await connection.execute(select(worker))).mappings().one()
+            after_worker = (
+                (await connection.execute(select(*old_worker))).mappings().one()
+            )
+            cursor = (
+                await connection.execute(
+                    select(worker.c.claim_cursor, worker.c.claim_cursor_generation)
+                )
+            ).one()
             after_event = (await connection.execute(select(event))).mappings().one()
             after_delivery = (
                 (await connection.execute(select(notification_delivery)))
@@ -89,8 +103,9 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
             )
 
         assert result.from_revision == "0022"
-        assert result.to_revision == "0028"
+        assert result.to_revision == "0029"
         assert after_worker == before_worker
+        assert tuple(cursor) == (None, 0)
         assert after_event == before_event
         assert after_delivery == before_delivery
         with pytest.raises(IntegrityError):

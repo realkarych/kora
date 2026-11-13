@@ -28,7 +28,7 @@ from kora.db.types import OutcomePayloadText
 from kora.db.usage_source import UsageSourceText
 from tests.support.warning_filters import expression_index_warnings_ignored
 
-HEAD_REVISION: str = "0028"
+HEAD_REVISION: str = "0029"
 
 
 def differences_ignoring_expression_indexes(connection: Connection) -> list[str]:
@@ -69,7 +69,7 @@ async def test_migration_reaches_head_and_matches_the_tables(
     assert (report.from_revision, report.to_revision, report.steps) == (
         None,
         HEAD_REVISION,
-        28,
+        29,
     )
     assert (rerun.from_revision, rerun.to_revision, rerun.steps) == (
         HEAD_REVISION,

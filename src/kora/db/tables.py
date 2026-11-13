@@ -104,6 +104,7 @@ from kora.db.types import (
     collated_text,
 )
 from kora.db.usage_source import UsageSourceText
+from kora.db.worker_claim_poll_v1 import CANDIDATE_INDEX, CANDIDATE_ROWS, cursor_columns
 from kora.db.worker_claims_v1 import CLAIM_INDEXES, claim_columns
 from kora.db.worker_registration_v1 import (
     EVENT_NAMESPACE_SCOPE,
@@ -639,6 +640,15 @@ attempt_dispatcher: Table = Table(
 
 for owner_name, claim_field in claim_columns():
     metadata.tables[owner_name].append_column(claim_field)
+for cursor_field in cursor_columns():
+    worker.append_column(cursor_field)
+Index(
+    CANDIDATE_INDEX,
+    attempt.c.runtime,
+    attempt.c.id,
+    sqlite_where=literal_column(CANDIDATE_ROWS),
+    postgresql_where=literal_column(CANDIDATE_ROWS),
+)
 for index_name, owner_name, fields, condition, unique in CLAIM_INDEXES:
     predicate = None if condition is None else literal_column(condition, Boolean())
     Index(
