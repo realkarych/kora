@@ -67,9 +67,8 @@ async def test_claim_transition_diagnostics_exclude_content_and_native_refusal(
     frame = caught.value.__traceback__
     while frame is not None:
         if frame.tb_frame.f_code.co_name == "claim_attempt":
-            assert (
-                not {"context", "query", "principal", "prepared"}
-                & frame.tb_frame.f_locals.keys()
+            assert {"context", "query", "principal", "prepared"}.isdisjoint(
+                frame.tb_frame.f_locals
             )
         frame = frame.tb_next
     async with database.read_transaction() as reader:
