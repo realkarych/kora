@@ -7,7 +7,7 @@ from kora.db.connection import Database
 from kora.db.graph_resource_owner_reads import acquire_graph_resource_owners
 from kora.db.graph_resource_transport import graph_resource_binary_projection
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
-from kora.db.tables import graph_version, graph_version_resource_owner, worker
+from kora.db.tables import attempt, graph_version, graph_version_resource_owner
 from kora.engine.attempt_usage import UsageAccess, UsageAccessRejected
 from kora.engine.usage_preparation import read_usage_context
 from tests.db.closing import ConnectionLedger
@@ -164,7 +164,7 @@ async def test_usage_preparation_does_not_preserve_stale_write_authority(
         LIMITS,
     )
     async with database.transaction() as connection:
-        await connection.execute(update(worker).values(incarnation_id="replacement"))
+        await connection.execute(update(attempt).values(lease_epoch=2))
     before = await usage_snapshot(database, case)
 
     with pytest.raises(UsageAccessRejected) as refused:

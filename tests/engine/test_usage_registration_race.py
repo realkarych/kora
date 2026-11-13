@@ -1,13 +1,16 @@
 import asyncio
 from datetime import timedelta
+from typing import cast
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from kora.db.connection import Database
 from kora.db.tables import worker
 from kora.engine.attempt_usage import UsageAccess, UsageAccessRejected, report_usage
 from kora.engine.locks import TransitionLocks
+from kora.engine.worker_registration import Registration, register_worker
+from kora.protocols.identity_records import ProcessIdentity
 from tests.db.closing import ConnectionLedger
 from tests.db.test_graph_credential_guard import postgres_pid, wait_for_blocked_writer
 from tests.engine.lock_support import DEADLINE, lock_inventory
@@ -35,10 +38,28 @@ async def test_usage_rechecks_authority_after_waiting_for_registration(
                 .with_for_update()
             )
             if change == "incarnation":
-                await connection.execute(
-                    update(worker)
-                    .where(worker.c.id == case.principal.owner)
-                    .values(incarnation_id="replacement-incarnation")
+                await register_worker(
+                    connection,
+                    Registration(
+                        case.principal.owner,
+                        "replacement-incarnation",
+                        "local",
+                        "replacement-domain",
+                        "0.1.0",
+                        1,
+                        ProcessIdentity(
+                            host_id="host",
+                            boot_id="boot",
+                            pid_namespace="namespace",
+                            pid=2345,
+                            start_time=600,
+                            leads_group=True,
+                        ),
+                    ),
+                    case.principal,
+                    portable=False,
+                    now=case.clock.now(),
+                    event_id=case.identifiers.new(),
                 )
             blocker.set_result(await postgres_pid(connection, database.dialect))
             await asyncio.wait_for(release.wait(), DEADLINE)
@@ -77,15 +98,21 @@ async def test_usage_rechecks_authority_after_waiting_for_registration(
         else:
             release.set()
             await asyncio.wait_for(owner, DEADLINE)
-            with pytest.raises(UsageAccessRejected) as refused:
+            if change == "incarnation":
                 await asyncio.wait_for(contender, DEADLINE)
-            assert refused.value.reason is UsageAccess.STALE_GRANT
+            else:
+                with pytest.raises(UsageAccessRejected) as refused:
+                    await asyncio.wait_for(contender, DEADLINE)
+                assert refused.value.reason is UsageAccess.STALE_GRANT
     finally:
         release.set()
         await asyncio.gather(owner, contender, return_exceptions=True)
     after = await usage_snapshot(database, case)
 
-    assert after[0] == ()
-    assert after[2] is False
+    assert isinstance(after[0], tuple)
+    assert len(cast(tuple[object, ...], after[0])) == (
+        1 if change == "incarnation" else 0
+    )
+    assert after[2] is (change == "incarnation")
     assert ledger.outstanding == database.units_in_flight() == 0
     assert await lock_inventory(database) == []
