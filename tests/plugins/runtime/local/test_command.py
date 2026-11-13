@@ -99,6 +99,7 @@ from tests.support.local_runtime import (
 )
 
 HOLD_MARKER = f"kora-hold-p{os.getpid()}-809-"
+ATTEMPT_TOKEN = os.getpid().to_bytes(16, "big").hex()
 FD_REPORT = "\n".join(
     (
         "import os, time",
@@ -1142,7 +1143,7 @@ async def test_exited_command_settles_observed_descendants_without_status(
 async def test_command_stop_leaves_foreign_token_lookalike_alive(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    token = bytes(range(16)).hex()
+    token = ATTEMPT_TOKEN
     canary = "private-unrelated-native-environment"
     with subprocess.Popen(
         [
@@ -1323,7 +1324,7 @@ def stop_workers() -> frozenset[threading.Thread]:
 
 @pytest.mark.parametrize("alignment", [4, 8])
 def test_darwin_command_marker_requires_complete_environment(alignment: int) -> None:
-    marker = b"KORA_ATTEMPT_TOKEN=" + bytes(range(16)).hex().encode()
+    marker = b"KORA_ATTEMPT_TOKEN=" + ATTEMPT_TOKEN.encode()
     path = (2).to_bytes(4, sys.byteorder) + b"/x" + b"\0" * (alignment - 2)
     arguments = path + b"command\0\0"
     argument_only = path + b"command\0" + marker + b"\0"
@@ -1375,7 +1376,7 @@ class CommandSignalProbe(CommandDomainStop):
 
 
 def test_command_stop_refuses_stale_identity_for_live_process() -> None:
-    value = bytes(range(16)).hex()
+    value = ATTEMPT_TOKEN
     ready = "import os; os.write(1, b'r'); os.read(0, 1)"
     with subprocess.Popen(
         [sys.executable, "-I", "-c", ready],
@@ -1423,7 +1424,7 @@ def test_census_retains_listed_group_member_after_detach() -> None:
             "    os.read(0, 1)",
         )
     )
-    marker = b"KORA_ATTEMPT_TOKEN=" + bytes(range(16)).hex().encode()
+    marker = b"KORA_ATTEMPT_TOKEN=" + ATTEMPT_TOKEN.encode()
     reader = NativeIdentityReader()
     with subprocess.Popen(
         [sys.executable, "-I", "-c", command],
