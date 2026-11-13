@@ -1,16 +1,17 @@
 from hashlib import sha256
 from typing import cast
 
+from kora.ir.agent_secrets import UNENFORCED
 from kora.ir.deployment_checks import (
     DeploymentSelection,
     check_deployment_document,
 )
 from kora.ir.diagnostics import Diagnostic
 from kora.ir.document import GraphDocument
-from tests.api.deployment_cases import HARNESS, unresolved_approval
+from tests.api.deployment_cases import DEFAULT_POLICY, HARNESS, unresolved_approval
 from tests.ir.first_slice_configuration_cases import chain_document, chain_nodes
 
-SELECTION = DeploymentSelection("claude")
+SELECTION = DeploymentSelection("claude", UNENFORCED)
 EMPTY_FILE = {
     "name": "check.sh",
     "sha256": "sha256:" + sha256(b"").hexdigest(),
@@ -32,7 +33,7 @@ def findings(
 def test_deployment_checks_accept_the_skeleton_chain() -> None:
     document = chain_document()
 
-    result = check_deployment_document(document, SELECTION)
+    result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
     assert result.deployable
     assert result.complete
@@ -50,7 +51,7 @@ def test_deployment_checks_collect_findings_from_every_pass() -> None:
     config(nodes, "agent")["skills"] = ["private-skill"]
     document = chain_document(nodes)
 
-    result = check_deployment_document(document, SELECTION)
+    result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
     codes = {error.code for error in result.diagnostics.errors}
     assert not result.deployable
@@ -64,7 +65,7 @@ def test_deployment_checks_refuse_unselected_providers() -> None:
     config(nodes, "gate")["runtime"] = "docker"
     document = chain_document(nodes, runtime_fields={"runtime": "docker"})
 
-    result = check_deployment_document(document, SELECTION)
+    result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
     assert not result.deployable
     assert findings(result.diagnostics.errors) == {
@@ -79,7 +80,7 @@ def test_deployment_checks_refuse_declared_command_files() -> None:
     config(nodes, "gate")["resources"] = [EMPTY_FILE]
     document = chain_document(nodes)
 
-    result = check_deployment_document(document, SELECTION)
+    result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
     assert not result.deployable
     assert ("IR028", ("graph", "nodes", "gate", "config", "resources")) in findings(
@@ -92,7 +93,7 @@ def test_deployment_checks_accept_an_empty_command_file_list() -> None:
     config(nodes, "gate")["resources"] = []
     document = chain_document(nodes)
 
-    result = check_deployment_document(document, SELECTION)
+    result = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
 
     assert result.deployable
 
@@ -100,7 +101,9 @@ def test_deployment_checks_accept_an_empty_command_file_list() -> None:
 def test_deployment_checks_report_unresolved_work_as_incomplete() -> None:
     document = GraphDocument.model_validate(unresolved_approval())
 
-    result = check_deployment_document(document, DeploymentSelection(HARNESS))
+    result = check_deployment_document(
+        document, DeploymentSelection(HARNESS, UNENFORCED), DEFAULT_POLICY
+    )
 
     assert not result.complete
     assert not result.deployable

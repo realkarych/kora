@@ -16,12 +16,15 @@ from kora.ir.json import JsonObject
 from kora.models.errors import ApiErrorEnvelope
 from kora.models.graphs import DeployResponse
 from tests.api.deployment_cases import (
+    ALLOW_AGENT_SECRETS,
     GRAPH,
     HARNESS,
     NAMESPACE,
     preparer,
+    save_secret_policy,
     skeleton_ir,
     unresolved_approval,
+    with_agent_secret,
 )
 from tests.api.support import (
     HttpCall,
@@ -321,3 +324,36 @@ async def test_deploy_route_treats_a_disconnected_body_as_a_refusal(
     assert ApiErrorEnvelope.model_validate_json(call.body).error.code == "API003"
     assert "api.request.failed" not in events
     assert await rows(database) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_refuses_unenforced_agent_secrets(
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+) -> None:
+    case = await seed_case(database, NAMESPACE)
+    headers = {"Authorization": str(case.request.authorization)}
+    namespace_id = case.principal.namespaces[0].namespace_id
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+
+    async with client_for(app) as client:
+        refused = await client.post(
+            PATH, json=body(with_agent_secret()), headers=headers
+        )
+        unwritten = await rows(database)
+        await save_secret_policy(database, namespace_id, ALLOW_AGENT_SECRETS)
+        allowed = await client.post(
+            PATH, json=body(with_agent_secret()), headers=headers
+        )
+
+    envelope = error_of(refused)
+    errors = envelope.model_dump(mode="json")["error"]["details"]["errors"]
+    assert (refused.status_code, envelope.error.code) == (422, "API003")
+    assert [(error["code"], error["path"]) for error in errors] == [
+        ("IR015", ["graph", "nodes", "agent", "config", "secret_env"])
+    ]
+    assert "API_TOKEN" not in refused.text
+    assert unwritten == (0, 0)
+    assert allowed.status_code == 201
+    assert await rows(database) == (1, 1)

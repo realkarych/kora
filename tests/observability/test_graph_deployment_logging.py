@@ -1,7 +1,6 @@
 from typing import cast
 
 import pytest
-from sqlalchemy.exc import IntegrityError
 
 from kora.api.graph_deployment_writer import (
     GraphDeploymentTarget,
@@ -10,10 +9,13 @@ from kora.api.graph_deployment_writer import (
 from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database
 from kora.db.identifiers import IdentifierGenerator
+from kora.db.namespace_reads import InvalidNamespacePolicy
+from kora.ir.agent_secrets import UNENFORCED
 from kora.ir.deployment_checks import DeploymentSelection, check_deployment_document
 from kora.observability import Level, LoggingSettings
 from tests.api.deployment_cases import (
     AT,
+    DEFAULT_POLICY,
     OWNER,
     evaluator,
     prepared,
@@ -47,7 +49,9 @@ def test_deployment_checks_logging_is_content_free(
         configure, pipe, LoggingSettings(level=Level.DEBUG)
     )
 
-    result = check_deployment_document(document, DeploymentSelection("claude"))
+    result = check_deployment_document(
+        document, DeploymentSelection("claude", UNENFORCED), DEFAULT_POLICY
+    )
     output = finished_output(diagnostics, pipe)
 
     records = [
@@ -72,8 +76,12 @@ async def test_deploy_writer_logging_is_content_free(
 ) -> None:
     namespace_id, token_id = await seeded_namespace(database)
     deployment = await prepared(evaluator)
-    target = GraphDeploymentTarget(namespace_id, principal(namespace_id, token_id))
-    missing = GraphDeploymentTarget(token_id, principal(token_id, token_id))
+    target = GraphDeploymentTarget(
+        namespace_id, principal(namespace_id, token_id), DEFAULT_POLICY
+    )
+    missing = GraphDeploymentTarget(
+        token_id, principal(token_id, token_id), DEFAULT_POLICY
+    )
     diagnostics = configured_with_reader(
         configure, pipe, LoggingSettings(level=Level.DEBUG)
     )
@@ -88,7 +96,7 @@ async def test_deploy_writer_logging_is_content_free(
         )
         for _ in range(2)
     ]
-    with pytest.raises(IntegrityError):
+    with pytest.raises(InvalidNamespacePolicy):
         await publish_graph_deployment(
             database,
             deployment,

@@ -33,9 +33,11 @@ from kora.db.graph_deployment_reads import (
 from kora.db.graph_read_admission import GraphVersionReadAdmission
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.db.identifiers import IdentifierGenerator
+from kora.db.namespace_reads import read_namespace_secret_policy
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_version_identity import GraphVersionDigests
 from kora.engine.locks import Scope, ScopeKind, TransitionLocks
+from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 from kora.protocols.authentication import Principal
 
@@ -56,6 +58,11 @@ COMPLETED: EventSpec = CATALOG.register(
 class GraphDeploymentTarget:
     namespace_id: str
     principal: Principal
+    secret_policy: NamespaceSecretPolicy
+
+
+class NamespacePolicyChanged(Exception):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +142,9 @@ async def _publish(
     )
     locks = TransitionLocks(connection)
     await locks.acquire_scopes((Scope(ScopeKind.NAMESPACE, (target.namespace_id,)),))
+    current = await read_namespace_secret_policy(connection, target.namespace_id)
+    if current != target.secret_policy:
+        raise NamespacePolicyChanged()
     digests = deployment.inputs.logical.digests
     graph_id, created = await _graph_id(
         connection, dialect, target, deployment.graph_name, identifiers, at
