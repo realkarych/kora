@@ -11,8 +11,8 @@ from kora.db.worker_registration_v1 import (
     incarnation_elements,
 )
 
-revision: str = "0022"
-down_revision: str | None = "0021"
+revision: str = "0023"
+down_revision: str | None = "0022"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 

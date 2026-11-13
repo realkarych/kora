@@ -17,7 +17,7 @@ from tests.plugins.authentication.support import seed_case
 
 
 def predecessor(connection: Connection) -> None:
-    command.upgrade(alembic_config(connection), "0021")
+    command.upgrade(alembic_config(connection), "0022")
 
 
 @pytest.mark.asyncio
@@ -88,8 +88,8 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
                 .one()
             )
 
-        assert result.from_revision == "0021"
-        assert result.to_revision == "0022"
+        assert result.from_revision == "0022"
+        assert result.to_revision == "0023"
         assert after_worker == before_worker
         assert after_event == before_event
         assert after_delivery == before_delivery

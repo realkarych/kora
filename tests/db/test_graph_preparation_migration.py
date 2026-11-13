@@ -229,8 +229,8 @@ async def test_preparation_migrates_native_sqlite_utf16_and_refuses_bad_text(
         assert str(actual_encoding).lower() == encoding
         assert (report.from_revision, report.to_revision, report.steps) == (
             PREDECESSOR,
-            "0022",
-            15,
+            "0023",
+            16,
         )
         assert dict(result.mappings().one()) == values
         assert settlement == GraphPreparationSettlement(
@@ -355,8 +355,8 @@ async def test_preparation_migration_rolls_back_stamp_and_releases_writer(
         assert absent
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             PREDECESSOR,
-            "0022",
-            15,
+            "0023",
+            16,
         )
         assert repeated.steps == 0
         assert before == after
