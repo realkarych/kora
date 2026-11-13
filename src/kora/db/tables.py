@@ -25,6 +25,7 @@ from kora.db.bootstrap_initialization_v1 import (
 )
 from kora.db.claim_sources_v1 import LOCATORS, SQLITE_KEY, claim_source_elements
 from kora.db.claim_sources_v1 import TABLE_NAME as CLAIM_SOURCE_TABLE
+from kora.db.deadline_discovery_v1 import INDEXES as DEADLINE_INDEXES
 from kora.db.grant_history_v1 import (
     attempt_history_columns,
     dispatcher_history_columns,
@@ -677,6 +678,14 @@ approval_request: Table = Table(
     document("evaluation_error", nullable=True),
     *audit_columns(),
 )
+
+for index_name, owner_table, index_columns, predicate, _ in DEADLINE_INDEXES:
+    Index(
+        index_name,
+        *(metadata.tables[owner_table].c[column] for column in index_columns),
+        postgresql_where=None if predicate is None else literal_column(predicate),
+        sqlite_where=None if predicate is None else literal_column(predicate),
+    )
 
 artifact_version: Table = Table(
     "artifact_version",
