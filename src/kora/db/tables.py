@@ -23,6 +23,8 @@ from kora.db.bootstrap_initialization_v1 import (
 from kora.db.bootstrap_initialization_v1 import (
     bootstrap_initialization_elements_v1,
 )
+from kora.db.claim_sources_v1 import LOCATORS, SQLITE_KEY, claim_source_elements
+from kora.db.claim_sources_v1 import TABLE_NAME as CLAIM_SOURCE_TABLE
 from kora.db.graph_deployment_stage_v1 import (
     OCCURRENCE_TABLE,
     STAGE_TABLE,
@@ -591,6 +593,17 @@ attempt: Table = Table(
         sqlite_where=text("status IN ('claimed', 'submitted', 'running', 'finishing')"),
     ),
 )
+
+attempt.append_column(Column("acknowledged_segment_offset", BigInteger, nullable=True))
+attempt_claim_read_admission: Table = Table(
+    CLAIM_SOURCE_TABLE, metadata, *claim_source_elements()
+)
+for owner, key, locator in LOCATORS:
+    Index(
+        locator,
+        metadata.tables[owner].c[key],
+        sqlite_where=literal_column(SQLITE_KEY.replace("id", key)),
+    ).ddl_if(dialect="sqlite")
 
 attempt_dispatcher: Table = Table(
     "attempt_dispatcher",
