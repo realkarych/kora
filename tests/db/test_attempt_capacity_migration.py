@@ -16,6 +16,7 @@ from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
+from tests.db.seed import predecessor_snapshot
 from tests.db.test_graph_publication_digest_migration import wait_for_invalid_index
 from tests.engine.expiry_support import execution_case
 
@@ -33,7 +34,18 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
                 lambda sync: command.upgrade(alembic_config(sync), "0025")
             )
         case = await execution_case(database)
-        before = await case.snapshot(database)
+        async with database.read_transaction() as reader:
+            before = await reader.run_sync(
+                lambda sync: predecessor_snapshot(
+                    sync,
+                    {
+                        "attempt": tuple(
+                            str(field["name"])
+                            for field in inspect(sync).get_columns("attempt")
+                        )
+                    },
+                )
+            )
         async with database.transaction() as writer:
             await writer.exec_driver_sql(
                 "CREATE INDEX ix_attempt_physical_capacity ON attempt (id)"
@@ -76,8 +88,10 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
 
         report = await upgrade_database(empty_database_settings)
         repeated = await upgrade_database(empty_database_settings)
-        after = await case.snapshot(database)
         async with database.read_transaction() as reader:
+            after = await reader.run_sync(
+                lambda sync: predecessor_snapshot(sync, before.columns)
+            )
             with await reader.execute(select(attempt.c.id)) as result:
                 ids = list(result.scalars())
             graph_indexes = await reader.run_sync(
@@ -89,8 +103,8 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0025",
-            "0026",
-            1,
+            "0027",
+            2,
         )
         assert repeated.steps == 0
         assert after == before
