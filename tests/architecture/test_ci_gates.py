@@ -54,6 +54,7 @@ SCAFFOLD_JOIN_FIELDS = (
     "PLAN_RESULT",
     "LANES_RESULT",
     "MACOS_LANES_RESULT",
+    "MACOS_GENERAL_LANES_RESULT",
     "DEPENDENCIES_OUTCOME",
     "DOWNLOAD_OUTCOME",
     "VERIFICATION_OUTCOME",
@@ -285,12 +286,51 @@ def test_scaffold_join_refuses_failed_cancelled_skipped_or_missing_evidence(
         **SCOPE,
         "WORKFLOW_CANCELLED": "false",
         "FULL_SCOPE": "true",
+        "EVENT_NAME": "push",
         field: outcome,
     }
 
     result = run_gate(["scaffold-evidence"], values, output)
 
     passes = field == "WORKFLOW_CANCELLED" and outcome == "false"
+    assert (result.returncode == 0) is passes
+    assert recorded(output) == ("verified=true\n" if passes else "")
+
+
+@pytest.mark.parametrize(
+    ("event", "general", "passes"),
+    [
+        ("pull_request", "skipped", True),
+        ("pull_request", "success", False),
+        ("pull_request", "failure", False),
+        ("pull_request", "cancelled", False),
+        ("pull_request", "", False),
+        ("push", "success", True),
+        ("push", "skipped", False),
+        ("push", "failure", False),
+        ("push", "cancelled", False),
+        ("push", "", False),
+        ("pull_request_target", "skipped", False),
+        ("schedule", "success", False),
+        ("", "success", False),
+        (None, "skipped", False),
+    ],
+)
+def test_scaffold_join_requires_the_general_macos_lanes_by_event(
+    tmp_path: Path, event: str | None, general: str, passes: bool
+) -> None:
+    output = tmp_path / "output"
+    values: dict[str, str | None] = {
+        **dict.fromkeys(SCAFFOLD_JOIN_FIELDS, "success"),
+        **SCOPE,
+        "WORKFLOW_CANCELLED": "false",
+        "FULL_SCOPE": "true",
+        "EVENT_NAME": event,
+        "MACOS_GENERAL_LANES_RESULT": general,
+    }
+
+    result = run_gate(["scaffold-evidence"], values, output)
+
     assert (result.returncode == 0) is passes
     assert recorded(output) == ("verified=true\n" if passes else "")
 

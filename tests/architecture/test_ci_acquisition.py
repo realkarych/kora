@@ -78,9 +78,20 @@ PRIVILEGED_ACQUISITIONS = (
 )
 BUDGET_PRESERVING_SUDO = "sudo --preserve-env=RUNNER_TEMP "
 PLANNED_LANE_JOBS = frozenset(
-    {"ci.yml:scaffold-plan", "ci.yml:scaffold-tests", "ci.yml:scaffold-tests-macos"}
+    {
+        "ci.yml:scaffold-plan",
+        "ci.yml:scaffold-tests",
+        "ci.yml:scaffold-tests-macos",
+        "ci.yml:scaffold-tests-macos-general",
+    }
 )
-STATIC_CHECK_JOBS = frozenset({"ci.yml:scaffold-tests", "ci.yml:scaffold-tests-macos"})
+STATIC_CHECK_JOBS = frozenset(
+    {
+        "ci.yml:scaffold-tests",
+        "ci.yml:scaffold-tests-macos",
+        "ci.yml:scaffold-tests-macos-general",
+    }
+)
 STATIC_CHECK_STEP = "static_checks"
 STATIC_CHECK_EXCLUSION = "${{ matrix.lane != 'static-checks' }}"
 DEADLINE_MARGIN_SECONDS = 120.0

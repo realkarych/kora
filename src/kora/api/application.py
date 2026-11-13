@@ -13,10 +13,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from kora.api.authentication import authenticate_route
 from kora.api.errors import RequestRejection, definitive_error, request_rejection
 from kora.api.exchange import ApiExchange, current_exchange, method_of
-from kora.api.graph_deployment_route import (
-    GraphDeploymentServices,
-    deployment_handler,
-)
+from kora.api.graph_deployment_route import deployment_handler
+from kora.api.graph_services import GraphServices
 from kora.api.responses import (
     error_response,
     framework_error,
@@ -29,10 +27,12 @@ from kora.api.routes import (
     ActiveCatalog,
     RouteName,
 )
+from kora.api.run_trigger_route import trigger_handler
 from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.engine.admission_initialization import AdmissionInitialization
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
+from kora.models.runs import AcceptedRun, SkippedRun, TriggerRequest
 from kora.models.workers import RegisteredWorker, WorkerRegistration
 from kora.observability import ProcessDiagnostics
 from kora.protocols.authentication import Authenticator
@@ -127,7 +127,7 @@ def create_application(
     diagnostics: ProcessDiagnostics,
     clock: Clock,
     request_id: Callable[[], str],
-    deployment: GraphDeploymentServices | None = None,
+    deployment: GraphServices | None = None,
     *,
     worker_registration: WorkerRegistrationRoute | None = None,
     admission_initialization: AdmissionInitialization | None = None,
@@ -193,6 +193,31 @@ def create_application(
                     "content": {
                         "application/json": {
                             "schema": DeployRequest.model_json_schema()
+                        }
+                    },
+                }
+            },
+        )
+
+        framework.add_api_route(
+            RouteName.GRAPH_RUNS.value,
+            trigger_handler(deployment, clock),
+            methods=["POST"],
+            operation_id="trigger_run",
+            status_code=201,
+            response_model=AcceptedRun,
+            responses={
+                200: {
+                    "model": AcceptedRun | SkippedRun,
+                    "description": "A saved outcome or an overlap skip.",
+                }
+            },
+            openapi_extra={
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": TriggerRequest.model_json_schema()
                         }
                     },
                 }

@@ -56,6 +56,7 @@ require_scaffold_evidence() {
     test "$PLAN_RESULT" = skipped
     test "$LANES_RESULT" = skipped
     test "$MACOS_LANES_RESULT" = skipped
+    test "$MACOS_GENERAL_LANES_RESULT" = skipped
     test "$DEPENDENCIES_OUTCOME" = skipped
     test "$DOWNLOAD_OUTCOME" = skipped
     test "$VERIFICATION_OUTCOME" = skipped
@@ -66,6 +67,11 @@ require_scaffold_evidence() {
   test "$PLAN_RESULT" = success
   test "$LANES_RESULT" = success
   test "$MACOS_LANES_RESULT" = success
+  case "$EVENT_NAME" in
+    pull_request) test "$MACOS_GENERAL_LANES_RESULT" = skipped ;;
+    push) test "$MACOS_GENERAL_LANES_RESULT" = success ;;
+    *) exit 1 ;;
+  esac
   test "$DEPENDENCIES_OUTCOME" = success
   test "$DOWNLOAD_OUTCOME" = success
   test "$VERIFICATION_OUTCOME" = success

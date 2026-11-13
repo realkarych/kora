@@ -10,31 +10,11 @@ from kora.client import ApiError, ClientError, KoraClient
 from kora.client.documents import GraphDocumentError, read_graph_deployment
 from kora.client.settings import ClientSettings
 from kora.ir.json import JsonObject
-from kora.mcp.results import tool_result, usage_error
-from kora.observability import (
-    CATALOG,
-    EventSpec,
-    FieldKind,
-    Level,
-    ProcessDiagnostics,
-)
+from kora.mcp.operating import OperatingTools
+from kora.mcp.results import MCP_COMPONENT, TOOL_FINISHED, tool_result, usage_error
+from kora.observability import ProcessDiagnostics
 
-SERVER_NAME = "kora-authoring"
 DEPLOY_TOOL = "kora_deploy"
-MCP_COMPONENT: str = CATALOG.register_component("mcp")
-TOOL_FINISHED: EventSpec = CATALOG.register(
-    EventSpec(
-        "mcp.tool.finished",
-        MCP_COMPONENT,
-        Level.DEBUG,
-        "an MCP tool call finished",
-        {
-            "tool": FieldKind.STRING,
-            "outcome": FieldKind.STRING,
-            "code": FieldKind.STRING,
-        },
-    )
-)
 DEPLOY_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
@@ -105,15 +85,27 @@ class AuthoringTools:
         return tool_result(deployed.document)
 
 
-async def serve_authoring(
-    settings: ClientSettings, diagnostics: ProcessDiagnostics
+SERVER_NAMES: dict[str, str] = {
+    "authoring": "kora-authoring",
+    "operating": "kora-operating",
+}
+
+
+async def serve_stdio(
+    server_name: str, settings: ClientSettings, diagnostics: ProcessDiagnostics
 ) -> None:
     async with KoraClient(
         settings.url, settings.token, diagnostics=diagnostics
     ) as client:
-        tools = AuthoringTools(client, diagnostics)
+        tools = (
+            AuthoringTools(client, diagnostics)
+            if server_name == "authoring"
+            else OperatingTools(client, diagnostics)
+        )
         server: Server[object] = Server(
-            SERVER_NAME, on_list_tools=tools.list_tools, on_call_tool=tools.call_tool
+            SERVER_NAMES[server_name],
+            on_list_tools=tools.list_tools,
+            on_call_tool=tools.call_tool,
         )
         async with stdio_server() as (read_stream, write_stream):
             await server.run(

@@ -29,6 +29,7 @@ from kora.engine.start_acceptance import (
     StartAcceptance,
     StartAcceptanceFailed,
     StartCandidate,
+    accept_manual_start,
     acquire_manual_start,
     select_manual_start,
 )
@@ -36,6 +37,7 @@ from kora.engine.start_facts import (
     InstallationRefusal,
     ManualStartFacts,
     SelectedStartVersion,
+    StartFactsResult,
     StartRefusal,
     declares_agent_secrets,
     read_manual_start_facts,
@@ -717,3 +719,46 @@ async def test_manual_start_refuses_an_unavailable_saved_binding(
 
     assert result is StartRefusal.PARAMETERS_UNAVAILABLE
     assert all(not table for table in (await start_rows(database)).values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [1, 2])
+async def test_accept_manual_start_prepares_again_once(
+    database: Database, evaluator: Evaluator, changes: int
+) -> None:
+    case = await deploy(database, evaluator)
+    request = request_for(case)
+    published: list[str] = []
+
+    async def prepare(
+        candidate: StartCandidate,
+    ) -> StartAcceptance | StartFactsResult | None:
+        selected = await acquire_manual_start(
+            database, request, candidate, limits=IDENTITY
+        )
+        assert isinstance(selected, SelectedStartVersion)
+        facts = read_manual_start_facts(selected, request, SELECTION, limits=IDENTITY)
+        if len(published) < changes:
+            published.append(
+                await redeploy(database, evaluator, case, f"Change {len(published)}.")
+            )
+        return facts
+
+    clock = FakeClock(AT)
+    result = await accept_manual_start(
+        database,
+        case.user,
+        request,
+        KEY,
+        prepare,
+        identifiers=IdentifierGenerator(clock.now),
+        clock=clock.now,
+    )
+    rows = await start_rows(database)
+
+    if changes == 1:
+        assert accepted(result).graph_version_id == published[0]
+        assert len(rows["run"]) == 1
+    else:
+        assert result == StartAcceptance(AcceptanceOutcome.STALE)
+        assert all(not table for table in rows.values())

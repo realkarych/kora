@@ -123,6 +123,7 @@ Installed adverse-fixture exception (issue #307): tests/fixtures/provider_toolin
 
 - Supported operating systems: **Linux and macOS**. Windows is not supported: no Windows code paths, compatibility shims, path handling or CI jobs. POSIX assumptions are fine.
 - CI runs on Linux and macOS. GitHub-hosted macOS runners have no Docker, so tests that need Docker (Docker runtime, PostgreSQL through containers) run on the Linux job only.
+- A pull request runs on macOS the static checks, the storage lane and the local-runtime lane. The general test lanes run on macOS for every push to `master`, where a failed general lane opens an issue automatically; a macOS-only failure of a general test is therefore found after the merge. The project owner decided this on 2026-11-13 under [issue #1473](https://github.com/realkarych/kora/issues/1473); the [dated record](knowledge/research/macos-general-lanes-on-master-2026-11-13.md) holds the basis and the limits. Linux runs every lane in pull requests.
 
 ## Definition of done
 

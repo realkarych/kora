@@ -46,7 +46,7 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
             after = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
-            objects = await connection.run_sync(attempt_schema_objects)
+            objects = await connection.run_sync(attempt_schema_objects, True)
             columns = await connection.run_sync(
                 lambda sync: inspect(sync).get_columns("attempt")
             )
@@ -74,8 +74,8 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0003",
-            "0026",
-            23,
+            "0027",
+            24,
         )
         assert after == before.history
         assert_attempt_schema_extension(
@@ -174,8 +174,8 @@ async def test_attempt_cancel_cause_upgrade_recovers_compatible_partial_schema(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0003",
-            "0026",
-            23,
+            "0027",
+            24,
         )
         assert differences == []
         assert stage.database is not None

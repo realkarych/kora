@@ -106,20 +106,45 @@ async def test_grant_history_migration_preserves_active_legacy_rows(
             await writer.execute(insert(attempt_dispatcher).values(**values))
         async with database.migration_connection() as connection:
             with pytest.raises(
-                RuntimeError, match="grant history cannot be downgraded"
+                RuntimeError, match="deadline discovery cannot be downgraded"
             ):
                 await connection.run_sync(downgrade)
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0025",
-            "0026",
-            1,
+            "0027",
+            2,
         )
         assert after_attempt == before_attempt
         assert after_dispatcher == before_dispatcher
         assert tuple(unknown) == (None, None, None)
         assert tuple(tip) == (None,) * 6
         assert differences == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_grant_history_revision_refuses_downgrade(
+    empty_database_settings: DatabaseSettings,
+) -> None:
+    database = Database(empty_database_settings)
+    try:
+        async with database.migration_connection() as writer:
+            await writer.run_sync(
+                lambda sync: command.upgrade(alembic_config(sync), "0026")
+            )
+
+        async with database.migration_connection() as writer:
+            with pytest.raises(
+                RuntimeError, match="grant history cannot be downgraded"
+            ):
+                await writer.run_sync(downgrade)
+
+        async with database.read_transaction() as reader:
+            assert (
+                await reader.execute(select(attempt_dispatcher.c.prefix_count))
+            ).all() == []
     finally:
         await database.close()
 
@@ -181,8 +206,8 @@ async def test_grant_history_upgrade_resumes_after_second_index_failure(
         )
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0025",
-            "0026",
-            1,
+            "0027",
+            2,
         )
         assert differences == []
     finally:

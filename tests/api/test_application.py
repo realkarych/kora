@@ -398,6 +398,7 @@ async def test_route_authorization_table_covers_every_operation(
         ("/healthz", {"GET"}),
         ("/api/v1/openapi.json", {"GET"}),
         ("/api/v1/namespaces/{ns}/graphs/{graph}/versions", {"POST"}),
+        ("/api/v1/namespaces/{ns}/graphs/{graph}/runs", {"POST"}),
     ]
     assert [
         route.path for route in probes.application.routes if isinstance(route, APIRoute)
@@ -422,5 +423,6 @@ async def test_parity_client_side_operations(
     assert set(schema["paths"]) == {
         "/healthz",
         "/api/v1/namespaces/{ns}/graphs/{graph}/versions",
+        "/api/v1/namespaces/{ns}/graphs/{graph}/runs",
     }
     assert "servers" not in schema

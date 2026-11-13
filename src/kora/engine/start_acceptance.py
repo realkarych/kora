@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -28,8 +29,11 @@ from kora.engine.start_capacity import (
 )
 from kora.engine.start_facts import (
     EMPTY_PARAMETERS,
+    InstallationRefusal,
     ManualStartFacts,
     SelectedStartVersion,
+    StartFactsResult,
+    StartRefusal,
 )
 from kora.engine.start_records import (
     AcceptedStart,
@@ -463,3 +467,43 @@ async def commit_manual_start(
     if result is None:
         raise_private_metadata_error(StartAcceptanceFailed())
     return _completed(result)
+
+
+StartPreparation = Callable[
+    [StartCandidate], Awaitable[StartAcceptance | StartFactsResult | None]
+]
+StartResult = StartAcceptance | StartRefusal | InstallationRefusal | None
+START_ATTEMPTS = 2
+
+
+async def accept_manual_start(
+    database: Database,
+    principal: Principal,
+    request: PreparedManualStartRequest,
+    key: str,
+    prepare: StartPreparation,
+    *,
+    identifiers: IdentifierGenerator,
+    clock: Callable[[], datetime],
+) -> StartResult:
+    stale = StartAcceptance(AcceptanceOutcome.STALE)
+    for _ in range(START_ATTEMPTS):
+        candidate = await select_manual_start(database, principal, request, key)
+        if isinstance(candidate, StartAcceptance):
+            return candidate
+        prepared = await prepare(candidate)
+        if not isinstance(prepared, ManualStartFacts):
+            return prepared
+        committed = await commit_manual_start(
+            database,
+            principal,
+            request,
+            key,
+            prepared,
+            run_id=identifiers.new(),
+            identifiers=identifiers,
+            at=clock(),
+        )
+        if committed.outcome is not AcceptanceOutcome.STALE:
+            return committed
+    return stale

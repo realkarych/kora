@@ -94,6 +94,7 @@ MCP_DISTRIBUTIONS: frozenset[str] = frozenset({"mcp", "mcp_types"})
 
 class McpServerName(StrEnum):
     AUTHORING = "authoring"
+    OPERATING = "operating"
 
 
 DOCTOR_DATABASE_DEADLINE_SECONDS: float = 5.0
@@ -635,7 +636,10 @@ def conformance(
 
 
 def serve_mcp(
-    environment: Mapping[str, str], diagnostics: ProcessDiagnostics, url: str | None
+    environment: Mapping[str, str],
+    diagnostics: ProcessDiagnostics,
+    server: McpServerName,
+    url: str | None,
 ) -> None:
     from kora.client.settings import (
         MCP_CREDENTIAL_VARIABLE,
@@ -644,7 +648,7 @@ def serve_mcp(
     )
 
     try:
-        from kora.mcp.stdio import serve_authoring
+        from kora.mcp.stdio import serve_stdio
     except ModuleNotFoundError as error:
         if (error.name or "").partition(".")[0] not in MCP_DISTRIBUTIONS:
             raise
@@ -657,7 +661,7 @@ def serve_mcp(
             f"{CLIENT_CONFIGURATION_PREFIX}: {error.variable}: {error.problem.value}\n"
         )
         raise typer.Exit(EXIT_CONFIGURATION) from None
-    asyncio.run(serve_authoring(settings, diagnostics))
+    asyncio.run(serve_stdio(server.value, settings, diagnostics))
 
 
 def cel_check() -> CheckResult:
@@ -762,12 +766,38 @@ def compose_application(
 
         deploy_command(environment, diagnostics, path, as_json)
 
+    @app.command(name="trigger", help="Start a deployed graph without parameters.")
+    def trigger(
+        graph: str,
+        namespace: str | None = typer.Option(None, "--namespace"),
+        graph_version: str | None = typer.Option(None, "--graph-version"),
+        idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
+        allow_unenforced_secrets: bool = typer.Option(
+            False, "--allow-unenforced-secrets"
+        ),
+        as_json: bool = typer.Option(False, "--json", help="Print the API response."),
+    ) -> None:
+        from kora.cli.graphs import TriggerOptions, trigger_command
+
+        trigger_command(
+            environment,
+            diagnostics,
+            TriggerOptions(
+                graph,
+                namespace,
+                graph_version,
+                idempotency_key,
+                allow_unenforced_secrets,
+            ),
+            as_json,
+        )
+
     @app.command(name="mcp", help="Serve the kora MCP tools over stdio.")
     def serve_mcp_command(
         server: Annotated[McpServerName, typer.Option("--server")],
         url: str | None = typer.Option(None, "--url"),
     ) -> None:
-        serve_mcp(environment, diagnostics, url)
+        serve_mcp(environment, diagnostics, server, url)
 
     @app.command(
         name="conformance", help="Check an installed provider or resume local cleanup."

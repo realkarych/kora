@@ -714,6 +714,41 @@ Until the guarded publication writer of [#1369](https://github.com/realkarych/ko
 - **Stdio MCP.** `kora mcp --server authoring [--url …]` takes the API origin from `--url` or `KORA_URL` and the credential only from `KORA_MCP_TOKEN`, refusing missing or malformed configuration, including a refused origin, with exit 78. It needs the `kora[mcp]` extra; without it, it exits 78 with a message naming the extra. It lists exactly `kora_deploy`, which takes `{path}` and returns the API response as structured and text content. The path is read off the protocol's event loop, from a regular file only, with the local read authority of the user who started the server; the tool confines it no further, and the document goes only to the configured API origin. An API refusal or a client transport failure is a result with `isError: true` carrying the error object; an invalid argument or document is a result with `isError: true` and a fixed text. stdout carries only protocol messages.
 - **Parity.** `test_parity_operations_are_reachable` reads the OpenAPI document, derives each client method's operation from its request call and each surface's coverage from its calls of those methods, and fails when an operation lacks a CLI or MCP path. Its exact exclusions are `GET /healthz` and the service-only `POST /api/v1/workers` protocol operation described under [worker registration activation](#worker-registration-activation-1449). Other operations, including worker reads, remain subject to parity.
 
+### Walking-skeleton manual start (issue #1463)
+
+Until parameter evaluation and the guarded writers land, the trigger route runs at the [skeleton depth of the first-slice contract](first-slice.md#walking-skeleton-and-narrowed-depth) over the accepting writer of [data-model section 13.2.4](data-model.md#1324-walking-skeleton-manual-start-acceptance-1461). This section states its public behavior.
+
+- **Order of checks.**
+  1. The dispatch authenticates the bearer and refuses a missing or invalid credential with `API009` and a service principal with `API005` before any handler runs.
+  2. The handler resolves `{ns}` only among the namespaces granted to the token and refuses any other name, existing or not, with `API005`.
+  3. It checks the optional `Idempotency-Key` header: one header of 1–255 visible ASCII characters, otherwise `API003`. A server-generated key replaces an absent one, so such a start cannot be replayed.
+  4. It reads at most 4 MiB of strict JSON with the deploy's refusals (`API003` with empty details), then resolves `{graph}` in the namespace; an unknown graph is `API001`.
+- **Request.** The body is `{params, graph_version?, allow_unenforced_secrets?}`:
+  - `params` is a JSON object, and only `{}` can start, as the first-slice narrowing states;
+  - `graph_version` is a `gv_` identifier and selects that version, where omission selects the latest;
+  - `allow_unenforced_secrets` defaults to false and is saved on the run.
+
+  A `params` object outside the manual request bounds of data-model section 13.2.1 is `API003`.
+- **Replay.** A matching request under a used key returns the saved outcome with `200`, before version, parameter or quota checks and including after a newer deployment. A changed request under that key is `API004`. No refusal is saved; a refused start can be retried with the same key.
+- **Refusals of a new start.**
+  - The selected version must be active, otherwise `API010`.
+  - Nonempty `params` and a version whose agent declares secrets are `API003` with empty details.
+  - A version whose graph declares parameters, or whose saved parameter binding is unavailable, is `API010`.
+  - A version whose harness or runtime the installation no longer provides is `API003` with the deploy's `IR018` and `IR028` findings.
+  - A full outstanding backlog is `409`, `API002`, retryable, with `details: {reason: run_backlog_full, scope: {kind: namespace, id: <ns>}, limit_name: max_pending_runs, limit, used, next_action: retry_start}`.
+  - A latest version that changes between preparation and the locked acceptance is prepared once more; a second change is `API011`, retryable.
+- **Response.** The body is the shared `StartOutcome`: `{outcome: "accepted", run_id: "run_…", graph_version_id: "gv_…", status: "pending"}` or `{outcome: "skipped", reason: "overlap", run_id: null}`. A run created by this request returns `201`. A replay and a new overlap skip return `200`.
+- **Preparation resources.** The request parameters are canonicalized for the request digest on a worker thread, off the request loop. A start claims the deploy's single preparation slot before it acquires the selected version. It then decodes the stored values on the same preparation thread, so a start and a deploy never decode documents at the same time. While the slot is taken, a new start is refused with `API011`, retryable, and no queue forms. Replays and selection refusals do not need the slot.
+- **Namespace for CLI commands.** A CLI command that acts inside a namespace takes it from `--namespace`, otherwise from `KORA_NAMESPACE`. Without either, or with a value that is not a namespace identifier, it exits 78 before any request, naming the option or variable. MCP tools take `namespace` as an argument. The project owner decided this on 2026-11-13 for every namespace-scoped command.
+- **CLI.** `kora trigger <graph> [--namespace NS] [--graph-version gv_…] [--idempotency-key KEY] [--allow-unenforced-secrets] [--json]` reads `KORA_URL` and `KORA_TOKEN` like `kora deploy`.
+  - **Arguments.** `--param` and `--dry-run` are not offered at skeleton depth. An invalid `--graph-version` or a key outside the server's key rule exits 2 before any request. The shared client refuses a namespace or graph name outside the identifier pattern as a `destination_policy` failure before sending, so a name such as `..` cannot address another path.
+  - **Output.** The command prints the accepted run or the skip, or with `--json` the API body, and exits 0. An API refusal prints the API error envelope on stdout and exits 1. A client failure exits 1.
+- **Stdio MCP.** `kora mcp --server operating [--url …]` uses the same configuration, credential and extra as the authoring server and lists exactly `kora_trigger`.
+  - **Arguments.** It takes `{namespace, graph, graph_version?, idempotency_key?, allow_unenforced_secrets?}` and refuses other arguments, and a key outside the server's key rule, as a usage error.
+  - **Result.** It returns the API JSON, or the API error object as a tool error.
+  - **Diagnostics.** `mcp.tool.finished` records the tool name and outcome.
+- **Parity.** `test_parity_operations_are_reachable` covers the operation through `kora trigger` and `kora_trigger`.
+
 ### First-slice operation coverage
 
 [First-slice.md](first-slice.md) limits the installation to the 24 user operations below and its worker operations. The bounded-read derivatives in [the complete selector catalogue](bounded-read-projections.md#9-exact-client-read-selectors) activate with their parent operation and their named implementation gates; this does not activate deferred targets, retry or diff in the first slice. The table uses namespace-relative paths under `/api/v1/namespaces/{ns}`; `N` abbreviates `/runs/{run}/nodes/{node_path}`. Each selector names a distinct reachable call, not an extra tool. All request/response and authorization semantics remain those of the full operation above. Worker routes retain their existing parity exclusion; the remote issuer route activates only with a backend that issues in the control plane. Probes have the exact parity-only exclusions of section 7.

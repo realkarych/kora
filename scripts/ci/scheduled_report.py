@@ -62,6 +62,38 @@ LANES = (
 
 
 @dataclass(frozen=True)
+class Schedule:
+    title: str
+    impact: str
+    lanes: tuple[Lane, ...]
+
+
+DAILY = Schedule(
+    "Daily master lane failed",
+    "A lane of the scheduled `Daily master lanes` workflow did not pass on "
+    "master. Its tests or measurements run once a day on master instead of on "
+    "every pull request.",
+    LANES,
+)
+MASTER_PUSH = Schedule(
+    "Master push lane failed",
+    "A job of the `CI` workflow did not pass for a push to master. Part of what "
+    "it checks runs only for pushes to master and not in pull requests.",
+    (
+        Lane(
+            "scaffold-tests-macos-general",
+            "MACOS_GENERAL_LANES",
+            "macOS general test lanes",
+            False,
+        ),
+        Lane("scaffold-evidence", "SCAFFOLD_EVIDENCE", "Scaffold evidence", True),
+        Lane("mutation-tooling", "MUTATION_TOOLING", "Mutation tooling", False),
+    ),
+)
+SCHEDULES = {"master-push": MASTER_PUSH}
+
+
+@dataclass(frozen=True)
 class Run:
     repository: str
     run_id: str
@@ -123,15 +155,17 @@ def lane_result(environment: Mapping[str, str], lane: Lane) -> str:
     return result
 
 
-def failures(environment: Mapping[str, str]) -> tuple[Failure, ...]:
-    results = ((lane, lane_result(environment, lane)) for lane in LANES)
+def failures(
+    environment: Mapping[str, str], lanes: tuple[Lane, ...] = LANES
+) -> tuple[Failure, ...]:
+    results = ((lane, lane_result(environment, lane)) for lane in lanes)
     return tuple(
         Failure(lane, result) for lane, result in results if result != "success"
     )
 
 
-def issue_title(lane: Lane) -> str:
-    return f"Daily master lane failed: {lane.title}"
+def issue_title(lane: Lane, schedule: Schedule = DAILY) -> str:
+    return f"{schedule.title}: {lane.title}"
 
 
 def occurrence(failure: Failure, run: Run) -> str:
@@ -144,12 +178,10 @@ def occurrence(failure: Failure, run: Run) -> str:
     )
 
 
-def issue_body(failure: Failure, run: Run) -> str:
+def issue_body(failure: Failure, run: Run, schedule: Schedule = DAILY) -> str:
     return (
         "### Impact\n\n"
-        "A lane of the scheduled `Daily master lanes` workflow did not pass on "
-        "master. Its tests or measurements run once a day on master instead of on "
-        "every pull request. This open issue tracks the failure until the lane "
+        f"{schedule.impact} This open issue tracks the failure until the lane "
         "passes again.\n\n"
         "### Failed lane\n\n"
         f"{occurrence(failure, run)}\n"
@@ -164,18 +196,20 @@ def repeated_body(failure: Failure, run: Run) -> str:
     return f"The lane failed again.\n\n{occurrence(failure, run)}"
 
 
-def report(environment: Mapping[str, str], tracker: Tracker) -> tuple[str, ...]:
+def report(
+    environment: Mapping[str, str], tracker: Tracker, schedule: Schedule = DAILY
+) -> tuple[str, ...]:
     run = current_run(environment)
     listed = tracker.open_issues()
     actions: list[str] = []
-    for failure in failures(environment):
-        title = issue_title(failure.lane)
+    for failure in failures(environment, schedule.lanes):
+        title = issue_title(failure.lane, schedule)
         existing = [issue.number for issue in listed if issue.title == title]
         if existing:
             tracker.comment(min(existing), repeated_body(failure, run))
             actions.append(f"commented {failure.lane.job}")
         else:
-            tracker.create(title, issue_body(failure, run))
+            tracker.create(title, issue_body(failure, run, schedule))
             actions.append(f"opened {failure.lane.job}")
     return tuple(actions)
 
@@ -302,16 +336,28 @@ class GitHubTracker:
         self.request("POST", f"issues/{number}/comments", {"body": body})
 
 
-def main() -> int:
+def selected_schedule(arguments: list[str]) -> Schedule:
+    match arguments:
+        case []:
+            return DAILY
+        case [name] if name in SCHEDULES:
+            return SCHEDULES[name]
+        case _:
+            raise ReportFailure("the report schedule is unknown")
+
+
+def main(arguments: list[str]) -> int:
+    schedule = selected_schedule(arguments)
     environment = dict(os.environ)
     run = current_run(environment)
     token = environment.get("GITHUB_TOKEN", "")
     if not token:
         raise ReportFailure("GITHUB_TOKEN is required to report failed lanes")
-    for action in report(environment, GitHubTracker(run.repository, token)):
+    tracker = GitHubTracker(run.repository, token)
+    for action in report(environment, tracker, schedule):
         sys.stdout.write(f"{action}\n")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

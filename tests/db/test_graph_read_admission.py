@@ -653,8 +653,8 @@ async def test_graph_admission_migration_recovers_without_rewriting_history(
         )
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0008",
-            "0026",
-            18,
+            "0027",
+            19,
         )
         assert before == after
         assert dict(rolled_back_preparation) == preparation

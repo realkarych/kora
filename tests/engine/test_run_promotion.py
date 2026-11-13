@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from kora.conformance.capture import captured
 from kora.db.connection import Database, Dialect
-from kora.db.identifiers import IdentifierGenerator
+from kora.db.identifiers import MAX_RANDOM, IdentifierGenerator, decode
 from kora.db.migrations import upgrade_database
 from kora.db.pending_runs import PendingRunSweep
 from kora.db.reads import events_of_run
@@ -297,8 +297,10 @@ async def test_promotion_rollback_releases_writer(
     case = await promotion_case(database)
     ledger = ConnectionLedger(database)
     if failure == "sql":
-        generator = IdentifierGenerator(case.clock.now, fixed_randomness(1000))
-        probe = IdentifierGenerator(case.clock.now, fixed_randomness(1000))
+        case.clock.advance(1)
+        randomness = fixed_randomness(decode(case.scope.namespace_id) & MAX_RANDOM)
+        generator = IdentifierGenerator(case.clock.now, randomness)
+        probe = IdentifierGenerator(case.clock.now, randomness)
         for _ in case.materialization.nodes:
             probe.new()
         collision = probe.new()
@@ -318,10 +320,15 @@ async def test_promotion_rollback_releases_writer(
         case = replace(case, identifiers=generator)
     before = await case.snapshot(database)
     ready, release = asyncio.Event(), asyncio.Event()
+    executed: list[str] = []
 
     async def interrupted() -> None:
         async with database.transaction() as writer:
-            await case.apply(writer, await case.locks(writer))
+            async with observed_statements(writer) as statements:
+                try:
+                    await case.apply(writer, await case.locks(writer))
+                finally:
+                    executed.extend(statements)
             ready.set()
             await release.wait()
 
@@ -335,6 +342,13 @@ async def test_promotion_rollback_releases_writer(
     repeated = await case.promote(database)
 
     assert after == before
+    if failure == "sql":
+        writes = [
+            statement.split()[2 if statement.startswith("INSERT") else 1]
+            for statement in executed
+            if statement.startswith(("INSERT", "UPDATE"))
+        ]
+        assert writes == ["node_instance", "run", "event"]
     assert repeated is PromotionOutcome.APPLIED
     assert await lock_inventory(database) == []
     assert database.units_in_flight() == ledger.outstanding == 0

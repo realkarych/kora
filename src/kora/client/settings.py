@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
+from kora.client.documents import NAMESPACE
 from kora.client.errors import ClientError
 from kora.client.transport import TOKEN, direct_origin
 
@@ -9,6 +10,8 @@ URL_VARIABLE = "KORA_URL"
 URL_OPTION = "--url"
 CLI_CREDENTIAL_VARIABLE = "KORA_TOKEN"
 MCP_CREDENTIAL_VARIABLE = "KORA_MCP_TOKEN"
+NAMESPACE_VARIABLE = "KORA_NAMESPACE"
+NAMESPACE_OPTION = "--namespace"
 
 
 class ConfigurationProblem(StrEnum):
@@ -53,3 +56,13 @@ def read_client_settings(
             credential_variable, ConfigurationProblem.INVALID
         )
     return ClientSettings(origin, token)
+
+
+def read_namespace(environment: Mapping[str, str], option: str | None) -> str:
+    source = NAMESPACE_VARIABLE if option is None else NAMESPACE_OPTION
+    value = environment.get(NAMESPACE_VARIABLE, "") if option is None else option
+    if not value:
+        raise ClientConfigurationError(source, ConfigurationProblem.MISSING)
+    if NAMESPACE.fullmatch(value) is None:
+        raise ClientConfigurationError(source, ConfigurationProblem.INVALID)
+    return value

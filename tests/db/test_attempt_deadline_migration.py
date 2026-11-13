@@ -59,7 +59,7 @@ async def test_deadline_migration_preserves_legacy_scalars(
             after = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
-            objects = await connection.run_sync(attempt_schema_objects)
+            objects = await connection.run_sync(attempt_schema_objects, True)
             columns = await connection.run_sync(
                 lambda sync: inspect(sync).get_columns("attempt")
             )
@@ -89,8 +89,8 @@ async def test_deadline_migration_preserves_legacy_scalars(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0005",
-            "0026",
-            21,
+            "0027",
+            22,
         )
         assert after == before.history
         assert_attempt_schema_extension(
@@ -252,8 +252,8 @@ async def test_deadline_migration_recovers_partial_schema(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0005",
-            "0026",
-            21,
+            "0027",
+            22,
         )
         assert differences == []
         assert stage.database is not None

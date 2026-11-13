@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,9 +26,11 @@ from tests.scaffold_evidence import (
     SCHEDULED_LANES,
     STORAGE_ARGUMENTS,
     ChildTiming,
+    Verification,
     collection_nodes,
     environment_key,
     environment_lanes,
+    general_lanes,
     general_nodes,
     lane_arguments,
     matrix_rows,
@@ -161,8 +164,16 @@ def recollect(root: Path, operating_system: str, python: str, *extra: str) -> No
         rehash(directory, ["complete.txt"])
 
 
-def verify(root: Path, counts: dict[str, int] = COUNTS) -> object:
-    return verify_scaffold(root, "123", "1", REVISION, REQUESTED, counts, TABLE)
+def verify(
+    root: Path, counts: dict[str, int] = COUNTS, event: str = "push"
+) -> Verification:
+    return verify_scaffold(root, "123", "1", REVISION, REQUESTED, counts, TABLE, event)
+
+
+def pull_request_evidence(root: Path) -> None:
+    complete_evidence(root)
+    for lane in general_lanes(LANES):
+        shutil.rmtree(lane_directory(root, "macos-15", "3.11.17", lane))
 
 
 def local_total() -> int:
@@ -172,13 +183,109 @@ def local_total() -> int:
 def test_scaffold_receipts_prove_complete_planned_execution(tmp_path: Path) -> None:
     complete_evidence(tmp_path)
 
-    result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED, COUNTS, TABLE)
+    result = verify(tmp_path)
 
     assert (result.environments, result.lanes, result.tests) == (
         3,
         12,
         30 + local_total(),
     )
+
+
+def test_pull_request_receipts_prove_the_platform_lanes_of_macos(
+    tmp_path: Path,
+) -> None:
+    pull_request_evidence(tmp_path)
+
+    result = verify(tmp_path, event="pull_request")
+
+    assert (result.environments, result.lanes, result.tests) == (
+        3,
+        10,
+        30 - len(GENERAL_NODES) + local_total(),
+    )
+
+
+def test_pull_request_evidence_refuses_a_general_macos_lane(tmp_path: Path) -> None:
+    complete_evidence(tmp_path)
+
+    with pytest.raises(EvidenceFailure, match="exactly the planned lanes"):
+        verify(tmp_path, event="pull_request")
+
+
+@pytest.mark.parametrize("lane", ["storage", "local-runtime"])
+def test_pull_request_evidence_requires_each_platform_lane_of_macos(
+    tmp_path: Path, lane: str
+) -> None:
+    pull_request_evidence(tmp_path)
+    shutil.rmtree(lane_directory(tmp_path, "macos-15", "3.11.17", lane))
+
+    with pytest.raises(EvidenceFailure, match="exactly the planned lanes"):
+        verify(tmp_path, event="pull_request")
+
+
+def test_pull_request_evidence_requires_the_general_lanes_of_linux(
+    tmp_path: Path,
+) -> None:
+    pull_request_evidence(tmp_path)
+    shutil.rmtree(lane_directory(tmp_path, "ubuntu-24.04", "3.15.0", "general-2"))
+
+    with pytest.raises(EvidenceFailure, match="exactly the planned lanes"):
+        verify(tmp_path, event="pull_request")
+
+
+def test_pull_request_evidence_keeps_the_general_lane_checks_of_linux(
+    tmp_path: Path,
+) -> None:
+    pull_request_evidence(tmp_path)
+    recollect(
+        tmp_path, "ubuntu-24.04", "3.11.17", "tests/test_unexecuted.py::test_value"
+    )
+
+    with pytest.raises(EvidenceFailure, match="differs from its assignment"):
+        verify(tmp_path, event="pull_request")
+
+
+def test_pull_request_evidence_refuses_a_repeated_macos_test(tmp_path: Path) -> None:
+    pull_request_evidence(tmp_path)
+    storage = lane_directory(tmp_path, "macos-15", "3.11.17", "storage")
+    repeated = identities((*STORAGE_NODES, *local_nodes("macos-15")[:1]))
+    write_junit(storage / "junit.xml", repeated)
+    rehash(storage, ["junit.xml"])
+
+    with pytest.raises(EvidenceFailure, match="duplicate tests"):
+        verify(tmp_path, event="pull_request")
+
+
+def test_master_push_evidence_requires_the_general_lanes_of_macos(
+    tmp_path: Path,
+) -> None:
+    pull_request_evidence(tmp_path)
+
+    with pytest.raises(EvidenceFailure, match="exactly the planned lanes"):
+        verify(tmp_path, event="push")
+
+
+@pytest.mark.parametrize("event", ["", "pull_request_target", "schedule", "PUSH"])
+def test_scaffold_evidence_refuses_an_unknown_event(tmp_path: Path, event: str) -> None:
+    complete_evidence(tmp_path)
+
+    with pytest.raises(EvidenceFailure, match="unknown event"):
+        verify(tmp_path, event=event)
+
+
+def test_pull_request_timings_leave_out_the_general_lanes_of_macos(
+    tmp_path: Path,
+) -> None:
+    pull_request_evidence(tmp_path)
+
+    lanes = list(observed_timings(tmp_path, COUNTS, TABLE, "pull_request"))
+
+    assert len(lanes) == 2 * LANES
+    assert {timing.environment for lane in lanes for timing in lane} == {
+        "ubuntu-24.04-3.11.17",
+        "ubuntu-24.04-3.15.0",
+    }
 
 
 @pytest.mark.parametrize("environment", ["ubuntu-24.04-3.15.0", "macos-15-3.11.17"])
@@ -192,7 +299,7 @@ def test_general_lanes_may_collect_the_same_tests_in_another_order(
     (second / "complete.txt").write_text(collection_text(reordered))
     rehash(second, ["complete.txt"])
 
-    result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED, COUNTS, TABLE)
+    result = verify(tmp_path)
 
     assert result.tests == 30 + local_total()
 
@@ -200,7 +307,7 @@ def test_general_lanes_may_collect_the_same_tests_in_another_order(
 def test_observed_timings_cover_every_general_child(tmp_path: Path) -> None:
     complete_evidence(tmp_path)
 
-    lanes = list(observed_timings(tmp_path, COUNTS, TABLE))
+    lanes = list(observed_timings(tmp_path, COUNTS, TABLE, "push"))
 
     timings = [timing for lane in lanes for timing in lane]
     assert len(lanes) == 3 * LANES
@@ -220,7 +327,7 @@ def test_timings_print_readable_lanes_before_failing_on_a_missing_one(
     command = [sys.executable, "-m", "tests.scaffold_evidence", "timings"]
 
     result = subprocess.run(
-        [*command, str(tmp_path), json.dumps(COUNTS)],
+        [*command, str(tmp_path), json.dumps(COUNTS), "push"],
         cwd=ROOT,
         capture_output=True,
         check=False,
@@ -279,7 +386,7 @@ def test_timings_refuse_evidence_that_verification_also_refuses(
     rehash(directory, [changed])
 
     with pytest.raises(failure):
-        list(observed_timings(tmp_path, COUNTS, TABLE))
+        list(observed_timings(tmp_path, COUNTS, TABLE, "push"))
 
     with pytest.raises(failure):
         verify(tmp_path)
@@ -598,7 +705,7 @@ def test_linux_pull_request_lanes_keep_unscheduled_neighbours(
     complete_evidence(tmp_path)
     add_executed_node(tmp_path, "ubuntu-24.04", "3.11.17", node)
 
-    result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED, COUNTS, TABLE)
+    result = verify(tmp_path)
 
     assert result.tests == 31 + local_total()
 
@@ -660,14 +767,16 @@ def test_plan_outputs_split_lane_rows_by_platform(tmp_path: Path) -> None:
     assert counts == dict.fromkeys(COUNTS, 1)
     assert json.loads(outputs["linux"]) == {"include": rows["linux"]}
     assert json.loads(outputs["macos"]) == {"include": rows["macos"]}
+    assert json.loads(outputs["macos_general"]) == {"include": rows["macos_general"]}
     assert {row["os"] for row in rows["linux"]} == {"ubuntu-24.04"}
     assert {row["os"] for row in rows["macos"]} == {"macos-15"}
+    assert {row["os"] for row in rows["macos_general"]} == {"macos-15"}
     assert [row["lane"] for row in rows["macos"]] == [
         "static-checks",
         "storage",
         "local-runtime",
-        "general-1",
     ]
+    assert [row["lane"] for row in rows["macos_general"]] == ["general-1"]
     assert [row["lane"] for row in rows["linux"]].count("static-checks") == 2
     assert rows["macos"][0]["pytest-arguments"] == ""
     assert rows["macos"][1]["pytest-arguments"] == " ".join(STORAGE_ARGUMENTS)

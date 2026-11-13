@@ -19,7 +19,7 @@ from tests.db.seed import START, Seeder, seed_predecessor
 from tests.db.test_pricing_migration import price_check, retained_index_progress
 from tests.observability.conftest import ProcessResult, run_kora
 
-HEAD_REVISION: str = "0026"
+HEAD_REVISION: str = "0027"
 HIDDEN_MARKER: str = "PASSWORD-MARKER-4471"
 USER_MARKER: str = "usermarker4472"
 HOST_MARKER: str = "hostmarker4473.invalid"
@@ -388,7 +388,7 @@ async def test_db_upgrade_index_failure_is_content_free_and_recoverable(
         assert all(set(entry) <= {"type", "module", "frames"} for entry in chain)
         assert recovered.code == 0
         assert recovered.stdout == b"0026\n"
-        assert recovered_revision == "0026"
+        assert recovered_revision == "0027"
         assert events(recovered).count("db.migration.finished") == 1
     finally:
         await database.close()
