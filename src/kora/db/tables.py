@@ -23,6 +23,7 @@ from kora.db.bootstrap_initialization_v1 import (
 from kora.db.bootstrap_initialization_v1 import (
     bootstrap_initialization_elements_v1,
 )
+from kora.db.deadline_discovery_v1 import INDEXES as DEADLINE_INDEXES
 from kora.db.graph_deployment_stage_v1 import (
     OCCURRENCE_TABLE,
     STAGE_TABLE,
@@ -651,6 +652,14 @@ approval_request: Table = Table(
     document("evaluation_error", nullable=True),
     *audit_columns(),
 )
+
+for index_name, owner_table, index_columns, predicate, _ in DEADLINE_INDEXES:
+    Index(
+        index_name,
+        *(metadata.tables[owner_table].c[column] for column in index_columns),
+        postgresql_where=None if predicate is None else literal_column(predicate),
+        sqlite_where=None if predicate is None else literal_column(predicate),
+    )
 
 artifact_version: Table = Table(
     "artifact_version",

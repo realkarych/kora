@@ -43,7 +43,7 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
             after = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
-            objects = await connection.run_sync(attempt_schema_objects)
+            objects = await connection.run_sync(attempt_schema_objects, True)
             columns = await connection.run_sync(
                 lambda sync: inspect(sync).get_columns("attempt")
             )

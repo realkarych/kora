@@ -59,7 +59,7 @@ async def test_outcome_migration_preserves_unrecorded_history(
             after = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
-            objects = await connection.run_sync(attempt_schema_objects)
+            objects = await connection.run_sync(attempt_schema_objects, True)
             columns = await connection.run_sync(
                 lambda sync: inspect(sync).get_columns("attempt")
             )
