@@ -119,6 +119,20 @@ def findings(
             id="server-without-isolation",
         ),
         pytest.param(
+            agent(SECRETS, EGRESS, server=tool({}, EGRESS)),
+            UNENFORCED,
+            ALLOWED,
+            {SERVER_POLICY},
+            id="agent-secrets-do-not-exempt-server",
+        ),
+        pytest.param(
+            agent(network_policy=EGRESS, server=server(EGRESS)),
+            UNENFORCED,
+            ALLOWED,
+            {AGENT_POLICY},
+            id="server-secrets-do-not-exempt-agent",
+        ),
+        pytest.param(
             agent(SECRETS, EGRESS, server=server(EGRESS), runtime="docker"),
             ENFORCING,
             DEFAULTS,
