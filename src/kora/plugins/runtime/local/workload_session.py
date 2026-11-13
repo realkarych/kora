@@ -5,7 +5,7 @@ from typing import Literal, Protocol
 
 from kora.plugins.runtime.local.capture import OpenedLog
 from kora.plugins.runtime.local.channel import LogName
-from kora.protocols.runtime import TransferItem, Workload
+from kora.protocols.runtime import CommandObservation, TransferItem, Workload
 from kora.runner.filesystem import DirectoryAnchor, FileIdentity
 from kora.runner.registry import Submitter
 
@@ -105,6 +105,8 @@ class WorkloadSession(Protocol):
     def read_output(self, opened: OpenedOutput, offset: int, length: int) -> bytes: ...
 
     def note_output(self, outcome: str, started: int) -> None: ...
+
+    def command_observation(self, submitter: Submitter) -> CommandObservation: ...
 
     def completion(self) -> Completion: ...
 

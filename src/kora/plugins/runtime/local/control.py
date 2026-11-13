@@ -11,6 +11,7 @@ from kora.plugins.runtime.local.channel import (
     ACCEPTANCE_PROGRESS_NS,
     ENVELOPE_BYTES,
     FRAME_PROGRESS_NS,
+    OBSERVATION_BYTES,
     SECTION_FRAME_BYTES,
     START_PROGRESS_NS,
     AttachRequest,
@@ -24,6 +25,7 @@ from kora.plugins.runtime.local.channel import (
     delivery_error,
     message_refused,
     read_delivery,
+    read_observation,
     read_output_declaration,
     read_output_trailer,
     read_status,
@@ -32,7 +34,7 @@ from kora.plugins.runtime.local.channel import (
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity_records import ProcessIdentity
-from kora.protocols.runtime import TransferItem, Workload
+from kora.protocols.runtime import CommandObservation, TransferItem, Workload
 from kora.protocols.time import Clock
 from kora.runner.channels import (
     BoundedChannel,
@@ -140,6 +142,41 @@ async def start_command(
         )
         _, payload = await channel.read_typed_frame(started, reservations)
         read_delivery(payload, request_id, "started")
+    finally:
+        channel.close()
+
+
+async def observe_command(
+    path: str,
+    runner: ProcessIdentity,
+    dispatcher_id: str,
+    source: PeerSource,
+    executor: TransitionExecutor,
+    clock: Clock,
+    request_id: str,
+) -> CommandObservation:
+    deadline = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    endpoint = await connected(path, clock, deadline)
+    channel = BoundedChannel(endpoint, clock)
+    try:
+        await attested(endpoint, runner, source, executor)
+        request = AttachRequest(
+            op="attach", request_id=request_id, dispatcher_id=dispatcher_id
+        )
+        await channel.write_typed_frame(
+            FrameType.JSON, canonical_bytes(request.model_dump(mode="json")), deadline
+        )
+        reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
+        _, payload = await channel.read_typed_frame(deadline, reservations)
+        read_delivery(payload, request_id, "attached")
+        answered = clock.monotonic_ns() + START_PROGRESS_NS
+        await channel.write_typed_frame(
+            FrameType.JSON, control_request("observe", request_id), answered
+        )
+        _, payload = await channel.read_typed_frame(
+            answered, {FrameType.JSON.value: OBSERVATION_BYTES}
+        )
+        return read_observation(payload, request_id)
     finally:
         channel.close()
 

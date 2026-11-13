@@ -144,10 +144,15 @@ class WorkspacePreparation:
         self._log = log
         self._state = WorkspaceState.ABSENT
         self._task: asyncio.Task[None] | None = None
+        self._prepared: PreparedWorkspace | None = None
 
     @property
     def state(self) -> WorkspaceState:
         return self._state
+
+    @property
+    def prepared(self) -> PreparedWorkspace | None:
+        return self._prepared
 
     def begin(self, admitted: Admitted, attempt_id: str) -> None:
         if self._task is not None:
@@ -213,6 +218,7 @@ class WorkspacePreparation:
         if not await self._append("runner.workspace_prepared", data):
             self._finish(WorkspaceState.FAILED, "journal_unavailable", started)
             return
+        self._prepared = prepared
         self._finish(WorkspaceState.PREPARED, "prepared", started)
 
     async def _checkout(

@@ -23,6 +23,7 @@ from kora.protocols.errors import ERROR_CODE, KoraProtocolError
 from kora.protocols.identity import Count, Identifier, Sha256
 from kora.protocols.runtime import (
     MAX_TRANSFER_BYTES,
+    CommandObservation,
     RuntimeStatus,
     TransferItem,
     TransferName,
@@ -39,6 +40,7 @@ MAX_SECTIONS: Final[int] = 16
 HEADER_DEPTH: Final[int] = 3
 ENVELOPE_BYTES: Final[int] = 8192
 ENVELOPE_DEPTH: Final[int] = 4
+OBSERVATION_BYTES: Final[int] = 32768
 FRAME_PROGRESS_NS: Final[int] = 5 * NANOSECONDS_PER_SECOND
 START_PROGRESS_NS: Final[int] = 15 * NANOSECONDS_PER_SECOND
 ACCEPTANCE_PROGRESS_NS: Final[int] = 15 * NANOSECONDS_PER_SECOND
@@ -96,6 +98,9 @@ ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
         "the transferred bytes do not match the digest", False
     ),
     "transfer_refused": EnvelopeEntry("the input cannot be transferred", False),
+    "command_unobserved": EnvelopeEntry(
+        "no command observation was recorded for the attempt", False
+    ),
 }
 REFUSED_MESSAGE: Final[str] = "the control message was refused"
 RETRYABLE_REFUSALS: Final[frozenset[MessageRefusal]] = frozenset(
@@ -648,6 +653,34 @@ def read_request(payload: bytes) -> ControlRequest | AttachRequest | None:
         return attached
     request = json_model(ControlRequest, payload)
     return None if request is not None and request.op == "attach" else request
+
+
+class ObservationEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["observed"]
+    value: CommandObservation
+
+
+def observation_envelope(request_id: str, value: CommandObservation) -> bytes:
+    envelope = ObservationEnvelope(
+        request_id=request_id, result="observed", value=value
+    )
+    return canonical_bytes(envelope.model_dump(mode="json"))
+
+
+def read_observation(payload: bytes, request_id: str) -> CommandObservation:
+    decoded = decode_strict_json(payload, OBSERVATION_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    envelope = json_model(ObservationEnvelope, payload)
+    if envelope is None or envelope.request_id != request_id:
+        raise message_refused(MessageRefusal.MALFORMED)
+    return envelope.value
 
 
 def status_envelope(request_id: str, value: StatusValue) -> bytes:

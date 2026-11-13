@@ -33,6 +33,7 @@ from kora.plugins.runtime.local.channel import (
     delivery_envelope,
     delivery_error,
     error_envelope,
+    observation_envelope,
     operation_unknown,
     output_envelope,
     output_trailer,
@@ -56,7 +57,12 @@ from kora.plugins.runtime.local.workload_session import (
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
-from kora.protocols.runtime import RuntimeStatus, TransferItem, Workload
+from kora.protocols.runtime import (
+    CommandObservation,
+    RuntimeStatus,
+    TransferItem,
+    Workload,
+)
 from kora.protocols.time import Clock
 from kora.runner.channels import (
     BoundedChannel,
@@ -467,6 +473,11 @@ class ControlServer:
                     answer = await self._start(
                         submitter, request.request_id, observational
                     )
+                elif request.op == "observe":
+                    await self._send_observation(
+                        channel, submitter, observational, request.request_id
+                    )
+                    return
                 else:
                     answer = error_envelope(request.request_id, operation_unknown())
                 await self._answer(channel, answer)
@@ -775,6 +786,36 @@ class ControlServer:
                 dispose()
             if command is not None and outcome is not None:
                 command.note_output(outcome, started_ns)
+
+    async def _send_observation(
+        self,
+        channel: BoundedChannel,
+        submitter: Submitter,
+        observational: bool,
+        request_id: str,
+    ) -> None:
+        session = self._session
+
+        def observe() -> CommandObservation:
+            if self._closing is not None:
+                raise delivery_error("transfer_refused")
+            if session is None:
+                raise delivery_error("command_unobserved")
+            self._current_submitter(submitter)
+            return session.command_observation(submitter)
+
+        try:
+            if observational:
+                raise delivery_error("execution_unauthorized")
+            observation = await self._transfer_native(observe)
+        except KoraProtocolError as error:
+            if error.code == "registry_busy":
+                error = delivery_error("workload_busy")
+            await self._answer(channel, self._transfer_answer(request_id, error))
+        except (NativeIOSubmissionUncertain, NativeIOUnresolved):
+            channel.close()
+        else:
+            await self._answer(channel, observation_envelope(request_id, observation))
 
     def _current_submitter(self, submitter: Submitter) -> None:
         if self._running().submitter != submitter:

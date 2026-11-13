@@ -8,7 +8,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -53,6 +53,7 @@ from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT
 from kora.protocols.common import ProtocolContext
 from kora.protocols.identity import Handle
+from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.runtime import Workload
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
@@ -644,7 +645,42 @@ def captures_logged(attempt: Path) -> bool:
     return len(runtime_outcomes(attempt / "runner.log", "runtime.local.capture")) == 2
 
 
-async def observational_refusal(tmp_path: Path) -> str:
+async def read_log_as_observer(
+    path: str, runner: ProcessIdentity, executor: TransitionExecutor, base: Path
+) -> object:
+    clock = SystemClock()
+    descriptor = os.open(
+        base / "spool", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+    )
+    os.unlink(base / "spool")
+    try:
+        return await transfer_output(
+            path,
+            runner,
+            "dispatcher-2",
+            kernel_source(NativeIdentityReader()),
+            executor,
+            clock,
+            descriptor,
+            LogRequest(
+                op="read_log", request_id="log-1", which="stdout", from_offset=0
+            ),
+            clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
+            whole=True,
+            close_spool=lambda: None,
+        )
+    finally:
+        os.close(descriptor)
+
+
+ObserverRequest = Callable[
+    [str, ProcessIdentity, TransitionExecutor, Path], Awaitable[object]
+]
+
+
+async def observational_refusal(
+    tmp_path: Path, ask: ObserverRequest = read_log_as_observer
+) -> str:
     (tmp_path / "observer").mkdir()
     root = state_root(tmp_path / "observer")
     with short_directory() as base:
@@ -652,34 +688,11 @@ async def observational_refusal(tmp_path: Path) -> str:
             root, base / "sockets", start=False
         ) as controller:
             executor = TransitionExecutor()
-            clock = SystemClock()
-            descriptor = os.open(
-                base / "spool", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
-            )
-            os.unlink(base / "spool")
             try:
                 refused = await protocol_error(
-                    transfer_output(
-                        controller.path.strip(),
-                        controller.orphan(),
-                        "dispatcher-2",
-                        kernel_source(NativeIdentityReader()),
-                        executor,
-                        clock,
-                        descriptor,
-                        LogRequest(
-                            op="read_log",
-                            request_id="log-1",
-                            which="stdout",
-                            from_offset=0,
-                        ),
-                        clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
-                        whole=True,
-                        close_spool=lambda: None,
-                    )
+                    ask(controller.path.strip(), controller.orphan(), executor, base)
                 )
             finally:
-                os.close(descriptor)
                 await executor.close()
     return refused.code
 

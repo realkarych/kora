@@ -48,6 +48,7 @@ from kora.plugins.runtime.local.configuration import StateRoot as StateRoot
 from kora.plugins.runtime.local.control import (
     ListenerRefused,
     deliver_workload,
+    observe_command,
     runner_status,
     start_command,
     transfer_input,
@@ -84,6 +85,7 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import TerminationReceipt
 from kora.protocols.identity import Handle, ProcessIdentity
 from kora.protocols.runtime import (
+    CommandObservation,
     RuntimeCapabilities,
     RuntimeStatus,
     TransferItem,
@@ -760,6 +762,32 @@ class LocalRuntime:
         except ListenerRefused:
             raise refusal("runner_unreachable") from None
         except (ChannelError, OSError):
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code == "message_refused":
+                raise refusal("runner_unreachable") from None
+            raise
+
+    async def command_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> CommandObservation:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        entry = await self.entry(key)
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        try:
+            return await observe_command(
+                entry.socket_path,
+                entry.runner,
+                entry.submitter.dispatcher_id,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+            )
+        except (ListenerRefused, ChannelError, OSError):
             raise refusal("runner_unreachable") from None
         except KoraProtocolError as error:
             if error.code == "message_refused":

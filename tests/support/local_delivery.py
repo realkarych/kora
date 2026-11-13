@@ -7,6 +7,7 @@ from pathlib import Path
 from kora.conformance.capture import Capture
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import ComponentLogger
+from kora.plugins.runtime.local.capture import CaptureIO
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
     ENVELOPE_BYTES,
@@ -158,9 +159,12 @@ class ReapedSession(CommandSession):
         scope: SecretScope,
         clock: Clock,
         log: ComponentLogger,
+        capture_io: CaptureIO | None = None,
     ) -> None:
         self.reaper = AdoptedReaper()
-        super().__init__(attempt, candidate, scope, clock, log, self.reaper)
+        super().__init__(
+            attempt, candidate, scope, clock, log, self.reaper, capture_io=capture_io
+        )
 
     async def stop(self) -> None:
         try:

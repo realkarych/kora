@@ -34,6 +34,13 @@ from kora.plugins.runtime.local.command_stop import (
     StopOutcome,
 )
 from kora.plugins.runtime.local.environment import candidate_environment
+from kora.plugins.runtime.local.observation import (
+    COMMAND_OBSERVED,
+    completed_observation,
+    observation_record,
+    sealed_tail,
+    with_tails,
+)
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.spawn import DEFAULT_SIGNALS
 from kora.plugins.runtime.local.workload_session import (
@@ -51,7 +58,7 @@ from kora.plugins.runtime.local.workspace import (
     checkout_admission,
 )
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.runtime import TransferItem, Workload
+from kora.protocols.runtime import CommandObservation, TransferItem, Workload
 from kora.protocols.secret_value import SecretScope, SecretValue
 from kora.protocols.time import Clock
 from kora.runner.filesystem import (
@@ -250,6 +257,13 @@ class CommandSession:
         self._workspace = WorkspacePreparation(
             attempt, candidate, self._journal, reaper, clock, log
         )
+        self._kind: str | None = None
+        self._executing_ns: int | None = None
+        self._exit: tuple[int, int] | None = None
+        self._observation: CommandObservation | None = None
+        self._unobserved = False
+        self._observing = False
+        self._tails: tuple[bytes, bytes] | None = None
         self._domain_stop: asyncio.Task[StopOutcome] | None = None
         self._prelaunch: dict[int, int] | None = None
         self._closing: asyncio.Task[None] | None = None
@@ -293,6 +307,7 @@ class CommandSession:
             if self._execution is None:
                 self._execution = submitter
                 self._prelaunch = prelaunch or None
+                self._kind = workload.kind
         admitted = checkout_admission(workload)
         if isinstance(admitted, Admitted) and command_argv(workload) is not None:
             self._workspace.begin(admitted, workload.attempt_id)
@@ -613,10 +628,9 @@ class CommandSession:
         code = observed_exit(status)
         if code is None:
             return
+        exited = self._clock.monotonic_ns()
         try:
-            self._loop.call_soon_threadsafe(
-                self._begin_domain_stop, self._clock.monotonic_ns()
-            )
+            self._loop.call_soon_threadsafe(self._begin_domain_stop, exited)
         except RuntimeError:
             if not self._loop.is_closed():
                 raise
@@ -633,6 +647,8 @@ class CommandSession:
         finally:
             with self._lock:
                 self._exit_recorded = recorded
+                if recorded:
+                    self._exit = (code, exited)
                 self._lock.notify_all()
         if not recorded:
             with self._lock:
@@ -686,6 +702,8 @@ class CommandSession:
         level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
         self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
         if outcome is StopOutcome.CONFIRMED:
+            with self._lock:
+                self._observing = True
             self._start_capture_seal()
             if self._workspace.state is not WorkspaceState.ABSENT:
                 with self._lock:
@@ -700,14 +718,71 @@ class CommandSession:
 
     async def _seal_capture(self) -> None:
         capture = self._capture
-        if capture is None:
+        try:
+            if capture is not None:
+                await capture.seal(self._clock.monotonic_ns())
+                for which, omitted in capture.omitted():
+                    record: JsonObject = {"kind": which, "omitted": omitted}
+                    await self._loop.run_in_executor(
+                        None, self._journal.append, "runner.cap_reached", record
+                    )
+        finally:
+            await self._loop.run_in_executor(None, self._observe)
+
+    def _assembled(self) -> CommandObservation | None:
+        capture = self._capture
+        prepared = self._workspace.prepared
+        with self._lock:
+            self._lock.wait_for(self._snapshot_ready)
+            if self._halted() or self._stage is not _Stage.RUNNING:
+                return None
+            ended = self._exit
+            executing = self._executing_ns
+        if ended is None or executing is None or capture is None or prepared is None:
+            return None
+        code, exited = ended
+        return completed_observation(
+            code,
+            exited - executing,
+            prepared,
+            capture.facts("stdout"),
+            capture.facts("stderr"),
+        )
+
+    def _observe(self) -> None:
+        try:
+            self._record_observation()
+        finally:
+            with self._lock:
+                self._observing = False
+
+    def _record_observation(self) -> None:
+        started = self._clock.monotonic_ns()
+        if self._workspace.state is WorkspaceState.ABSENT:
+            with self._lock:
+                self._unobserved = True
             return
-        await capture.seal(self._clock.monotonic_ns())
-        for which, omitted in capture.omitted():
-            record: JsonObject = {"kind": which, "omitted": omitted}
-            await self._loop.run_in_executor(
-                None, self._journal.append, "runner.cap_reached", record
-            )
+        observation = self._assembled()
+        outcome = "refused"
+        if observation is not None:
+            try:
+                appended = self._journal.append_outcome(
+                    COMMAND_OBSERVED,
+                    observation_record(observation),
+                    reader_bounded=True,
+                )
+            except (JournalCapacityError, JsonShapeError, UnicodeEncodeError):
+                appended = None
+            if appended is JournalAppendOutcome.DURABLE:
+                outcome = "observed"
+            elif appended is not None:
+                outcome = "journal_unavailable"
+        with self._lock:
+            if outcome == "observed":
+                self._observation = observation
+            else:
+                self._unobserved = True
+            self._emit(outcome, started)
 
     def close_journal(self) -> None:
         self._journal.close()
@@ -718,10 +793,10 @@ class CommandSession:
         return self._stop.is_set() or self._fenced.is_set()
 
     def fence(self) -> None:
-        self._begin_domain_stop(self._clock.monotonic_ns())
         with self._lock:
             self._fenced.set()
             self._lock.notify_all()
+        self._begin_domain_stop(self._clock.monotonic_ns())
         self._workspace.cancel()
 
     def completion(self) -> Completion:
@@ -757,6 +832,10 @@ class CommandSession:
             try:
                 if self._domain_stop is not None:
                     await self._domain_stop
+                with self._lock:
+                    unattached = self._observing and self._capture_seal is None
+                if unattached:
+                    self._capture_seal = self._loop.create_task(self._seal_capture())
                 if self._output_seal is not None:
                     await self._output_seal
                 if self._capture_seal is not None:
@@ -861,12 +940,14 @@ class CommandSession:
                 self._stop_leader(owner)
                 self._finish(_Stage.FAILED, "refused", started)
                 raise delivery_error("command_not_started")
+            executing = self._clock.monotonic_ns()
             if not self._journal.append("runner.candidate_started", {"leader": True}):
                 self._stop_leader(owner)
                 self._finish(_Stage.FENCED, "journal_unavailable", started)
                 raise delivery_error("journal_unavailable")
             with self._lock:
                 self._running_ns = started
+                self._executing_ns = executing
             self._finish(_Stage.RUNNING, "started", started)
             durable = True
         finally:
@@ -1175,6 +1256,46 @@ class CommandSession:
             raise delivery_error("transfer_refused")
         return open_log(self._attempt, which, facts, offset)
 
+    def command_observation(self, submitter: Submitter) -> CommandObservation:
+        with self._lock:
+            if self._execution != submitter:
+                raise delivery_error("execution_unauthorized")
+            if self._kind is not None and self._kind != "command":
+                raise delivery_error("workload_kind_unavailable")
+            observation = self._observation
+            tails = self._tails
+            executing = self._executing_ns
+            pending = self._observing
+            settled = (
+                self._unobserved
+                or self._halted()
+                or self._stop_unresolved
+                or self._exit_recorded is False
+                or self._stage in (_Stage.FAILED, _Stage.FENCED)
+            )
+        capture = self._capture
+        if observation is None or capture is None:
+            state = self._workspace.state
+            if not pending and (
+                settled
+                or state is WorkspaceState.FAILED
+                or (state is WorkspaceState.ABSENT and executing is not None)
+            ):
+                raise delivery_error("command_unobserved")
+            raise delivery_error("workload_busy")
+        if tails is None:
+            tails = (
+                sealed_tail(
+                    self._attempt, "stdout", capture.facts("stdout"), observation.stdout
+                ),
+                sealed_tail(
+                    self._attempt, "stderr", capture.facts("stderr"), observation.stderr
+                ),
+            )
+            with self._lock:
+                self._tails = tails
+        return with_tails(observation, *tails)
+
     def note_output(self, outcome: str, started: int) -> None:
         waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
         level = Level.INFO if outcome == "transferred" else Level.WARNING
@@ -1198,5 +1319,9 @@ class CommandSession:
                 return
             self._warned = True
         waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
-        level = Level.INFO if outcome in {"started", "exited"} else Level.WARNING
+        level = (
+            Level.INFO
+            if outcome in {"started", "exited", "observed"}
+            else Level.WARNING
+        )
         self._log.emit_at(level, COMMAND, outcome=outcome, waited_ms=waited)

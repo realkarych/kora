@@ -1,3 +1,4 @@
+import base64
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, fields
 from datetime import timedelta
@@ -8,6 +9,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    StrictBytes,
     StrictInt,
     StringConstraints,
     Tag,
@@ -18,6 +20,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from kora.ir import PrincipalRef, VcsRef
+from kora.ir.command_result import CommandResult
 from kora.ir.config import ResourceName
 from kora.ir.cost import Money, PricingStatus, Sum, UsageCoverage, consistent_price
 from kora.ir.json import (
@@ -99,6 +102,9 @@ MAX_CHECKOUT_REQUEST_BYTES: Final[int] = 65_536
 MAX_EVENT_DATA_BYTES: Final[int] = 65_536
 MIN_EXIT_CODE: Final[int] = -255
 MAX_EXIT_CODE: Final[int] = 255
+MAX_SIGNAL: Final[int] = 255
+MAX_CAPTURE_BYTES: Final[int] = 67_108_864
+MAX_TAIL_BYTES: Final[int] = 4096
 MAX_REFERENCE_BYTES: Final[int] = 1024
 MAX_TYPE_NAME_LENGTH: Final[int] = 256
 
@@ -237,15 +243,18 @@ def protected_path_fits(value: str) -> str:
     return value
 
 
+ProtectedPaths = Annotated[
+    tuple[Annotated[ProtectedPath, AfterValidator(protected_path_fits)], ...],
+    Field(max_length=MAX_PROTECTED_PATHS),
+]
+
+
 class CheckoutSource(BoundaryModel):
     repo: RepoText
     rev: RevisionText
     pinned: PinnedRevision | None
     branch: BranchText
-    protected_paths: Annotated[
-        tuple[Annotated[ProtectedPath, AfterValidator(protected_path_fits)], ...],
-        Field(max_length=MAX_PROTECTED_PATHS),
-    ]
+    protected_paths: ProtectedPaths
 
     @model_validator(mode="after")
     def bounded_request(self) -> Self:
@@ -293,6 +302,59 @@ class RuntimeStatus(BoundaryModel):
         if self.exit_code is not None and self.state != "exited":
             raise runtime_refused()
         return self
+
+
+class CaptureFacts(BoundaryModel):
+    model_config = ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
+
+    payload_digest: Digest
+    size: Annotated[Count, Field(le=MAX_CAPTURE_BYTES)]
+    observed_bytes: Count
+    eof: StrictBool
+    truncated: StrictBool
+    tail: Annotated[StrictBytes, Field(max_length=MAX_TAIL_BYTES)]
+
+    def descriptor(self, storage_ref: str) -> JsonObject:
+        return {
+            "storage_ref": storage_ref,
+            "payload_digest": self.payload_digest,
+            "size": self.size,
+            "observed_bytes": self.observed_bytes,
+            "eof": self.eof,
+            "truncated": self.truncated,
+            "tail_base64": base64.b64encode(self.tail).decode("ascii"),
+        }
+
+
+class ResourceFact(BoundaryModel):
+    name: BoundedResourceName
+    sha256: Digest
+    size: Annotated[Count, Field(le=MAX_RESOURCE_BYTES)]
+    executable: StrictBool
+
+
+class CommandObservation(BoundaryModel):
+    exit_code: Annotated[StrictInt, Field(ge=MIN_EXIT_CODE, le=MAX_EXIT_CODE)]
+    signal: Annotated[StrictInt, Field(ge=1, le=MAX_SIGNAL)] | None
+    termination: Literal["none", "interrupted", "killed", "killed_after_grace"]
+    stop_reason: Literal["completed", "deadline", "cancel", "journal_unavailable"]
+    duration_ms: Count
+    repo: RepoText
+    commit: RevisionIdentity
+    base_commit: RevisionIdentity
+    protected_paths: ProtectedPaths
+    protection: Literal["verified", "unprotected"]
+    resources: Annotated[tuple[ResourceFact, ...], Field(max_length=MAX_RESOURCES)]
+    resource_set_digest: Digest | None
+    resource_protection: Literal["protected", "none"]
+    stdout: CaptureFacts
+    stderr: CaptureFacts
+
+    def result(self, stdout_ref: str, stderr_ref: str) -> CommandResult:
+        value: JsonObject = self.model_dump(mode="json", exclude={"stdout", "stderr"})
+        value["stdout"] = self.stdout.descriptor(stdout_ref)
+        value["stderr"] = self.stderr.descriptor(stderr_ref)
+        return CommandResult(value)
 
 
 class AdoptedSession(BoundaryModel):
@@ -426,6 +488,10 @@ class Runtime(Protocol):
     def read_transcript(
         self, handle: Handle, ctx: ProtocolContext
     ) -> AsyncIterator[bytes]: ...
+
+    async def command_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> CommandObservation: ...
 
     async def finalize(
         self,

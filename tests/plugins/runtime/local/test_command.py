@@ -78,6 +78,8 @@ from kora.runner.registry import Running, Submitter, TransitionExecutor
 from tests.support.local_delivery import ReapedSession
 from tests.support.local_peers import identity_of, until
 from tests.support.local_runners import (
+    NEVER_READY,
+    carriers,
     exited_within,
     open_spawning,
     reap_runners,
@@ -96,7 +98,8 @@ from tests.support.local_runtime import (
     state_root,
 )
 
-HOLD_MARKER = "kora-hold-809"
+HOLD_MARKER = f"kora-hold-p{os.getpid()}-809-"
+ATTEMPT_TOKEN = os.getpid().to_bytes(16, "big").hex()
 FD_REPORT = "\n".join(
     (
         "import os, time",
@@ -995,6 +998,20 @@ async def test_launch_failure_has_no_fabricated_exit(
 
 
 @pytest.mark.asyncio
+async def test_hold_marker_selects_only_processes_of_this_test_process() -> None:
+    foreign = HOLD_MARKER.replace(f"-p{os.getpid()}-", "-p0-")
+    with carriers((*NEVER_READY, foreign), (*NEVER_READY, HOLD_MARKER)) as started:
+        other, owned = started
+        await until(lambda: other.pid in marker_pids(foreign))
+        await until(lambda: owned.pid in marker_pids(HOLD_MARKER))
+
+        selected = marker_pids(HOLD_MARKER)
+
+    assert owned.pid in selected
+    assert other.pid not in selected
+
+
+@pytest.mark.asyncio
 async def test_leader_exit_capture_eof_and_descriptors_are_separate(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
@@ -1126,7 +1143,7 @@ async def test_exited_command_settles_observed_descendants_without_status(
 async def test_command_stop_leaves_foreign_token_lookalike_alive(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    token = bytes(range(16)).hex()
+    token = ATTEMPT_TOKEN
     canary = "private-unrelated-native-environment"
     with subprocess.Popen(
         [
@@ -1307,7 +1324,7 @@ def stop_workers() -> frozenset[threading.Thread]:
 
 @pytest.mark.parametrize("alignment", [4, 8])
 def test_darwin_command_marker_requires_complete_environment(alignment: int) -> None:
-    marker = b"KORA_ATTEMPT_TOKEN=" + bytes(range(16)).hex().encode()
+    marker = b"KORA_ATTEMPT_TOKEN=" + ATTEMPT_TOKEN.encode()
     path = (2).to_bytes(4, sys.byteorder) + b"/x" + b"\0" * (alignment - 2)
     arguments = path + b"command\0\0"
     argument_only = path + b"command\0" + marker + b"\0"
@@ -1359,7 +1376,7 @@ class CommandSignalProbe(CommandDomainStop):
 
 
 def test_command_stop_refuses_stale_identity_for_live_process() -> None:
-    value = bytes(range(16)).hex()
+    value = ATTEMPT_TOKEN
     ready = "import os; os.write(1, b'r'); os.read(0, 1)"
     with subprocess.Popen(
         [sys.executable, "-I", "-c", ready],
@@ -1407,7 +1424,7 @@ def test_census_retains_listed_group_member_after_detach() -> None:
             "    os.read(0, 1)",
         )
     )
-    marker = b"KORA_ATTEMPT_TOKEN=" + bytes(range(16)).hex().encode()
+    marker = b"KORA_ATTEMPT_TOKEN=" + ATTEMPT_TOKEN.encode()
     reader = NativeIdentityReader()
     with subprocess.Popen(
         [sys.executable, "-I", "-c", command],
