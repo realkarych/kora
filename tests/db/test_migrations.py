@@ -82,11 +82,13 @@ async def test_migration_reaches_head_and_matches_the_tables(
 
 
 @pytest.mark.asyncio
-async def test_no_column_has_a_server_default(database: Database) -> None:
+async def test_server_defaults_match_cursor_writer_compatibility(
+    database: Database,
+) -> None:
     async with database.read_transaction() as connection:
         defaults = await connection.run_sync(server_defaults)
 
-    assert defaults == []
+    assert defaults == [("worker", "claim_cursor_generation")]
 
 
 @pytest.mark.asyncio
