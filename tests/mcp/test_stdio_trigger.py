@@ -88,3 +88,4 @@ async def test_mcp_trigger(
         ("kora_trigger", "api_error"),
     ]
     assert token.encode() not in stderr
+    assert b"mcp-start" not in stderr

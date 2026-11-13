@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,13 @@ async def test_cli_trigger(
             + ["--allow-unenforced-secrets"],
             environment | {"KORA_NAMESPACE": NAMESPACE},
         )
+        preferred = await kora(
+            ["trigger", "skeleton", "--namespace", NAMESPACE, "--json"],
+            environment | {"KORA_NAMESPACE": "elsewhere"},
+        )
+        dotted = await kora(
+            ["trigger", "..", "--namespace", NAMESPACE, "--json"], environment
+        )
         unconfigured = await kora(["trigger", "skeleton"], environment)
         invalid = await kora(
             ["trigger", "skeleton", "--namespace", "Not-A-Namespace"], environment
@@ -64,9 +72,15 @@ async def test_cli_trigger(
     assert records["cli.trigger.finished"]["outcome"] == "ok"
     assert changed.code == 1
     assert ApiErrorEnvelope.model_validate_json(changed.stdout).error.code == "API004"
+    assert preferred.code == 0
+    assert AcceptedRun.model_validate_json(preferred.stdout).run_id != accepted.run_id
+    assert dotted.code == 1
+    details = json.loads(dotted.stdout)["error"]["details"]
+    assert (details["reason"], details["outcome"]) == ("destination_policy", "not_sent")
     assert (unconfigured.code, unconfigured.stdout) == (78, b"")
     assert b"KORA_NAMESPACE: missing" in unconfigured.stderr
     assert (invalid.code, invalid.stdout) == (78, b"")
     assert b"--namespace: invalid" in invalid.stderr
     assert (bad_version.code, bad_version.stdout) == (2, b"")
-    assert token.encode() not in human.stderr + machine.stderr + changed.stderr
+    for private in (token.encode(), b"cli-start"):
+        assert private not in human.stderr + machine.stderr + changed.stderr

@@ -1,5 +1,5 @@
+import asyncio
 from collections.abc import Awaitable, Callable
-from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
@@ -30,13 +30,14 @@ from kora.db.types import NAME_LENGTH
 from kora.engine.start_acceptance import (
     AcceptanceOutcome,
     StartAcceptance,
+    StartCandidate,
+    StartPreparation,
+    StartResult,
+    accept_manual_start,
     acquire_manual_start,
-    commit_manual_start,
-    select_manual_start,
 )
 from kora.engine.start_facts import (
     InstallationRefusal,
-    ManualStartFacts,
     StartFactsResult,
     StartRefusal,
     read_manual_start_facts,
@@ -55,19 +56,14 @@ from kora.protocols.authentication import Principal
 from kora.protocols.time import Clock
 
 TriggerHandler = Callable[[Request, str, str], Awaitable[Response]]
-START_ATTEMPTS = 2
-
-
-class Preparation(StrEnum):
-    BUSY = "busy"
-
-
-StartResult = StartAcceptance | StartRefusal | InstallationRefusal | Preparation
 DEFINITIVE: dict[AcceptanceOutcome, ApiErrorCode] = {
     AcceptanceOutcome.MISMATCHED: ApiErrorCode.IDEMPOTENCY_MISMATCH,
     AcceptanceOutcome.REFUSED: ApiErrorCode.FORBIDDEN,
     AcceptanceOutcome.MISSING: ApiErrorCode.NOT_FOUND,
 }
+UNAVAILABLE_INTERPRETATIONS: frozenset[AcceptanceOutcome] = frozenset(
+    {AcceptanceOutcome.UNAVAILABLE, AcceptanceOutcome.RETENTION_UNAVAILABLE}
+)
 REJECTIONS: dict[StartRefusal, RequestRejection] = {
     StartRefusal.PARAMETERS: RequestRejection.PARAMETERS,
     StartRefusal.SECRETS: RequestRejection.SECRETS,
@@ -75,11 +71,14 @@ REJECTIONS: dict[StartRefusal, RequestRejection] = {
 
 
 def idempotency_key(request: Request) -> str | None | RequestRejection:
-    value = request.headers.get("idempotency-key")
-    if value is None:
+    values = request.headers.getlist("idempotency-key")
+    if not values:
         return None
-    if not 1 <= len(value) <= NAME_LENGTH or not all(
-        "!" <= character <= "~" for character in value
+    [value, *duplicates] = values
+    if (
+        duplicates
+        or not 1 <= len(value) <= NAME_LENGTH
+        or not all("!" <= character <= "~" for character in value)
     ):
         return RequestRejection.IDEMPOTENCY_KEY
     return value
@@ -96,83 +95,60 @@ def public_outcome(outcome: StartOutcome) -> AcceptedRun | SkippedRun:
     return SkippedRun(outcome="skipped", reason="overlap", run_id=None)
 
 
-async def _prepared_start(
-    services: GraphServices,
-    principal: Principal,
-    request: PreparedManualStartRequest,
-    key: str,
-) -> StartAcceptance | StartFactsResult | Preparation:
-    candidate = await select_manual_start(services.database, principal, request, key)
-    if isinstance(candidate, StartAcceptance):
-        return candidate
-    async with services.preparer.reserve() as reservation:
-        if reservation is None:
-            return Preparation.BUSY
-        selected = await acquire_manual_start(
-            services.database, request, candidate, limits=IDENTITY
-        )
-        if isinstance(selected, StartAcceptance):
-            return selected
-
-        async def facts(_: Evaluator) -> StartFactsResult:
-            return read_manual_start_facts(
-                selected, request, services.selection, limits=IDENTITY
+def _preparation(
+    services: GraphServices, request: PreparedManualStartRequest
+) -> StartPreparation:
+    async def prepare(
+        candidate: StartCandidate,
+    ) -> StartAcceptance | StartFactsResult | None:
+        async with services.preparer.reserve() as reservation:
+            if reservation is None:
+                return None
+            selected = await acquire_manual_start(
+                services.database, request, candidate, limits=IDENTITY
             )
+            if isinstance(selected, StartAcceptance):
+                return selected
 
-        return await reservation.run(facts)
+            async def facts(_: Evaluator) -> StartFactsResult:
+                return read_manual_start_facts(
+                    selected, request, services.selection, limits=IDENTITY
+                )
 
+            return await reservation.run(facts)
 
-async def _start(
-    services: GraphServices,
-    clock: Clock,
-    principal: Principal,
-    request: PreparedManualStartRequest,
-    key: str,
-) -> StartResult | None:
-    for _ in range(START_ATTEMPTS):
-        prepared = await _prepared_start(services, principal, request, key)
-        if not isinstance(prepared, ManualStartFacts):
-            return prepared
-        committed = await commit_manual_start(
-            services.database,
-            principal,
-            request,
-            key,
-            prepared,
-            run_id=services.identifiers.new(),
-            identifiers=services.identifiers,
-            at=clock.now(),
-        )
-        if committed.outcome is not AcceptanceOutcome.STALE:
-            return committed
-    return None
+    return prepare
 
 
 def _response(
-    result: StartResult | None, namespace: str, request_id: str
+    result: StartResult, namespace: str, request_id: str
 ) -> ApiErrorEnvelope | Response:
-    if result is None or result is Preparation.BUSY:
+    if result is None:
         return dependency_unavailable(
             DependencyRetryContext.PROVEN_PRE_EFFECT, request_id=request_id
         )
     if isinstance(result, InstallationRefusal):
         return deployment_validation_error(result.diagnostics, request_id=request_id)
+    if result is StartRefusal.PARAMETERS_UNAVAILABLE:
+        return internal_error(request_id=request_id)
     if isinstance(result, StartRefusal):
-        rejection = REJECTIONS.get(result)
-        if rejection is None:
-            return internal_error(request_id=request_id)
-        return request_rejection(rejection, request_id=request_id)
-    if result.outcome in DEFINITIVE:
-        return definitive_error(DEFINITIVE[result.outcome], request_id=request_id)
-    if result.outcome is AcceptanceOutcome.FULL:
-        if result.limit is None or result.used is None:
-            return internal_error(request_id=request_id)
+        return request_rejection(REJECTIONS[result], request_id=request_id)
+    outcome = result.outcome
+    if outcome is AcceptanceOutcome.STALE:
+        return dependency_unavailable(
+            DependencyRetryContext.PROVEN_PRE_EFFECT, request_id=request_id
+        )
+    if outcome in UNAVAILABLE_INTERPRETATIONS:
+        return internal_error(request_id=request_id)
+    if outcome in DEFINITIVE:
+        return definitive_error(DEFINITIVE[outcome], request_id=request_id)
+    if outcome is AcceptanceOutcome.FULL and result.limit and result.used is not None:
         return backlog_full_error(
             namespace, result.limit, result.used, request_id=request_id
         )
     if result.response is None:
-        return internal_error(request_id=request_id)
-    created = result.outcome is AcceptanceOutcome.ACCEPTED
+        raise RuntimeError("A completed start carries its outcome.")
+    created = outcome is AcceptanceOutcome.ACCEPTED
     return JSONResponse(
         public_outcome(result.response).model_dump(mode="json"),
         status_code=201 if created else 200,
@@ -208,7 +184,8 @@ async def _trigger(
     if graph_id is None:
         return definitive_error(ApiErrorCode.NOT_FOUND, request_id=request_id)
     try:
-        start = prepare_manual_start_request(
+        start = await asyncio.to_thread(
+            prepare_manual_start_request,
             namespace_id,
             graph_id,
             dict(body.params),
@@ -219,12 +196,14 @@ async def _trigger(
         )
     except StartRecordRejected:
         return request_rejection(RequestRejection.PARAMETERS, request_id=request_id)
-    result = await _start(
-        services,
-        clock,
+    result = await accept_manual_start(
+        services.database,
         principal,
         start,
         services.identifiers.new() if key is None else key,
+        _preparation(services, start),
+        identifiers=services.identifiers,
+        clock=clock.now,
     )
     return _response(result, namespace_name, request_id)
 

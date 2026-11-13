@@ -291,6 +291,7 @@ async def test_worker_route_principal_separation(
     assert set(paths) == {
         "/healthz",
         "/api/v1/namespaces/{ns}/graphs/{graph}/versions",
+        "/api/v1/namespaces/{ns}/graphs/{graph}/runs",
         "/api/v1/workers",
     }
 

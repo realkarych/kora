@@ -100,3 +100,39 @@ async def test_preparer_stops_its_thread_when_opening_fails() -> None:
     await occupying.close()
     assert preparation_threads() == []
     assert_settled(owner)
+
+
+@pytest.mark.asyncio
+async def test_reservation_keeps_its_slot_until_cancelled_work_ends() -> None:
+    owner = EvaluationThread(load_binding())
+    gate = threading.Event()
+
+    async def blocked(_: Evaluator) -> str:
+        await asyncio.to_thread(gate.wait)
+        return "settled"
+
+    async with DeploymentPreparer(AuthorityClock(), owner) as preparer:
+
+        async def caller() -> str:
+            async with preparer.reserve() as reservation:
+                assert reservation is not None
+                return await reservation.run(blocked)
+
+        task = asyncio.create_task(caller())
+        await until(lambda: preparer.busy)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        held_after_cancel = preparer.busy
+        async with preparer.reserve() as second:
+            refused = second is None
+        gate.set()
+        async with preparer.hold():
+            pass
+        released = not preparer.busy
+
+    assert held_after_cancel
+    assert refused
+    assert released
+    assert preparation_threads() == []
+    assert_settled(owner)

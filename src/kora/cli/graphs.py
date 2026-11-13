@@ -17,7 +17,7 @@ from kora.client.settings import (
     read_client_settings,
     read_namespace,
 )
-from kora.client.transport import DeployedGraphVersion, TriggeredRun
+from kora.client.transport import IDEMPOTENCY_KEY, DeployedGraphVersion, TriggeredRun
 from kora.ir.json import JsonObject
 from kora.models.graphs import OpaqueObject
 from kora.models.runs import SkippedRun, TriggerRequest
@@ -161,7 +161,7 @@ def trigger_command(
         _stderr("kora: invalid --graph-version")
         raise typer.Exit(EXIT_USAGE) from None
     key = options.idempotency_key
-    if key is not None and (not key.isascii() or not key.isprintable()):
+    if key is not None and IDEMPOTENCY_KEY.fullmatch(key) is None:
         _stderr("kora: invalid --idempotency-key")
         raise typer.Exit(EXIT_USAGE)
 

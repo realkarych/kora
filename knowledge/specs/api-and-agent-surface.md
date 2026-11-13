@@ -695,7 +695,7 @@ Until parameter evaluation and the guarded writers land, the trigger route runs 
 - **Order of checks.**
   1. The dispatch authenticates the bearer and refuses a missing or invalid credential with `API009` and a service principal with `API005` before any handler runs.
   2. The handler resolves `{ns}` only among the namespaces granted to the token and refuses any other name, existing or not, with `API005`.
-  3. It checks the optional `Idempotency-Key` header: 1–255 visible ASCII characters, otherwise `API003`. A server-generated key replaces an absent one, so such a start cannot be replayed.
+  3. It checks the optional `Idempotency-Key` header: one header of 1–255 visible ASCII characters, otherwise `API003`. A server-generated key replaces an absent one, so such a start cannot be replayed.
   4. It reads at most 4 MiB of strict JSON with the deploy's refusals (`API003` with empty details), then resolves `{graph}` in the namespace; an unknown graph is `API001`.
 - **Request.** The body is `{params, graph_version?, allow_unenforced_secrets?}`:
   - `params` is a JSON object, and only `{}` can start, as the first-slice narrowing states;
@@ -712,13 +712,13 @@ Until parameter evaluation and the guarded writers land, the trigger route runs 
   - A full outstanding backlog is `409`, `API002`, retryable, with `details: {reason: run_backlog_full, scope: {kind: namespace, id: <ns>}, limit_name: max_pending_runs, limit, used, next_action: retry_start}`.
   - A latest version that changes between preparation and the locked acceptance is prepared once more; a second change is `API011`, retryable.
 - **Response.** The body is the shared `StartOutcome`: `{outcome: "accepted", run_id: "run_…", graph_version_id: "gv_…", status: "pending"}` or `{outcome: "skipped", reason: "overlap", run_id: null}`. A run created by this request returns `201`. A replay and a new overlap skip return `200`.
-- **Preparation resources.** A start claims the deploy's single preparation slot before it acquires the selected version. It then decodes the stored values on the same preparation thread, so a start and a deploy never decode documents at the same time. While the slot is taken, a new start is refused with `API011`, retryable, and no queue forms. Replays and selection refusals do not need the slot.
+- **Preparation resources.** The request parameters are canonicalized for the request digest on a worker thread, off the request loop. A start claims the deploy's single preparation slot before it acquires the selected version. It then decodes the stored values on the same preparation thread, so a start and a deploy never decode documents at the same time. While the slot is taken, a new start is refused with `API011`, retryable, and no queue forms. Replays and selection refusals do not need the slot.
 - **Namespace for CLI commands.** A CLI command that acts inside a namespace takes it from `--namespace`, otherwise from `KORA_NAMESPACE`. Without either, or with a value that is not a namespace identifier, it exits 78 before any request, naming the option or variable. MCP tools take `namespace` as an argument. The project owner decided this on 2026-11-13 for every namespace-scoped command.
 - **CLI.** `kora trigger <graph> [--namespace NS] [--graph-version gv_…] [--idempotency-key KEY] [--allow-unenforced-secrets] [--json]` reads `KORA_URL` and `KORA_TOKEN` like `kora deploy`.
-  - **Arguments.** `--param` and `--dry-run` are not offered at skeleton depth. An invalid `--graph-version` or a key outside printable ASCII exits 2 before any request.
+  - **Arguments.** `--param` and `--dry-run` are not offered at skeleton depth. An invalid `--graph-version` or a key outside the server's key rule exits 2 before any request. The shared client refuses a namespace or graph name outside the identifier pattern as a `destination_policy` failure before sending, so a name such as `..` cannot address another path.
   - **Output.** The command prints the accepted run or the skip, or with `--json` the API body, and exits 0. An API refusal prints the API error envelope on stdout and exits 1. A client failure exits 1.
 - **Stdio MCP.** `kora mcp --server operating [--url …]` uses the same configuration, credential and extra as the authoring server and lists exactly `kora_trigger`.
-  - **Arguments.** It takes `{namespace, graph, graph_version?, idempotency_key?, allow_unenforced_secrets?}` and refuses other arguments as a usage error.
+  - **Arguments.** It takes `{namespace, graph, graph_version?, idempotency_key?, allow_unenforced_secrets?}` and refuses other arguments, and a key outside the server's key rule, as a usage error.
   - **Result.** It returns the API JSON, or the API error object as a tool error.
   - **Diagnostics.** `mcp.tool.finished` records the tool name and outcome.
 - **Parity.** `test_parity_operations_are_reachable` covers the operation through `kora trigger` and `kora_trigger`.

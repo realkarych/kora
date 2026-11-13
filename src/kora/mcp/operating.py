@@ -5,6 +5,7 @@ from mcp.server import ServerRequestContext
 from pydantic import ValidationError
 
 from kora.client import ApiError, ClientError, KoraClient
+from kora.client.transport import IDEMPOTENCY_KEY
 from kora.ir.json import JsonObject
 from kora.mcp.results import MCP_COMPONENT, TOOL_FINISHED, tool_result, usage_error
 from kora.models.graphs import OpaqueObject
@@ -77,9 +78,9 @@ class OperatingTools:
         if not isinstance(namespace, str) or not isinstance(graph, str):
             return usage_error("The namespace and graph arguments must be strings.")
         if key is not None and (
-            not isinstance(key, str) or not key.isascii() or not key.isprintable()
+            not isinstance(key, str) or IDEMPOTENCY_KEY.fullmatch(key) is None
         ):
-            return usage_error("The idempotency key must be printable ASCII.")
+            return usage_error("The idempotency key must be 1-255 visible ASCII.")
         try:
             request = TriggerRequest(
                 params=OpaqueObject(),

@@ -8,7 +8,7 @@ from sqlalchemy import insert, update
 from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
-from kora.db.tables import api_token, namespace
+from kora.db.tables import api_token, graph_version, namespace
 from kora.ir.json import JsonObject
 from kora.models.errors import ApiErrorEnvelope
 from kora.models.graphs import DeployResponse
@@ -180,7 +180,7 @@ async def test_trigger_route_refuses_a_full_backlog(
         await writer.execute(
             update(namespace)
             .where(namespace.c.id == namespace_id)
-            .values(policy={"concurrency": {"max_pending_runs": 1}})
+            .values(policy={"concurrency": {"max_pending_runs": 2}})
         )
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
@@ -188,9 +188,16 @@ async def test_trigger_route_refuses_a_full_backlog(
 
     async with client_for(app) as client:
         await deployed(client, headers)
-        await client.post(RUNS, json={"params": {}}, headers=keyed(headers, "k1"))
+        for key in ("k1", "k2"):
+            await client.post(RUNS, json={"params": {}}, headers=keyed(headers, key))
+        async with database.transaction() as writer:
+            await writer.execute(
+                update(namespace)
+                .where(namespace.c.id == namespace_id)
+                .values(policy={"concurrency": {"max_pending_runs": 1}})
+            )
         full = await client.post(
-            RUNS, json={"params": {}}, headers=keyed(headers, "k2")
+            RUNS, json={"params": {}}, headers=keyed(headers, "k3")
         )
 
     envelope = error_of(full)
@@ -204,7 +211,7 @@ async def test_trigger_route_refuses_a_full_backlog(
         "scope": {"kind": "namespace", "id": NAMESPACE},
         "limit_name": "max_pending_runs",
         "limit": 1,
-        "used": 1,
+        "used": 2,
         "next_action": "retry_start",
     }
 
@@ -266,6 +273,12 @@ async def test_trigger_route_refuses_invalid_starts(
         (b'{"params": {}}', {"Idempotency-Key": "x" * 256}),
         (b'{"params": {}}', {"Idempotency-Key": "two words"}),
     )
+    duplicated = [
+        (b"authorization", headers["Authorization"].encode()),
+        (b"content-type", b"application/json"),
+        (b"idempotency-key", b"first"),
+        (b"idempotency-key", b"second"),
+    ]
 
     async with client_for(app) as client, client_for(other) as unconfigured:
         await deployed(client, headers)
@@ -276,8 +289,11 @@ async def test_trigger_route_refuses_invalid_starts(
         installation = await unconfigured.post(
             RUNS, json={"params": {}}, headers=headers
         )
+        twice = await client.post(
+            RUNS, content=b'{"params": {}}', headers=httpx.Headers(duplicated)
+        )
 
-    for response in responses:
+    for response in (*responses, twice):
         assert (response.status_code, error_of(response).error.code) == (422, "API003")
     findings = error_of(installation).model_dump(mode="json")["error"]["details"]
     assert error_of(installation).error.code == "API003"
@@ -288,7 +304,11 @@ async def test_trigger_route_refuses_invalid_starts(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("change", "status", "code"),
-    [("secrets", 422, "API003"), ("parameters", 500, "API010")],
+    [
+        ("secrets", 422, "API003"),
+        ("parameters", 500, "API010"),
+        ("inactive", 500, "API010"),
+    ],
 )
 async def test_trigger_route_refuses_unsupported_versions(
     database: Database,
@@ -303,14 +323,24 @@ async def test_trigger_route_refuses_unsupported_versions(
     if change == "secrets":
         ir["secrets"] = {"aliases": {"API_TOKEN": "secret://env/API_TOKEN"}}
         agent_config(ir)["secret_env"] = {"API_TOKEN": "API_TOKEN"}
-    else:
+    elif change == "parameters":
         child(ir, "graph")["params"] = {"type": "object"}
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     )
 
     async with client_for(app) as client:
-        await deployed(client, headers, ir)
+        version = await deployed(client, headers, ir)
+        if change == "inactive":
+            async with database.transaction() as writer:
+                await writer.execute(
+                    update(graph_version)
+                    .where(
+                        graph_version.c.id
+                        == version.graph_version_id.removeprefix("gv_")
+                    )
+                    .values(status="retired")
+                )
         response = await client.post(
             RUNS,
             json={"params": {}, "allow_unenforced_secrets": True},
