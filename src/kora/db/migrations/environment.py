@@ -12,6 +12,7 @@ from sqlalchemy import Column, Connection
 from sqlalchemy.schema import SchemaItem
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
+from kora.db.attempt_capacity_v1 import SQLITE_DEPLOYED_INDEX
 from kora.db.connection import (
     MIGRATION_LEASE,
     MIGRATION_LOCK_TIMEOUT,
@@ -139,6 +140,7 @@ def include_schema_object(
             ORDINAL_INVALID_INDEX,
             SQLITE_RUN_LOCATOR_INDEX,
             SQLITE_RUN_INPUT_LOCATOR_INDEX,
+            SQLITE_DEPLOYED_INDEX,
         )
         and not reflected
         and compare_to is None

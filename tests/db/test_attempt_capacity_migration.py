@@ -2,10 +2,14 @@ import asyncio
 
 import pytest
 from alembic import command
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.exc import DBAPIError
 
-from kora.db.attempt_capacity_v1 import INDEXES
+from kora.db.attempt_capacity_v1 import (
+    INDEXES,
+    SQLITE_DEPLOYED_INDEX,
+    capacity_index_dialect,
+)
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.migrations import current_revision, upgrade_database
 from kora.db.migrations.environment import alembic_config
@@ -59,6 +63,11 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
             else:
                 async with database.transaction() as writer:
                     for name, table, columns, _, predicate, _ in INDEXES:
+                        if capacity_index_dialect(name) not in (
+                            None,
+                            writer.dialect.name,
+                        ):
+                            continue
                         suffix = "" if predicate is None else " WHERE " + predicate
                         await writer.exec_driver_sql(
                             f"CREATE INDEX {name} ON {table} "
@@ -71,6 +80,12 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
         async with database.read_transaction() as reader:
             with await reader.execute(select(attempt.c.id)) as result:
                 ids = list(result.scalars())
+            graph_indexes = await reader.run_sync(
+                lambda sync: {
+                    index["name"]
+                    for index in inspect(sync).get_indexes("graph_version")
+                }
+            )
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0025",
@@ -80,6 +95,9 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
         assert repeated.steps == 0
         assert after == before
         assert ids == [case.attempt_id]
+        assert (SQLITE_DEPLOYED_INDEX in graph_indexes) is (
+            database.dialect is Dialect.SQLITE
+        )
         assert await migration_lock_count(database) == 0
         assert database.units_in_flight() == ledger.outstanding == 0
     finally:
