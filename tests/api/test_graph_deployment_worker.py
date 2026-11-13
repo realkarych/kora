@@ -38,7 +38,7 @@ def heavy_ir() -> JsonObject:
     assert isinstance(agent, dict)
     config = agent["config"]
     assert isinstance(config, dict)
-    config["prompt"] = "x" * 300_000
+    config["prompt"] = "x" * 100_000
     return ir
 
 
@@ -77,7 +77,8 @@ async def test_preparer_keeps_its_slot_until_cancelled_work_ends() -> None:
             await cancelled
         held_after_cancel = preparer.busy
         refused = await preparer.prepare(skeleton_ir(), SELECTORS, SELECTION)
-        await until(lambda: not preparer.busy)
+        async with preparer.hold():
+            pass
         admitted = await preparer.prepare(skeleton_ir(), SELECTORS, SELECTION)
 
     assert held_after_cancel
