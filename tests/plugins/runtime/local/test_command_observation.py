@@ -2,10 +2,12 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import signal
 import sys
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,14 +21,14 @@ from kora.ir.command_result import (
     CommandResultValidationError,
     verify_command_result_captures,
 )
-from kora.ir.json import JsonObject
+from kora.ir.json import JsonObject, JsonValue
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.runtime.local.channel import (
     OBSERVATION_BYTES,
     observation_envelope,
     read_observation,
 )
-from kora.plugins.runtime.local.command import COMPONENT
+from kora.plugins.runtime.local.command import COMMAND, COMMAND_STOP, COMPONENT
 from kora.plugins.runtime.local.control import observe_command
 from kora.plugins.runtime.local.reaper import adopted_pids
 from kora.plugins.runtime.local.runtime import LocalRuntime
@@ -90,6 +92,88 @@ ENDINGS = {
     "nonzero": ("import sys; sys.exit(3)", 3),
     "signal": ("import os, signal; os.kill(os.getpid(), signal.SIGTERM)", -15),
 }
+DIAGNOSTIC_FIELDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "runtime.local.workspace": (
+        ("prepared", "failed", "journal_unavailable", "cancelled"),
+        ("waited_ms",),
+    ),
+    "runtime.local.command_stop": (("confirmed", "unresolved"), ("waited_ms",)),
+    "runtime.local.capture": (
+        ("complete", "truncated", "write_failed", "unsealed"),
+        ("retained_bytes", "observed_bytes", "waited_ms"),
+    ),
+    "runtime.local.command": (
+        ("started", "exited", "observed", "refused", "journal_unavailable"),
+        ("waited_ms",),
+    ),
+}
+
+
+def diagnostic_number(value: object) -> int | float | str:
+    if (
+        (type(value) is int or type(value) is float)
+        and 0 <= value <= 2**63 - 1
+        and math.isfinite(value)
+    ):
+        return value
+    return "invalid"
+
+
+def observation_diagnostics(
+    capture: Capture, completion: Completion, journal_bytes: int
+) -> JsonObject:
+    selected: deque[JsonValue] = deque(maxlen=16)
+    omitted = 0
+    for record in capture.finish():
+        name = record.get("event")
+        if type(name) is not str or name not in DIAGNOSTIC_FIELDS:
+            omitted += 1
+            continue
+        outcomes, fields = DIAGNOSTIC_FIELDS[name]
+        outcome = record.get("outcome")
+        projected: JsonObject = {
+            "event": name,
+            "outcome": outcome
+            if type(outcome) is str and outcome in outcomes
+            else "invalid",
+        }
+        for field in fields:
+            projected[field] = diagnostic_number(record.get(field))
+        if len(selected) == 16:
+            omitted += 1
+        selected.append(projected)
+    return {
+        "pre_teardown_completion": completion.value,
+        "pre_teardown_journal_bytes": diagnostic_number(journal_bytes),
+        "post_teardown_events": list(selected),
+        "omitted_records": omitted,
+    }
+
+
+def test_observation_diagnostic_tail_preserves_late_stop_and_observation(
+    kora_capture: Capture,
+) -> None:
+    logger = kora_capture.diagnostics.logger(COMPONENT)
+    for index in range(20):
+        logger.emit(COMMAND, outcome="refused", waited_ms=index)
+    logger.emit(COMMAND_STOP, outcome="confirmed", waited_ms=21)
+    logger.emit(COMMAND, outcome="observed", waited_ms=22)
+
+    evidence = observation_diagnostics(kora_capture, Completion.COMPLETE, 1024)
+
+    assert evidence["omitted_records"] == 6
+    assert evidence["post_teardown_events"] == [
+        *(
+            {"event": "runtime.local.command", "outcome": "refused", "waited_ms": index}
+            for index in range(6, 20)
+        ),
+        {
+            "event": "runtime.local.command_stop",
+            "outcome": "confirmed",
+            "waited_ms": 21,
+        },
+        {"event": "runtime.local.command", "outcome": "observed", "waited_ms": 22},
+    ]
 
 
 def checked_out(
@@ -518,9 +602,12 @@ async def test_command_observation_duration_uses_execution_acknowledgement(
 
             observed = await settled_answer(session)
             elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
+            completion = session.completion()
+            journal_bytes = (attempt / "journal.jsonl").stat().st_size
+    diagnostics = observation_diagnostics(kora_capture, completion, journal_bytes)
 
-    assert isinstance(observed, CommandObservation)
-    assert 7000 <= observed.duration_ms <= 7000 + elapsed_ms
+    assert isinstance(observed, CommandObservation), diagnostics
+    assert 7000 <= observed.duration_ms <= 7000 + elapsed_ms, diagnostics
 
 
 @pytest.mark.asyncio
@@ -540,16 +627,19 @@ async def test_command_observation_record_fits_the_reader_bound(
             session.attach_drains()
 
             answer = await settled_answer(session)
+            completion = session.completion()
             size = (attempt / "journal.jsonl").stat().st_size
             records = observed_records(attempt)
+    diagnostics = observation_diagnostics(kora_capture, completion, size)
 
     if room == 4096:
-        assert isinstance(answer, CommandObservation)
-        assert len(records) == 1
-        assert RECORD_LIMIT - room < size <= RECORD_LIMIT
+        assert isinstance(answer, CommandObservation), diagnostics
+        assert len(records) == 1, diagnostics
+        assert RECORD_LIMIT - room < size <= RECORD_LIMIT, diagnostics
     else:
-        assert answer == "command_unobserved"
-        assert records == []
+        assert completion is Completion.COMPLETE, diagnostics
+        assert answer == "command_unobserved", diagnostics
+        assert records == [], diagnostics
 
 
 @pytest.mark.asyncio
