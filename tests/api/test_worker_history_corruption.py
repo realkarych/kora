@@ -7,6 +7,7 @@ from kora.client.errors import ApiError
 from kora.db.connection import Database
 from kora.db.tables import attempt_dispatcher
 from kora.models.worker_history import WorkerHistoryQuery
+from kora.protocols.history import chain_step, record_bytes
 from tests.api.claim_support import BEARER
 from tests.api.deployment_cases import evaluator
 from tests.api.history_support import history_api
@@ -67,3 +68,39 @@ async def test_history_corrupt_saved_page_fails_without_content_or_mutation(
     assert before == after
     assert ledger.outstanding == database.units_in_flight() == 0
     assert database.writer_is_free()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forgery", ["snapshot_count", "start_count", "start_digest"])
+async def test_history_exact_saved_prefix_refuses_well_formed_forged_positions(
+    database: Database,
+    history_api: tuple[ClaimCase, AuthorityClock, ApiExchange],
+    forgery: str,
+) -> None:
+    case, _, app = history_api
+    grants, snapshot = await retained_history(database, case, 3, False)
+    first_digest = chain_step(snapshot.seed(), record_bytes(grants[0]))
+    query = WorkerHistoryQuery(
+        lease_epoch=grants[-1].lease_epoch,
+        dispatcher_id=grants[-1].dispatcher_id,
+        snapshot_version=1,
+        snapshot_upper_epoch=snapshot.upper_epoch,
+        snapshot_count=snapshot.count + (forgery == "snapshot_count"),
+        snapshot_digest=snapshot.digest,
+        after_epoch=grants[0].lease_epoch,
+        received_count=2 if forgery == "start_count" else 1,
+        prefix_digest="f" * 64 if forgery == "start_digest" else first_digest,
+    )
+    before = await state(database)
+    ledger = ConnectionLedger(database)
+
+    async with KoraClient("http://127.0.0.1", BEARER, asgi_app=app) as client:
+        with pytest.raises(ApiError) as caught:
+            await client.grant_history(case.binding.attempt_id, query)
+    after = await state(database)
+
+    assert caught.value.code == "API002"
+    assert b'"reason":"grant_history_conflict"' in caught.value.content
+    assert b'"retryable":false' in caught.value.content
+    assert before == after
+    assert ledger.outstanding == database.units_in_flight() == 0
