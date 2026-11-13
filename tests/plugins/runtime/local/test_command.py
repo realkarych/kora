@@ -78,6 +78,8 @@ from kora.runner.registry import Running, Submitter, TransitionExecutor
 from tests.support.local_delivery import ReapedSession
 from tests.support.local_peers import identity_of, until
 from tests.support.local_runners import (
+    NEVER_READY,
+    carriers,
     exited_within,
     open_spawning,
     reap_runners,
@@ -96,7 +98,7 @@ from tests.support.local_runtime import (
     state_root,
 )
 
-HOLD_MARKER = f"kora-hold-809-{os.getpid()}-"
+HOLD_MARKER = f"kora-hold-{os.getpid()}-809-"
 FD_REPORT = "\n".join(
     (
         "import os, time",
@@ -994,22 +996,11 @@ async def test_launch_failure_has_no_fabricated_exit(
     assert status.exit_code is None
 
 
-@contextmanager
-def marked_process(marker: str) -> Generator[subprocess.Popen[bytes]]:
-    process = subprocess.Popen(
-        [sys.executable, "-I", "-c", "import signal\nsignal.pause()", marker]
-    )
-    try:
-        yield process
-    finally:
-        process.kill()
-        process.wait(timeout=10)
-
-
 @pytest.mark.asyncio
 async def test_hold_marker_selects_only_processes_of_this_test_process() -> None:
     foreign = HOLD_MARKER.replace(f"-{os.getpid()}-", "-0-")
-    with marked_process(foreign) as other, marked_process(HOLD_MARKER) as owned:
+    with carriers((*NEVER_READY, foreign), (*NEVER_READY, HOLD_MARKER)) as started:
+        other, owned = started
         await until(lambda: other.pid in marker_pids(foreign))
         await until(lambda: owned.pid in marker_pids(HOLD_MARKER))
 
