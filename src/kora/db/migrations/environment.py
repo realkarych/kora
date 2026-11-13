@@ -12,6 +12,7 @@ from sqlalchemy import Column, Connection
 from sqlalchemy.schema import SchemaItem
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
+from kora.db.admission_wait_v1 import SQLITE_OWNER_INDEX
 from kora.db.attempt_capacity_v1 import SQLITE_DEPLOYED_INDEX
 from kora.db.claim_sources_v1 import LOCATORS
 from kora.db.connection import (
@@ -142,6 +143,7 @@ def include_schema_object(
             SQLITE_RUN_LOCATOR_INDEX,
             SQLITE_RUN_INPUT_LOCATOR_INDEX,
             SQLITE_DEPLOYED_INDEX,
+            SQLITE_OWNER_INDEX,
             *(index for _, _, index in LOCATORS),
         )
         and not reflected
