@@ -29,6 +29,7 @@ class TimingGap:
 
 @dataclass(frozen=True)
 class StopTiming:
+    clock_measured: bool
     factory_calls: int
     stop_entered: bool
     stop_returned: bool
@@ -105,7 +106,8 @@ class MeasuredStop:
 
 
 class StopTimingProbe:
-    def __init__(self) -> None:
+    def __init__(self, measure_clock: bool = True) -> None:
+        self.measure_clock = measure_clock
         self.factory_calls = 0
         self.stop_entered = False
         self.stop_returned = False
@@ -129,11 +131,15 @@ class StopTimingProbe:
         wall = time.monotonic_ns()
         cpu = time.thread_time_ns()
         self.factory_calls = bounded_timing(self.factory_calls + 1)
-        measured = MeasuredClock(clock)
+        measured = MeasuredClock(clock) if self.measure_clock else None
         self.measured_clock = measured
         try:
             original = CommandDomainStop(
-                group, marker, measured, wake_reaper, prelaunch
+                group,
+                marker,
+                clock if measured is None else measured,
+                wake_reaper,
+                prelaunch,
             )
         finally:
             self.constructor_elapsed_ns = bounded_timing(time.monotonic_ns() - wall)
@@ -143,6 +149,7 @@ class StopTimingProbe:
     def snapshot(self) -> StopTiming:
         measured = self.measured_clock
         return StopTiming(
+            clock_measured=self.measure_clock,
             factory_calls=self.factory_calls,
             stop_entered=self.stop_entered,
             stop_returned=self.stop_returned,

@@ -500,11 +500,17 @@ async def test_command_observation_refuses_other_kinds(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "measure_clock", [False, True], ids=["plain_clock", "measured_clock"]
+)
 async def test_command_observation_duration_uses_execution_acknowledgement(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path,
+    kora_capture: Capture,
+    measure_clock: bool,
+    record_testsuite_property: Callable[[str, object], None],
 ) -> None:
     clock = OffsetClock()
-    timing = StopTimingProbe()
+    timing = StopTimingProbe(measure_clock)
     async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
         workload = checked_out(runtime, GATED)
         async with observed_session(
@@ -527,17 +533,31 @@ async def test_command_observation_duration_uses_execution_acknowledgement(
             elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
 
     evidence = timing.snapshot()
+    record_testsuite_property(f"command_stop_duration_{measure_clock}", str(evidence))
     assert isinstance(observed, CommandObservation), evidence
     assert 7000 <= observed.duration_ms <= 7000 + elapsed_ms, evidence
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("room", [4096, 256], ids=["fits", "overflows"])
+@pytest.mark.parametrize(
+    ("room", "measure_clock"),
+    [(4096, False), (4096, True), (256, True), (256, False)],
+    ids=[
+        "fits-plain_clock",
+        "fits-measured_clock",
+        "overflows-measured_clock",
+        "overflows-plain_clock",
+    ],
+)
 async def test_command_observation_record_fits_the_reader_bound(
-    tmp_path: Path, kora_capture: Capture, room: int
+    tmp_path: Path,
+    kora_capture: Capture,
+    room: int,
+    measure_clock: bool,
+    record_testsuite_property: Callable[[str, object], None],
 ) -> None:
     seed = padding_record(RECORD_LIMIT - room)
-    timing = StopTimingProbe()
+    timing = StopTimingProbe(measure_clock)
     async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
         workload = checked_out(runtime, "pass")
         async with observed_session(
@@ -556,6 +576,9 @@ async def test_command_observation_record_fits_the_reader_bound(
             completion = session.completion()
 
     evidence = timing.snapshot()
+    record_testsuite_property(
+        f"command_stop_record_{room}_{measure_clock}", str(evidence)
+    )
     assert completion is Completion.COMPLETE, evidence
     if room == 4096:
         assert isinstance(answer, CommandObservation), evidence
