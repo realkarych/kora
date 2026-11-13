@@ -316,6 +316,7 @@ async def test_run_settlement_rolls_back_status_event_marker_and_target(
     database: Database,
 ) -> None:
     case = await finished_run(database, held=True)
+    case.clock.advance(1)
     generator = IdentifierGenerator(case.clock.now, fixed_randomness(1000))
     duplicate = IdentifierGenerator(case.clock.now, fixed_randomness(1000)).new()
     async with database.transaction() as writer:
