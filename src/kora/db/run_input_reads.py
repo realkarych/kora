@@ -14,6 +14,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
 
 from kora.db.connection import SNAPSHOT_NATIVE_ERRORS, Database
@@ -103,16 +104,20 @@ def run_input_value_statement(
     return statement
 
 
-async def acquire_run_input(
-    database: Database,
+def valid_run_input_read(field: RunInputField, limits: RunInputReadLimits) -> bool:
+    return type(field) is RunInputField and all(
+        type(limit) is int and 0 < limit <= SQLITE_MAX_PARENT_ALLOWANCE
+        for limit in (limits.parent, limits.projection, limits.params)
+    )
+
+
+async def acquire_run_input_on_connection(
+    connection: AsyncConnection,
     binding: RunInputBinding,
     field: RunInputField,
     limits: RunInputReadLimits,
 ) -> bytes | None:
-    if type(field) is not RunInputField or not all(
-        type(limit) is int and 0 < limit <= SQLITE_MAX_PARENT_ALLOWANCE
-        for limit in (limits.parent, limits.projection, limits.params)
-    ):
+    if not valid_run_input_read(field, limits):
         return None
     namespace_id, graph_id, version_id, run_id = (
         binding.namespace_id,
@@ -122,25 +127,39 @@ async def acquire_run_input(
     )
     limit = limits.projection if field is RunInputField.PROJECTION else limits.params
     admitted = RunInputReadLimits(limits.parent, limits.projection, limits.params)
+    if not await verify_run_input_parent(
+        connection,
+        namespace_id,
+        graph_id,
+        version_id,
+        run_id,
+        max_parent_bytes=admitted.parent,
+    ):
+        return None
+    payload: object = await connection.scalar(
+        run_input_value_statement(connection.dialect.name, run_id, field, admitted)
+    )
+    if type(payload) is bytes and MIN_OBJECT_BYTES <= len(payload) <= limit:
+        return payload
+    return None
+
+
+async def acquire_run_input(
+    database: Database,
+    binding: RunInputBinding,
+    field: RunInputField,
+    limits: RunInputReadLimits,
+) -> bytes | None:
+    if not valid_run_input_read(field, limits):
+        return None
     try:
         async with database.read_snapshot() as connection:
-            if not await verify_run_input_parent(
-                connection,
-                namespace_id,
-                graph_id,
-                version_id,
-                run_id,
-                max_parent_bytes=admitted.parent,
-            ):
-                raise _RunInputReadRefused() from None
             try:
-                payload: object = await connection.scalar(
-                    run_input_value_statement(database.dialect, run_id, field, admitted)
+                payload = await acquire_run_input_on_connection(
+                    connection, binding, field, limits
                 )
             except (OSError, SQLAlchemyError):
                 raise _RunInputReadRefused() from None
     except (_RunInputReadRefused, *SNAPSHOT_NATIVE_ERRORS):
         return None
-    if type(payload) is bytes and MIN_OBJECT_BYTES <= len(payload) <= limit:
-        return payload
-    return None
+    return payload
