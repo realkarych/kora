@@ -1,7 +1,7 @@
 from decimal import Decimal, localcontext
 
 import pytest
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import bindparam, func, insert, select, update
 
 from kora.db.connection import Database
 from kora.db.tables import attempt, usage_record
@@ -132,3 +132,61 @@ async def test_approval_cost_refuses_invalid_saved_accounting(
     assert failure.value.__cause__ is failure.value.__context__ is None
     assert database.units_in_flight() == 0
     assert database.writer_is_free()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_byte", [0, 1])
+async def test_approval_cost_exact_serialized_boundary(
+    database: Database, extra_byte: int
+) -> None:
+    case = await cost_case(database)
+    identities: list[str] = []
+    async with database.transaction() as writer:
+        seed = Seeder(writer)
+        for start in range(0, 1024, 64):
+            _, identity = await cost_attempt(
+                writer, case, f"node{start}", saved_coverage=coverage()
+            )
+            values = [
+                usage_values(seed, identity, f"{number:04d}", amount="0")
+                for number in range(start, start + 64)
+            ]
+            await writer.execute(insert(usage_record), values)
+            identities.extend(str(value["id"]) for value in values)
+    baseline = await case.calculate(database)
+    missing_bytes = RunCost.byte_limit - len(baseline.model_dump_json().encode())
+    changes: list[dict[str, str]] = []
+    for number, identity in enumerate(identities):
+        padding_bytes = min(missing_bytes, 996)
+        wide_count, ascii_count = divmod(padding_bytes, 4)
+        model = f"{number:04d}" + "\U00010000" * wide_count + "a" * ascii_count
+        changes.append({"identity": identity, "model_name": model})
+        missing_bytes -= padding_bytes
+    assert missing_bytes == 0
+    changes[-1]["model_name"] += "b" * extra_byte
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(usage_record)
+            .where(usage_record.c.id == bindparam("identity"))
+            .values(model=bindparam("model_name")),
+            changes,
+        )
+    async with database.read_transaction() as reader:
+        before = list((await reader.execute(select(usage_record))).all())
+
+    if extra_byte:
+        with pytest.raises(ApprovalCostOverflow):
+            await case.calculate(database)
+        result = None
+    else:
+        result = await case.calculate(database)
+
+    if result is not None:
+        assert len(result.model_dump_json().encode()) == RunCost.byte_limit
+        assert result.usd_estimate == "0"
+        assert len(result.models) == 1024
+    async with database.read_transaction() as reader:
+        after = list((await reader.execute(select(usage_record))).all())
+    assert sorted(before) == sorted(after)
+    assert database.writer_is_free()
+    assert database.units_in_flight() == 0
