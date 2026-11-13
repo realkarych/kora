@@ -170,7 +170,7 @@ async def seed_query_history(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("history", [300, 3000])
-async def test_expiry_queries_exclude_finished_and_foreign_history(
+async def test_expiry_query_work_is_bounded_for_declared_history_sizes(
     database: Database, history: int, tmp_path: Path
 ) -> None:
     case = await execution_case(database, timeout="0s")
@@ -238,9 +238,6 @@ async def test_expiry_queries_exclude_finished_and_foreign_history(
         for index in ("ix_attempt_due_deadline", "ix_attempt_lease_until")
         for line in due_plan
     ), "\n".join(due_plan)
-    assert any("ix_attempt_cancel_due" in line for line in cancellation_plan), (
-        cancellation_plan
-    )
     assert any("ix_approval_request_wait" in line for line in delivery_plan), (
         delivery_plan
     )
@@ -248,21 +245,65 @@ async def test_expiry_queries_exclude_finished_and_foreign_history(
         wait_plan
     )
     if postgres:
-        for plan, indexes in (
-            (due_plan, ("ix_attempt_due_deadline", "ix_attempt_lease_until")),
-            (cancellation_plan, ("ix_attempt_cancel_due",)),
-        ):
-            scans = [line for line in plan if any(index in line for index in indexes)]
-            assert len(scans) == 1
-            match = re.search(r"actual rows=([0-9]+) loops=([0-9]+)", scans[0])
-            assert match is not None
-            assert int(match[1]) <= 150
-            assert int(match[2]) == 1
-            removed = [
-                int(match[1])
-                for line in plan
-                if (match := re.search(r"Rows Removed by Filter: ([0-9]+)", line))
-            ]
-            assert sum(removed) <= 150
+        due_scans = [
+            line
+            for line in due_plan
+            if "ix_attempt_due_deadline" in line or "ix_attempt_lease_until" in line
+        ]
+        assert len(due_scans) == 1
+        assert_scan_work(due_scans[0], rows=150, loops=1)
+        assert removed_rows(due_plan) <= 150
+        assert_cancellation_work(cancellation_plan, history)
         assert not any("Seq Scan" in line for line in wait_plan + delivery_plan)
+    else:
+        assert any("ix_attempt_cancel_due" in line for line in cancellation_plan), (
+            cancellation_plan
+        )
     assert database.units_in_flight() == 0
+
+
+def assert_scan_work(line: str, *, rows: int, loops: int) -> None:
+    match = re.search(r"actual rows=([0-9]+) loops=([0-9]+)", line)
+    assert match is not None, line
+    assert int(match[1]) <= rows, line
+    assert int(match[2]) <= loops, line
+
+
+def removed_rows(plan: list[str]) -> int:
+    return sum(
+        int(match[1])
+        for line in plan
+        if (match := re.search(r"Rows Removed by Filter: ([0-9]+)", line))
+    )
+
+
+def assert_cancellation_work(plan: list[str], history: int) -> None:
+    candidates = [line for line in plan if " on attempt attempt_1 (" in line]
+    facts = [line for line in plan if " on attempt (" in line]
+    grants = [line for line in plan if " on attempt_dispatcher (" in line]
+    assert len(candidates) == len(facts) == len(grants) == 1, plan
+    assert_scan_work(candidates[0], rows=100, loops=1)
+    if history == 300:
+        assert any(
+            index in candidates[0] for index in ("ix_attempt_cancel_due", "pk_attempt")
+        ), candidates
+        assert removed_rows(plan) <= 300, plan
+    else:
+        assert "ix_attempt_cancel_due" in candidates[0], candidates
+        assert removed_rows(plan) == 0, plan
+    if history == 300 and "Seq Scan" in facts[0]:
+        assert_scan_work(facts[0], rows=450, loops=1)
+    else:
+        assert "Index Scan using pk_attempt" in facts[0], facts
+        assert_scan_work(facts[0], rows=1, loops=100)
+    assert "Index Scan using uq_attempt_dispatcher_attempt_id_lease_epoch" in grants[0]
+    assert_scan_work(grants[0], rows=1, loops=100)
+    grant_limit = plan[plan.index(grants[0]) - 1]
+    assert "Limit" in grant_limit, plan
+    assert_scan_work(grant_limit, rows=1, loops=100)
+    other_scans = [
+        line
+        for line in plan
+        if "Scan" in line and line not in candidates + facts + grants
+    ]
+    assert all('Subquery Scan on "ANY_subquery"' in line for line in other_scans), plan

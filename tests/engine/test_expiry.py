@@ -348,8 +348,6 @@ async def test_run_expiry_closes_wait_observation_and_delivery_atomically(
     async with database.transaction() as writer:
         await observe_run_expiry(await expiry_context(writer, case, False))
     observed, _, _ = await case.snapshot(database)
-    async with database.transaction() as writer:
-        await expire_run(await expiry_context(writer, case))
     async with database.read_transaction() as reader:
         with await reader.execute(select(wait).where(wait.c.id == wait_id)) as result:
             waiting = dict(result.mappings().one())
@@ -357,6 +355,15 @@ async def test_run_expiry_closes_wait_observation_and_delivery_atomically(
             select(approval_request).where(approval_request.c.id == approval_id)
         ) as result:
             approval = dict(result.mappings().one())
+    async with database.transaction() as writer:
+        await expire_run(await expiry_context(writer, case))
+    async with database.read_transaction() as reader:
+        with await reader.execute(select(wait).where(wait.c.id == wait_id)) as result:
+            settled_wait = dict(result.mappings().one())
+        with await reader.execute(
+            select(approval_request).where(approval_request.c.id == approval_id)
+        ) as result:
+            settled_approval = dict(result.mappings().one())
 
     assert observed["status"] == "running"
     assert waiting["status"] == "cancelled"
@@ -371,6 +378,8 @@ async def test_run_expiry_closes_wait_observation_and_delivery_atomically(
         "authorizations": [{"state": "unknown"}],
     }
     assert approval["channel_request_id"] == "remote-1"
+    assert settled_wait == waiting
+    assert settled_approval == approval
 
 
 @pytest.mark.asyncio
