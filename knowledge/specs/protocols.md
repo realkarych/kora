@@ -460,7 +460,7 @@ Local process groups provide cleanup, not a hostile-code boundary. The same capa
 
 ### Resumable retained dispatcher history (issue #226)
 
-Approved [contract plan](https://github.com/realkarych/kora/issues/226#issuecomment-6368198702) and [owner approval](https://github.com/realkarych/kora/issues/226#issuecomment-6368236030), 2026-10-23. This is the shared contract for protocol DTOs, metadata, worker API and the worker bridge. Its new executable consumers remain pending implementation.
+Approved [contract plan](https://github.com/realkarych/kora/issues/226#issuecomment-6368198702) and [owner approval](https://github.com/realkarych/kora/issues/226#issuecomment-6368236030), 2026-10-23. This is the shared contract for protocol DTOs, metadata, worker API and the worker bridge. The [metadata persistence helpers](data-model.md#implemented-persistence-1500) implement bounded catch-up and atomic append under #1500. Authenticated Claim/history delivery and completion acknowledgement remain #1450/#1452; these helpers do not establish deployment activation or worker/runtime compatibility.
 
 #### Identity and immutable prefix
 

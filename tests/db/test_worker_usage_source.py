@@ -211,7 +211,7 @@ async def test_usage_migration_preserves_source_and_available_floor(
         repeat = await upgrade_database(empty_database_settings)
 
         assert report.from_revision == "0023"
-        assert report.to_revision == "0025"
+        assert report.to_revision == "0026"
         assert repeat.steps == 0
         assert decoded == originals
         assert {row["id"]: row["source"] for row in rows} == originals
