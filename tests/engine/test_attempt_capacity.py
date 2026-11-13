@@ -12,7 +12,6 @@ from kora.engine.attempt_capacity import (
     AttemptCapacityRefused,
     CapacityLimit,
     check_attempt_capacity,
-    prepare_graph_caps,
 )
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.locks import LockError
@@ -29,7 +28,6 @@ from tests.engine.lock_support import (
     lock_inventory,
     wait_for_lock_waiter,
 )
-from tests.engine.test_readiness import readiness_source
 
 
 @pytest.mark.asyncio
@@ -273,10 +271,9 @@ async def test_capacity_preserves_large_valid_caps_and_refuses_decode_overflow(
         database, {"max_running_nodes": 10**80, "max_running_runs": 10**80}
     )
     await namespace_limit(database, case.scope.namespace_id, 10**800)
-    checked = await readiness_source(database)
 
     with pytest.raises(AttemptCapacityRefused) as caught:
-        prepare_graph_caps(checked, max_ir_bytes=1)
+        await capacity_case(database, max_ir_bytes=1)
     async with database.transaction() as writer:
         observed = await check_attempt_capacity(
             await case.context(writer),
