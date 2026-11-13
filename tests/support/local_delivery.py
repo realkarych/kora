@@ -18,6 +18,7 @@ from kora.plugins.runtime.local.channel import (
     workload_digest,
 )
 from kora.plugins.runtime.local.command import CommandSession
+from kora.plugins.runtime.local.command_stop import CommandDomainStop, DomainStopFactory
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import (
@@ -160,10 +161,18 @@ class ReapedSession(CommandSession):
         clock: Clock,
         log: ComponentLogger,
         capture_io: CaptureIO | None = None,
+        stopper: DomainStopFactory = CommandDomainStop,
     ) -> None:
         self.reaper = AdoptedReaper()
         super().__init__(
-            attempt, candidate, scope, clock, log, self.reaper, capture_io=capture_io
+            attempt,
+            candidate,
+            scope,
+            clock,
+            log,
+            self.reaper,
+            capture_io=capture_io,
+            stopper=stopper,
         )
 
     async def stop(self) -> None:

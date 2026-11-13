@@ -27,6 +27,7 @@ from kora.plugins.runtime.local.channel import (
     read_observation,
 )
 from kora.plugins.runtime.local.command import COMPONENT
+from kora.plugins.runtime.local.command_stop import CommandDomainStop, DomainStopFactory
 from kora.plugins.runtime.local.control import observe_command
 from kora.plugins.runtime.local.reaper import adopted_pids
 from kora.plugins.runtime.local.runtime import LocalRuntime
@@ -68,6 +69,7 @@ from tests.plugins.runtime.local.test_command_workspace import (
     settled,
     step_plan,
 )
+from tests.support.command_stop_timing import StopTimingProbe
 from tests.support.local_delivery import ReapedSession
 from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
 from tests.support.local_runtime import private_directory
@@ -235,6 +237,7 @@ async def observed_session(
     clock: Clock | None = None,
     io: HeldIO | None = None,
     seed: bytes = b"",
+    stopper: DomainStopFactory = CommandDomainStop,
 ) -> AsyncGenerator[tuple[ReapedSession, Path]]:
     attempt = private_directory(tmp_path.resolve(), "attempt")
     if seed:
@@ -248,6 +251,7 @@ async def observed_session(
         clock or SystemClock(),
         capture.diagnostics.logger(COMPONENT),
         capture_io=io,
+        stopper=stopper,
     )
     try:
         await without_stray_children()
@@ -500,9 +504,12 @@ async def test_command_observation_duration_uses_execution_acknowledgement(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     clock = OffsetClock()
+    timing = StopTimingProbe()
     async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
         workload = checked_out(runtime, GATED)
-        async with observed_session(tmp_path, kora_capture, clock=clock) as (
+        async with observed_session(
+            tmp_path, kora_capture, clock=clock, stopper=timing
+        ) as (
             session,
             attempt,
         ):
@@ -519,8 +526,9 @@ async def test_command_observation_duration_uses_execution_acknowledgement(
             observed = await settled_answer(session)
             elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
 
-    assert isinstance(observed, CommandObservation)
-    assert 7000 <= observed.duration_ms <= 7000 + elapsed_ms
+    evidence = timing.snapshot()
+    assert isinstance(observed, CommandObservation), evidence
+    assert 7000 <= observed.duration_ms <= 7000 + elapsed_ms, evidence
 
 
 @pytest.mark.asyncio
@@ -529,9 +537,12 @@ async def test_command_observation_record_fits_the_reader_bound(
     tmp_path: Path, kora_capture: Capture, room: int
 ) -> None:
     seed = padding_record(RECORD_LIMIT - room)
+    timing = StopTimingProbe()
     async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
         workload = checked_out(runtime, "pass")
-        async with observed_session(tmp_path, kora_capture, seed=seed) as (
+        async with observed_session(
+            tmp_path, kora_capture, seed=seed, stopper=timing
+        ) as (
             session,
             attempt,
         ):
@@ -542,14 +553,17 @@ async def test_command_observation_record_fits_the_reader_bound(
             answer = await settled_answer(session)
             size = (attempt / "journal.jsonl").stat().st_size
             records = observed_records(attempt)
+            completion = session.completion()
 
+    evidence = timing.snapshot()
+    assert completion is Completion.COMPLETE, evidence
     if room == 4096:
-        assert isinstance(answer, CommandObservation)
-        assert len(records) == 1
-        assert RECORD_LIMIT - room < size <= RECORD_LIMIT
+        assert isinstance(answer, CommandObservation), evidence
+        assert len(records) == 1, evidence
+        assert RECORD_LIMIT - room < size <= RECORD_LIMIT, evidence
     else:
-        assert answer == "command_unobserved"
-        assert records == []
+        assert answer == "command_unobserved", evidence
+        assert records == [], evidence
 
 
 @pytest.mark.asyncio
