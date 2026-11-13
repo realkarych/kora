@@ -547,7 +547,9 @@ async def test_command_observation_duration_uses_execution_acknowledgement(
             elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
             completion = session.completion()
             journal_bytes = (attempt / "journal.jsonl").stat().st_size
-    diagnostics = observation_diagnostics(kora_capture, completion, journal_bytes)
+    diagnostics = json.dumps(
+        observation_diagnostics(kora_capture, completion, journal_bytes), sort_keys=True
+    )
 
     assert isinstance(observed, CommandObservation), diagnostics
     assert 7000 <= observed.duration_ms <= 7000 + elapsed_ms, diagnostics
@@ -573,7 +575,9 @@ async def test_command_observation_record_fits_the_reader_bound(
             completion = session.completion()
             size = (attempt / "journal.jsonl").stat().st_size
             records = observed_records(attempt)
-    diagnostics = observation_diagnostics(kora_capture, completion, size)
+    diagnostics = json.dumps(
+        observation_diagnostics(kora_capture, completion, size), sort_keys=True
+    )
 
     if room == 4096:
         assert isinstance(answer, CommandObservation), diagnostics
