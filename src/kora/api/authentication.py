@@ -27,12 +27,17 @@ async def authenticate_route(
     authenticator: Authenticator,
     clock: Clock,
     kind: Literal["user", "service"],
+    *,
+    current_authority: bool = False,
 ) -> Principal | ApiErrorEnvelope:
     exchange = current_exchange()
     headers = [
         value for name, value in request.headers.raw if name.lower() == b"authorization"
     ]
-    info = RequestInfo(headers[0].decode("latin-1") if len(headers) == 1 else None)
+    info = RequestInfo(
+        headers[0].decode("latin-1") if len(headers) == 1 else None,
+        requires_current_authority=current_authority,
+    )
     try:
         principal = await authenticator.authenticate(
             info, AuthenticationContext(exchange.logger, clock)

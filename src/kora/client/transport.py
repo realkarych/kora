@@ -8,7 +8,7 @@ from contextvars import Context
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Self, TypeVar
+from typing import Self, TypeVar, cast
 from urllib.parse import quote, urlsplit
 
 import certifi
@@ -35,12 +35,19 @@ from kora.client.errors import (
     Outcome,
 )
 from kora.client.network import DirectTransport
+from kora.ir.graph_json import ObjectReader
 from kora.ir.json import JsonObject, JsonShapeError, parse_json_object
 from kora.models.errors import HTTP_STATUSES, ApiErrorCode, require_api_error_fields
 from kora.models.graphs import DeployRequest, DeployResponse
 from kora.models.runs import AcceptedRun, SkippedRun, StartOutcome, TriggerRequest
+from kora.models.worker_claims import (
+    WorkerClaimRequest,
+    WorkerClaimResponse,
+    decoded_claim,
+)
 from kora.models.workers import RegisteredWorker, WorkerRegistration
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, ProcessDiagnostics
+from kora.protocols.worker_claim_wire import MAX_CLAIM_BYTES
 
 OPENAPI_PATH: str = "/api/v1/openapi.json"
 OPENAPI_RESPONSE_BYTES: int = 4 * 1024 * 1024
@@ -336,6 +343,20 @@ class KoraClient:
             body=body,
         )
 
+    async def claim_worker(
+        self, worker_id: str, request: WorkerClaimRequest
+    ) -> WorkerClaimResponse:
+        if re.fullmatch(r"[!-~]{1,255}", worker_id) is None:
+            raise ClientError(Failure.DESTINATION_POLICY, Outcome.NOT_SENT)
+        segment = quote(worker_id, safe="").replace(".", "%2E")
+        return await self._request_json(
+            "POST",
+            f"/api/v1/workers/{segment}/claims",
+            decoded_claim,
+            response_limit=MAX_CLAIM_BYTES,
+            body=parse_json_object(request.model_dump(mode="json")),
+        )
+
     async def _request_json(
         self,
         method: str,
@@ -479,18 +500,27 @@ class KoraClient:
         success: frozenset[int],
         exchange: Exchange,
     ) -> T:
+        lossless = status in success and decode is decoded_claim
         try:
-            raw: object = json.loads(
-                content.decode("utf-8"),
-                object_pairs_hook=unique_object,
-                parse_constant=reject_constant,
+            raw: object = (
+                ObjectReader(content.decode("utf-8"), allow_whitespace=True).object()
+                if lossless
+                else json.loads(
+                    content.decode("utf-8"),
+                    object_pairs_hook=unique_object,
+                    parse_constant=reject_constant,
+                )
             )
         except (ValueError, RecursionError):
             reason = Failure.JSON if status in success else Failure.STATUS_ENVELOPE
             raise exchange.failure(reason) from None
         try:
-            value = parse_json_object(
-                raw, max_depth=JSON_DEPTH, max_bytes=response_limit
+            value = (
+                cast(JsonObject, raw)
+                if lossless
+                else parse_json_object(
+                    raw, max_depth=JSON_DEPTH, max_bytes=response_limit
+                )
             )
         except JsonShapeError:
             reason = Failure.SCHEMA if status in success else Failure.STATUS_ENVELOPE
@@ -499,7 +529,7 @@ class KoraClient:
             raise self._api_error(value, content, status, exchange)
         try:
             return decode(value)
-        except ValidationError:
+        except (ValueError, KeyError, TypeError):
             raise exchange.failure(Failure.SCHEMA) from None
 
     def _api_error(

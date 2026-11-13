@@ -49,6 +49,7 @@ def attempt_schema_objects(
             "ix_attempt_run_recovery",
             "ix_attempt_worker_open",
             "ix_attempt_worker_unknown",
+            "ix_attempt_claim_candidate",
         }
         assert added <= {index["name"] for index in indexes}
         indexes = [index for index in indexes if index["name"] not in added]

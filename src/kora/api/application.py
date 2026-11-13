@@ -28,12 +28,14 @@ from kora.api.routes import (
     RouteName,
 )
 from kora.api.run_trigger_route import trigger_handler
+from kora.api.worker_claims_route import WorkerClaimsRoute
 from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.engine.admission_initialization import AdmissionInitialization
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
 from kora.models.runs import AcceptedRun, SkippedRun, TriggerRequest
-from kora.models.workers import RegisteredWorker, WorkerRegistration
+from kora.models.worker_claims import WorkerClaimRequest, WorkerClaimResponse
+from kora.models.workers import RegisteredWorker, WorkerName, WorkerRegistration
 from kora.observability import ProcessDiagnostics
 from kora.protocols.authentication import Authenticator
 from kora.protocols.time import Clock
@@ -71,7 +73,10 @@ class ApiDispatch:
                 Request(scope),
                 self.authenticator,
                 self.clock,
-                "service" if matched.name == RouteName.WORKERS else "user",
+                "service"
+                if matched.name in (RouteName.WORKERS, RouteName.WORKER_CLAIMS)
+                else "user",
+                current_authority=matched.name is RouteName.WORKER_CLAIMS,
             )
             if isinstance(authority, ApiErrorEnvelope):
                 await error_response(authority, method=method)(scope, receive, send)
@@ -92,7 +97,10 @@ class ApiDispatch:
             )
             await response(scope, receive, send)
             return
-        if matched is not None and matched.name == RouteName.WORKERS:
+        if matched is not None and matched.name in (
+            RouteName.WORKERS,
+            RouteName.WORKER_CLAIMS,
+        ):
             body = bytearray()
             try:
                 async for chunk in Request(scope, receive).stream():
@@ -130,6 +138,7 @@ def create_application(
     deployment: GraphServices | None = None,
     *,
     worker_registration: WorkerRegistrationRoute | None = None,
+    worker_claims: WorkerClaimsRoute | None = None,
     admission_initialization: AdmissionInitialization | None = None,
 ) -> ApiExchange:
     @asynccontextmanager
@@ -235,6 +244,18 @@ def create_application(
             methods=["POST"],
             operation_id="register_worker",
             response_model=RegisteredWorker,
+        )
+    if worker_claims is not None:
+
+        async def claim(worker_id: WorkerName, body: WorkerClaimRequest) -> Response:
+            return await worker_claims(worker_id, body)
+
+        framework.add_api_route(
+            RouteName.WORKER_CLAIMS.value,
+            claim,
+            methods=["POST"],
+            operation_id="claim_worker",
+            response_model=WorkerClaimResponse,
         )
     framework.add_exception_handler(HTTPException, framework_error)
     framework.add_exception_handler(RequestValidationError, validation_error)

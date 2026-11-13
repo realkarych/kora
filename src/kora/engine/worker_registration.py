@@ -116,6 +116,8 @@ async def register_worker(
             "id": registration.name,
             "token_id": principal.token_id,
             "created_at": now,
+            "claim_cursor": None,
+            "claim_cursor_generation": 0,
             **values,
         },
     )
