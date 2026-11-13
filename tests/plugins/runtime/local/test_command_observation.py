@@ -2,12 +2,10 @@ import asyncio
 import base64
 import hashlib
 import json
-import math
 import os
 import signal
 import sys
 import time
-from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,7 +19,7 @@ from kora.ir.command_result import (
     CommandResultValidationError,
     verify_command_result_captures,
 )
-from kora.ir.json import JsonObject, JsonValue
+from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.runtime.local.channel import (
     OBSERVATION_BYTES,
@@ -70,6 +68,7 @@ from tests.plugins.runtime.local.test_command_workspace import (
     settled,
     step_plan,
 )
+from tests.support.command_diagnostics import observation_diagnostics
 from tests.support.local_delivery import ReapedSession
 from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
 from tests.support.local_runtime import private_directory
@@ -92,62 +91,6 @@ ENDINGS = {
     "nonzero": ("import sys; sys.exit(3)", 3),
     "signal": ("import os, signal; os.kill(os.getpid(), signal.SIGTERM)", -15),
 }
-DIAGNOSTIC_FIELDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "runtime.local.workspace": (
-        ("prepared", "failed", "journal_unavailable", "cancelled"),
-        ("waited_ms",),
-    ),
-    "runtime.local.command_stop": (("confirmed", "unresolved"), ("waited_ms",)),
-    "runtime.local.capture": (
-        ("complete", "truncated", "write_failed", "unsealed"),
-        ("retained_bytes", "observed_bytes", "waited_ms"),
-    ),
-    "runtime.local.command": (
-        ("started", "exited", "observed", "refused", "journal_unavailable"),
-        ("waited_ms",),
-    ),
-}
-
-
-def diagnostic_number(value: object) -> int | float | str:
-    if (
-        (type(value) is int or type(value) is float)
-        and 0 <= value <= 2**63 - 1
-        and math.isfinite(value)
-    ):
-        return value
-    return "invalid"
-
-
-def observation_diagnostics(
-    capture: Capture, completion: Completion, journal_bytes: int
-) -> JsonObject:
-    selected: deque[JsonValue] = deque(maxlen=16)
-    omitted = 0
-    for record in capture.finish():
-        name = record.get("event")
-        if type(name) is not str or name not in DIAGNOSTIC_FIELDS:
-            omitted += 1
-            continue
-        outcomes, fields = DIAGNOSTIC_FIELDS[name]
-        outcome = record.get("outcome")
-        projected: JsonObject = {
-            "event": name,
-            "outcome": outcome
-            if type(outcome) is str and outcome in outcomes
-            else "invalid",
-        }
-        for field in fields:
-            projected[field] = diagnostic_number(record.get(field))
-        if len(selected) == 16:
-            omitted += 1
-        selected.append(projected)
-    return {
-        "pre_teardown_completion": completion.value,
-        "pre_teardown_journal_bytes": diagnostic_number(journal_bytes),
-        "post_teardown_events": list(selected),
-        "omitted_records": omitted,
-    }
 
 
 def test_observation_diagnostic_tail_preserves_late_stop_and_observation(
