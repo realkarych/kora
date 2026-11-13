@@ -25,6 +25,12 @@ from kora.db.bootstrap_initialization_v1 import (
 )
 from kora.db.claim_sources_v1 import LOCATORS, SQLITE_KEY, claim_source_elements
 from kora.db.claim_sources_v1 import TABLE_NAME as CLAIM_SOURCE_TABLE
+from kora.db.grant_history_v1 import (
+    attempt_history_columns,
+    dispatcher_history_columns,
+    dispatcher_history_indexes,
+    lease_epoch_type,
+)
 from kora.db.graph_deployment_stage_v1 import (
     OCCURRENCE_TABLE,
     STAGE_TABLE,
@@ -535,7 +541,9 @@ attempt: Table = Table(
     Column("number", Integer, nullable=False),
     Column("runtime", name(), nullable=False),
     Column("worker_id", name(), ForeignKey("worker.id"), nullable=True),
-    Column("execution_domain_id", identifier(), nullable=True),
+    Column(
+        "execution_domain_id", collated_text(26, postgresql_length=256), nullable=True
+    ),
     Column("execution_state", name(), nullable=False),
     Column("recovery_version", Integer, nullable=False),
     flag("recovery_required"),
@@ -558,7 +566,7 @@ attempt: Table = Table(
     Column("strategy_fallback", name(), nullable=True),
     Column("infrastructure_retries", Integer, nullable=False),
     Column("lease_owner", name(), nullable=True),
-    Column("lease_epoch", Integer, nullable=False),
+    Column("lease_epoch", lease_epoch_type(), nullable=False),
     timestamp("lease_until", nullable=True),
     timestamp("last_heartbeat_at", nullable=True),
     document("counters"),
@@ -577,6 +585,7 @@ attempt: Table = Table(
     ),
     timestamp("deadline_expired_at", nullable=True),
     timestamp("finished_at", nullable=True),
+    *attempt_history_columns(),
     *audit_columns(),
     UniqueConstraint("node_instance_id", "number"),
     CheckConstraint(
@@ -610,16 +619,20 @@ attempt_dispatcher: Table = Table(
     metadata,
     primary_identifier(),
     reference("attempt_id", "attempt.id"),
-    Column("execution_domain_id", identifier(), nullable=False),
+    Column(
+        "execution_domain_id", collated_text(26, postgresql_length=256), nullable=False
+    ),
     Column("worker_id", name(), ForeignKey("worker.id"), nullable=False),
-    Column("incarnation_id", identifier(), nullable=False),
-    Column("lease_epoch", Integer, nullable=False),
+    Column("incarnation_id", collated_text(26, postgresql_length=256), nullable=False),
+    Column("lease_epoch", lease_epoch_type(), nullable=False),
     Column("mode", name(), nullable=False),
     timestamp("granted_at"),
     timestamp("closed_at", nullable=True),
     document("evidence", nullable=True),
     *audit_columns(),
+    *dispatcher_history_columns(),
     UniqueConstraint("attempt_id", "lease_epoch"),
+    *dispatcher_history_indexes(),
 )
 
 wait: Table = Table(
