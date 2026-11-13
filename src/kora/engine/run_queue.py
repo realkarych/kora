@@ -8,15 +8,10 @@ from sqlalchemy.sql.elements import TextClause
 from kora.db.identifiers import is_identifier
 from kora.db.run_queue_index_v1 import (
     ACTIVE_QUEUE_ROWS,
-    POSTGRES_QUEUE_INDEX,
-    POSTGRES_QUEUE_INDEX_STATE,
     POSTGRES_QUEUE_KEY,
     SQLITE_QUEUE_INDEX,
-    SQLITE_QUEUE_INDEX_DEFINITION,
-    SQLITE_QUEUE_INDEX_STATE,
     SQLITE_QUEUE_KEY,
     SQLITE_QUEUE_ROWS,
-    postgres_queue_index_definition,
 )
 from kora.db.transactions import WriterTransactionError, raise_private_metadata_error
 from kora.db.types import POSTGRESQL
@@ -66,7 +61,6 @@ class QueueCheckFailure(StrEnum):
     OWNERSHIP = "ownership"
     LOCKS = "locks"
     MODE = "mode"
-    INDEX = "index"
     READ = "read"
 
 
@@ -74,29 +68,6 @@ class QueueCheckFailed(RuntimeError):
     def __init__(self, reason: QueueCheckFailure) -> None:
         super().__init__(reason.value)
         self.reason: QueueCheckFailure = reason
-
-
-async def _postgres_index_available(connection: AsyncConnection) -> bool:
-    with await connection.execute(
-        POSTGRES_QUEUE_INDEX_STATE, {"name": POSTGRES_QUEUE_INDEX}
-    ) as result:
-        row = result.one_or_none()
-    if row is None:
-        return False
-    schema, definition, valid, ready, live, same_table = row
-    return (
-        type(schema) is str
-        and definition == postgres_queue_index_definition(schema)
-        and valid is ready is live is same_table is True
-    )
-
-
-async def _sqlite_index_available(connection: AsyncConnection) -> bool:
-    exists: object = await connection.scalar(
-        SQLITE_QUEUE_INDEX_STATE,
-        {"name": SQLITE_QUEUE_INDEX, "definition": SQLITE_QUEUE_INDEX_DEFINITION},
-    )
-    return type(exists) is int and exists == 1
 
 
 async def _observe(
@@ -127,13 +98,6 @@ async def _observe(
     try:
         if postgres and not await writable_postgres_transaction(connection):
             return QueueCheckFailure.MODE
-        index_available = (
-            await _postgres_index_available(connection)
-            if postgres
-            else await _sqlite_index_available(connection)
-        )
-        if not index_available:
-            return QueueCheckFailure.INDEX
         with await connection.execute(
             POSTGRES_QUEUE_PROBE if postgres else SQLITE_QUEUE_PROBE,
             {"namespace_id": namespace_id, "graph_id": graph_id, "run_id": run_id},

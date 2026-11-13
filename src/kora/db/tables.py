@@ -63,6 +63,8 @@ from kora.db.graph_version_resource_owner_v1 import (
 from kora.db.graph_version_resource_owner_v1 import (
     graph_version_resource_owner_elements_v1,
 )
+from kora.db.promotion_admission_v1 import TABLE_NAME as PROMOTION_ADMISSION_TABLE
+from kora.db.promotion_admission_v1 import promotion_admission_elements
 from kora.db.run_input_locator_v1 import (
     SQLITE_RUN_INPUT_KEY,
     SQLITE_RUN_INPUT_LOCATOR_INDEX,
@@ -446,6 +448,7 @@ run: Table = Table(
         "retention_version IS NULL OR retention_version = 1", name="retention_version"
     ),
     Index("ix_run_namespace_target", "namespace_id", "target_key"),
+    Index("ix_run_status_id", "status", "id"),
     Index(
         "ix_run_needs_scheduling",
         "id",
@@ -838,6 +841,10 @@ inbound_event: Table = Table(
     document("consumed_by"),
     *audit_columns(),
     UniqueConstraint("namespace_id", "name", "idempotency_key"),
+)
+
+run_promotion_admission: Table = Table(
+    PROMOTION_ADMISSION_TABLE, metadata, *promotion_admission_elements()
 )
 
 event_evaluation: Table = Table(
