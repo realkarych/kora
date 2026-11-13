@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from typing import cast
 
@@ -35,16 +35,19 @@ from kora.engine.start_records import (
     PreparedManualStartRequest,
     prepare_manual_start_request,
 )
+from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.deployment_checks import DeploymentSelection
 from kora.ir.json import JsonObject
 from kora.protocols.authentication import Principal
 from tests.api.deployment_cases import (
     AT,
+    DEFAULT_POLICY,
     GRAPH,
     SELECTION,
     prepared,
     principal,
     publish,
+    save_secret_policy,
     seeded_namespace,
     skeleton_ir,
 )
@@ -76,21 +79,31 @@ PREPARED: dict[str, PreparedDeployment] = {}
 
 
 async def prepared_once(
-    evaluator: Evaluator, ir: JsonObject | None = None
+    evaluator: Evaluator,
+    ir: JsonObject | None = None,
+    policy: NamespaceSecretPolicy = DEFAULT_POLICY,
 ) -> PreparedDeployment:
     document = skeleton_ir() if ir is None else ir
-    key = json.dumps(document, sort_keys=True)
+    key = json.dumps([document, asdict(policy)], sort_keys=True)
     if key not in PREPARED:
-        PREPARED[key] = await prepared(evaluator, document)
+        PREPARED[key] = await prepared(evaluator, document, policy)
     return PREPARED[key]
 
 
 async def deploy(
-    database: Database, evaluator: Evaluator, ir: JsonObject | None = None
+    database: Database,
+    evaluator: Evaluator,
+    ir: JsonObject | None = None,
+    policy: NamespaceSecretPolicy = DEFAULT_POLICY,
 ) -> DeployedGraph:
     namespace_id, token_id = await seeded_namespace(database)
+    if policy != DEFAULT_POLICY:
+        await save_secret_policy(database, namespace_id, policy)
     published = await publish(
-        database, await prepared_once(evaluator, ir), namespace_id, token_id
+        database,
+        await prepared_once(evaluator, ir, policy),
+        namespace_id,
+        token_id,
     )
     return DeployedGraph(
         namespace_id,
