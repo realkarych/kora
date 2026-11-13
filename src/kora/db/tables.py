@@ -94,6 +94,11 @@ from kora.db.types import (
     UtcTimestamp,
     collated_text,
 )
+from kora.db.worker_registration_v1 import (
+    EVENT_NAMESPACE_SCOPE,
+    domain_elements,
+    incarnation_elements,
+)
 
 NAMING_CONVENTION: dict[str, str] = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -378,14 +383,23 @@ worker: Table = Table(
     "worker",
     metadata,
     Column("id", name(), primary_key=True),
-    Column("incarnation_id", identifier(), nullable=False),
-    Column("execution_domain_id", identifier(), nullable=False),
+    Column("incarnation_id", collated_text(26, postgresql_length=256), nullable=False),
+    Column(
+        "execution_domain_id", collated_text(26, postgresql_length=256), nullable=False
+    ),
     Column("runtime", name(), nullable=False),
     Column("version", name(), nullable=False),
     Column("capacity", Integer, nullable=False),
     timestamp("last_seen_at"),
     reference("token_id", "api_token.id"),
     *audit_columns(),
+)
+
+worker_incarnation: Table = Table(
+    "worker_incarnation", metadata, *incarnation_elements()
+)
+worker_execution_domain: Table = Table(
+    "worker_execution_domain", metadata, *domain_elements()
 )
 
 idempotency_record: Table = Table(
@@ -801,7 +815,7 @@ event: Table = Table(
     "event",
     metadata,
     primary_identifier(),
-    reference("namespace_id", "namespace.id"),
+    reference("namespace_id", "namespace.id", nullable=True),
     reference("run_id", "run.id", nullable=True),
     reference("node_instance_id", "node_instance.id", nullable=True),
     reference("attempt_id", "attempt.id", nullable=True),
@@ -811,6 +825,7 @@ event: Table = Table(
     timestamp("at"),
     *audit_columns(),
     Index("ix_event_run_id_id", "run_id", "id"),
+    CheckConstraint(EVENT_NAMESPACE_SCOPE, name="namespace_scope"),
 )
 
 provider_pause: Table = Table(

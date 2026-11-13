@@ -355,6 +355,64 @@ jobs:
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: bash scripts/ci/require_outcomes.sh scaffold-lane
 
+  changed-test-repetition:
+    name: Changed test repetition
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      KORA_TEST_DATABASES: sqlite,postgresql
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          path: ${{ runner.temp }}/kora-acquisitions
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified Scaffold Node cache
+        if: ${{ github.event_name == 'pull_request' }}
+        run: bash scripts/ci/setup_scaffold_node.sh
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          node-version-file: web/.node-version
+          package-manager-cache: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          package_json_file: web/package.json
+          run_install: false
+          cache: true
+          cache_dependency_path: web/pnpm-lock.yaml
+      - name: Prepare verified uv and Python
+        if: ${{ github.event_name == 'pull_request' }}
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: scaffold-3.11.17-general
+      - name: Install locked dependencies
+        if: ${{ github.event_name == 'pull_request' }}
+        run: bash scripts/ci/scaffold_lane.sh dependencies
+      - name: Install locked frontend dependencies
+        if: ${{ github.event_name == 'pull_request' }}
+        run: pnpm --dir web install --frozen-lockfile
+      - name: Repeat changed test modules
+        id: repetition
+        if: ${{ github.event_name == 'pull_request' }}
+        run: uv run --no-sync python -m tests.changed_test_repetition repeat
+
   scaffold-evidence:
     name: Scaffold evidence
     if: ${{ always() }}
@@ -444,7 +502,7 @@ jobs:
   scaffold:
     name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
     if: ${{ always() }}
-    needs: [scaffold-evidence]
+    needs: [scaffold-evidence, changed-test-repetition]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
@@ -466,10 +524,12 @@ jobs:
         env:
           EVIDENCE_RESULT: ${{ needs.scaffold-evidence.result }}
           EVIDENCE_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}
+          REPETITION_RESULT: ${{ needs.changed-test-repetition.result }}
         run: |
           bash scripts/ci/require_outcomes.sh check \
             EVIDENCE_RESULT=success \
-            EVIDENCE_VERIFIED=true
+            EVIDENCE_VERIFIED=true \
+            REPETITION_RESULT=success
 
   local-runtime-diagnostics:
     needs: [change-scope]

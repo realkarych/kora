@@ -8,12 +8,14 @@ from pydantic import StrictBool, StrictInt
 
 from kora.api.application import create_application
 from kora.api.exchange import COMPONENT
+from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.db.connection import Database, parse_database_url
 from kora.observability import Level, LoggingSettings, configure_process
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
 from kora.protocols.boundary import BoundaryModel
 from kora.protocols.time import SystemClock
 from tests.api.support import RequestIds, client_for
+from tests.api.worker_support import CAPABILITIES, registration
 from tests.db.closing import ConnectionLedger, reached
 from tests.plugins.authentication.support import seed_case
 from tests.plugins.storage.sink_probe import fill
@@ -47,7 +49,13 @@ def run(sink: str, configuration: Path) -> SinkReport:
     database = Database(parse_database_url(data))
     ledger = ConnectionLedger(database)
     app = create_application(
-        StaticTokenAuthenticator({}, database), diagnostics, clock, RequestIds()
+        StaticTokenAuthenticator({}, database),
+        diagnostics,
+        clock,
+        RequestIds(),
+        worker_registration=WorkerRegistrationRoute(
+            database, {"local": CAPABILITIES}, clock, diagnostics
+        ),
     )
     completed = 0
 
@@ -55,6 +63,7 @@ def run(sink: str, configuration: Path) -> SinkReport:
         nonlocal completed
         try:
             case = await seed_case(database, "api-sink")
+            service = await seed_case(database, "worker-sink", "service")
             headers = {"Authorization": str(case.request.authorization)}
             async with client_for(app) as client:
                 for _ in range(32):
@@ -65,7 +74,16 @@ def run(sink: str, configuration: Path) -> SinkReport:
                     assert (
                         await client.post("/api/v1/openapi.json", headers=headers)
                     ).status_code == 405
-                    completed += 3
+                    assert (
+                        await client.post(
+                            "/api/v1/workers",
+                            headers={
+                                "Authorization": str(service.request.authorization)
+                            },
+                            json=registration(service).model_dump(mode="json"),
+                        )
+                    ).status_code == 200
+                    completed += 4
         finally:
             await database.close()
 

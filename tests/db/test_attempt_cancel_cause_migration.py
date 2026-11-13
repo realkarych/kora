@@ -71,8 +71,8 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0003",
-            "0022",
-            19,
+            "0023",
+            20,
         )
         assert after == before.history
         assert objects == before.schema_objects
@@ -167,8 +167,8 @@ async def test_attempt_cancel_cause_upgrade_recovers_compatible_partial_schema(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0003",
-            "0022",
-            19,
+            "0023",
+            20,
         )
         assert differences == []
         assert stage.database is not None

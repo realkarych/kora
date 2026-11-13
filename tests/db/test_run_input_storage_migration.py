@@ -23,7 +23,7 @@ from tests.support.databases import sqlite_settings
 
 PREDECESSOR = "0019"
 REVISION = "0020"
-HEAD_REVISION = "0022"
+HEAD_REVISION = "0023"
 SENTINEL = "kora.run-inputs.v1"
 ADD_INPUT_ENCODING = "ALTER TABLE run ADD COLUMN input_encoding_version INTEGER"
 RUN_IDENTIFIER = re.compile(r"\b(?:run|run_inputs)\b", re.IGNORECASE)
@@ -194,7 +194,7 @@ async def test_run_input_migration_adds_only_empty_native_storage(
         assert (report.from_revision, report.to_revision, report.steps) == (
             PREDECESSOR,
             HEAD_REVISION,
-            3,
+            4,
         )
         assert (repeated.from_revision, repeated.to_revision, repeated.steps) == (
             HEAD_REVISION,
@@ -218,6 +218,7 @@ async def test_run_input_migration_adds_only_empty_native_storage(
             statement
             for statement in observation.statements
             if RUN_IDENTIFIER.search(statement) is not None
+            and not statement.startswith("CREATE TABLE _alembic_tmp_event ")
         ]
         assert scoped[0] == ADD_INPUT_ENCODING
         assert scoped[1].startswith("CREATE TABLE run_inputs ")
@@ -439,7 +440,7 @@ async def test_run_input_migration_conflict_is_atomic_and_content_free(
             )
         )
         assert recovered.code == 0
-        assert recovered.stdout == b"0022\n"
+        assert recovered.stdout == b"0023\n"
         assert recovered_revision == HEAD_REVISION
         assert events(recovered).count("db.migration.finished") == 1
     finally:
@@ -498,7 +499,7 @@ async def test_run_input_migration_interruption_releases_native_resources(
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             PREDECESSOR,
             HEAD_REVISION,
-            3,
+            4,
         )
         observation.assert_released()
     finally:

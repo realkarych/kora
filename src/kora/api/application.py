@@ -5,12 +5,12 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from kora.api.authentication import personal_authentication
-from kora.api.errors import definitive_error
+from kora.api.authentication import authenticate_route
+from kora.api.errors import RequestRejection, definitive_error, request_rejection
 from kora.api.exchange import ApiExchange, current_exchange, method_of
 from kora.api.graph_deployment_route import (
     GraphDeploymentServices,
@@ -28,8 +28,10 @@ from kora.api.routes import (
     ActiveCatalog,
     RouteName,
 )
+from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
+from kora.models.workers import RegisteredWorker, WorkerRegistration
 from kora.observability import ProcessDiagnostics
 from kora.protocols.authentication import Authenticator
 from kora.protocols.time import Clock
@@ -63,13 +65,16 @@ class ApiDispatch:
             exchange.route = matched.name.value
         method = method_of(scope)
         if matched is not None and matched.name in PROTECTED_ROUTES:
-            principal = await personal_authentication(
-                Request(scope), self.authenticator, self.clock
+            authority = await authenticate_route(
+                Request(scope),
+                self.authenticator,
+                self.clock,
+                "service" if matched.name == RouteName.WORKERS else "user",
             )
-            if isinstance(principal, ApiErrorEnvelope):
-                await error_response(principal, method=method)(scope, receive, send)
+            if isinstance(authority, ApiErrorEnvelope):
+                await error_response(authority, method=method)(scope, receive, send)
                 return
-            exchange.principal = principal
+            exchange.principal = authority
         code: ApiErrorCode | None = None
         if method not in RECOGNIZED_METHODS:
             code = ApiErrorCode.METHOD_NOT_IMPLEMENTED
@@ -85,7 +90,34 @@ class ApiDispatch:
             )
             await response(scope, receive, send)
             return
-        await self.application(scope, receive, send)
+        if matched is not None and matched.name == RouteName.WORKERS:
+            body = bytearray()
+            try:
+                async for chunk in Request(scope, receive).stream():
+                    if len(chunk) > 4 * 1024 * 1024 - len(body):
+                        await error_response(
+                            definitive_error(
+                                ApiErrorCode.VALIDATION, request_id=exchange.request_id
+                            ),
+                            method=method,
+                        )(scope, receive, send)
+                        return
+                    body.extend(chunk)
+            except ClientDisconnect:
+                await error_response(
+                    request_rejection(
+                        RequestRejection.INCOMPLETE_BODY, request_id=exchange.request_id
+                    ),
+                    method=method,
+                )(scope, receive, send)
+                return
+
+            async def received_body() -> Message:
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+            await self.application(scope, received_body, send)
+        else:
+            await self.application(scope, receive, send)
 
 
 def create_application(
@@ -94,6 +126,8 @@ def create_application(
     clock: Clock,
     request_id: Callable[[], str],
     deployment: GraphDeploymentServices | None = None,
+    *,
+    worker_registration: WorkerRegistrationRoute | None = None,
 ) -> ApiExchange:
     framework = FastAPI(
         title="kora",
@@ -153,6 +187,19 @@ def create_application(
                     },
                 }
             },
+        )
+
+    if worker_registration is not None:
+
+        async def register(body: WorkerRegistration) -> RegisteredWorker | Response:
+            return await worker_registration(body)
+
+        framework.add_api_route(
+            RouteName.WORKERS.value,
+            register,
+            methods=["POST"],
+            operation_id="register_worker",
+            response_model=RegisteredWorker,
         )
     framework.add_exception_handler(HTTPException, framework_error)
     framework.add_exception_handler(RequestValidationError, validation_error)

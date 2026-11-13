@@ -466,7 +466,11 @@ def predecessor_snapshot(
         source = table(table_name, *(ColumnClause[object](name) for name in names))
         selected = tuple(
             cast(column, Text).label(column.name)
-            if table_name == "run" and column.name == "target_key"
+            if (table_name == "run" and column.name == "target_key")
+            or (
+                table_name == "worker"
+                and column.name in {"incarnation_id", "execution_domain_id"}
+            )
             else column
             for column in source.c
         )

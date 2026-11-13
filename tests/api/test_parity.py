@@ -8,7 +8,9 @@ from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.ir.json import parse_json_object
 from tests.api.deployment_cases import HARNESS, preparer
-from tests.api.support import api_capture, application, deployment_services
+from tests.api.support import api_capture, deployment_services
+from tests.api.worker_support import worker_application
+from tests.plugins.authentication.support import AuthorityClock
 from tests.support.ast_modules import write_module
 from tests.support.parity import schema_operations, uncovered_operations
 
@@ -50,8 +52,11 @@ def synthetic_tree(root: Path, *, cli: bool, mcp: bool) -> Path:
 async def test_parity_operations_are_reachable(
     api_capture: Capture, database: Database, preparer: DeploymentPreparer
 ) -> None:
-    app = application(
-        database, api_capture, deployment_services(database, preparer, HARNESS)
+    app = worker_application(
+        database,
+        api_capture,
+        AuthorityClock(),
+        deployment=deployment_services(database, preparer, HARNESS),
     )
     framework = app.application
     assert isinstance(framework, FastAPI)
@@ -61,6 +66,7 @@ async def test_parity_operations_are_reachable(
     paths = schema["paths"]
     assert isinstance(paths, dict)
     assert DEPLOY in schema_operations(paths)
+    assert ("POST", "/api/v1/workers") in schema_operations(paths)
     assert uncovered_operations(paths, SOURCE_ROOT) == []
 
 
@@ -80,3 +86,15 @@ def test_parity_fails_when_a_client_mapping_is_removed(
     uncovered = uncovered_operations(PATHS, root)
 
     assert uncovered == expected
+
+
+def test_worker_protocol_exclusion_preserves_worker_read_parity(tmp_path: Path) -> None:
+    root = synthetic_tree(tmp_path, cli=True, mcp=True)
+    paths: dict[str, object] = {
+        **PATHS,
+        "/api/v1/workers": {"post": {}, "get": {}},
+    }
+
+    uncovered = uncovered_operations(paths, root)
+
+    assert uncovered == ["cli: GET /api/v1/workers", "mcp: GET /api/v1/workers"]

@@ -1349,6 +1349,16 @@ def ignore_the_macos_lanes(workflows: Workflows) -> None:
     del table(gate["env"])["MACOS_LANES_RESULT"]
 
 
+def ignore_the_changed_test_repetition(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "scaffold"))[-1]
+    del table(gate["env"])["REPETITION_RESULT"]
+
+
+def accept_a_failed_changed_test_repetition(workflows: Workflows) -> None:
+    gate = step_list(job_of(workflows, "ci.yml", "scaffold"))[-1]
+    rewrite_run(gate, " \\\n  REPETITION_RESULT=success", "")
+
+
 def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
     job = job_of(workflows, "conformance-lifetime.yml", "lifetime-evidence")
     job["needs"] = [*needs_of(job), "storage-probe"]
@@ -1373,6 +1383,8 @@ def wait_for_a_lifetime_shard_without_its_result(workflows: Workflows) -> None:
         compute_an_unreviewed_gate_matrix,
         ignore_the_macos_lanes,
         report_timings_in_place_of_verification,
+        ignore_the_changed_test_repetition,
+        accept_a_failed_changed_test_repetition,
     ],
 )
 def test_gate_check_refuses_a_mutated_workflow(

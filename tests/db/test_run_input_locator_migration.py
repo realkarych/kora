@@ -25,7 +25,7 @@ from tests.db.test_run_input_storage_migration import SENTINEL, UpgradeObservati
 from tests.support.databases import encoded_sqlite_settings, sqlite_settings
 
 PREDECESSOR = "0020"
-HEAD_REVISION = "0022"
+HEAD_REVISION = "0023"
 WIDE = 4 * 1024 * 1024
 INDEXES = {SQLITE_RUN_LOCATOR_INDEX, SQLITE_RUN_INPUT_LOCATOR_INDEX}
 PARENT_LOOKUP = "".join(
@@ -193,7 +193,7 @@ async def test_run_input_locators_exclude_noncanonical_historical_keys(
 
         assert observed_encoding == encoding
         assert report.to_revision == HEAD_REVISION
-        assert report.steps == 2
+        assert report.steps == 3
         assert before == after
         assert len(after[0]) == len(keys) - 1
         assert len(after[1]) == len(keys) - 2
@@ -232,7 +232,7 @@ async def test_run_input_locator_migration_preserves_existing_schema_and_values(
         assert (report.from_revision, report.to_revision, report.steps) == (
             PREDECESSOR,
             HEAD_REVISION,
-            2,
+            3,
         )
         assert (repeat.from_revision, repeat.to_revision, repeat.steps) == (
             HEAD_REVISION,
@@ -250,6 +250,21 @@ async def test_run_input_locator_migration_preserves_existing_schema_and_values(
                 statement
                 for statement in observation.statements
                 if statement.startswith(("CREATE ", "ALTER ", "DROP "))
+                and (
+                    statement.startswith(
+                        (
+                            "CREATE TABLE run ",
+                            "ALTER TABLE run ",
+                            "DROP TABLE run ",
+                            "CREATE TABLE run_inputs ",
+                            "ALTER TABLE run_inputs ",
+                            "DROP TABLE run_inputs ",
+                            "CREATE TABLE run_promotion_admission (",
+                        )
+                    )
+                    or " ON run " in statement
+                    or " ON run_inputs " in statement
+                )
             ]
             assert len(definitions) == 2
             assert definitions[0] == (
@@ -297,7 +312,7 @@ async def test_run_input_locator_conflict_rolls_back_first_index_and_revision(
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             PREDECESSOR,
             HEAD_REVISION,
-            2,
+            3,
         )
         assert recovered_indexes == original_indexes | INDEXES | {"ix_run_status_id"}
         assert before == after
