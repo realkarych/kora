@@ -27,6 +27,7 @@ The project owner fixed the following depth on 2026-11-11 ([graph and startup an
   - **Idempotency.** Only the durable start receipt of [data-model section 13.2.1](data-model.md#1321-manual-request-and-receipt-format-606): a matching request with the same key returns the saved accepted or skipped outcome, a changed request with that key is `API004`, and no refusal is saved. The generic 24-hour `idempotency_record` response cache stays with slice acceptance.
   - **Agent secrets.** A start is refused with `API003` for any version in which an agent node, or an MCP server of an agent node, declares `secret_env`, whatever the start's `allow_unenforced_secrets` says, because the namespace-side permission is not implemented and defaults to false. The flag is accepted and saved on the run. The missing deploy-time `IR015` is [#1462](https://github.com/realkarych/kora/issues/1462).
   - **Installation recheck.** A start checks the selected version against the installation's selection with the deploy's installation checks and refuses a mismatch with `API003` and the same `IR018` and `IR028` findings, as item 3 of the installation feature inventory requires.
+  - **Route.** The trigger route, `kora trigger` and the stdio `kora_trigger` behave as [walking-skeleton manual start](api-and-agent-surface.md#walking-skeleton-manual-start-issue-1463) states.
 
 ### Narrowed first-slice depth
 

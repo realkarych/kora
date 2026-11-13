@@ -69,7 +69,7 @@ class StdioSession:
         return self.process.returncode, stderr
 
 
-async def start(environment: dict[str, str]) -> StdioSession:
+async def start(environment: dict[str, str], server: str = "authoring") -> StdioSession:
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-I",
@@ -77,7 +77,7 @@ async def start(environment: dict[str, str]) -> StdioSession:
         "kora",
         "mcp",
         "--server",
-        "authoring",
+        server,
         env={"PATH": os.environ["PATH"], **environment},
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,

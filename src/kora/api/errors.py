@@ -15,8 +15,10 @@ from kora.models.errors import (
     ApiError,
     ApiErrorCode,
     ApiErrorEnvelope,
+    BacklogDetails,
     ConflictDetails,
     EmptyDetails,
+    LimitScope,
     ValidationDetails,
 )
 from kora.protocols.errors import KoraProtocolError
@@ -59,6 +61,9 @@ class RequestRejection(StrEnum):
     DOCUMENT = "document"
     SELECTORS = "selectors"
     INCOMPLETE_BODY = "incomplete_body"
+    PARAMETERS = "parameters"
+    SECRETS = "secrets"
+    IDEMPOTENCY_KEY = "idempotency_key"
 
 
 class DependencyRetryContext(StrEnum):
@@ -189,6 +194,27 @@ def lock_timeout_error(*, request_id: str) -> ApiErrorEnvelope:
             message=MESSAGES[ApiErrorCode.CONFLICT],
             retryable=True,
             details=ConflictDetails(reason="lock_timeout"),
+            request_id=request_id,
+        )
+    )
+
+
+def backlog_full_error(
+    namespace: str, limit: int, used: int, *, request_id: str
+) -> ApiErrorEnvelope:
+    return ApiErrorEnvelope(
+        error=ApiError(
+            code=ApiErrorCode.CONFLICT,
+            message=MESSAGES[ApiErrorCode.CONFLICT],
+            retryable=True,
+            details=BacklogDetails(
+                reason="run_backlog_full",
+                scope=LimitScope(kind="namespace", id=namespace),
+                limit_name="max_pending_runs",
+                limit=limit,
+                used=used,
+                next_action="retry_start",
+            ),
             request_id=request_id,
         )
     )

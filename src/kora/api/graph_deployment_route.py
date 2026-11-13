@@ -1,8 +1,8 @@
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from typing import TypeVar
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response
@@ -19,31 +19,23 @@ from kora.api.errors import (
 from kora.api.exchange import current_exchange
 from kora.api.graph_deployment import DeploymentFindings, DeploymentRefusal
 from kora.api.graph_deployment_limits import MAX_REQUEST_BYTES
-from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.api.graph_deployment_writer import (
     GraphDeploymentTarget,
     publish_graph_deployment,
 )
+from kora.api.graph_services import GraphServices
 from kora.api.responses import error_response
 from kora.cel_eval.errors import EvaluatorUnavailable
 from kora.db.connection import Database
-from kora.db.identifiers import IdentifierGenerator
 from kora.db.namespace_reads import granted_namespace_id
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
-from kora.ir.deployment_checks import DeploymentSelection
 from kora.ir.vcs_ref_json import finite_float, refuse_constant, unique_object
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import GRAPH_VERSION_PREFIX, DeployRequest, DeployResponse
 from kora.protocols.authentication import Principal
 from kora.protocols.time import Clock
 
-
-@dataclass(frozen=True, slots=True)
-class GraphDeploymentServices:
-    database: Database
-    preparer: DeploymentPreparer
-    selection: DeploymentSelection
-    identifiers: IdentifierGenerator
+Body = TypeVar("Body", bound=BaseModel)
 
 
 class BodyRejected(ValueError):
@@ -52,12 +44,12 @@ class BodyRejected(ValueError):
         self.reason = reason
 
 
-async def _read_body(request: Request) -> DeployRequest:
+async def read_json_body(request: Request, model: type[Body], max_bytes: int) -> Body:
     body = bytearray()
     try:
         async for chunk in request.stream():
             body.extend(chunk)
-            if len(body) > MAX_REQUEST_BYTES:
+            if len(body) > max_bytes:
                 raise BodyRejected(RequestRejection.BYTE_LIMIT)
     except ClientDisconnect:
         raise BodyRejected(RequestRejection.INCOMPLETE_BODY) from None
@@ -75,12 +67,12 @@ async def _read_body(request: Request) -> DeployRequest:
     except (ValueError, RecursionError):
         raise BodyRejected(RequestRejection.MALFORMED_JSON) from None
     try:
-        return DeployRequest.model_validate(parsed)
+        return model.model_validate(parsed)
     except ValidationError:
         raise BodyRejected(RequestRejection.FRAMEWORK_SHAPE) from None
 
 
-async def _authorized_namespace(
+async def authorized_namespace(
     database: Database, principal: Principal, name: str
 ) -> str | None:
     granted = tuple(grant.namespace_id for grant in principal.namespaces)
@@ -100,7 +92,7 @@ REFUSALS: dict[DeploymentRefusal, RequestRejection] = {
 
 
 async def _deploy(
-    services: GraphDeploymentServices,
+    services: GraphServices,
     clock: Clock,
     request: Request,
     principal: Principal,
@@ -108,7 +100,7 @@ async def _deploy(
 ) -> ApiErrorEnvelope | Response:
     request_id = current_exchange().request_id
     namespace_name, graph = names
-    namespace_id = await _authorized_namespace(
+    namespace_id = await authorized_namespace(
         services.database, principal, namespace_name
     )
     if namespace_id is None:
@@ -118,7 +110,7 @@ async def _deploy(
             DependencyRetryContext.PROVEN_PRE_EFFECT, request_id=request_id
         )
     try:
-        body = await _read_body(request)
+        body = await read_json_body(request, DeployRequest, MAX_REQUEST_BYTES)
     except BodyRejected as rejected:
         return request_rejection(rejected.reason, request_id=request_id)
     selectors = GraphDeploymentSelectors(
@@ -166,9 +158,7 @@ async def _deploy(
     )
 
 
-def deployment_handler(
-    services: GraphDeploymentServices, clock: Clock
-) -> DeploymentHandler:
+def deployment_handler(services: GraphServices, clock: Clock) -> DeploymentHandler:
     async def deploy(request: Request, ns: str, graph: str) -> Response:
         principal = current_exchange().principal
         if principal is None:

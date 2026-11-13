@@ -1,12 +1,13 @@
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
     StrictBool,
+    StrictInt,
     StrictStr,
     model_validator,
 )
@@ -79,6 +80,20 @@ class EmptyDetails(WireRecord):
 
 class ConflictDetails(WireRecord):
     reason: Literal["lock_timeout"]
+
+
+class LimitScope(WireRecord):
+    kind: Literal["namespace"]
+    id: StrictStr
+
+
+class BacklogDetails(WireRecord):
+    reason: Literal["run_backlog_full"]
+    scope: LimitScope
+    limit_name: Literal["max_pending_runs"]
+    limit: Annotated[StrictInt, Field(ge=1)]
+    used: Annotated[StrictInt, Field(ge=0)]
+    next_action: Literal["retry_start"]
 
 
 class ValidationDetails(WireRecord):
@@ -179,7 +194,7 @@ class ApiError(WireRecord):
     message: Text1024
     location: None = None
     retryable: StrictBool
-    details: EmptyDetails | ConflictDetails | ValidationDetails
+    details: EmptyDetails | ConflictDetails | BacklogDetails | ValidationDetails
     request_id: StrictStr
 
     @model_validator(mode="after")
@@ -190,7 +205,7 @@ class ApiError(WireRecord):
                 raise PydanticCustomError(
                     "api_details", "API error details are invalid."
                 )
-        elif isinstance(self.details, ConflictDetails):
+        elif isinstance(self.details, ConflictDetails | BacklogDetails):
             if self.code != ApiErrorCode.CONFLICT:
                 raise PydanticCustomError(
                     "api_details", "API error details are invalid."

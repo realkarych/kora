@@ -1633,7 +1633,7 @@ Activation requires compatible participating readers and writers and qualified n
    4. the deploy's installation findings for the installation's selection.
 
    A saved `parameters` member that the [graph parameter interpretation](#graph-parameter-interpretation) reader does not accept as the closed-empty binding is refused like a declared `graph.params`, as an unavailable interpretation.
-   - **Binding to the request.** Only this step creates the facts. They are bound to the request's namespace, graph and digest, its explicit version if any, and its empty parameters, and acceptance refuses facts that belong to another request.
+   - **Binding to the request.** Only this step creates the facts. They are bound to the request's namespace, graph and digest; the digest covers the version selector, the parameters and the secrets flag. Acceptance refuses facts that belong to another request.
    - **Skipped re-verification.** The step skips the canonical re-render and digest recomputation of the stored values. The deploy writer produced them, the bounded acquisition admitted them, and promotion re-verifies the pinned contract, digests, header, overlap and timeout before any execution effect. A corrupt stored value can therefore leave a run pending but never executes it; `test_corrupted_stored_graph_never_executes` checks this.
    - **No database access.** The step makes no database call and holds no connection, so a caller can run it off its request loop.
 4. **Acceptance.** One writer unit takes the prospective run lock and the global, namespace and graph scope locks. It rechecks the receipt and the selection with the locked helpers of section 13.2.1, then checks overlap, outstanding capacity and retention with section 13.2.2.

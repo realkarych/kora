@@ -16,7 +16,7 @@ import httpcore
 import httpx
 from anyio import CancelScope
 from anyio.lowlevel import checkpoint_if_cancelled
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from pydantic_core import PydanticCustomError
 
 from kora.client.asgi import (
@@ -37,6 +37,7 @@ from kora.client.network import DirectTransport
 from kora.ir.json import JsonObject, JsonShapeError, parse_json_object
 from kora.models.errors import HTTP_STATUSES, ApiErrorCode, require_api_error_fields
 from kora.models.graphs import DeployRequest, DeployResponse
+from kora.models.runs import AcceptedRun, SkippedRun, StartOutcome, TriggerRequest
 from kora.models.workers import RegisteredWorker, WorkerRegistration
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, ProcessDiagnostics
 
@@ -44,6 +45,8 @@ OPENAPI_PATH: str = "/api/v1/openapi.json"
 OPENAPI_RESPONSE_BYTES: int = 4 * 1024 * 1024
 GRAPH_VERSIONS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
 DEPLOY_RESPONSE_BYTES: int = 2 * 1024 * 1024
+GRAPH_RUNS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/runs"
+TRIGGER_RESPONSE_BYTES: int = 16 * 1024
 OK: frozenset[int] = frozenset({200})
 CREATED_OR_OK: frozenset[int] = frozenset({200, 201})
 JSON_DEPTH: int = 64
@@ -99,6 +102,19 @@ class DeployedGraphVersion:
 
 def deployed_graph_version(value: JsonObject) -> DeployedGraphVersion:
     return DeployedGraphVersion(DeployResponse.model_validate(value), value)
+
+
+@dataclass(frozen=True, slots=True)
+class TriggeredRun:
+    response: AcceptedRun | SkippedRun
+    document: JsonObject
+
+
+START_OUTCOME: TypeAdapter[AcceptedRun | SkippedRun] = TypeAdapter(StartOutcome)
+
+
+def triggered_run(value: JsonObject) -> TriggeredRun:
+    return TriggeredRun(START_OUTCOME.validate_python(value), value)
 
 
 def registered_worker(value: JsonObject) -> RegisteredWorker:
@@ -284,6 +300,27 @@ class KoraClient:
             success=CREATED_OR_OK,
         )
 
+    async def trigger(
+        self,
+        namespace: str,
+        graph: str,
+        request: TriggerRequest,
+        idempotency_key: str | None = None,
+    ) -> TriggeredRun:
+        return await self._request_json(
+            "POST",
+            GRAPH_RUNS_PATH.format(
+                ns=quote(namespace, safe=""), graph=quote(graph, safe="")
+            ),
+            triggered_run,
+            response_limit=TRIGGER_RESPONSE_BYTES,
+            body=request.model_dump(mode="json", exclude_none=True),
+            success=CREATED_OR_OK,
+            headers=()
+            if idempotency_key is None
+            else (("Idempotency-Key", idempotency_key),),
+        )
+
     async def register_worker(
         self, registration: WorkerRegistration
     ) -> RegisteredWorker:
@@ -305,6 +342,7 @@ class KoraClient:
         response_limit: int,
         body: JsonObject | None = None,
         success: frozenset[int] = OK,
+        headers: tuple[tuple[str, str], ...] = (),
     ) -> T:
         if self._closing is not None:
             raise RuntimeError("The API client is closed.")
@@ -319,7 +357,13 @@ class KoraClient:
         deadline = loop.time() + self._timeout
         task = asyncio.create_task(
             self._exchange(
-                method, path, decode, response_limit, body, success, exchange
+                method,
+                path,
+                decode,
+                response_limit,
+                (body, headers),
+                success,
+                exchange,
             )
         )
         self._active[task] = exchange.scope
@@ -362,10 +406,11 @@ class KoraClient:
         path: str,
         decode: Callable[[JsonObject], T],
         response_limit: int,
-        body: JsonObject | None,
+        payload: tuple[JsonObject | None, tuple[tuple[str, str], ...]],
         success: frozenset[int],
         exchange: Exchange,
     ) -> T:
+        body, headers = payload
         request = httpx.Request(
             method,
             self._origin.copy_with(path=path),
@@ -373,6 +418,7 @@ class KoraClient:
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/json",
                 "Accept-Encoding": "identity",
+                **dict(headers),
             },
             json=body,
             extensions={"trace": exchange.observe},
