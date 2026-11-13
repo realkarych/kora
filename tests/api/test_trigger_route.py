@@ -6,22 +6,31 @@ import pytest
 from sqlalchemy import insert, update
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
+from kora.cel_eval.thread import Evaluator
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
+from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import api_token, graph_version, namespace
 from kora.ir.json import JsonObject
 from kora.models.errors import ApiErrorEnvelope
-from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun, SkippedRun
 from kora.protocols.authentication import Principal
-from tests.api.deployment_cases import GRAPH, HARNESS, NAMESPACE, preparer, skeleton_ir
+from tests.api.deployment_cases import (
+    GRAPH,
+    HARNESS,
+    NAMESPACE,
+    evaluator,
+    preparer,
+    publish,
+    skeleton_ir,
+)
 from tests.api.support import api_capture, application, client_for, deployment_services
 from tests.db.seed import Seeder
 from tests.engine.graph_output_cases import child
-from tests.engine.start_cases import agent_config, start_rows
-from tests.plugins.authentication.support import seed_case
+from tests.engine.start_cases import agent_config, prepared_once, start_rows
+from tests.plugins.authentication.support import AuthorityClock, seed_case
 
-__all__ = ["api_capture", "preparer"]
+__all__ = ["api_capture", "evaluator", "preparer"]
 
 VERSIONS = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/versions"
 RUNS = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/runs"
@@ -75,19 +84,18 @@ async def service_headers(database: Database, namespace_id: str) -> dict[str, st
 
 
 async def deployed(
-    client: httpx.AsyncClient, headers: dict[str, str], ir: JsonObject | None = None
-) -> DeployResponse:
-    response = await client.post(
-        VERSIONS,
-        json={
-            "graph": GRAPH,
-            "ir": skeleton_ir() if ir is None else ir,
-            "resources": [],
-        },
-        headers=headers,
+    database: Database,
+    evaluator: Evaluator,
+    namespace_id: str,
+    ir: JsonObject | None = None,
+) -> str:
+    published = await publish(
+        database,
+        await prepared_once(evaluator, ir),
+        namespace_id,
+        IdentifierGenerator(AuthorityClock().now).new(),
     )
-    assert response.status_code == 201
-    return DeployResponse.model_validate(response.json())
+    return "gv_" + published.graph_version_id
 
 
 def with_overlap(overlap: str) -> JsonObject:
@@ -102,15 +110,18 @@ async def empty(database: Database) -> bool:
 
 @pytest.mark.asyncio
 async def test_trigger_route_accepts_and_replays(
-    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+    database: Database,
+    evaluator: Evaluator,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
 ) -> None:
-    headers, _ = await user(database)
+    headers, namespace_id = await user(database)
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     )
 
     async with client_for(app) as client:
-        version = await deployed(client, headers)
+        version = await deployed(database, evaluator, namespace_id)
         first = await client.post(
             RUNS, json={"params": {}}, headers=keyed(headers, "k1")
         )
@@ -127,7 +138,7 @@ async def test_trigger_route_accepts_and_replays(
     accepted = AcceptedRun.model_validate(first.json())
     assert (first.status_code, again.status_code) == (201, 200)
     assert again.json() == first.json()
-    assert accepted.graph_version_id == version.graph_version_id
+    assert accepted.graph_version_id == version
     assert accepted.run_id.startswith("run_")
     assert (changed.status_code, error_of(changed).error.code) == (409, "API004")
     assert unkeyed.status_code == 201
@@ -148,15 +159,18 @@ async def test_trigger_route_accepts_and_replays(
 
 @pytest.mark.asyncio
 async def test_trigger_route_skips_on_overlap(
-    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+    database: Database,
+    evaluator: Evaluator,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
 ) -> None:
-    headers, _ = await user(database)
+    headers, namespace_id = await user(database)
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     )
 
     async with client_for(app) as client:
-        await deployed(client, headers, with_overlap("skip"))
+        await deployed(database, evaluator, namespace_id, with_overlap("skip"))
         first = await client.post(
             RUNS, json={"params": {}}, headers=keyed(headers, "k1")
         )
@@ -173,7 +187,10 @@ async def test_trigger_route_skips_on_overlap(
 
 @pytest.mark.asyncio
 async def test_trigger_route_refuses_a_full_backlog(
-    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+    database: Database,
+    evaluator: Evaluator,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
 ) -> None:
     headers, namespace_id = await user(database)
     async with database.transaction() as writer:
@@ -187,7 +204,7 @@ async def test_trigger_route_refuses_a_full_backlog(
     )
 
     async with client_for(app) as client:
-        await deployed(client, headers)
+        await deployed(database, evaluator, namespace_id)
         for key in ("k1", "k2"):
             await client.post(RUNS, json={"params": {}}, headers=keyed(headers, key))
         async with database.transaction() as writer:
@@ -218,7 +235,10 @@ async def test_trigger_route_refuses_a_full_backlog(
 
 @pytest.mark.asyncio
 async def test_trigger_route_authorizes_before_body(
-    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+    database: Database,
+    evaluator: Evaluator,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
 ) -> None:
     headers, namespace_id = await user(database)
     service = await service_headers(database, namespace_id)
@@ -255,9 +275,12 @@ async def test_trigger_route_authorizes_before_body(
 
 @pytest.mark.asyncio
 async def test_trigger_route_refuses_invalid_starts(
-    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+    database: Database,
+    evaluator: Evaluator,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
 ) -> None:
-    headers, _ = await user(database)
+    headers, namespace_id = await user(database)
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     )
@@ -281,7 +304,7 @@ async def test_trigger_route_refuses_invalid_starts(
     ]
 
     async with client_for(app) as client, client_for(other) as unconfigured:
-        await deployed(client, headers)
+        await deployed(database, evaluator, namespace_id)
         responses = [
             await client.post(RUNS, content=body, headers=headers | content | extra)
             for body, extra in requests
@@ -312,13 +335,14 @@ async def test_trigger_route_refuses_invalid_starts(
 )
 async def test_trigger_route_refuses_unsupported_versions(
     database: Database,
+    evaluator: Evaluator,
     preparer: DeploymentPreparer,
     api_capture: Capture,
     change: str,
     status: int,
     code: str,
 ) -> None:
-    headers, _ = await user(database)
+    headers, namespace_id = await user(database)
     ir = skeleton_ir()
     if change == "secrets":
         ir["secrets"] = {"aliases": {"API_TOKEN": "secret://env/API_TOKEN"}}
@@ -330,15 +354,12 @@ async def test_trigger_route_refuses_unsupported_versions(
     )
 
     async with client_for(app) as client:
-        version = await deployed(client, headers, ir)
+        version = await deployed(database, evaluator, namespace_id, ir)
         if change == "inactive":
             async with database.transaction() as writer:
                 await writer.execute(
                     update(graph_version)
-                    .where(
-                        graph_version.c.id
-                        == version.graph_version_id.removeprefix("gv_")
-                    )
+                    .where(graph_version.c.id == version.removeprefix("gv_"))
                     .values(status="retired")
                 )
         response = await client.post(
@@ -353,15 +374,18 @@ async def test_trigger_route_refuses_unsupported_versions(
 
 @pytest.mark.asyncio
 async def test_trigger_route_refuses_while_preparation_is_busy(
-    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+    database: Database,
+    evaluator: Evaluator,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
 ) -> None:
-    headers, _ = await user(database)
+    headers, namespace_id = await user(database)
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     )
 
     async with client_for(app) as client:
-        await deployed(client, headers)
+        await deployed(database, evaluator, namespace_id)
         first = await client.post(
             RUNS, json={"params": {}}, headers=keyed(headers, "k1")
         )
