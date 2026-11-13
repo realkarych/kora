@@ -130,11 +130,13 @@ ESCAPING = "\n".join(
 FLOODING = "\n".join(
     (
         "import os",
+        "os.write(1, b'leader')",
         "if os.fork() == 0:",
         "    block = b'f' * 65536",
         "    while True:",
         "        os.write(1, block)",
-        "os.write(1, b'leader')",
+        "with open('go', 'rb') as gate:",
+        "    assert gate.read(1) == b'g'",
     )
 )
 BOUNDED = "\n".join(
@@ -489,11 +491,19 @@ async def test_command_capture_never_delays_stop(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     io = HeldIO("write")
-    async with capture_session(tmp_path, kora_capture, FLOODING, io=io) as (
+    async with capture_session(tmp_path, kora_capture, FLOODING, io=io, gate=True) as (
         session,
         attempt,
     ):
-        await until(lambda: session.stop_outcome() is not None)
+        gate = os.open(attempt / "candidate" / "go", os.O_RDWR | os.O_NONBLOCK)
+        try:
+            try:
+                await until(io.entered.is_set)
+            finally:
+                os.write(gate, b"g")
+                await until(lambda: session.stop_outcome() is not None)
+        finally:
+            os.close(gate)
         outcome = session.stop_outcome()
         entered = io.entered.is_set()
         writes_at_stop = io.writes

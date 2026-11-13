@@ -1,0 +1,11 @@
+# Held capture and command-stop ordering, 2026-11-13
+
+[Issue #1481](https://github.com/realkarych/kora/issues/1481) repairs the preparation of `test_command_capture_never_delays_stop`. The [capture contract](../specs/protocols.md#local-runtime-issue-123) requires domain stop to complete independently of a blocked capture writer. The test must establish that the writer is blocked before it triggers leader exit.
+
+[CI 43409876736](https://github.com/realkarych/kora/actions/runs/43409876736), attempt 1 on `c0663f2bbb34bf4a7cb380ad19ff2274fc6e48b9`, failed in Changed test repetition at `assert entered`: domain stop was confirmed, but the held write had not begun. The job recorded one failed case, fourteen passing cases and one deselected host-fixture case. It was not rerun. This was the same legal ordering described in [earlier forced-order evidence](https://github.com/realkarych/kora/issues/1437#issuecomment-6837336099), distinct from the missing capture facts repaired by #1439.
+
+The original flooding workload let the leader exit immediately after its fork. The stop could complete before the fixture attached drains or scheduled the writer. The workload now makes its small leader write before forking, so the flooding descendant cannot block that write, and holds leader exit on the existing FIFO. The test waits for the native write barrier before releasing the leader with one byte. The writer remains held until the test observes confirmed stop.
+
+The test owns one nonblocking read/write FIFO descriptor. Its read end retains the release byte even if the leader has not opened its own read end yet. The release and existing stop wait execute in a finally block even if the held-write condition fails; the descriptor stays open through that wait and always closes before session teardown. The existing session context releases the native writer and settles its runtime resources. No process signal, runtime behavior, deadline or final assertion changes. The separate regression for a domain stopping before drain attachment remains intact.
+
+This localized repair follows the existing deterministic-test contract under standing authorization. The pull request records focused checks, independent correctness review and supported-platform final-revision CI; it does not claim to repair the independent observation or full-disk failures in #1469 and #1478.
