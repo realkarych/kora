@@ -32,11 +32,11 @@ def assert_attempt_schema_extension(
 
 
 def install_predecessor(connection: Connection) -> None:
-    command.upgrade(alembic_config(connection), "0024")
+    command.upgrade(alembic_config(connection), "0025")
 
 
 def downgrade(connection: Connection) -> None:
-    command.downgrade(alembic_config(connection), "0024")
+    command.downgrade(alembic_config(connection), "0025")
 
 
 @pytest.mark.asyncio
@@ -79,12 +79,12 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
         await database.close()
 
     assert (report.from_revision, report.to_revision, report.steps) == (
-        "0024",
         "0025",
+        "0026",
         1,
     )
     assert after == before
     assert offset is None
     assert admitted == []
     assert differences == []
-    assert version == "0025"
+    assert version == "0026"

@@ -12,8 +12,8 @@ from kora.db.claim_sources_v1 import (
 )
 from kora.db.types import SQLITE
 
-revision: str = "0025"
-down_revision: str | None = "0024"
+revision: str = "0026"
+down_revision: str | None = "0025"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
