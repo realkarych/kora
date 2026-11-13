@@ -84,6 +84,8 @@ A manual retry from the API is the same clear-downstream transaction on the chos
 
 Full outstanding quota returns retryable HTTP 409/API002 with `reason=run_backlog_full`, scope, limit and used count, with no run, accepted receipt or unprocessed trigger event. Do not poison the retry key/24-hour response cache. Matching accepted replay still succeeds when the quota is full, after a deployment or after response loss. Cron/start-sensor/graph-triggered saturation instead records explicit `trigger.rejected` and advances the occurrence cursor atomically; skip records `trigger.skipped`. No hidden occurrence queue or catch-up is added. Existing trigger reads show the latest outcome/reason/time; wait-directed events retain ordinary wake processing.
 
+The read-only approval-cost calculator is implemented by #1517, with [its source and transaction ownership](data-model.md#read-only-approval-aggregation-1517). It neither creates a request nor authorizes delivery. #1447 owns one calculation per original writer transaction, atomic saving with the request, overflow failure and transaction exit before any external effect. Actual producer and replay integration remain required before activating the approval pass.
+
 Workers run a separate loop: claim `created` attempts of their runtime through the API (section 3), prepare the workspace, submit, stream, enforce, finalise.
 
 ## 3. Submission, execution uncertainty and recovery
