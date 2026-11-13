@@ -264,6 +264,9 @@ async def read_history_rows(
     verified: bool = False,
     newest: bool = False,
     reserve_prefix: bool = False,
+    upper: int | None = None,
+    exact: int | None = None,
+    dispatcher_id: str | None = None,
 ) -> tuple[RawGrant, ...]:
     if type(maximum) is not int or not 0 < maximum <= 129:
         raise GrantHistoryRejected()
@@ -275,6 +278,12 @@ async def read_history_rows(
         statement = statement.where(VERIFIED_PREFIX)
     if after is not None:
         statement = statement.where(fields.lease_epoch > after)
+    if upper is not None:
+        statement = statement.where(fields.lease_epoch <= upper)
+    if exact is not None:
+        statement = statement.where(fields.lease_epoch == exact)
+    if dispatcher_id is not None:
+        statement = statement.where(fields.id == dispatcher_id)
     statement = statement.order_by(
         fields.lease_epoch.desc() if newest else fields.lease_epoch
     ).limit(maximum)
