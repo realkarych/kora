@@ -577,7 +577,6 @@ The lock's place in the order of section 12 is after the scope locks and before 
 
 Future contracts, on PostgreSQL and SQLite, with in-process receivers and an injected clock: `test_delivery_survives_restart_and_retry`, `test_late_committing_event_is_delivered`, `test_slow_receiver_holds_no_lock`, `test_sender_crash_and_two_replicas`, `test_destination_checked_at_send`, `test_subscription_lifecycle`. Their setups and assertions are in [protocols.md](protocols.md) section 13; documentation CI runs none of them.
 
-
 ### Trusted admission configuration prerequisite (#1484)
 
 The API initialization owner imports policies and immutable prices before configured application startup completes, following [the bounded producer and replay contract](data-model.md#trusted-admission-initialization-issues-1446-and-1484). Scheduler admission selects stored prices and reads current policy under the common global/namespace scopes; it does not import configuration. The empty default is effective at the earliest supported finite timestamp, so a backward wall-clock step does not remove its availability. Initialization creates no attempt, reservation, execution grant or accepted-output fact; physical admission and its concurrent last-slot checks remain #1446.
