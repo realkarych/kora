@@ -26,6 +26,7 @@ from tests.db.cancel_cause_support import (
     seed_cause_predecessor,
 )
 from tests.db.seed import predecessor_snapshot
+from tests.db.test_claim_source_migration import assert_attempt_schema_extension
 from tests.db.test_db_upgrade_process import events, upgrade
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 from tests.engine.test_outcome_records import prepared
@@ -97,7 +98,9 @@ async def test_outcome_migration_preserves_unrecorded_history(
             22,
         )
         assert after == before.history
-        assert objects == before.schema_objects
+        assert_attempt_schema_extension(
+            before.schema_objects, objects, database.dialect
+        )
         assert values
         assert all(tuple(value) == (None, None, None) for value in values)
         assert tuple(omitted) == (None, None, None)

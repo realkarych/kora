@@ -28,6 +28,7 @@ from tests.db.cancel_cause_support import (
 )
 from tests.db.seed import predecessor_snapshot
 from tests.db.test_attempt_outcome_migration import seed_outcome_predecessor
+from tests.db.test_claim_source_migration import assert_attempt_schema_extension
 from tests.db.test_db_upgrade_process import events, upgrade
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 from tests.engine.test_deadline_records import AT, deadline
@@ -90,7 +91,9 @@ async def test_deadline_migration_preserves_legacy_scalars(
             21,
         )
         assert after == before.history
-        assert objects == before.schema_objects
+        assert_attempt_schema_extension(
+            before.schema_objects, objects, database.dialect
+        )
         assert values
         assert all(
             isinstance(

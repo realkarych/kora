@@ -110,6 +110,8 @@ Backfill processes the original saved value in bounded restartable work, never c
 
 Engine and metadata owners measure bytes, nesting, repeated selections and large individual fields as well as node count, transaction duration and unrelated scheduler progress. Constant descriptor row count alone does not prove short transactions. No new graph/input-validity limit is introduced. The implementation must keep original manifest, descriptor and publication identity consistent through cancellation, crash/replay, stale preparation, backfill and shutdown on both databases.
 
+The internal [Claim source admission](data-model.md#attempt-source-read-admission-issue-1490) records conservative whole-value native/transport quantities and a source revision. It enables admission before selected JSON projection without copying payloads. It is not an exact byte-range descriptor, supplies no selected-history endpoint and does not satisfy the separate staged canonical representation requirement above. Its mutable revision includes request availability changes; reader activation still requires the actual source producer and final authority recheck.
+
 ## 6. Attempt comparison
 
 `GET T/diff?against=` resolves both immutable attempt identities once and returns metadata/digest/availability comparisons, the resolved counterpart, and refs to paged config paths/output pairs. Later continuations bind that resolved counterpart, never re-resolve a default to a newer attempt. Both sides are scoped and content-authorized before content loading; forbidden content-derived differences are omitted with explicit access status.
