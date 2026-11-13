@@ -6,8 +6,8 @@ from sqlalchemy import Boolean, literal_column, text
 from kora.db.deadline_discovery_v1 import INDEXES
 from kora.db.types import POSTGRESQL
 
-revision: str = "0024"
-down_revision: str | None = "0023"
+revision: str = "0025"
+down_revision: str | None = "0024"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 

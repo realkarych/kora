@@ -26,7 +26,7 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
     try:
         async with database.migration_connection() as migrator:
             await migrator.run_sync(
-                lambda sync: command.upgrade(alembic_config(sync), "0023")
+                lambda sync: command.upgrade(alembic_config(sync), "0024")
             )
         case = await execution_case(database)
         before = await case.snapshot(database)
@@ -39,7 +39,7 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
         ):
             await upgrade_database(empty_database_settings)
         async with database.transaction() as writer:
-            assert await writer.run_sync(current_revision) == "0023"
+            assert await writer.run_sync(current_revision) == "0024"
             await writer.exec_driver_sql("DROP INDEX ix_attempt_due_deadline")
         if database.dialect is Dialect.POSTGRESQL:
             if retained_index == "invalid":
@@ -71,8 +71,8 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
                 ids = list(result.scalars())
 
         assert (report.from_revision, report.to_revision, report.steps) == (
-            "0023",
             "0024",
+            "0025",
             1,
         )
         assert repeated.steps == 0
