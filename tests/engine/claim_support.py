@@ -138,15 +138,17 @@ async def wait_for_claim_waiter(database: Database) -> None:
     if database.dialect is Dialect.SQLITE:
         await until(lambda: database.units_in_flight() == 2)
         return
-    async with asyncio.timeout(10), database.read_transaction() as reader:
-        while not await reader.scalar(
-            text(
-                "SELECT EXISTS (SELECT 1 FROM pg_locks "
-                "JOIN pg_stat_activity USING (pid) "
-                "WHERE NOT granted AND datname = current_database())"
-            )
-        ):
-            pass
+    async with asyncio.timeout(10):
+        while True:
+            async with database.read_transaction() as reader:
+                if await reader.scalar(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                        "JOIN pg_stat_activity USING (pid) "
+                        "WHERE NOT granted AND datname = current_database())"
+                    )
+                ):
+                    return
 
 
 async def claim_case(
