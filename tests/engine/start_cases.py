@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import cast
@@ -5,6 +6,7 @@ from typing import cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from kora.api.graph_deployment import PreparedDeployment
 from kora.api.graph_deployment_limits import IDENTITY
 from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database
@@ -70,12 +72,25 @@ async def _graph_id(database: Database, namespace_id: str) -> str:
     return found
 
 
+PREPARED: dict[str, PreparedDeployment] = {}
+
+
+async def prepared_once(
+    evaluator: Evaluator, ir: JsonObject | None = None
+) -> PreparedDeployment:
+    document = skeleton_ir() if ir is None else ir
+    key = json.dumps(document, sort_keys=True)
+    if key not in PREPARED:
+        PREPARED[key] = await prepared(evaluator, document)
+    return PREPARED[key]
+
+
 async def deploy(
     database: Database, evaluator: Evaluator, ir: JsonObject | None = None
 ) -> DeployedGraph:
     namespace_id, token_id = await seeded_namespace(database)
     published = await publish(
-        database, await prepared(evaluator, ir), namespace_id, token_id
+        database, await prepared_once(evaluator, ir), namespace_id, token_id
     )
     return DeployedGraph(
         namespace_id,
@@ -94,7 +109,10 @@ async def publish_version(
     database: Database, evaluator: Evaluator, case: DeployedGraph, ir: JsonObject
 ) -> str:
     published = await publish(
-        database, await prepared(evaluator, ir), case.namespace_id, case.user.token_id
+        database,
+        await prepared_once(evaluator, ir),
+        case.namespace_id,
+        case.user.token_id,
     )
     return published.graph_version_id
 
