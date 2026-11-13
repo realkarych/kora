@@ -26,6 +26,7 @@ from tests.db.cancel_cause_support import (
     seed_cause_predecessor,
 )
 from tests.db.seed import predecessor_snapshot
+from tests.db.test_claim_source_migration import assert_attempt_schema_extension
 from tests.db.test_db_upgrade_process import events, upgrade
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 from tests.engine.test_outcome_records import prepared
@@ -93,11 +94,13 @@ async def test_outcome_migration_preserves_unrecorded_history(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0004",
-            "0026",
-            22,
+            "0027",
+            23,
         )
         assert after == before.history
-        assert objects == before.schema_objects
+        assert_attempt_schema_extension(
+            before.schema_objects, objects, database.dialect
+        )
         assert values
         assert all(tuple(value) == (None, None, None) for value in values)
         assert tuple(omitted) == (None, None, None)
@@ -210,8 +213,8 @@ async def test_outcome_migration_recovers_partial_schema(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0004",
-            "0026",
-            22,
+            "0027",
+            23,
         )
         assert differences == []
         assert stage.database is not None
