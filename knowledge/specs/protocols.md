@@ -2309,7 +2309,7 @@ These are **future executable test contracts**; documentation CI does not run th
 
 ### Agent-secret contracts (ADR-0009, amended 2026-10-18)
 
-These are **future executable test contracts** for issue #42; documentation CI does not run them. Runtime cases run on the Linux CI job, where Docker is available; validation cases run everywhere. Metadata cases run on PostgreSQL and SQLite.
+These are **future executable test contracts** for issue #42; documentation CI does not run them. Runtime cases run on the Linux CI job, where Docker is available; validation cases run everywhere. Metadata cases run on PostgreSQL and SQLite. `test_agent_secret_rule_fails_closed` runs since [#1462](https://github.com/realkarych/kora/issues/1462) against the shared validator pass that deploy uses; `kora validate` does not exist yet and will reuse that pass.
 
 | test | setup and observable assertion |
 |---|---|

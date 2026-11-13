@@ -11,6 +11,8 @@ from kora.ir.agent_secrets import (
 )
 from kora.ir.document import GraphDocument
 from kora.ir.errors import PLACEHOLDER_LOCATION
+from kora.ir.export import export_ir
+from kora.ir.json import JsonObject
 from tests.ir.secret_alias_cases import secret_document, secret_node
 
 Path = tuple[str | int, ...]
@@ -57,6 +59,12 @@ def agent(
     return secret_document({"agent": node})
 
 
+def on_default_runtime(document: GraphDocument, runtime: str) -> GraphDocument:
+    data = export_ir(document)
+    cast("JsonObject", data["runtime"])["runtime"] = runtime
+    return GraphDocument.model_validate(data)
+
+
 def server(network_policy: object = MISSING) -> dict[str, object]:
     return {"type": "stdio", "secret_env": SECRETS, "network_policy": network_policy}
 
@@ -84,6 +92,12 @@ def findings(
             ENFORCING,
             AGENT_PATH,
             id="agent-unknown-runtime",
+        ),
+        pytest.param(
+            on_default_runtime(agent(SECRETS, EGRESS), "docker"),
+            ENFORCING,
+            AGENT_PATH,
+            id="agent-uninstalled-default-runtime",
         ),
         pytest.param(
             agent(network_policy=EGRESS, server=server()),
@@ -123,6 +137,10 @@ def test_agent_secret_rule_fails_closed(
         pytest.param(agent(SECRETS, EGRESS), id="agent-egress"),
         pytest.param(agent(SECRETS, {"egress": []}), id="agent-deny-all"),
         pytest.param(agent(server=server({"egress": []})), id="server-own-policy"),
+        pytest.param(
+            on_default_runtime(agent(SECRETS, EGRESS, runtime="local"), "docker"),
+            id="node-runtime-overrides-default",
+        ),
     ],
 )
 def test_agent_secret_rule_accepts_enforced_policies(document: GraphDocument) -> None:
