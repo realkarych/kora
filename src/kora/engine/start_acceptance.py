@@ -8,7 +8,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, clear_snapshot_error
-from kora.db.graph_value_json import GraphValueRejected
 from kora.db.graph_version_reads import acquire_graph_version
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import event, graph_version, inbound_event, run, run_inputs
@@ -41,6 +40,7 @@ from kora.engine.start_records import (
 )
 from kora.engine.start_replay import (
     ReplayOutcome,
+    StartReadFailed,
     StartReplay,
     read_manual_start_candidate,
     recheck_locked_manual_start_version,
@@ -109,38 +109,11 @@ def _replayed(replay: StartReplay) -> StartAcceptance:
     return StartAcceptance(REPLAYS[replay.outcome], replay.response)
 
 
-async def _select(
-    connection: AsyncConnection,
-    principal: Principal,
-    request: PreparedManualStartRequest,
-    key: str,
-    limits: GraphVersionIdentityLimits,
-) -> StartAcceptance | SelectedStartVersion:
-    candidate = await read_manual_start_candidate(connection, principal, request, key)
-    replay = candidate.replay
-    if replay.outcome is not ReplayOutcome.ABSENT:
-        return _replayed(replay)
-    version_id = candidate.version_id
-    if version_id is None:
-        return StartAcceptance(AcceptanceOutcome.MISSING)
-    status = await connection.scalar(
-        select(graph_version.c.status).where(graph_version.c.id == version_id)
-    )
-    if status != "active":
-        return StartAcceptance(AcceptanceOutcome.UNAVAILABLE)
-    identity = request.identity
-    acquired = await acquire_graph_version(
-        connection,
-        identity.namespace_id,
-        identity.graph_id,
-        version_id,
-        max_encoded_bytes=limits.max_encoded_bytes,
-    )
-    if acquired is None:
-        return StartAcceptance(AcceptanceOutcome.MISSING)
-    return SelectedStartVersion(
-        identity.namespace_id, identity.graph_id, version_id, acquired
-    )
+@dataclass(frozen=True, slots=True)
+class StartCandidate:
+    namespace_id: str
+    graph_id: str
+    version_id: str
 
 
 async def select_manual_start(
@@ -148,18 +121,60 @@ async def select_manual_start(
     principal: Principal,
     request: PreparedManualStartRequest,
     key: str,
+) -> StartAcceptance | StartCandidate:
+    async with database.read_snapshot() as connection:
+        candidate = await read_manual_start_candidate(
+            connection, principal, request, key
+        )
+    replay = candidate.replay
+    if replay.outcome is not ReplayOutcome.ABSENT:
+        return _completed(_replayed(replay))
+    if candidate.version_id is None:
+        return _completed(StartAcceptance(AcceptanceOutcome.MISSING))
+    identity = request.identity
+    return StartCandidate(
+        identity.namespace_id, identity.graph_id, candidate.version_id
+    )
+
+
+async def _acquire(
+    connection: AsyncConnection,
+    candidate: StartCandidate,
+    limits: GraphVersionIdentityLimits,
+) -> StartAcceptance | SelectedStartVersion:
+    status = await connection.scalar(
+        select(graph_version.c.status).where(graph_version.c.id == candidate.version_id)
+    )
+    if status != "active":
+        return StartAcceptance(AcceptanceOutcome.UNAVAILABLE)
+    acquired = await acquire_graph_version(
+        connection,
+        candidate.namespace_id,
+        candidate.graph_id,
+        candidate.version_id,
+        max_encoded_bytes=limits.max_encoded_bytes,
+    )
+    if acquired is None:
+        return StartAcceptance(AcceptanceOutcome.MISSING)
+    return SelectedStartVersion(
+        candidate.namespace_id, candidate.graph_id, candidate.version_id, acquired
+    )
+
+
+async def acquire_manual_start(
+    database: Database,
+    candidate: StartCandidate,
     *,
     limits: GraphVersionIdentityLimits,
 ) -> StartAcceptance | SelectedStartVersion:
-    async def unit(
-        connection: AsyncConnection,
-    ) -> StartAcceptance | SelectedStartVersion:
-        return await _select(connection, principal, request, key, limits)
-
-    selected = await database.read(unit)
-    if isinstance(selected, StartAcceptance):
-        return _completed(selected)
-    return selected
+    try:
+        async with database.read_snapshot() as connection:
+            acquired = await _acquire(connection, candidate, limits)
+    except SQLAlchemyError:
+        raise_private_metadata_error(StartReadFailed())
+    if isinstance(acquired, StartAcceptance):
+        return _completed(acquired)
+    return acquired
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,9 +197,7 @@ def _response(
             graph_version_id=acceptance.facts.pin.version_id,
             status="pending",
         )
-    if capacity.outcome is CapacityOutcome.SKIPPED:
-        return SkippedStart(outcome="skipped", reason="overlap", run_id=None)
-    raise StartRecordRejected()
+    return SkippedStart(outcome="skipped", reason="overlap", run_id=None)
 
 
 def _receipt_values(
@@ -297,6 +310,8 @@ async def _accept(
     identifiers: IdentifierGenerator,
 ) -> StartAcceptance:
     facts = acceptance.facts
+    if not facts.belongs_to(acceptance.request):
+        raise StartRecordRejected()
     recheck = await recheck_locked_manual_start_version(
         connection,
         locks,
@@ -395,7 +410,6 @@ async def commit_manual_start(
         raise
     except (
         SQLAlchemyError,
-        GraphValueRejected,
         ValueError,
         TypeError,
         RecursionError,

@@ -2,14 +2,14 @@ import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import cast
+from typing import Never, Self, cast
 
 from pydantic import MISSING, ValidationError
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.db.graph_version_reads import AcquiredGraphVersion
-from kora.engine.graph_parameters import PARAMETER_INTERPRETATION
+from kora.engine.graph_parameters import read_graph_parameter_binding
 from kora.engine.graph_version_identity import (
     GraphVersionIdentityLimits,
     GraphVersionPin,
@@ -26,10 +26,6 @@ from kora.ir.topology import Node
 from kora.ir.vcs_ref_json import finite_float, refuse_constant, unique_object
 
 EMPTY_PARAMETERS = b"{}"
-CLOSED_EMPTY_PARAMETERS: dict[str, object] = {
-    "interpretation": PARAMETER_INTERPRETATION,
-    "schema": {"type": "object", "properties": {}, "additionalProperties": False},
-}
 
 
 class StartRefusal(StrEnum):
@@ -51,13 +47,70 @@ class SelectedStartVersion:
     acquired: AcquiredGraphVersion
 
 
-@dataclass(frozen=True, slots=True)
+_MANUAL_START_FACTS = object()
+
+
 class ManualStartFacts:
+    __slots__ = (
+        "namespace_id",
+        "pin",
+        "overlap",
+        "timeout",
+        "retention",
+        "_request_digest",
+    )
     namespace_id: str
     pin: GraphVersionPin
     overlap: Overlap
     timeout: str | None
     retention: Retention | MISSING
+    _request_digest: str
+
+    def __new__(
+        cls,
+        issuer: object,
+        request: PreparedManualStartRequest,
+        pin: GraphVersionPin,
+        document: GraphDocument,
+    ) -> Self:
+        if issuer is not _MANUAL_START_FACTS:
+            del issuer, request, pin, document
+            raise TypeError("manual start facts require the facts step")
+        limits = document.runtime.limits
+        facts = super().__new__(cls)
+        for name, value in (
+            ("namespace_id", request.identity.namespace_id),
+            ("pin", pin),
+            ("overlap", resolve_manual_overlap(document.graph.overlap)),
+            (
+                "timeout",
+                None
+                if limits is MISSING or limits.timeout is MISSING
+                else limits.timeout,
+            ),
+            ("retention", document.runtime.retention),
+            ("_request_digest", request.identity.request_digest),
+        ):
+            object.__setattr__(facts, name, value)
+        return facts
+
+    def belongs_to(self, request: PreparedManualStartRequest) -> bool:
+        identity = request.identity
+        return (
+            (identity.namespace_id, identity.graph_id, identity.request_digest)
+            == (self.namespace_id, self.pin.graph_id, self._request_digest)
+            and request.graph_version_id in (None, self.pin.version_id)
+            and request.parameter_bytes() == EMPTY_PARAMETERS
+        )
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        raise AttributeError("manual start facts are immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        raise AttributeError("manual start facts are immutable")
+
+    def __getstate__(self) -> Never:
+        raise TypeError("manual start facts require explicit access")
 
 
 StartFactsResult = ManualStartFacts | StartRefusal | InstallationRefusal
@@ -83,6 +136,23 @@ def _nodes(document: GraphDocument) -> Iterator[Node]:
             yield from body.nodes.values()
 
 
+def declares_agent_secrets(document: GraphDocument) -> bool:
+    for node in _nodes(document):
+        config = node.config
+        if not isinstance(config, AgentConfig):
+            continue
+        servers = () if config.mcp_servers is MISSING else config.mcp_servers.values()
+        if any(
+            declared is not MISSING and bool(declared)
+            for declared in (
+                config.secret_env,
+                *(server.secret_env for server in servers),
+            )
+        ):
+            return True
+    return False
+
+
 def _facts(
     selected: SelectedStartVersion,
     request: PreparedManualStartRequest,
@@ -96,38 +166,22 @@ def _facts(
     ) or request.graph_version_id not in (None, selected.version_id):
         raise GraphValueRejected(GraphValueFailure.INVALID)
     pin, texts = read_acquired_graph_version_texts(selected.acquired, limits=limits)
-    if pin.version_id != selected.version_id:
-        raise GraphValueRejected(GraphValueFailure.INVALID)
     document = GraphDocument.model_validate(_strict_object(texts.ir))
-    contract = _strict_object(texts.execution_contract)
-    if (
-        document.graph.params is not MISSING
-        or contract.get("parameters") != CLOSED_EMPTY_PARAMETERS
-    ):
+    if document.graph.params is not MISSING:
         return StartRefusal.PARAMETERS_UNAVAILABLE
+    read_graph_parameter_binding(
+        document,
+        _strict_object(texts.execution_contract).get("parameters"),
+        max_encoded_bytes=limits.max_encoded_bytes,
+    )
     if request.parameter_bytes() != EMPTY_PARAMETERS:
         return StartRefusal.PARAMETERS
-    if any(
-        isinstance(node.config, AgentConfig)
-        and node.config.secret_env is not MISSING
-        and bool(node.config.secret_env)
-        for node in _nodes(document)
-    ):
+    if declares_agent_secrets(document):
         return StartRefusal.SECRETS
     findings = installation_findings(document, selection)
     if not findings.valid:
         return InstallationRefusal(findings)
-    runtime = document.runtime
-    limits_section = runtime.limits
-    return ManualStartFacts(
-        namespace_id=selected.namespace_id,
-        pin=pin,
-        overlap=resolve_manual_overlap(document.graph.overlap),
-        timeout=None
-        if limits_section is MISSING or limits_section.timeout is MISSING
-        else limits_section.timeout,
-        retention=runtime.retention,
-    )
+    return ManualStartFacts(_MANUAL_START_FACTS, request, pin, document)
 
 
 def read_manual_start_facts(

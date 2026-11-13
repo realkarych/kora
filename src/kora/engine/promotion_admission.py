@@ -50,7 +50,7 @@ def _native_bound(value: object) -> int:
     raise ValueError("promotion admission requires database values")
 
 
-def _record_bound(values: Mapping[str, object], columns: tuple[str, ...]) -> int:
+def record_bound(values: Mapping[str, object], columns: tuple[str, ...]) -> int:
     if not values.keys() <= set(columns):
         raise ValueError("promotion admission contains unknown columns")
     bound = 9 * (len(columns) + 1) + sum(
@@ -94,8 +94,8 @@ async def record_manual_promotion_admission(
             graph_id=scope.graph_id,
             graph_version_id=scope.version_id,
             version=1,
-            run_bytes=_record_bound(run_values, tuple(run.c.keys())),
-            receipt_bytes=_record_bound(receipt_values, tuple(inbound_event.c.keys())),
+            run_bytes=record_bound(run_values, tuple(run.c.keys())),
+            receipt_bytes=record_bound(receipt_values, tuple(inbound_event.c.keys())),
         )
     )
     diagnostics = current_diagnostics()

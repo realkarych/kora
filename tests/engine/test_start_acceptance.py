@@ -3,17 +3,20 @@ from typing import cast
 
 import pytest
 from pydantic import MISSING
-from sqlalchemy import insert, update
+from sqlalchemy import insert, select, update
 
+from kora.api.graph_deployment_limits import IDENTITY
 from kora.cel_eval.thread import Evaluator
-from kora.db.connection import Database
+from kora.db.connection import Database, Dialect
+from kora.db.graph_value_json import GraphValueRejected
 from kora.db.graph_version_reads import acquire_graph_version
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.retention import resolve_retention_snapshot
-from kora.db.tables import event, namespace, run
+from kora.db.tables import event, graph_version, inbound_event, namespace, run
 from kora.engine.graph_execution_contract import check_detached_execution_contract
 from kora.engine.graph_resource_references import GraphResourceScope
-from kora.engine.locks import TransitionLocks
+from kora.engine.locks import Scope, ScopeKind, TransitionLocks
+from kora.engine.promotion_admission import record_bound
 from kora.engine.run_materialization import prepare_run_materialization
 from kora.engine.run_promotion import (
     PromotionOutcome,
@@ -25,11 +28,17 @@ from kora.engine.start_acceptance import (
     AcceptanceOutcome,
     StartAcceptance,
     StartAcceptanceFailed,
+    StartCandidate,
+    acquire_manual_start,
+    select_manual_start,
 )
 from kora.engine.start_facts import (
     InstallationRefusal,
     ManualStartFacts,
+    SelectedStartVersion,
     StartRefusal,
+    declares_agent_secrets,
+    read_manual_start_facts,
 )
 from kora.engine.start_records import (
     AcceptedStart,
@@ -37,12 +46,19 @@ from kora.engine.start_records import (
     decode_start_receipt,
 )
 from kora.ir.deployment_checks import DeploymentSelection
+from kora.ir.document import GraphDocument
 from kora.ir.json import JsonObject
-from tests.api.deployment_cases import AT, OWNER, evaluator, skeleton_ir
-from tests.db.closing import ConnectionLedger
+from kora.protocols.authentication import Principal
+from tests.api.deployment_cases import AT, OWNER, SELECTION, evaluator, skeleton_ir
+from tests.db.closing import ConnectionLedger, until
 from tests.db.seed import FakeClock, Seeder, fixed_randomness
 from tests.engine.graph_output_cases import child
-from tests.engine.lock_support import lock_inventory
+from tests.engine.lock_support import (
+    DEADLINE,
+    held_transaction,
+    lock_inventory,
+    release_and_join,
+)
 from tests.engine.promotion_support import READ_LIMITS
 from tests.engine.start_cases import (
     KEY,
@@ -51,6 +67,7 @@ from tests.engine.start_cases import (
     commit,
     deploy,
     facts_for,
+    publish_version,
     redeploy,
     request_for,
     start,
@@ -145,7 +162,11 @@ async def promote(database: Database, case: DeployedGraph, run_id: str) -> str:
 async def test_manual_start_accepts_a_pending_run(
     database: Database, evaluator: Evaluator
 ) -> None:
-    case = await deploy(database, evaluator, with_runtime(limits={"timeout": "2h"}))
+    case = await deploy(
+        database,
+        evaluator,
+        with_runtime(limits={"timeout": "2h"}, retention={"transcripts": "7d"}),
+    )
 
     response = accepted(await start(database, case, allow_unenforced_secrets=True))
     rows = await start_rows(database)
@@ -188,7 +209,9 @@ async def test_manual_start_accepts_a_pending_run(
         "cel_params_projection": INPUT_SENTINEL,
         "input_encoding_version": 1,
         "allow_unenforced_secrets": True,
-        "retention": resolve_retention_snapshot({}, MISSING).to_json(),
+        "retention": resolve_retention_snapshot(
+            {"transcripts": "7d"}, MISSING
+        ).to_json(),
         "retention_version": 1,
         "started_at": None,
         "target_key": None,
@@ -208,9 +231,16 @@ async def test_manual_start_accepts_a_pending_run(
         "graph_version": case.version_id,
         "rerun_of": None,
     }
-    assert (admission["run_id"], admission["receipt_id"]) == (
+    assert (
+        admission["run_id"],
+        admission["receipt_id"],
+        admission["run_bytes"],
+        admission["receipt_bytes"],
+    ) == (
         response.run_id,
         receipt["id"],
+        record_bound(saved, tuple(run.c.keys())),
+        record_bound(receipt, tuple(inbound_event.c.keys())),
     )
 
 
@@ -304,9 +334,14 @@ async def test_manual_start_refuses_a_full_backlog(
             None,
             StartRefusal.PARAMETERS_UNAVAILABLE,
         ),
+        (
+            with_graph(params={"type": "object"}),
+            {"extra": 1},
+            StartRefusal.PARAMETERS_UNAVAILABLE,
+        ),
         (with_agent_secret(), None, StartRefusal.SECRETS),
     ],
-    ids=["nonempty", "declared", "agent-secret"],
+    ids=["nonempty", "declared", "declared-nonempty", "agent-secret"],
 )
 async def test_manual_start_refuses_parameters_and_secrets(
     database: Database,
@@ -357,30 +392,6 @@ async def test_manual_start_detects_a_changed_latest_version(
 
 
 @pytest.mark.asyncio
-async def test_manual_start_concurrent_duplicates(
-    database: Database, evaluator: Evaluator
-) -> None:
-    case = await deploy(database, evaluator)
-    request = request_for(case)
-    prepared = [await facts_for(database, case, request) for _ in range(2)]
-    facts = [entry for entry in prepared if isinstance(entry, ManualStartFacts)]
-    assert len(facts) == 2
-
-    results = await asyncio.gather(
-        *(
-            commit(database, case, request, entry, seconds=index)
-            for index, entry in enumerate(facts)
-        )
-    )
-    rows = await start_rows(database)
-
-    outcomes = sorted(result.outcome.value for result in results)
-    assert outcomes == ["accepted", "replayed"]
-    assert results[0].response == results[1].response
-    assert (len(rows["run"]), len(rows["receipt"]), len(rows["event"])) == (1, 1, 1)
-
-
-@pytest.mark.asyncio
 async def test_manual_start_rolls_back_and_releases(
     database: Database, evaluator: Evaluator
 ) -> None:
@@ -421,5 +432,251 @@ async def test_manual_start_rolls_back_and_releases(
 
     assert after == before
     assert retried.graph_version_id == case.version_id
+    assert await lock_inventory(database) == []
+    assert database.units_in_flight() == ledger.outstanding == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["service", "ungranted"])
+async def test_manual_start_refuses_unauthorized_principals(
+    database: Database, evaluator: Evaluator, variant: str
+) -> None:
+    case = await deploy(database, evaluator)
+    grants = tuple(
+        grant.model_copy(update={"transcripts": False})
+        for grant in case.user.namespaces
+    )
+    change: dict[str, object] = (
+        {
+            "kind": "service",
+            "approve": False,
+            "platform": False,
+            "runtime": "local",
+            "namespaces": grants,
+        }
+        if variant == "service"
+        else {"namespaces": ()}
+    )
+    intruder = Principal.model_validate(case.user.model_dump() | change)
+    request = request_for(case)
+    facts = await facts_for(database, case, request)
+    assert isinstance(facts, ManualStartFacts)
+
+    selected = await select_manual_start(database, intruder, request, KEY)
+    committed = await commit(database, case, request, facts, principal=intruder)
+    rows = await start_rows(database)
+
+    assert selected == StartAcceptance(AcceptanceOutcome.REFUSED)
+    assert committed == StartAcceptance(AcceptanceOutcome.REFUSED)
+    assert all(not table for table in rows.values())
+
+
+@pytest.mark.asyncio
+async def test_manual_start_facts_bind_their_request(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await deploy(database, evaluator)
+    facts = await facts_for(database, case, request_for(case))
+    assert isinstance(facts, ManualStartFacts)
+
+    newer = await redeploy(database, evaluator, case, "A newer prompt.")
+    selected = await acquire_manual_start(
+        database,
+        StartCandidate(case.namespace_id, case.graph_id, newer),
+        limits=IDENTITY,
+    )
+    assert isinstance(selected, SelectedStartVersion)
+
+    with pytest.raises(StartAcceptanceFailed):
+        await commit(database, case, request_for(case, {"extra": 1}), facts)
+    with pytest.raises(GraphValueRejected):
+        read_manual_start_facts(
+            selected,
+            request_for(case, version=case.version_id),
+            SELECTION,
+            limits=IDENTITY,
+        )
+    with pytest.raises(TypeError):
+        ManualStartFacts(
+            object(),
+            request_for(case),
+            facts.pin,
+            GraphDocument.model_validate(skeleton_ir()),
+        )
+    rows = await start_rows(database)
+
+    assert all(not table for table in rows.values())
+
+
+@pytest.mark.asyncio
+async def test_corrupted_stored_graph_never_executes(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await deploy(database, evaluator)
+    async with database.transaction() as writer:
+        stored = await writer.scalar(
+            select(graph_version.c.ir).where(graph_version.c.id == case.version_id)
+        )
+        assert isinstance(stored, str)
+        assert stored.count("repository") == 1
+        await writer.execute(
+            update(graph_version)
+            .where(graph_version.c.id == case.version_id)
+            .values(ir=stored.replace("repository", "repositorx"))
+        )
+
+    response = accepted(await start(database, case))
+    with pytest.raises(GraphValueRejected):
+        await promote(database, case, response.run_id)
+    rows = await start_rows(database)
+
+    [saved] = rows["run"]
+    assert (saved["status"], saved["started_at"]) == ("pending", None)
+
+
+@pytest.mark.parametrize(
+    ("change", "declares"),
+    [
+        ({}, False),
+        ({"secret_env": {"API_TOKEN": "API_TOKEN"}}, True),
+        ({"mcp_servers": {"tools": {"type": "stdio", "command": "tools"}}}, False),
+        (
+            {
+                "mcp_servers": {
+                    "tools": {
+                        "type": "stdio",
+                        "command": "tools",
+                        "secret_env": {"API_TOKEN": "API_TOKEN"},
+                    }
+                }
+            },
+            True,
+        ),
+    ],
+    ids=["none", "agent", "server-without-secrets", "server"],
+)
+def test_agent_secret_declarations(change: JsonObject, declares: bool) -> None:
+    ir = skeleton_ir()
+    agent_config(ir).update(change)
+
+    found = declares_agent_secrets(GraphDocument.model_validate(ir))
+
+    assert found is declares
+
+
+@pytest.mark.asyncio
+async def test_manual_start_pins_an_older_explicit_version(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await deploy(database, evaluator, with_runtime(limits={"timeout": "2h"}))
+    await publish_version(
+        database, evaluator, case, with_runtime(limits={"timeout": "3h"})
+    )
+
+    response = accepted(await start(database, case, version=case.version_id))
+    rows = await start_rows(database)
+
+    [saved] = rows["run"]
+    assert response.graph_version_id == case.version_id
+    assert (saved["graph_version_id"], saved["limits"]) == (
+        case.version_id,
+        {"timeout": "2h"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_start_refuses_an_inactive_version(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await deploy(database, evaluator)
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(graph_version)
+            .where(graph_version.c.id == case.version_id)
+            .values(status="retired")
+        )
+
+    result = await start(database, case)
+
+    assert result == StartAcceptance(AcceptanceOutcome.UNAVAILABLE)
+    assert all(not table for table in (await start_rows(database)).values())
+
+
+async def wait_for_waiters(database: Database, count: int) -> None:
+    if database.dialect is Dialect.SQLITE:
+        await until(lambda: database.units_in_flight() == count + 1)
+        return
+    async with asyncio.timeout(DEADLINE):
+        while (
+            sum(not granted for _, _, granted in await lock_inventory(database)) < count
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_manual_start_contending_duplicates_accept_once(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await deploy(database, evaluator)
+    request = request_for(case)
+    prepared = [await facts_for(database, case, request) for _ in range(2)]
+    facts = [entry for entry in prepared if isinstance(entry, ManualStartFacts)]
+    assert len(facts) == 2
+    ready, release = asyncio.Event(), asyncio.Event()
+    holder = asyncio.create_task(
+        held_transaction(database, ready, release, (Scope(ScopeKind.GLOBAL),))
+    )
+    await asyncio.wait_for(ready.wait(), DEADLINE)
+
+    starts = [
+        asyncio.create_task(commit(database, case, request, entry, seconds=index))
+        for index, entry in enumerate(facts)
+    ]
+    await wait_for_waiters(database, 2)
+    await release_and_join(release, holder)
+    results = await asyncio.gather(*starts)
+    rows = await start_rows(database)
+
+    assert sorted(result.outcome.value for result in results) == [
+        "accepted",
+        "replayed",
+    ]
+    assert results[0].response == results[1].response
+    assert (len(rows["run"]), len(rows["receipt"]), len(rows["event"])) == (1, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_manual_start_settles_its_unit(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await deploy(database, evaluator)
+    ledger = ConnectionLedger(database)
+    request = request_for(case)
+    facts = await facts_for(database, case, request)
+    assert isinstance(facts, ManualStartFacts)
+    ready, release = asyncio.Event(), asyncio.Event()
+    holder = asyncio.create_task(
+        held_transaction(database, ready, release, (Scope(ScopeKind.GLOBAL),))
+    )
+    await asyncio.wait_for(ready.wait(), DEADLINE)
+    task = asyncio.create_task(commit(database, case, request, facts))
+    await wait_for_waiters(database, 1)
+
+    task.cancel()
+    await release_and_join(release, holder)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    rows = await start_rows(database)
+    replayed = await start(database, case, seconds=1)
+
+    assert {name: len(table) for name, table in rows.items()} == {
+        "run": 1,
+        "run_inputs": 1,
+        "receipt": 1,
+        "event": 1,
+        "admission": 1,
+    }
+    assert isinstance(replayed, StartAcceptance)
+    assert replayed.outcome is AcceptanceOutcome.REPLAYED
     assert await lock_inventory(database) == []
     assert database.units_in_flight() == ledger.outstanding == 0

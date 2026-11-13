@@ -19,6 +19,7 @@ from kora.db.tables import (
 )
 from kora.engine.start_acceptance import (
     StartAcceptance,
+    acquire_manual_start,
     commit_manual_start,
     select_manual_start,
 )
@@ -89,15 +90,21 @@ def agent_config(ir: JsonObject) -> dict[str, object]:
     return nodes["agent"]["config"]
 
 
+async def publish_version(
+    database: Database, evaluator: Evaluator, case: DeployedGraph, ir: JsonObject
+) -> str:
+    published = await publish(
+        database, await prepared(evaluator, ir), case.namespace_id, case.user.token_id
+    )
+    return published.graph_version_id
+
+
 async def redeploy(
     database: Database, evaluator: Evaluator, case: DeployedGraph, prompt: str
 ) -> str:
     ir = skeleton_ir()
     agent_config(ir)["prompt"] = prompt
-    published = await publish(
-        database, await prepared(evaluator, ir), case.namespace_id, case.user.token_id
-    )
-    return published.graph_version_id
+    return await publish_version(database, evaluator, case, ir)
 
 
 def request_for(
@@ -123,9 +130,10 @@ async def facts_for(
     key: str = KEY,
     selection: DeploymentSelection = SELECTION,
 ) -> StartResult | ManualStartFacts:
-    selected = await select_manual_start(
-        database, case.user, request, key, limits=IDENTITY
-    )
+    candidate = await select_manual_start(database, case.user, request, key)
+    if isinstance(candidate, StartAcceptance):
+        return candidate
+    selected = await acquire_manual_start(database, candidate, limits=IDENTITY)
     if isinstance(selected, StartAcceptance):
         return selected
     return read_manual_start_facts(selected, request, selection, limits=IDENTITY)
@@ -139,11 +147,12 @@ async def commit(
     key: str = KEY,
     identifiers: IdentifierGenerator | None = None,
     seconds: int = 0,
+    principal: Principal | None = None,
 ) -> StartAcceptance:
     clock = FakeClock(AT + timedelta(seconds=seconds))
     return await commit_manual_start(
         database,
-        case.user,
+        case.user if principal is None else principal,
         request,
         key,
         facts,
