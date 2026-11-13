@@ -76,7 +76,7 @@ from kora.runner.journal import (
 from kora.runner.peers import kernel_source
 from kora.runner.registry import Running, Submitter, TransitionExecutor
 from tests.support.local_delivery import ReapedSession
-from tests.support.local_peers import identity_of, until
+from tests.support.local_peers import POLL_SECONDS, identity_of, until
 from tests.support.local_runners import (
     NEVER_READY,
     carriers,
@@ -850,7 +850,7 @@ async def until_exited(
         if status.state == "exited":
             return
         assert SystemClock().monotonic_ns() < deadline
-        await asyncio.sleep(0)
+        await asyncio.sleep(POLL_SECONDS)
 
 
 @pytest.mark.asyncio

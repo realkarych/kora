@@ -69,7 +69,12 @@ from tests.plugins.runtime.local.test_command_workspace import (
     step_plan,
 )
 from tests.support.local_delivery import ReapedSession
-from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
+from tests.support.local_peers import (
+    CONDITION_SECONDS,
+    POLL_SECONDS,
+    identity_of,
+    until,
+)
 from tests.support.local_runtime import private_directory
 
 __all__ = ["kora_capture"]
@@ -114,7 +119,7 @@ async def unless_busy(call: Callable[[], Awaitable[T]]) -> T:
         except KoraProtocolError as error:
             if error.code != "workload_busy" or time.monotonic() >= deadline:
                 raise
-        await asyncio.sleep(0)
+        await asyncio.sleep(POLL_SECONDS)
 
 
 async def runtime_answer(
@@ -224,7 +229,7 @@ async def without_stray_children() -> None:
     deadline = time.monotonic() + CONDITION_SECONDS
     while found := stray_children():
         assert time.monotonic() < deadline, f"the test process has children: {found}"
-        await asyncio.sleep(0)
+        await asyncio.sleep(POLL_SECONDS)
 
 
 @asynccontextmanager
