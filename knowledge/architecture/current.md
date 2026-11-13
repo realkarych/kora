@@ -68,7 +68,7 @@ The [package layer table](detailed.md#package-layers) lists packages that do not
 
 ### Size
 
-`src/kora` holds 526 Python modules and about 113,726 lines. The metadata schema has 42 tables and 27 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel`, `kora.cel_eval` or the harness packages; `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
+`src/kora` holds 527 Python modules and about 113,856 lines. The metadata schema has 42 tables and 27 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel`, `kora.cel_eval` or the harness packages; `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
 
 ## 3. How the existing pieces connect
 
