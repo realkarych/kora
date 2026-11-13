@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from alembic import op
 from sqlalchemy import Boolean, literal_column, text
 
-from kora.db.attempt_capacity_v1 import INDEXES
+from kora.db.attempt_capacity_v1 import INDEXES, capacity_index_dialect
 from kora.db.types import POSTGRESQL
 
 revision: str = "0026"
@@ -21,6 +21,8 @@ def _create_index(
     expected_predicate: str | None,
 ) -> None:
     connection = op.get_bind()
+    if capacity_index_dialect(name) not in (None, connection.dialect.name):
+        return
     predicate = (
         postgres_predicate
         if connection.dialect.name == POSTGRESQL

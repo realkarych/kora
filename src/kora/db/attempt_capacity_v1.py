@@ -1,3 +1,6 @@
+from kora.db.types import SQLITE
+
+SQLITE_DEPLOYED_INDEX = "ix_graph_version_deployed_caps"
 PHYSICAL_STATES = ("created", "claimed", "submitted", "running", "finishing")
 PHYSICAL_ROWS = "status IN ('created', 'claimed', 'submitted', 'running', 'finishing')"
 PG_PHYSICAL = (
@@ -33,7 +36,7 @@ INDEXES: tuple[
         "((status)::text = 'active'::text)",
     ),
     (
-        "ix_graph_version_deployed_caps",
+        SQLITE_DEPLOYED_INDEX,
         "graph_version",
         ("graph_id", "number", "id"),
         None,
@@ -41,3 +44,7 @@ INDEXES: tuple[
         None,
     ),
 )
+
+
+def capacity_index_dialect(name: str) -> str | None:
+    return SQLITE if name == SQLITE_DEPLOYED_INDEX else None
