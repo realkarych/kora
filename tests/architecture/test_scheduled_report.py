@@ -57,9 +57,9 @@ LIFETIME_COMMENT = (
 GENERAL_TITLE = "Master push lane failed: macOS general test lanes"
 GENERAL_BODY = (
     "### Impact\n\n"
-    "A lane of the `CI` workflow that runs only for pushes to master did not pass. "
-    "Its tests run on every master commit instead of on every pull request. This "
-    "open issue tracks the failure until the lane passes again.\n\n"
+    "A job of the `CI` workflow did not pass for a push to master. Part of what it "
+    "checks runs only for pushes to master and not in pull requests. This open "
+    "issue tracks the failure until the lane passes again.\n\n"
     "### Failed lane\n\n"
     "- Lane: `scaffold-tests-macos-general`\n"
     "- Result: `failure`\n"
@@ -198,6 +198,15 @@ def passing() -> dict[str, str]:
     return values
 
 
+def master_passing() -> dict[str, str]:
+    values = dict(RUN)
+    for lane in MASTER_PUSH.lanes:
+        values[f"{lane.variable}_RESULT"] = "success"
+        if lane.proof:
+            values[f"{lane.variable}_VERIFIED"] = "true"
+    return values
+
+
 def lane_named(job: str) -> Lane:
     return next(lane for lane in LANES if lane.job == job)
 
@@ -258,7 +267,7 @@ def test_passing_lanes_list_open_issues_without_writing() -> None:
 
 def test_a_failed_master_push_lane_opens_its_own_issue() -> None:
     tracker = RecordingTracker((OpenIssue(31, LIFETIME_TITLE),))
-    environment = {**RUN, "MACOS_GENERAL_LANES_RESULT": "failure"}
+    environment = {**master_passing(), "MACOS_GENERAL_LANES_RESULT": "failure"}
 
     actions = report(environment, tracker, MASTER_PUSH)
 
@@ -271,7 +280,7 @@ def test_a_repeated_master_push_failure_comments_on_its_issue() -> None:
     tracker = RecordingTracker(
         (OpenIssue(31, LIFETIME_TITLE), OpenIssue(40, GENERAL_TITLE))
     )
-    environment = {**RUN, "MACOS_GENERAL_LANES_RESULT": "failure"}
+    environment = {**master_passing(), "MACOS_GENERAL_LANES_RESULT": "failure"}
 
     actions = report(environment, tracker, MASTER_PUSH)
 
@@ -282,9 +291,8 @@ def test_a_repeated_master_push_failure_comments_on_its_issue() -> None:
 
 def test_a_passing_master_push_lane_writes_nothing() -> None:
     tracker = RecordingTracker((OpenIssue(40, GENERAL_TITLE),))
-    environment = {**RUN, "MACOS_GENERAL_LANES_RESULT": "success"}
 
-    actions = report(environment, tracker, MASTER_PUSH)
+    actions = report(master_passing(), tracker, MASTER_PUSH)
 
     assert actions == ()
     assert tracker.created == []
@@ -292,20 +300,41 @@ def test_a_passing_master_push_lane_writes_nothing() -> None:
 
 
 @pytest.mark.parametrize(
-    ("value", "rendered"),
-    [("cancelled", "cancelled"), ("skipped", "skipped"), ("", "missing")],
+    "lane", MASTER_PUSH.lanes, ids=[lane.job for lane in MASTER_PUSH.lanes]
 )
-def test_a_master_push_lane_that_did_not_run_is_reported(
-    value: str, rendered: str
+@pytest.mark.parametrize(
+    ("value", "rendered"),
+    [
+        ("failure", "failure"),
+        ("cancelled", "cancelled"),
+        ("skipped", "skipped"),
+        ("", "missing"),
+    ],
+)
+def test_every_unsuccessful_master_push_lane_opens_its_own_issue(
+    lane: Lane, value: str, rendered: str
 ) -> None:
     tracker = RecordingTracker(())
-    environment = {**RUN, "MACOS_GENERAL_LANES_RESULT": value}
+    environment = {**master_passing(), f"{lane.variable}_RESULT": value}
 
-    report(environment, tracker, MASTER_PUSH)
+    actions = report(environment, tracker, MASTER_PUSH)
 
+    assert actions == (f"opened {lane.job}",)
     [(title, body)] = tracker.created
-    assert title == GENERAL_TITLE
-    assert f"- Result: `{rendered}`\n" in body
+    assert title == f"Master push lane failed: {lane.title}"
+    assert f"- Lane: `{lane.job}`\n- Result: `{rendered}`\n" in body
+
+
+def test_scaffold_evidence_without_its_proof_is_reported_on_a_master_push() -> None:
+    tracker = RecordingTracker(())
+    environment = {**master_passing(), "SCAFFOLD_EVIDENCE_VERIFIED": ""}
+
+    actions = report(environment, tracker, MASTER_PUSH)
+
+    assert actions == ("opened scaffold-evidence",)
+    [(title, body)] = tracker.created
+    assert title == "Master push lane failed: Scaffold evidence"
+    assert "- Result: `unproven`\n" in body
 
 
 @pytest.mark.parametrize(
@@ -605,13 +634,18 @@ def test_report_job_passes_every_lane_result_and_proof() -> None:
     assert table(step["env"]) == expected
 
 
-def test_master_report_job_passes_the_general_macos_lane_result() -> None:
+def test_master_report_job_passes_every_lane_result_and_proof() -> None:
     job = job_of(repository_workflows(), "ci.yml", "report-master-lanes")
     expected = {
         "GITHUB_TOKEN": "${{ github.token }}",
         **{
             f"{lane.variable}_RESULT": f"${{{{ needs.{lane.job}.result }}}}"
             for lane in MASTER_PUSH.lanes
+        },
+        **{
+            f"{lane.variable}_VERIFIED": f"${{{{ needs.{lane.job}.outputs.verified }}}}"
+            for lane in MASTER_PUSH.lanes
+            if lane.proof
         },
     }
 

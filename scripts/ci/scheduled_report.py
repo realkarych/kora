@@ -77,8 +77,8 @@ DAILY = Schedule(
 )
 MASTER_PUSH = Schedule(
     "Master push lane failed",
-    "A lane of the `CI` workflow that runs only for pushes to master did not "
-    "pass. Its tests run on every master commit instead of on every pull request.",
+    "A job of the `CI` workflow did not pass for a push to master. Part of what "
+    "it checks runs only for pushes to master and not in pull requests.",
     (
         Lane(
             "scaffold-tests-macos-general",
@@ -86,6 +86,8 @@ MASTER_PUSH = Schedule(
             "macOS general test lanes",
             False,
         ),
+        Lane("scaffold-evidence", "SCAFFOLD_EVIDENCE", "Scaffold evidence", True),
+        Lane("mutation-tooling", "MUTATION_TOOLING", "Mutation tooling", False),
     ),
 )
 SCHEDULES = {"master-push": MASTER_PUSH}

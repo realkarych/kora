@@ -1149,7 +1149,7 @@ jobs:
 
   report-master-lanes:
     name: Report failed master lanes
-    needs: [scaffold-tests-macos-general]
+    needs: [scaffold-tests-macos-general, scaffold-evidence, mutation-tooling]
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1167,4 +1167,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           MACOS_GENERAL_LANES_RESULT: ${{ needs.scaffold-tests-macos-general.result }}
+          SCAFFOLD_EVIDENCE_RESULT: ${{ needs.scaffold-evidence.result }}
+          SCAFFOLD_EVIDENCE_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}
+          MUTATION_TOOLING_RESULT: ${{ needs.mutation-tooling.result }}
         run: python3 -I -B scripts/ci/scheduled_report.py master-push
