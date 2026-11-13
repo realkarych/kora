@@ -248,6 +248,10 @@ class CaptureProbe(CommandSession):
     def sealing(self) -> bool:
         return self._capture_seal is not None
 
+    def stop_settled(self) -> bool:
+        seal = self._capture_seal
+        return self.stop_outcome() is not None and (seal is None or seal.done())
+
     def stopping(self) -> bool:
         return self._stop.is_set()
 
@@ -308,6 +312,7 @@ async def capture_session(
     gate: bool = False,
     stopper: DomainStopFactory = CommandDomainStop,
     existing: bool = False,
+    attach_after_stop: bool = False,
 ) -> AsyncGenerator[tuple[CaptureProbe, Path]]:
     attempt = private_directory(parent, f"{PATH_MARKER}-{os.getpid()}-capture")
     candidate = attempt / "candidate"
@@ -339,6 +344,8 @@ async def capture_session(
             )
         session.accept(SUBMITTER, prelaunch, work)
         await asyncio.to_thread(session.supervise, SUBMITTER, False, work, lambda: None)
+        if attach_after_stop:
+            await until(session.stop_settled)
         session.attach_drains()
         yield session, attempt
     finally:
@@ -1001,6 +1008,25 @@ async def test_command_capture_releases_resources(
         assert [record[0] for record in records] == ["unsealed", "unsealed"]
     else:
         assert all(record[0] == "complete" for record in records)
+
+
+@pytest.mark.asyncio
+async def test_command_capture_seals_when_the_domain_stops_before_drains_attach(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with capture_session(
+        tmp_path, kora_capture, "print('ok')", attach_after_stop=True
+    ) as (session, _attempt):
+        stopped = session.stop_outcome()
+
+        await session.settle_capture()
+        facts = facts_of(session, "stdout")
+    records = capture_records(kora_capture)
+
+    assert stopped is StopOutcome.CONFIRMED
+    assert [record[0] for record in records] == ["complete", "complete"]
+    assert facts.eof
+    assert facts.size == len(b"ok\n")
 
 
 async def released_after_disconnect(tmp_path: Path, capture: Capture) -> None:

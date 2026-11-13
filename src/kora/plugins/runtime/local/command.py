@@ -428,6 +428,12 @@ class CommandSession:
             self._log,
             self._capture_io,
         )
+        if self.completion() is Completion.COMPLETE:
+            self._start_capture_seal()
+
+    def _start_capture_seal(self) -> None:
+        if self._capture is not None and self._capture_seal is None:
+            self._capture_seal = self._loop.create_task(self._seal_capture())
 
     def supervise(
         self,
@@ -680,7 +686,7 @@ class CommandSession:
         level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
         self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
         if outcome is StopOutcome.CONFIRMED:
-            self._capture_seal = self._loop.create_task(self._seal_capture())
+            self._start_capture_seal()
             if self._workspace.state is not WorkspaceState.ABSENT:
                 with self._lock:
                     self._seal_outcome = "skipped"

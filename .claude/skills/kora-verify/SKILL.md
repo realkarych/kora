@@ -7,7 +7,7 @@ description: Use when planning or reviewing kora changes to code, contracts, doc
 
 Use proposed scope at task entry and the actual diff before readiness. This is the single review router: map review steps from other planning, implementation or shipping skills to its assignments instead of automatically adding another review stage. [AGENTS.md](../../../AGENTS.md) owns the change lifecycle, [the knowledge index](../../../knowledge/README.md) owns contract lookup, and [the coverage checklist](../../../knowledge/reviews/ai-development-setup.md) maps component families, workloads and activation conditions. Load only selected profiles. An assigned reviewer runs that profile directly without restarting the router.
 
-For the MVP, require one successful complete final-head CI execution, focused changed-behavior regressions and applicable independent source review. Do not add consecutive full-CI campaigns, repeated test-file campaigns or extra complete qualification as PR merge prerequisites. Keep repetition within existing behavioral/resource tests, all component safety assertions and scheduled/manual release qualification. The [owner-approved amendment](../../../knowledge/research/bounded-mvp-verification-2026-10-29.md) names the superseded historical requirements and remaining limits. Two unsuccessful repair iterations for one problem require an owner decision; they do not permit merging an unresolved required failure.
+Apply the [Development verification](../../../AGENTS.md#development-verification) rules of AGENTS.md, including the bounded MVP merge requirements and the owner decision after two unsuccessful repairs.
 
 ## GitHub reviewer mode
 
@@ -19,7 +19,7 @@ Collect actual child results and aggregate findings through the native review re
 
 ## Daily master mutation findings
 
-Within the existing verification plan, inspect available applicable master-audit findings through [the contributor procedure](../../../docs/development.md#daily-master-mutation-audit). Preserve source/scope and executed/reused/inconclusive distinctions, check the contract, and search for existing work before proposing a regression or issue. This postmerge evidence adds no PR mutation campaign, required status, score threshold, stale-report hold or independent review stage. Ordinary tooling-fixture regressions remain ordinary tests.
+Within the existing verification plan, inspect available applicable master-audit findings as [AGENTS.md](../../../AGENTS.md#development-verification) requires, through [the contributor procedure](../../../docs/development.md#daily-master-mutation-audit). This postmerge evidence adds no independent review stage.
 
 ## Determine scope
 
@@ -50,11 +50,11 @@ Apply the [observability contract](../../../knowledge/specs/observability.md) to
 
 ## Blocking checks and diagnostics
 
+[Development verification](../../../AGENTS.md#development-verification) in AGENTS.md defines the blocking safety and recovery gates, the classification of numerical checks, the owner approval an existing gate needs before it changes and the bounds on investigation; AGENTS.md's [Testing](../../../AGENTS.md#testing) section makes CI's ten-minute total a feedback target. This router also applies:
+
 1. Keep contract, integrity, authorization, crash/replay, exact resource closure, capacity admission and deterministic work/space bounds blocking. A deadline protecting cleanup, stop escalation or bounded child execution is a safety check, not an optional performance statistic.
-2. A numerical performance gate needs an approved requirement and method: workload and scale, environment, warm-up and intentional caches, observation overhead, metric, meaningful regression size and failure decision. Known bounded runtime state must be described separately from abandoned component resources. Do not infer a leak solely from a small process-wide byte delta.
-3. Measurements without that basis are diagnostics. Preserve adverse observations and limitations; a diagnostic anomaly does not establish a contract defect or justify repeated campaigns until green. A demonstrated unbounded trend, exceeded product quota or unresolved live resource remains a blocking defect.
-4. Existing approved numerical gates remain active until explicit owner approval names the changed gate, replacement evidence and reduced guarantees. Policy review uses the stricter base until that approval; do not retroactively mark an old failed run passed.
-5. CI's ten-minute total is a feedback target. Job/test/cleanup deadlines and required job results remain hard checks. Report the total duration, target misses and maintenance work without changing execution outcomes.
+2. A numerical performance gate needs an approved requirement and method: workload and scale, environment, warm-up and intentional caches, observation overhead, metric, meaningful regression size and failure decision. Known bounded runtime state must be described separately from abandoned component resources.
+3. Measurements without that basis are diagnostics. A demonstrated unbounded trend, exceeded product quota or unresolved live resource remains a blocking defect.
 
 ## Dispatch and collect evidence
 
