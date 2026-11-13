@@ -448,7 +448,11 @@ async def test_usage_api_openapi_declares_service_operation_and_closed_body(
 
     paths = schema["paths"]
     assert isinstance(paths, dict)
-    assert set(paths) == {"/healthz", "/api/v1/attempts/{att}/usage"}
+    assert set(paths) == {
+        "/healthz",
+        "/api/v1/workers",
+        "/api/v1/attempts/{att}/usage",
+    }
     operation = paths["/api/v1/attempts/{att}/usage"]
     assert isinstance(operation, dict)
     post = operation["post"]
