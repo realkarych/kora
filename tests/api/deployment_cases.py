@@ -200,14 +200,11 @@ async def publish(
     namespace_id: str,
     token_id: str,
     owner: str = OWNER,
-    policy: NamespaceSecretPolicy = DEFAULT_POLICY,
 ) -> PublishedGraphVersion:
     return await publish_graph_deployment(
         database,
         deployment,
-        GraphDeploymentTarget(
-            namespace_id, principal(namespace_id, token_id, owner), policy
-        ),
+        GraphDeploymentTarget(namespace_id, principal(namespace_id, token_id, owner)),
         identifiers=IdentifierGenerator(FakeClock(AT).now),
         at=AT,
     )

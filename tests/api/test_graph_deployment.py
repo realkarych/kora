@@ -328,9 +328,7 @@ async def test_deploy_writer_rolls_back_and_releases(
         await publish_graph_deployment(
             database,
             deployment,
-            GraphDeploymentTarget(
-                namespace_id, principal(namespace_id, token_id), DEFAULT_POLICY
-            ),
+            GraphDeploymentTarget(namespace_id, principal(namespace_id, token_id)),
             identifiers=IdentifierGenerator(FakeClock(AT).now, fixed_randomness(7)),
             at=AT,
         )
@@ -364,7 +362,7 @@ async def test_deploy_writer_refuses_a_service_principal_before_reuse(
         await publish_graph_deployment(
             database,
             deployment,
-            GraphDeploymentTarget(namespace_id, service, DEFAULT_POLICY),
+            GraphDeploymentTarget(namespace_id, service),
             identifiers=IdentifierGenerator(FakeClock(AT).now),
             at=AT,
         )
@@ -380,9 +378,7 @@ async def test_deploy_writer_refuses_a_changed_secret_policy(
     deployment = await prepared(evaluator, with_agent_secret(), ALLOW_AGENT_SECRETS)
 
     with pytest.raises(NamespacePolicyChanged):
-        await publish(
-            database, deployment, namespace_id, token_id, policy=ALLOW_AGENT_SECRETS
-        )
+        await publish(database, deployment, namespace_id, token_id)
 
     assert await row_counts(database) == (0, 0)
     assert database.writer_is_free()

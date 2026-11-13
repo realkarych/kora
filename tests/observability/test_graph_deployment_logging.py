@@ -76,12 +76,8 @@ async def test_deploy_writer_logging_is_content_free(
 ) -> None:
     namespace_id, token_id = await seeded_namespace(database)
     deployment = await prepared(evaluator)
-    target = GraphDeploymentTarget(
-        namespace_id, principal(namespace_id, token_id), DEFAULT_POLICY
-    )
-    missing = GraphDeploymentTarget(
-        token_id, principal(token_id, token_id), DEFAULT_POLICY
-    )
+    target = GraphDeploymentTarget(namespace_id, principal(namespace_id, token_id))
+    missing = GraphDeploymentTarget(token_id, principal(token_id, token_id))
     diagnostics = configured_with_reader(
         configure, pipe, LoggingSettings(level=Level.DEBUG)
     )

@@ -45,6 +45,7 @@ class PreparedDeployment:
     inputs: PreparedGraphDeploymentInputs
     source_digest: str
     warnings: DiagnosticCollection
+    secret_policy: NamespaceSecretPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,4 +126,5 @@ async def prepare_graph_deployment(
         prepared,
         _source_digest(document, prepared.logical.digests.ir_digest),
         checks.diagnostics,
+        policy,
     )

@@ -104,7 +104,6 @@ async def deploy(
         await prepared_once(evaluator, ir, policy),
         namespace_id,
         token_id,
-        policy=policy,
     )
     return DeployedGraph(
         namespace_id,

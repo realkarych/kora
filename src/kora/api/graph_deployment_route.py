@@ -155,7 +155,7 @@ async def _deploy(
         published = await publish_graph_deployment(
             services.database,
             outcome,
-            GraphDeploymentTarget(namespace_id, principal, policy),
+            GraphDeploymentTarget(namespace_id, principal),
             identifiers=services.identifiers,
             at=clock.now(),
         )

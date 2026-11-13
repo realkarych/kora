@@ -100,7 +100,6 @@ async def deployed(
         await prepared_once(evaluator, ir, policy),
         namespace_id,
         IdentifierGenerator(AuthorityClock().now).new(),
-        policy=policy,
     )
     return "gv_" + published.graph_version_id
 
