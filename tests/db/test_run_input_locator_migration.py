@@ -25,7 +25,7 @@ from tests.db.test_run_input_storage_migration import SENTINEL, UpgradeObservati
 from tests.support.databases import encoded_sqlite_settings, sqlite_settings
 
 PREDECESSOR = "0020"
-REVISION = "0021"
+HEAD_REVISION = "0022"
 WIDE = 4 * 1024 * 1024
 INDEXES = {SQLITE_RUN_LOCATOR_INDEX, SQLITE_RUN_INPUT_LOCATOR_INDEX}
 PARENT_LOOKUP = "".join(
@@ -192,8 +192,8 @@ async def test_run_input_locators_exclude_noncanonical_historical_keys(
             )
 
         assert observed_encoding == encoding
-        assert report.to_revision == REVISION
-        assert report.steps == 1
+        assert report.to_revision == HEAD_REVISION
+        assert report.steps == 2
         assert before == after
         assert len(after[0]) == len(keys) - 1
         assert len(after[1]) == len(keys) - 2
@@ -231,25 +231,31 @@ async def test_run_input_locator_migration_preserves_existing_schema_and_values(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             PREDECESSOR,
-            REVISION,
-            1,
+            HEAD_REVISION,
+            2,
         )
         assert (repeat.from_revision, repeat.to_revision, repeat.steps) == (
-            REVISION,
-            REVISION,
+            HEAD_REVISION,
+            HEAD_REVISION,
             0,
         )
-        assert revision == REVISION
+        assert revision == HEAD_REVISION
         assert differences == []
         assert before == after
         if database.dialect is Dialect.SQLITE:
-            assert after_indexes == before_indexes | INDEXES
+            assert after_indexes == before_indexes | INDEXES | {"ix_run_status_id"}
         else:
-            assert after_indexes == before_indexes
-            assert not any(
-                statement.startswith(("CREATE ", "ALTER ", "DROP "))
+            assert after_indexes == before_indexes | {"ix_run_status_id"}
+            definitions = [
+                statement
                 for statement in observation.statements
+                if statement.startswith(("CREATE ", "ALTER ", "DROP "))
+            ]
+            assert len(definitions) == 2
+            assert definitions[0] == (
+                "CREATE INDEX CONCURRENTLY ix_run_status_id ON run (status, id)"
             )
+            assert definitions[1].startswith("CREATE TABLE run_promotion_admission (")
         assert locks == database.units_in_flight() == 0
         observation.assert_released()
     finally:
@@ -290,10 +296,10 @@ async def test_run_input_locator_conflict_rolls_back_first_index_and_revision(
         assert SQLITE_RUN_LOCATOR_INDEX not in refused_indexes
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             PREDECESSOR,
-            REVISION,
-            1,
+            HEAD_REVISION,
+            2,
         )
-        assert recovered_indexes == original_indexes | INDEXES
+        assert recovered_indexes == original_indexes | INDEXES | {"ix_run_status_id"}
         assert before == after
         assert database.units_in_flight() == 0
         observation.assert_released()
