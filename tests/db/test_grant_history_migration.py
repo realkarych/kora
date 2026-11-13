@@ -27,12 +27,15 @@ async def test_grant_history_migration_preserves_active_legacy_rows(
 ) -> None:
     database = Database(empty_database_settings)
     old_attempt = tuple(
-        field for field in attempt.c if field.name not in (*TIP_FIELDS, *ACK_FIELDS)
+        field
+        for field in attempt.c
+        if field.name not in (*TIP_FIELDS, *ACK_FIELDS, "current_dispatcher_open")
     )
     old_dispatcher = tuple(
         field
         for field in attempt_dispatcher.c
-        if field.name not in ("process", "prefix_count", "prefix_digest")
+        if field.name
+        not in ("process", "prefix_count", "prefix_digest", "claim_id", "claim_digest")
     )
     try:
         async with database.migration_connection() as connection:
@@ -106,14 +109,14 @@ async def test_grant_history_migration_preserves_active_legacy_rows(
             await writer.execute(insert(attempt_dispatcher).values(**values))
         async with database.migration_connection() as connection:
             with pytest.raises(
-                RuntimeError, match="deadline discovery cannot be downgraded"
+                RuntimeError, match="worker Claims cannot be downgraded"
             ):
                 await connection.run_sync(downgrade)
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0025",
-            "0027",
-            2,
+            "0028",
+            3,
         )
         assert after_attempt == before_attempt
         assert after_dispatcher == before_dispatcher
@@ -206,8 +209,8 @@ async def test_grant_history_upgrade_resumes_after_second_index_failure(
         )
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0025",
-            "0027",
-            2,
+            "0028",
+            3,
         )
         assert differences == []
     finally:

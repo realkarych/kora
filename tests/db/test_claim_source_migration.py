@@ -74,7 +74,13 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
     selected = tuple(
         field
         for field in attempt.c
-        if field.name not in ("acknowledged_segment_offset", *TIP_FIELDS, *ACK_FIELDS)
+        if field.name
+        not in (
+            "acknowledged_segment_offset",
+            "current_dispatcher_open",
+            *TIP_FIELDS,
+            *ACK_FIELDS,
+        )
     )
     try:
         async with database.migration_connection() as writer:
@@ -101,7 +107,7 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
             differences = await reader.run_sync(differences_ignoring_expression_indexes)
         async with database.migration_connection() as writer:
             with pytest.raises(
-                RuntimeError, match="deadline discovery cannot be downgraded"
+                RuntimeError, match="worker Claims cannot be downgraded"
             ):
                 await writer.run_sync(downgrade)
         async with database.read_transaction() as reader:
@@ -111,11 +117,11 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
 
     assert (report.from_revision, report.to_revision, report.steps) == (
         "0024",
-        "0027",
-        3,
+        "0028",
+        4,
     )
     assert after == before
     assert offset is None
     assert admitted == []
     assert differences == []
-    assert version == "0027"
+    assert version == "0028"
