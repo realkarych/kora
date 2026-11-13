@@ -22,6 +22,7 @@ from kora.ir.first_slice_configuration import validate_first_slice_configuration
 from kora.ir.graph_links import COMPONENT, safe_source, validate_graph_links
 from kora.ir.inline_schemas import validate_inline_schemas
 from kora.ir.input_paths import validate_input_paths
+from kora.ir.network_policies import network_policy_findings
 from kora.ir.output_schemas import validate_output_schemas
 from kora.ir.retry_expressions import validate_retry_expressions
 from kora.ir.root_previous_attempts import validate_root_previous_attempt_refs
@@ -227,13 +228,12 @@ def check_deployment_document(
     selection: DeploymentSelection,
     policy: NamespaceSecretPolicy,
 ) -> DeploymentCheckResult:
+    runtimes = {LOCAL_RUNTIME: selection.runtime}
     outcomes = (
         *_pass_outcomes(document),
         (installation_findings(document, selection), True),
-        (
-            agent_secret_findings(document, {LOCAL_RUNTIME: selection.runtime}, policy),
-            True,
-        ),
+        (agent_secret_findings(document, runtimes, policy), True),
+        (network_policy_findings(document, runtimes, policy), True),
     )
     diagnostics = merge_diagnostics(tuple(collection for collection, _ in outcomes))
     complete = not diagnostics.valid or all(established for _, established in outcomes)

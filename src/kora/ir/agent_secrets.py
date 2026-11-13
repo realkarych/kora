@@ -38,7 +38,7 @@ class NamespaceSecretPolicy:
     require_network_enforcement: bool
 
 
-def _declares(secrets: dict[str, str] | MISSING) -> bool:
+def declares_secrets(secrets: dict[str, str] | MISSING) -> bool:
     return secrets is not MISSING and bool(secrets)
 
 
@@ -46,7 +46,7 @@ def _restricts(policy: NetworkPolicy | MISSING) -> bool:
     return policy is not MISSING and policy.egress is not MISSING
 
 
-def _nodes(document: GraphDocument) -> Iterator[tuple[str, Node, Path]]:
+def execution_nodes(document: GraphDocument) -> Iterator[tuple[str, Node, Path]]:
     graph = document.graph
     for name, node in graph.nodes.items():
         yield name, node, ("graph", "nodes", name)
@@ -54,6 +54,15 @@ def _nodes(document: GraphDocument) -> Iterator[tuple[str, Node, Path]]:
     for body_name, body in bodies.items():
         for name, node in body.nodes.items():
             yield name, node, ("graph", "subgraphs", body_name, "nodes", name)
+
+
+def node_runtime(
+    default: str,
+    config: AgentConfig | CommandConfig,
+    runtimes: Mapping[str, RuntimeEnforcement],
+) -> RuntimeEnforcement:
+    name = default if config.runtime is MISSING else config.runtime
+    return runtimes.get(name, UNENFORCED)
 
 
 class AgentSecretChecks:
@@ -69,8 +78,7 @@ class AgentSecretChecks:
         self.collector = DiagnosticCollector()
 
     def runtime(self, config: AgentConfig | CommandConfig) -> RuntimeEnforcement:
-        name = self.default_runtime if config.runtime is MISSING else config.runtime
-        return self.runtimes.get(name, UNENFORCED)
+        return node_runtime(self.default_runtime, config, self.runtimes)
 
     def refuse(
         self, message: str, hint: str, path: Path, node: Node, name: str
@@ -90,7 +98,7 @@ class AgentSecretChecks:
         if self.policy.allow_unenforced_agent_secrets:
             return
         runtime = self.runtime(config)
-        if _declares(config.secret_env) and not (
+        if declares_secrets(config.secret_env) and not (
             _restricts(config.network_policy) and runtime.enforces_network_policy
         ):
             self.refuse(
@@ -102,7 +110,7 @@ class AgentSecretChecks:
             )
         servers = () if config.mcp_servers is MISSING else config.mcp_servers.values()
         for server in servers:
-            if _declares(server.secret_env) and not (
+            if declares_secrets(server.secret_env) and not (
                 _restricts(server.network_policy)
                 and runtime.enforces_network_policy
                 and runtime.isolates_tool_secrets
@@ -119,7 +127,7 @@ class AgentSecretChecks:
     def command(self, config: CommandConfig, node: Node, name: str, path: Path) -> None:
         if (
             self.policy.require_network_enforcement
-            and _declares(config.secret_env)
+            and declares_secrets(config.secret_env)
             and not self.runtime(config).enforces_network_policy
         ):
             self.refuse(
@@ -138,7 +146,7 @@ def agent_secret_findings(
     policy: NamespaceSecretPolicy,
 ) -> DiagnosticCollection:
     checks = AgentSecretChecks(document, runtimes, policy)
-    for name, node, path in _nodes(document):
+    for name, node, path in execution_nodes(document):
         config = node.config
         if isinstance(config, AgentConfig):
             checks.agent(config, node, name, path + ("config",))

@@ -337,6 +337,15 @@ def with_command_secret() -> JsonObject:
     return ir
 
 
+def with_network_policy(ir: JsonObject, node: str, policy: JsonObject) -> JsonObject:
+    nodes = cast(
+        "dict[str, dict[str, dict[str, object]]]",
+        cast("JsonObject", ir["graph"])["nodes"],
+    )
+    nodes[node]["config"]["network_policy"] = policy
+    return ir
+
+
 async def namespace_with_policy(
     database: Database, policy: JsonObject | None = None
 ) -> dict[str, str]:
@@ -376,8 +385,21 @@ async def test_deploy_route_refuses_unenforced_agent_secrets(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ir",
+    [
+        pytest.param(with_agent_secret(), id="secret"),
+        pytest.param(
+            with_network_policy(with_agent_secret(), "agent", {"egress": []}),
+            id="secret-with-policy",
+        ),
+    ],
+)
 async def test_deploy_route_deploys_agent_secrets_the_namespace_allows(
-    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    ir: JsonObject,
 ) -> None:
     headers = await namespace_with_policy(database, asdict(ALLOW_AGENT_SECRETS))
     app = application(
@@ -385,9 +407,7 @@ async def test_deploy_route_deploys_agent_secrets_the_namespace_allows(
     )
 
     async with client_for(app) as client:
-        allowed = await client.post(
-            PATH, json=body(with_agent_secret()), headers=headers
-        )
+        allowed = await client.post(PATH, json=body(ir), headers=headers)
 
     assert allowed.status_code == 201
     assert await rows(database) == (1, 1)
@@ -437,4 +457,44 @@ async def test_deploy_route_refuses_against_the_saved_namespace_policy(
     details = envelope.model_dump(mode="json")["error"]["details"]
     assert (refused.status_code, envelope.error.code) == (status, code)
     assert [error["path"] for error in details.get("errors", [])] == paths
+    assert await rows(database) == (0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ir", "node"),
+    [
+        pytest.param(
+            with_network_policy(skeleton_ir(), "agent", {"egress": ["example.com"]}),
+            "agent",
+            id="agent",
+        ),
+        pytest.param(
+            with_network_policy(skeleton_ir(), "gate", {"egress": []}),
+            "gate",
+            id="command",
+        ),
+    ],
+)
+async def test_deploy_route_refuses_unenforced_network_policies(
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    ir: JsonObject,
+    node: str,
+) -> None:
+    headers = await namespace_with_policy(database, asdict(ALLOW_AGENT_SECRETS))
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+
+    async with client_for(app) as client:
+        refused = await client.post(PATH, json=body(ir), headers=headers)
+
+    envelope = error_of(refused)
+    errors = envelope.model_dump(mode="json")["error"]["details"]["errors"]
+    assert (refused.status_code, envelope.error.code) == (422, "API003")
+    assert [(error["code"], error["path"]) for error in errors] == [
+        ("IR028", ["graph", "nodes", node, "config", "network_policy"])
+    ]
     assert await rows(database) == (0, 0)
