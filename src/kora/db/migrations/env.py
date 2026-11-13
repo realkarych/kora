@@ -18,18 +18,21 @@ from kora.db.types import (
     UsdAmount,
     UtcTimestamp,
 )
+from kora.db.usage_source import UsageSourceText
 
 TYPES_MODULE: str = "kora.db.types"
 RENDERED_TYPES: tuple[
     type[CollatedText],
     type[JsonDocument],
     type[OutcomePayloadText],
+    type[UsageSourceText],
     type[UsdAmount],
     type[UtcTimestamp],
 ] = (
     CollatedText,
     JsonDocument,
     OutcomePayloadText,
+    UsageSourceText,
     UsdAmount,
     UtcTimestamp,
 )
@@ -40,7 +43,10 @@ def render_item(
 ) -> str | Literal[False]:
     if type_ != "type" or not isinstance(obj, RENDERED_TYPES):
         return False
-    autogen_context.imports.add(f"import {TYPES_MODULE}")
+    module = (
+        "kora.db.usage_source" if isinstance(obj, UsageSourceText) else TYPES_MODULE
+    )
+    autogen_context.imports.add(f"import {module}")
     if isinstance(obj, CollatedText):
         length = (
             f", postgresql_length={obj.postgresql_length}"
@@ -48,7 +54,7 @@ def render_item(
             else ""
         )
         return f"{TYPES_MODULE}.CollatedText({obj.length}{length})"
-    return f"{TYPES_MODULE}.{type(obj).__name__}()"
+    return f"{module}.{type(obj).__name__}()"
 
 
 def run_migrations() -> None:

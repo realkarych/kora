@@ -25,9 +25,10 @@ from kora.db.migrations import (
 from kora.db.migrations import environment as environment_module
 from kora.db.tables import metadata
 from kora.db.types import OutcomePayloadText
+from kora.db.usage_source import UsageSourceText
 from tests.support.warning_filters import expression_index_warnings_ignored
 
-HEAD_REVISION: str = "0023"
+HEAD_REVISION: str = "0024"
 
 
 def differences_ignoring_expression_indexes(connection: Connection) -> list[str]:
@@ -68,7 +69,7 @@ async def test_migration_reaches_head_and_matches_the_tables(
     assert (report.from_revision, report.to_revision, report.steps) == (
         None,
         HEAD_REVISION,
-        23,
+        24,
     )
     assert (rerun.from_revision, rerun.to_revision, rerun.steps) == (
         HEAD_REVISION,
@@ -145,7 +146,7 @@ def test_script_template_renders_without_comments(tmp_path: Path) -> None:
 RenderItem: TypeAlias = Callable[[str, object, AutogenContext], str | Literal[False]]
 
 
-def render_outcome_probe(connection: Connection) -> tuple[str, frozenset[str]]:
+def render_custom_types_probe(connection: Connection) -> tuple[str, frozenset[str]]:
     config = environment_module.alembic_config(connection)
     script = ScriptDirectory.from_config(config)
     results: list[tuple[str, frozenset[str]]] = []
@@ -166,7 +167,10 @@ def render_outcome_probe(connection: Connection) -> tuple[str, frozenset[str]]:
             return renderer(type_, value, autogen)
 
         table = Table(
-            "outcome_render_probe", MetaData(), Column("payload", OutcomePayloadText())
+            "custom_types_render_probe",
+            MetaData(),
+            Column("payload", OutcomePayloadText()),
+            Column("source", UsageSourceText()),
         )
         code = render_python_code(
             UpgradeOps([CreateTableOp.from_table(table)]),
@@ -183,11 +187,13 @@ def render_outcome_probe(connection: Connection) -> tuple[str, frozenset[str]]:
 
 
 @pytest.mark.asyncio
-async def test_generated_outcome_type_has_its_constructor_and_import(
+async def test_generated_custom_types_have_their_constructors_and_imports(
     database: Database,
 ) -> None:
     async with database.migration_connection() as connection:
-        rendered, imports = await connection.run_sync(render_outcome_probe)
+        rendered, imports = await connection.run_sync(render_custom_types_probe)
 
     assert "kora.db.types.OutcomePayloadText()" in rendered
     assert "import kora.db.types" in imports
+    assert "kora.db.usage_source.UsageSourceText()" in rendered
+    assert "import kora.db.usage_source" in imports

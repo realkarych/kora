@@ -94,6 +94,7 @@ from kora.db.types import (
     UtcTimestamp,
     collated_text,
 )
+from kora.db.usage_source import UsageSourceText
 from kora.db.worker_registration_v1 import (
     EVENT_NAMESPACE_SCOPE,
     domain_elements,
@@ -708,6 +709,7 @@ usage_record: Table = Table(
     Column("basis", name(), nullable=False),
     Column("billing_class", name(), nullable=False),
     Column("usd_estimate", UsdAmount(), nullable=True),
+    Column("same_basis_usd_floor", UsdAmount(), nullable=True),
     Column("reported_usd", UsdAmount(), nullable=True),
     document("known_token_fields", nullable=True),
     document("cache_creation_by_ttl", nullable=True),
@@ -740,7 +742,7 @@ usage_record: Table = Table(
         name="normalization",
     ),
     flag("delta_of_session_totals"),
-    document("source"),
+    Column("source", UsageSourceText(), nullable=False),
     Column("worker_id", name(), nullable=True),
     Column("image_digest", name(), nullable=True),
     *audit_columns(),

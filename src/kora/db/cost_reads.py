@@ -32,6 +32,7 @@ from kora.db.tables import (
     usage_record,
 )
 from kora.db.types import JsonValue, canonical_json, parse_json
+from kora.db.usage_source import source_text
 from kora.ir.cost import PriceRevision, RunCost, UsageCoverage, UsageRow, format_money
 from kora.ir.json import JsonShapeError, parse_json_object
 
@@ -409,6 +410,29 @@ def usage_value(row: RowMapping) -> UsageRead:
     )
 
 
+def usage_projection(
+    connection: AsyncConnection,
+) -> Sequence[ColumnElement[object] | ColumnElement[str] | ColumnElement[int]]:
+    return [
+        *(
+            item
+            for name in USAGE_SCALARS
+            if name != "observed_at"
+            for item in scalar_projection(connection, usage_record.c[name])
+        ),
+        *payload_projection(connection, usage_record.c.observed_at, 128),
+        *(
+            item
+            for name in USAGE_TEXT
+            for item in scalar_projection(connection, usage_record.c[name])
+        ),
+        *payload_projection(connection, usage_record.c.known_token_fields, 512),
+        *payload_projection(connection, usage_record.c.cache_creation_by_ttl, 256),
+        *payload_projection(connection, usage_record.c.usd_estimate, 128),
+        *payload_projection(connection, usage_record.c.reported_usd, 128),
+    ]
+
+
 async def read_usage_page(
     connection: AsyncConnection,
     namespace_id: str,
@@ -417,24 +441,7 @@ async def read_usage_page(
     limit: int = 64,
 ) -> tuple[UsageRead, ...]:
     statement = (
-        select(
-            *(
-                item
-                for name in USAGE_SCALARS
-                if name != "observed_at"
-                for item in scalar_projection(connection, usage_record.c[name])
-            ),
-            *payload_projection(connection, usage_record.c.observed_at, 128),
-            *(
-                item
-                for name in USAGE_TEXT
-                for item in scalar_projection(connection, usage_record.c[name])
-            ),
-            *payload_projection(connection, usage_record.c.known_token_fields, 512),
-            *payload_projection(connection, usage_record.c.cache_creation_by_ttl, 256),
-            *payload_projection(connection, usage_record.c.usd_estimate, 128),
-            *payload_projection(connection, usage_record.c.reported_usd, 128),
-        )
+        select(*usage_projection(connection))
         .select_from(attempt_run_join(usage_record.join(attempt)))
         .where(
             run.c.namespace_id == namespace_id,
@@ -464,7 +471,21 @@ async def read_usage_source(
     )
     if row is None:
         raise CostReadRefused()
-    document = payload(row, "source", SOURCE_BYTE_LIMIT)
+    return usage_source_value(row)
+
+
+def usage_source_value(row: RowMapping) -> JsonValue:
+    admit_projection(row)
+    try:
+        raw = required_text(row["source"])
+        document = parse_json(raw)
+        if (
+            len(source_text(document, ascii_only=False).encode("utf-8"))
+            > SOURCE_BYTE_LIMIT
+        ):
+            raise CostReadRefused()
+    except (ValueError, RecursionError, UnicodeError) as error:
+        raise CostReadRefused() from error
     if row["normalization_version"] is None:
         return document
     if row["normalization_version"] != 1:
