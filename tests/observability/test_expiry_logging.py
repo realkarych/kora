@@ -29,6 +29,8 @@ async def test_expiry_diagnostics_exclude_private_metadata(
     database: Database, failure: bool
 ) -> None:
     case = await execution_case(database, timeout="0s")
+    if failure:
+        case.promotion.clock.advance(1)
     ledger = ConnectionLedger(database)
     generator = IdentifierGenerator(case.promotion.clock.now, fixed_randomness(1000))
     if failure:
