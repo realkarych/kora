@@ -8,6 +8,7 @@ from sqlalchemy import insert, select, update
 from kora.api.application import create_application
 from kora.api.exchange import ApiExchange
 from kora.api.worker_claims_route import WorkerClaimsRoute
+from kora.api.worker_history_route import WorkerHistoryRoute
 from kora.cel_eval.thread import Evaluator
 from kora.conformance.capture import Capture, captured
 from kora.db.connection import Database
@@ -55,7 +56,11 @@ def poller(database: Database, clock: AuthorityClock) -> WorkerClaimPoll:
 
 
 async def application(
-    database: Database, capture: Capture, clock: AuthorityClock, case: ClaimCase
+    database: Database,
+    capture: Capture,
+    clock: AuthorityClock,
+    case: ClaimCase,
+    history: WorkerHistoryRoute | None = None,
 ) -> ApiExchange:
     async with database.transaction() as writer:
         await writer.execute(
@@ -69,6 +74,7 @@ async def application(
         clock,
         RequestIds(),
         worker_claims=WorkerClaimsRoute(poller(database, clock)),
+        worker_history=history,
     )
 
 

@@ -18,6 +18,7 @@ class RouteName(StrEnum):
     GRAPH_RUNS = "/api/v1/namespaces/{ns}/graphs/{graph}/runs"
     WORKERS = "/api/v1/workers"
     WORKER_CLAIMS = "/api/v1/workers/{worker_id:path}/claims"
+    WORKER_HISTORY = "/api/v1/attempts/{att}/grants"
 
 
 ROUTE_METHODS: dict[RouteName, frozenset[str]] = {
@@ -27,6 +28,7 @@ ROUTE_METHODS: dict[RouteName, frozenset[str]] = {
     RouteName.GRAPH_RUNS: frozenset({"POST"}),
     RouteName.WORKERS: frozenset({"POST"}),
     RouteName.WORKER_CLAIMS: frozenset({"POST"}),
+    RouteName.WORKER_HISTORY: frozenset({"GET"}),
 }
 REQUIRED_ROUTES: frozenset[RouteName] = frozenset({RouteName.HEALTH, RouteName.SCHEMA})
 PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
@@ -36,6 +38,7 @@ PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
         RouteName.GRAPH_RUNS,
         RouteName.WORKERS,
         RouteName.WORKER_CLAIMS,
+        RouteName.WORKER_HISTORY,
     }
 )
 

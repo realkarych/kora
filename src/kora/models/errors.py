@@ -79,7 +79,7 @@ class EmptyDetails(WireRecord):
 
 
 class ConflictDetails(WireRecord):
-    reason: Literal["lock_timeout"]
+    reason: Literal["lock_timeout", "grant_history_conflict"]
 
 
 class LimitScope(WireRecord):
