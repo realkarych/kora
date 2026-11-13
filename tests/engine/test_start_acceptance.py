@@ -48,11 +48,20 @@ from kora.engine.start_records import (
     StartRecordRejected,
     decode_start_receipt,
 )
+from kora.ir.agent_secrets import UNENFORCED
 from kora.ir.deployment_checks import DeploymentSelection
 from kora.ir.document import GraphDocument
 from kora.ir.json import JsonObject
 from kora.protocols.authentication import Principal
-from tests.api.deployment_cases import AT, OWNER, SELECTION, evaluator, skeleton_ir
+from tests.api.deployment_cases import (
+    ALLOW_AGENT_SECRETS,
+    AT,
+    OWNER,
+    SELECTION,
+    evaluator,
+    skeleton_ir,
+    with_agent_secret,
+)
 from tests.db.closing import ConnectionLedger, until
 from tests.db.seed import FakeClock, Seeder, fixed_randomness
 from tests.engine.graph_output_cases import child
@@ -95,13 +104,6 @@ def with_runtime(**settings: object) -> JsonObject:
 def with_graph(**settings: object) -> JsonObject:
     ir = skeleton_ir()
     child(ir, "graph").update(cast("JsonObject", settings))
-    return ir
-
-
-def with_agent_secret() -> JsonObject:
-    ir = skeleton_ir()
-    ir["secrets"] = {"aliases": {"API_TOKEN": "secret://env/API_TOKEN"}}
-    agent_config(ir)["secret_env"] = {"API_TOKEN": "API_TOKEN"}
     return ir
 
 
@@ -353,7 +355,7 @@ async def test_manual_start_refuses_parameters_and_secrets(
     params: JsonObject | None,
     refusal: StartRefusal,
 ) -> None:
-    case = await deploy(database, evaluator, ir)
+    case = await deploy(database, evaluator, ir, ALLOW_AGENT_SECRETS)
 
     result = await start(database, case, params, allow_unenforced_secrets=True)
     rows = await start_rows(database)
@@ -368,7 +370,9 @@ async def test_manual_start_rechecks_the_installation(
 ) -> None:
     case = await deploy(database, evaluator)
 
-    result = await start(database, case, selection=DeploymentSelection("claude"))
+    result = await start(
+        database, case, selection=DeploymentSelection("claude", UNENFORCED)
+    )
 
     assert isinstance(result, InstallationRefusal)
     assert [finding.code for finding in result.diagnostics.errors] == ["IR018"]

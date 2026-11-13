@@ -19,6 +19,7 @@ from kora.db.graph_value_json import (
 )
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
 from kora.engine.graph_types import read_document
+from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.deployment_checks import (
     DeploymentSelection,
     check_deployment_document,
@@ -44,6 +45,7 @@ class PreparedDeployment:
     inputs: PreparedGraphDeploymentInputs
     source_digest: str
     warnings: DiagnosticCollection
+    secret_policy: NamespaceSecretPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +94,7 @@ async def prepare_graph_deployment(
     ir: JsonObject,
     selectors: GraphDeploymentSelectors,
     selection: DeploymentSelection,
+    policy: NamespaceSecretPolicy,
     evaluator: Evaluator,
 ) -> DeploymentPreparation:
     read = _read(ir)
@@ -100,7 +103,7 @@ async def prepare_graph_deployment(
     text, document = read
     if not _selected(document, selectors):
         return DeploymentRefusal.SELECTORS
-    checks = check_deployment_document(document, selection)
+    checks = check_deployment_document(document, selection, policy)
     if not checks.complete:
         return DeploymentRefusal.INCOMPLETE
     if not checks.diagnostics.valid:
@@ -123,4 +126,5 @@ async def prepare_graph_deployment(
         prepared,
         _source_digest(document, prepared.logical.digests.ir_digest),
         checks.diagnostics,
+        policy,
     )

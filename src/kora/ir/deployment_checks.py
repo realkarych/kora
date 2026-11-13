@@ -2,6 +2,11 @@ from dataclasses import dataclass
 
 from pydantic import MISSING
 
+from kora.ir.agent_secrets import (
+    NamespaceSecretPolicy,
+    RuntimeEnforcement,
+    agent_secret_findings,
+)
 from kora.ir.approval_defaults import validate_approval_defaults
 from kora.ir.approval_predicates import validate_approval_response_predicates
 from kora.ir.branch_expressions import validate_branch_expressions
@@ -55,6 +60,7 @@ COMPLETED: EventSpec = CATALOG.register(
 @dataclass(frozen=True, slots=True)
 class DeploymentSelection:
     harness: str
+    runtime: RuntimeEnforcement
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,11 +223,17 @@ def merge_diagnostics(
 
 
 def check_deployment_document(
-    document: GraphDocument, selection: DeploymentSelection
+    document: GraphDocument,
+    selection: DeploymentSelection,
+    policy: NamespaceSecretPolicy,
 ) -> DeploymentCheckResult:
     outcomes = (
         *_pass_outcomes(document),
         (installation_findings(document, selection), True),
+        (
+            agent_secret_findings(document, {LOCAL_RUNTIME: selection.runtime}, policy),
+            True,
+        ),
     )
     diagnostics = merge_diagnostics(tuple(collection for collection, _ in outcomes))
     complete = not diagnostics.valid or all(established for _, established in outcomes)

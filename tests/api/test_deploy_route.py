@@ -1,9 +1,10 @@
 import json
+from dataclasses import asdict
 from typing import cast
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from starlette.types import Message
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
@@ -11,17 +12,19 @@ from kora.cel_eval.binding import load_binding
 from kora.cel_eval.thread import EvaluationThread, Settings
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
-from kora.db.tables import graph, graph_version
+from kora.db.tables import graph, graph_version, namespace
 from kora.ir.json import JsonObject
 from kora.models.errors import ApiErrorEnvelope
 from kora.models.graphs import DeployResponse
 from tests.api.deployment_cases import (
+    ALLOW_AGENT_SECRETS,
     GRAPH,
     HARNESS,
     NAMESPACE,
     preparer,
     skeleton_ir,
     unresolved_approval,
+    with_agent_secret,
 )
 from tests.api.support import (
     HttpCall,
@@ -320,4 +323,118 @@ async def test_deploy_route_treats_a_disconnected_body_as_a_refusal(
     assert call.status == 422
     assert ApiErrorEnvelope.model_validate_json(call.body).error.code == "API003"
     assert "api.request.failed" not in events
+    assert await rows(database) == (0, 0)
+
+
+def with_command_secret() -> JsonObject:
+    ir = skeleton_ir()
+    ir["secrets"] = {"aliases": {"API_TOKEN": "secret://env/API_TOKEN"}}
+    nodes = cast(
+        "dict[str, dict[str, dict[str, object]]]",
+        cast("JsonObject", ir["graph"])["nodes"],
+    )
+    nodes["gate"]["config"]["secret_env"] = {"API_TOKEN": "API_TOKEN"}
+    return ir
+
+
+async def namespace_with_policy(
+    database: Database, policy: JsonObject | None = None
+) -> dict[str, str]:
+    case = await seed_case(database, NAMESPACE)
+    if policy is not None:
+        async with database.transaction() as writer:
+            await writer.execute(
+                update(namespace)
+                .where(namespace.c.id == case.principal.namespaces[0].namespace_id)
+                .values(policy=policy)
+            )
+    return {"Authorization": str(case.request.authorization)}
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_refuses_unenforced_agent_secrets(
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+) -> None:
+    headers = await namespace_with_policy(database)
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+
+    async with client_for(app) as client:
+        refused = await client.post(
+            PATH, json=body(with_agent_secret()), headers=headers
+        )
+
+    envelope = error_of(refused)
+    errors = envelope.model_dump(mode="json")["error"]["details"]["errors"]
+    assert (refused.status_code, envelope.error.code) == (422, "API003")
+    assert [(error["code"], error["path"]) for error in errors] == [
+        ("IR015", ["graph", "nodes", "agent", "config", "secret_env"])
+    ]
+    assert "API_TOKEN" not in refused.text
+    assert await rows(database) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_deploy_route_deploys_agent_secrets_the_namespace_allows(
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+) -> None:
+    headers = await namespace_with_policy(database, asdict(ALLOW_AGENT_SECRETS))
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+
+    async with client_for(app) as client:
+        allowed = await client.post(
+            PATH, json=body(with_agent_secret()), headers=headers
+        )
+
+    assert allowed.status_code == 201
+    assert await rows(database) == (1, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("policy", "ir", "status", "code", "paths"),
+    [
+        pytest.param(
+            {"require_network_enforcement": True},
+            with_command_secret(),
+            422,
+            "API003",
+            [["graph", "nodes", "gate", "config", "secret_env"]],
+            id="command-enforcement",
+        ),
+        pytest.param(
+            {"allow_unenforced_agent_secrets": "true"},
+            with_agent_secret(),
+            500,
+            "API010",
+            [],
+            id="invalid-policy",
+        ),
+    ],
+)
+async def test_deploy_route_refuses_against_the_saved_namespace_policy(
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    policy: JsonObject,
+    ir: JsonObject,
+    status: int,
+    code: str,
+    paths: list[list[str]],
+) -> None:
+    headers = await namespace_with_policy(database, policy)
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+
+    async with client_for(app) as client:
+        refused = await client.post(PATH, json=body(ir), headers=headers)
+
+    envelope = error_of(refused)
+    details = envelope.model_dump(mode="json")["error"]["details"]
+    assert (refused.status_code, envelope.error.code) == (status, code)
+    assert [error["path"] for error in details.get("errors", [])] == paths
     assert await rows(database) == (0, 0)
