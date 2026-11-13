@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from kora.db.graph_value_json import TextBudget
+from kora.db.usage_context import UsageBinding
 from kora.engine.graph_execution_contract import CheckedExecutionContract
 from kora.engine.graph_types import read_document
 from kora.engine.usage_acceptance import UsageMapping, UsageRefusal, UsageRejected
@@ -9,13 +10,7 @@ from kora.ir.cost import Basis, BillingClass
 
 
 @dataclass(frozen=True, repr=False)
-class UsageContext:
-    namespace_id: str
-    run_id: str
-    graph_id: str
-    graph_version_id: str
-    execution_contract_digest: str
-    node_path: str
+class UsageContext(UsageBinding):
     mapping: UsageMapping
 
 
