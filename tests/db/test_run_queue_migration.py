@@ -25,7 +25,7 @@ from tests.engine.test_run_queue import acquire, queue_case
 from tests.support.databases import encoded_sqlite_settings
 
 PREDECESSOR = "0018"
-HEAD_REVISION = "0023"
+HEAD_REVISION = "0024"
 WIDE = 4 * 1024 * 1024
 
 
@@ -102,7 +102,7 @@ async def test_queue_index_upgrade_recovers_and_preserves_existing_history(
         assert (report.from_revision, report.to_revision, report.steps) == (
             PREDECESSOR,
             HEAD_REVISION,
-            5,
+            6,
         )
         assert state is QueueState.OLDER_PENDING
         assert before == after

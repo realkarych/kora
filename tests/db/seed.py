@@ -467,6 +467,7 @@ def predecessor_snapshot(
         selected = tuple(
             cast(column, Text).label(column.name)
             if (table_name == "run" and column.name == "target_key")
+            or (table_name == "usage_record" and column.name == "source")
             or (
                 table_name == "worker"
                 and column.name in {"incarnation_id", "execution_domain_id"}
