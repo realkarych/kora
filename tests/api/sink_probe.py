@@ -9,14 +9,18 @@ from pydantic import StrictBool, StrictInt
 from kora.api.application import create_application
 from kora.api.exchange import COMPONENT
 from kora.api.worker_registration_route import WorkerRegistrationRoute
+from kora.api.worker_usage_route import WorkerUsageRoute
 from kora.db.connection import Database, parse_database_url
 from kora.observability import Level, LoggingSettings, configure_process
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
 from kora.protocols.boundary import BoundaryModel
 from kora.protocols.time import SystemClock
 from tests.api.support import RequestIds, client_for
+from tests.api.usage_support import report, usage_path
 from tests.api.worker_support import CAPABILITIES, registration
 from tests.db.closing import ConnectionLedger, reached
+from tests.engine.test_graph_execution_contract import LIMITS
+from tests.engine.worker_usage_support import usage_case
 from tests.plugins.authentication.support import seed_case
 from tests.plugins.storage.sink_probe import fill
 
@@ -48,15 +52,6 @@ def run(sink: str, configuration: Path) -> SinkReport:
     )
     database = Database(parse_database_url(data))
     ledger = ConnectionLedger(database)
-    app = create_application(
-        StaticTokenAuthenticator({}, database),
-        diagnostics,
-        clock,
-        RequestIds(),
-        worker_registration=WorkerRegistrationRoute(
-            database, {"local": CAPABILITIES}, clock, diagnostics
-        ),
-    )
     completed = 0
 
     async def exercise() -> None:
@@ -64,6 +59,27 @@ def run(sink: str, configuration: Path) -> SinkReport:
         try:
             case = await seed_case(database, "api-sink")
             service = await seed_case(database, "worker-sink", "service")
+            body = registration(service)
+            body = body.model_copy(
+                update={"process": body.process.model_copy(update={"pid": 1235})}
+            )
+            usage = await usage_case(database)
+            app = create_application(
+                StaticTokenAuthenticator({}, database),
+                diagnostics,
+                usage.clock,
+                RequestIds(),
+                worker_registration=WorkerRegistrationRoute(
+                    database, {"local": CAPABILITIES}, usage.clock, diagnostics
+                ),
+                worker_usage=WorkerUsageRoute(
+                    database,
+                    LIMITS,
+                    usage.clock,
+                    usage.identifiers,
+                    lock_timeout_ms=1000,
+                ),
+            )
             headers = {"Authorization": str(case.request.authorization)}
             async with client_for(app) as client:
                 for _ in range(32):
@@ -80,10 +96,17 @@ def run(sink: str, configuration: Path) -> SinkReport:
                             headers={
                                 "Authorization": str(service.request.authorization)
                             },
-                            json=registration(service).model_dump(mode="json"),
+                            json=body.model_dump(mode="json"),
                         )
                     ).status_code == 200
-                    completed += 4
+                    assert (
+                        await client.post(
+                            usage_path(usage),
+                            headers={"Authorization": "Bearer " + usage.bearer_token},
+                            json=report(usage).model_dump(mode="json"),
+                        )
+                    ).status_code == 200
+                    completed += 5
         finally:
             await database.close()
 

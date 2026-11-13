@@ -12,7 +12,11 @@ REQUEST_METHOD = "_request_json"
 CLIENT_RECEIVER = "client"
 PARAMETER = re.compile(r"\{[^}]*\}")
 EXCLUDED_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
-    {("GET", "/healthz"), ("POST", "/api/v1/workers")}
+    {
+        ("GET", "/healthz"),
+        ("POST", "/api/v1/workers"),
+        ("POST", "/api/v1/attempts/{}/usage"),
+    }
 )
 
 
