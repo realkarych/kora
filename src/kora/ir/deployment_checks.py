@@ -171,7 +171,7 @@ class InstallationChecks:
             )
 
 
-def _installation_findings(
+def installation_findings(
     document: GraphDocument, selection: DeploymentSelection
 ) -> DiagnosticCollection:
     checks = InstallationChecks(selection)
@@ -221,7 +221,7 @@ def check_deployment_document(
 ) -> DeploymentCheckResult:
     outcomes = (
         *_pass_outcomes(document),
-        (_installation_findings(document, selection), True),
+        (installation_findings(document, selection), True),
     )
     diagnostics = merge_diagnostics(tuple(collection for collection, _ in outcomes))
     complete = not diagnostics.valid or all(established for _, established in outcomes)

@@ -258,6 +258,23 @@ def _checked_graph_version_identity(
     return CheckedGraphVersionIdentity(pair.ir, pair.execution_contract, values, pin)
 
 
+def read_acquired_graph_version_texts(
+    row: AcquiredGraphVersion, *, limits: GraphVersionIdentityLimits
+) -> tuple[GraphVersionPin, EncodedGraphValues]:
+    try:
+        pin = GraphVersionPin(
+            row.graph_id, row.id, _transport_digest(row.digests[1], row.encoding)
+        )
+        values, _ = _acquired_values(row, pin, limits)
+        return pin, values
+    except UnicodeDecodeError:
+        reason = GraphValueFailure.INVALID
+    except GraphValueRejected as rejection:
+        reason = rejection.reason
+    del row
+    raise_safe(GraphValueRejected(reason))
+
+
 def read_graph_version_identity(
     row: GraphVersionRow | AcquiredGraphVersion,
     pin: GraphVersionPin,
