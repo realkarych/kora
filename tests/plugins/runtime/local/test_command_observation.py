@@ -27,6 +27,10 @@ from kora.plugins.runtime.local.channel import (
     read_observation,
 )
 from kora.plugins.runtime.local.command import COMMAND, COMMAND_STOP, COMPONENT
+from kora.plugins.runtime.local.command_stop import (
+    STOP_DETAIL_FIELDS,
+    STOP_STATUS_FIELDS,
+)
 from kora.plugins.runtime.local.control import observe_command
 from kora.plugins.runtime.local.reaper import adopted_pids
 from kora.plugins.runtime.local.runtime import LocalRuntime
@@ -117,6 +121,26 @@ def test_observation_diagnostic_tail_preserves_late_stop_and_observation(
         },
         {"event": "runtime.local.command", "outcome": "observed", "waited_ms": 22},
     ]
+
+
+def test_observation_stop_projection_retains_only_fixed_boolean_evidence(
+    kora_capture: Capture,
+) -> None:
+    logger = kora_capture.diagnostics.logger(COMPONENT)
+    fields = {name: True for name in (*STOP_DETAIL_FIELDS, *STOP_STATUS_FIELDS)}
+    logger.emit(COMMAND_STOP, outcome="private-outcome", waited_ms=1, **fields)
+
+    evidence = observation_diagnostics(kora_capture, Completion.UNRESOLVED, 421)
+
+    assert evidence["post_teardown_events"] == [
+        {
+            "event": "runtime.local.command_stop",
+            "outcome": "invalid",
+            "waited_ms": 1,
+            **fields,
+        }
+    ]
+    assert "private-outcome" not in json.dumps(evidence)
 
 
 def checked_out(

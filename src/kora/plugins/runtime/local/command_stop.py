@@ -12,6 +12,7 @@ from kora.protocols.time import Clock
 from kora.runner.identity import (
     PROCESS_SCAN_ENTRIES,
     SCAN_NS,
+    CensusCondition,
     CommandRead,
     IdentityState,
     NativeIdentityReader,
@@ -20,6 +21,20 @@ from kora.runner.identity import (
 GRACE_NS: Final[int] = 5_000_000_000
 POLL_SECONDS: Final[float] = 0.05
 CENSUS_RETRY_NS: Final[int] = 250_000_000
+STOP_DETAIL_FIELDS: Final[tuple[str, ...]] = (
+    *(condition.value for condition in CensusCondition),
+    "last_census_available",
+    "last_census_complete",
+    "members_retained",
+    "group_ambiguous",
+    "member_capacity",
+    "stop_cutoff",
+)
+STOP_STATUS_FIELDS: Final[tuple[str, ...]] = (
+    "stop_details_available",
+    "native_run_unresolved",
+    "native_close_unresolved",
+)
 
 
 class StopOutcome(StrEnum):
@@ -54,6 +69,24 @@ class CommandDomainStop:
         self.members: set[ProcessIdentity] = set()
         self.ambiguous_group = False
         self.next_reap_wake = 0
+        self.observed: set[CensusCondition] = set()
+        self.last_census_complete: bool | None = None
+        self.member_capacity = False
+        self.stop_cutoff = False
+
+    def diagnostic_snapshot(self) -> tuple[tuple[str, bool], ...]:
+        return (
+            *(
+                (condition.value, condition in self.observed)
+                for condition in CensusCondition
+            ),
+            ("last_census_available", self.last_census_complete is not None),
+            ("last_census_complete", self.last_census_complete is True),
+            ("members_retained", bool(self.members)),
+            ("group_ambiguous", self.ambiguous_group),
+            ("member_capacity", self.member_capacity),
+            ("stop_cutoff", self.stop_cutoff),
+        )
 
     def stop(self, started_ns: int) -> StopOutcome:
         escalate = started_ns + GRACE_NS
@@ -72,6 +105,7 @@ class CommandDomainStop:
             had_members = bool(self.members)
             self._forget_stopped(cutoff)
             if self.clock.monotonic_ns() >= cutoff:
+                self.stop_cutoff = True
                 return False
             signalled.intersection_update(self.members)
             if self.clock.monotonic_ns() >= next_census or (
@@ -89,18 +123,24 @@ class CommandDomainStop:
                     ),
                 )
                 self.ambiguous_group = self.ambiguous_group or census.ambiguous_group
+                self.observed.update(census.observed)
+                self.last_census_complete = census.complete
                 members = {member.process.identity for member in census.members}
                 if len(self.members | members) > PROCESS_SCAN_ENTRIES:
+                    self.member_capacity = True
                     self._signal_members(requested, cutoff, signalled)
                     return False
                 self.members.update(members)
                 if census.complete and not self.members and not self.ambiguous_group:
-                    return self.clock.monotonic_ns() < cutoff
+                    in_time = self.clock.monotonic_ns() < cutoff
+                    self.stop_cutoff = self.stop_cutoff or not in_time
+                    return in_time
                 self._signal_members(requested, cutoff, signalled)
                 next_census = self.clock.monotonic_ns() + CENSUS_RETRY_NS
             remaining = (cutoff - self.clock.monotonic_ns()) / 1_000_000_000
             if remaining > 0:
                 time.sleep(min(remaining, POLL_SECONDS))
+        self.stop_cutoff = True
         return False
 
     def _forget_stopped(self, cutoff: int) -> None:

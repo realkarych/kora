@@ -29,6 +29,8 @@ from kora.plugins.runtime.local.capture import (
 from kora.plugins.runtime.local.channel import LogName, delivery_error
 from kora.plugins.runtime.local.child_owner import ChildOwner
 from kora.plugins.runtime.local.command_stop import (
+    STOP_DETAIL_FIELDS,
+    STOP_STATUS_FIELDS,
     CommandDomainStop,
     DomainStopFactory,
     StopOutcome,
@@ -116,7 +118,14 @@ COMMAND_STOP: Final[EventSpec] = CATALOG.register(
         COMPONENT,
         Level.INFO,
         "the attempt runner settled command-domain stop",
-        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+        {
+            "outcome": FieldKind.STRING,
+            "waited_ms": FieldKind.INTEGER,
+            **{
+                name: FieldKind.BOOLEAN
+                for name in (*STOP_DETAIL_FIELDS, *STOP_STATUS_FIELDS)
+            },
+        },
     )
 )
 SEAL: Final[EventSpec] = CATALOG.register(
@@ -685,22 +694,45 @@ class CommandSession:
     ) -> StopOutcome:
         marker = b"KORA_ATTEMPT_TOKEN=" + token.reveal().encode("ascii")
         executor = NativeExecutor(1, 1)
-        try:
-            outcome = await executor.run(
-                lambda: self._stopper(
-                    pid, marker, self._clock, self._reaper.wake, prelaunch
-                ).stop(started_ns)
+        details: tuple[tuple[str, bool], ...] = ()
+        run_unresolved = close_unresolved = False
+
+        def stop() -> tuple[StopOutcome, tuple[tuple[str, bool], ...]]:
+            stopper = self._stopper(
+                pid, marker, self._clock, self._reaper.wake, prelaunch
             )
+            outcome = stopper.stop(started_ns)
+            evidence = (
+                stopper.diagnostic_snapshot()
+                if isinstance(stopper, CommandDomainStop)
+                else ()
+            )
+            return outcome, evidence
+
+        try:
+            outcome, details = await executor.run(stop)
         except NativeIOUnresolved:
             outcome = StopOutcome.UNRESOLVED
+            run_unresolved = True
         finally:
             try:
                 await executor.close()
             except NativeIOUnresolved:
                 outcome = StopOutcome.UNRESOLVED
+                close_unresolved = True
+                details = ()
         waited = max(0, (self._clock.monotonic_ns() - started_ns) // 1_000_000)
         level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
-        self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
+        self._log.emit_at(
+            level,
+            COMMAND_STOP,
+            outcome=outcome,
+            waited_ms=waited,
+            stop_details_available=bool(details),
+            native_run_unresolved=run_unresolved,
+            native_close_unresolved=close_unresolved,
+            **dict(details),
+        )
         if outcome is StopOutcome.CONFIRMED:
             with self._lock:
                 self._observing = True

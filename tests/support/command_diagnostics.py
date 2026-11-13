@@ -9,6 +9,10 @@ from kora.conformance.capture import (
     CaptureTimeout,
 )
 from kora.ir.json import JsonObject, JsonValue
+from kora.plugins.runtime.local.command_stop import (
+    STOP_DETAIL_FIELDS,
+    STOP_STATUS_FIELDS,
+)
 from kora.plugins.runtime.local.workload_session import Completion
 
 DIAGNOSTIC_FIELDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
@@ -56,6 +60,11 @@ def event_diagnostics(capture: Capture) -> JsonObject:
         }
         for field in fields:
             projected[field] = diagnostic_number(record.get(field))
+        if name == "runtime.local.command_stop":
+            for field in (*STOP_DETAIL_FIELDS, *STOP_STATUS_FIELDS):
+                if field in record:
+                    value = record[field]
+                    projected[field] = value if type(value) is bool else "invalid"
         if len(selected) == 16:
             omitted += 1
         selected.append(projected)

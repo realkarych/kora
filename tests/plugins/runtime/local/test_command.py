@@ -30,7 +30,11 @@ from kora.plugins.runtime.local.channel import (
     control_request,
     read_delivery,
 )
-from kora.plugins.runtime.local.command_stop import CommandDomainStop
+from kora.plugins.runtime.local.command_stop import (
+    STOP_DETAIL_FIELDS,
+    CommandDomainStop,
+    StopOutcome,
+)
 from kora.plugins.runtime.local.control import (
     attested,
     connected,
@@ -59,6 +63,7 @@ from kora.runner.filesystem import (
 )
 from kora.runner.identity import (
     SCAN_NS,
+    CensusCondition,
     CommandPIDInventory,
     CommandRead,
     IdentityState,
@@ -1098,6 +1103,14 @@ def runtime_outcomes(path: Path, event: str) -> list[str]:
     return found
 
 
+def stopped_evidence(path: Path) -> JsonObject:
+    for line in path.read_text().splitlines():
+        record: JsonObject = json.loads(line)
+        if record.get("event") == "runtime.local.command_stop":
+            return record
+    raise AssertionError("command stop evidence is unavailable")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["ordinary", "resistant", "handoff", "unmarked"])
 async def test_exited_command_settles_observed_descendants_without_status(
@@ -1175,6 +1188,7 @@ async def test_command_stop_leaves_foreign_token_lookalike_alive(
                 outcomes = runtime_outcomes(log, "runtime.local.command_stop")
                 alive = unrelated.poll() is None
                 contents = log.read_text()
+                evidence = stopped_evidence(log)
         finally:
             if unrelated.stdin is not None:
                 unrelated.stdin.close()
@@ -1186,6 +1200,10 @@ async def test_command_stop_leaves_foreign_token_lookalike_alive(
     assert outcomes == ["confirmed"]
     assert token not in contents
     assert canary not in contents
+    assert evidence["stop_details_available"] is True
+    assert evidence["last_census_complete"] is True
+    assert evidence["members_retained"] is False
+    assert all(type(evidence[field]) is bool for field in STOP_DETAIL_FIELDS)
 
 
 @contextmanager
@@ -1261,6 +1279,7 @@ async def test_command_stop_confirms_only_prelaunch_opaque_processes(
             )
             outcomes = runtime_outcomes(log, "runtime.local.command_stop")
             alive = child.poll() is None
+            evidence = stopped_evidence(log)
     absent, final_observation = reader.command_member(
         child.pid, os.getpgrp(), b"KORA_ATTEMPT_TOKEN=synthetic"
     )
@@ -1268,10 +1287,15 @@ async def test_command_stop_confirms_only_prelaunch_opaque_processes(
     assert alive
     assert absent is None
     assert final_observation is CommandRead.UNSTABLE
+    assert evidence["stop_details_available"] is True
+    assert evidence["native_run_unresolved"] is False
+    assert evidence["native_close_unresolved"] is False
     if sys.platform == "darwin":
         assert member is None
         assert observation is CommandRead.OPAQUE
         assert outcomes == (["confirmed"] if already_present else ["unresolved"])
+        assert evidence["saw_opaque"] is True
+        assert evidence["last_census_complete"] is already_present
     else:
         assert member is not None
         assert member.owned
@@ -1366,6 +1390,39 @@ def test_empty_command_confirmation_preserves_follow_up_group_evidence(
     assert confirmation.complete is complete
     assert confirmation.ambiguous_group is ambiguous
     assert confirmation.members == ()
+    if follow_up is None:
+        assert confirmation.observed == frozenset(
+            {CensusCondition.INVENTORY_UNAVAILABLE}
+        )
+    elif not follow_up.complete:
+        assert confirmation.observed == frozenset(
+            {
+                CensusCondition.CONFIRMATION_CHANGED,
+                CensusCondition.INVENTORY_INCOMPLETE,
+            }
+        )
+    elif follow_up != first:
+        assert confirmation.observed == frozenset(
+            {CensusCondition.CONFIRMATION_CHANGED}
+        )
+    else:
+        assert confirmation.observed == frozenset()
+
+
+def test_command_stop_diagnostics_distinguish_cutoff_before_census() -> None:
+    clock = SystemClock()
+    stop = CommandDomainStop(os.getpgrp(), b"private-marker", clock, lambda: None)
+    expired_start = clock.monotonic_ns() - 100_000_000_000
+
+    outcome = stop.stop(expired_start)
+    snapshot = stop.diagnostic_snapshot()
+
+    assert outcome is StopOutcome.UNRESOLVED
+    assert dict(snapshot) == {
+        **{field: False for field in STOP_DETAIL_FIELDS},
+        "stop_cutoff": True,
+    }
+    assert "private-marker" not in repr(snapshot)
 
 
 class CommandSignalProbe(CommandDomainStop):
