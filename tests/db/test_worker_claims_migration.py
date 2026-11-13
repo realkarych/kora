@@ -75,8 +75,8 @@ async def test_worker_claim_migration_preserves_legacy_grants_and_recovers(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0027",
-            "0028",
-            1,
+            "0029",
+            2,
         )
         assert repeated.steps == 0
         assert after_attempt == before_attempt

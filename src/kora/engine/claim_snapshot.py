@@ -45,8 +45,8 @@ from kora.db.run_input_reads import (
 )
 from kora.engine.attempt_inputs import read_attempt_inputs
 from kora.engine.claim_material import (
-    ClaimRuntimeSelection,
     PreparedClaimMaterial,
+    RuntimeSelector,
     prepare_claim_material,
 )
 from kora.engine.claim_sources import DecodedClaimSources, decode_claim_sources
@@ -295,7 +295,7 @@ def _native_object(payload: bytes, encoding: str) -> JsonObject:
 def _prepare_claim_snapshot(
     acquired: AcquiredClaimSnapshot,
     pin: GraphVersionPin,
-    selection: ClaimRuntimeSelection,
+    selection: RuntimeSelector,
     limits: ClaimSnapshotLimits,
 ) -> PreparedClaimSnapshot:
     binding = acquired.sources.binding
@@ -374,7 +374,7 @@ def _prepare_claim_snapshot(
 def prepare_claim_snapshot(
     acquired: AcquiredClaimSnapshot,
     pin: GraphVersionPin,
-    selection: ClaimRuntimeSelection,
+    selection: RuntimeSelector,
     limits: ClaimSnapshotLimits,
 ) -> PreparedClaimSnapshot:
     try:

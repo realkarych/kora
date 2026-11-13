@@ -381,8 +381,8 @@ async def test_sqlite_ordinal_migration_rolls_back_first_index_on_second_conflic
         assert retained_indexes & INDEXES == {ORDINAL_INVALID_INDEX}
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             PREDECESSOR,
-            "0028",
-            12,
+            "0029",
+            13,
         )
         assert before == after
         assert failed_custody == recovered_custody == original_custody

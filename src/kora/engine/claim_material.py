@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
@@ -77,6 +78,11 @@ class SelectedClaimNode:
     outputs: list[JsonObject]
     resources: list[JsonValue]
     secret_aliases: JsonObject
+
+
+RuntimeSelector = (
+    ClaimRuntimeSelection | Callable[[SelectedClaimNode], ClaimRuntimeSelection]
+)
 
 
 def select_claim_node(
@@ -180,7 +186,7 @@ def _prepare(
     node_name: str,
     input_bindings: JsonObject,
     price: PriceRevision,
-    selection: ClaimRuntimeSelection,
+    selection: RuntimeSelector,
 ) -> PreparedClaimMaterial:
     scope = checked.scope
     binding = params.binding
@@ -192,6 +198,7 @@ def _prepare(
     ):
         raise ClaimWireRejected()
     node = select_claim_node(checked, node_name)
+    selected_runtime = selection(node) if callable(selection) else selection
     if input_bindings.keys() != set(node.input_names):
         raise ClaimWireRejected()
     params_bytes = encode_run_input_value(params.value, max_bytes=MAX_PARAMS_BYTES)
@@ -210,7 +217,7 @@ def _prepare(
             "execution_context": node.context,
             "input_bindings": input_bindings,
             "output_contract": node.outputs,
-            "limits": effective_claim_limits(node, selection),
+            "limits": effective_claim_limits(node, selected_runtime),
             "secret_aliases": node.secret_aliases,
             "resources": node.resources,
             "price_table_id": price.id,
@@ -247,7 +254,7 @@ def prepare_claim_material(
     node_name: str,
     input_bindings: JsonObject,
     price: PriceRevision,
-    selection: ClaimRuntimeSelection,
+    selection: RuntimeSelector,
 ) -> PreparedClaimMaterial:
     try:
         result = _prepare(checked, params, node_name, input_bindings, price, selection)

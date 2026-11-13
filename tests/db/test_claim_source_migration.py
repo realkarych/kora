@@ -107,7 +107,7 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
             differences = await reader.run_sync(differences_ignoring_expression_indexes)
         async with database.migration_connection() as writer:
             with pytest.raises(
-                RuntimeError, match="worker Claims cannot be downgraded"
+                RuntimeError, match="worker Claim polling cannot be downgraded"
             ):
                 await writer.run_sync(downgrade)
         async with database.read_transaction() as reader:
@@ -117,11 +117,11 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
 
     assert (report.from_revision, report.to_revision, report.steps) == (
         "0024",
-        "0028",
-        4,
+        "0029",
+        5,
     )
     assert after == before
     assert offset is None
     assert admitted == []
     assert differences == []
-    assert version == "0028"
+    assert version == "0029"
