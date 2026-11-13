@@ -1,11 +1,9 @@
-import math
 from collections.abc import Mapping
-from datetime import datetime
-from typing import cast
 
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from kora.db.native_values import native_value_bound
 from kora.db.tables import inbound_event, run, run_promotion_admission
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.locks import COMPONENT, Scope, ScopeKind, TransitionLocks
@@ -22,39 +20,11 @@ PREPARED: EventSpec = CATALOG.register(
 )
 
 
-def _native_bound(value: object) -> int:
-    if value is None:
-        return 64
-    if type(value) is bool:
-        return 32
-    if type(value) is datetime:
-        return 64
-    if type(value) is int:
-        return 64 + 2 * len(str(value))
-    if type(value) is float and math.isfinite(value):
-        return 1024
-    if type(value) is str:
-        return 64 + 12 * len(value.encode("utf-8"))
-    if type(value) is dict:
-        fields = cast(dict[object, object], value)
-        if not all(type(key) is str for key in fields):
-            raise ValueError("promotion admission requires string member names")
-        return 64 + sum(
-            32 + _native_bound(key) + _native_bound(child)
-            for key, child in fields.items()
-        )
-    if type(value) is list:
-        return 64 + sum(
-            32 + _native_bound(child) for child in cast(list[object], value)
-        )
-    raise ValueError("promotion admission requires database values")
-
-
 def record_bound(values: Mapping[str, object], columns: tuple[str, ...]) -> int:
     if not values.keys() <= set(columns):
         raise ValueError("promotion admission contains unknown columns")
     bound = 9 * (len(columns) + 1) + sum(
-        _native_bound(values.get(column)) for column in columns
+        native_value_bound(values.get(column)) for column in columns
     )
     if bound >= 2**63:
         raise ValueError("promotion admission exceeds native integer capacity")

@@ -1,4 +1,5 @@
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI
@@ -28,6 +29,7 @@ from kora.api.routes import (
 )
 from kora.api.run_trigger_route import trigger_handler
 from kora.api.worker_registration_route import WorkerRegistrationRoute
+from kora.engine.admission_initialization import AdmissionInitialization
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
 from kora.models.runs import AcceptedRun, SkippedRun, TriggerRequest
@@ -128,8 +130,16 @@ def create_application(
     deployment: GraphServices | None = None,
     *,
     worker_registration: WorkerRegistrationRoute | None = None,
+    admission_initialization: AdmissionInitialization | None = None,
 ) -> ApiExchange:
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncGenerator[None]:
+        if admission_initialization is not None:
+            await admission_initialization.initialize(diagnostics)
+        yield
+
     framework = FastAPI(
+        lifespan=lifespan,
         title="kora",
         version="1",
         debug=False,
