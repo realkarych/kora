@@ -11,23 +11,28 @@ from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import api_token, graph_version, namespace
+from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.json import JsonObject
 from kora.models.errors import ApiErrorEnvelope
 from kora.models.runs import AcceptedRun, SkippedRun
 from kora.protocols.authentication import Principal
 from tests.api.deployment_cases import (
+    ALLOW_AGENT_SECRETS,
+    DEFAULT_POLICY,
     GRAPH,
     HARNESS,
     NAMESPACE,
     evaluator,
     preparer,
     publish,
+    save_secret_policy,
     skeleton_ir,
+    with_agent_secret,
 )
 from tests.api.support import api_capture, application, client_for, deployment_services
 from tests.db.seed import Seeder
 from tests.engine.graph_output_cases import child
-from tests.engine.start_cases import agent_config, prepared_once, start_rows
+from tests.engine.start_cases import prepared_once, start_rows
 from tests.plugins.authentication.support import AuthorityClock, seed_case
 
 __all__ = ["api_capture", "evaluator", "preparer"]
@@ -88,10 +93,11 @@ async def deployed(
     evaluator: Evaluator,
     namespace_id: str,
     ir: JsonObject | None = None,
+    policy: NamespaceSecretPolicy = DEFAULT_POLICY,
 ) -> str:
     published = await publish(
         database,
-        await prepared_once(evaluator, ir),
+        await prepared_once(evaluator, ir, policy),
         namespace_id,
         IdentifierGenerator(AuthorityClock().now).new(),
     )
@@ -343,18 +349,18 @@ async def test_trigger_route_refuses_unsupported_versions(
     code: str,
 ) -> None:
     headers, namespace_id = await user(database)
-    ir = skeleton_ir()
-    if change == "secrets":
-        ir["secrets"] = {"aliases": {"API_TOKEN": "secret://env/API_TOKEN"}}
-        agent_config(ir)["secret_env"] = {"API_TOKEN": "API_TOKEN"}
-    elif change == "parameters":
+    await save_secret_policy(database, namespace_id, ALLOW_AGENT_SECRETS)
+    ir = with_agent_secret() if change == "secrets" else skeleton_ir()
+    if change == "parameters":
         child(ir, "graph")["params"] = {"type": "object"}
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     )
 
     async with client_for(app) as client:
-        version = await deployed(database, evaluator, namespace_id, ir)
+        version = await deployed(
+            database, evaluator, namespace_id, ir, ALLOW_AGENT_SECRETS
+        )
         if change == "inactive":
             async with database.transaction() as writer:
                 await writer.execute(

@@ -21,14 +21,19 @@ from kora.api.graph_deployment import DeploymentFindings, DeploymentRefusal
 from kora.api.graph_deployment_limits import MAX_REQUEST_BYTES
 from kora.api.graph_deployment_writer import (
     GraphDeploymentTarget,
+    NamespacePolicyChanged,
     publish_graph_deployment,
 )
 from kora.api.graph_services import GraphServices
 from kora.api.responses import error_response
 from kora.cel_eval.errors import EvaluatorUnavailable
 from kora.db.connection import Database
-from kora.db.namespace_reads import granted_namespace_id
+from kora.db.namespace_reads import (
+    granted_namespace_id,
+    read_namespace_secret_policy,
+)
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
+from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.vcs_ref_json import finite_float, refuse_constant, unique_object
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import GRAPH_VERSION_PREFIX, DeployRequest, DeployResponse
@@ -83,6 +88,15 @@ async def authorized_namespace(
     return await database.read(unit)
 
 
+async def namespace_secret_policy(
+    database: Database, namespace_id: str
+) -> NamespaceSecretPolicy:
+    async def unit(connection: AsyncConnection) -> NamespaceSecretPolicy:
+        return await read_namespace_secret_policy(connection, namespace_id)
+
+    return await database.read(unit)
+
+
 DeploymentHandler = Callable[[Request, str, str], Awaitable[Response]]
 REFUSALS: dict[DeploymentRefusal, RequestRejection] = {
     DeploymentRefusal.DOCUMENT: RequestRejection.DOCUMENT,
@@ -118,9 +132,10 @@ async def _deploy(
         route_graph=graph,
         request_graph=body.graph,
     )
+    policy = await namespace_secret_policy(services.database, namespace_id)
     try:
         outcome = await services.preparer.prepare(
-            dict(body.ir), selectors, services.selection
+            dict(body.ir), selectors, services.selection, policy
         )
     except EvaluatorUnavailable:
         return dependency_unavailable(
@@ -136,13 +151,18 @@ async def _deploy(
         )
     if isinstance(outcome, DeploymentRefusal):
         return request_rejection(REFUSALS[outcome], request_id=request_id)
-    published = await publish_graph_deployment(
-        services.database,
-        outcome,
-        GraphDeploymentTarget(namespace_id, principal),
-        identifiers=services.identifiers,
-        at=clock.now(),
-    )
+    try:
+        published = await publish_graph_deployment(
+            services.database,
+            outcome,
+            GraphDeploymentTarget(namespace_id, principal),
+            identifiers=services.identifiers,
+            at=clock.now(),
+        )
+    except NamespacePolicyChanged:
+        return dependency_unavailable(
+            DependencyRetryContext.PROVEN_PRE_EFFECT, request_id=request_id
+        )
     digests = published.digests
     response = DeployResponse(
         graph_version_id=GRAPH_VERSION_PREFIX + published.graph_version_id,
