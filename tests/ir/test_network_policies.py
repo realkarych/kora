@@ -126,6 +126,13 @@ def findings(
             id="agent-secrets-do-not-exempt-server",
         ),
         pytest.param(
+            agent(server=tool({}, EGRESS)),
+            ENFORCING,
+            DEFAULTS,
+            {SERVER_POLICY},
+            id="server-without-secrets-not-isolated",
+        ),
+        pytest.param(
             agent(network_policy=EGRESS, server=server(EGRESS)),
             UNENFORCED,
             ALLOWED,

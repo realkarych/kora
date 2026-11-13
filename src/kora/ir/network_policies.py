@@ -57,10 +57,11 @@ def _sites(
     )
     servers = () if config.mcp_servers is MISSING else config.mcp_servers.values()
     for server in servers:
+        isolated = runtime.isolates_tool_secrets and declares_secrets(server.secret_env)
         yield PolicySite(
             server.network_policy,
             allowed and declares_secrets(server.secret_env),
-            runtime.enforces_network_policy and runtime.isolates_tool_secrets,
+            runtime.enforces_network_policy and isolated,
             path + ("mcp_servers", PLACEHOLDER_LOCATION, "network_policy"),
             SERVER_MESSAGE,
         )
