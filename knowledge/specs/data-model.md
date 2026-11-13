@@ -1624,7 +1624,7 @@ Activation requires compatible participating readers and writers and qualified n
 
 `kora.engine.start_acceptance` and `kora.engine.start_facts` implement the canonical manual-start writer at the [walking-skeleton depth](first-slice.md#walking-skeleton-and-narrowed-depth): a start without parameters, with the narrowing the project owner fixed on 2026-11-13. It runs in four phases.
 
-1. **Selection.** One read snapshot performs the authorized receipt replay and the exact or latest candidate read of section 13.2.1. A matching or changed receipt, a refused principal and a missing graph or version end the start here.
+1. **Selection.** One read snapshot performs the authorized receipt replay and the exact or latest candidate read of section 13.2.1. A matching or changed receipt, a refused principal and a missing graph or version end the start here. Only this phase creates the candidate, bound to the request's namespace, graph and digest; acquisition refuses a candidate of another request.
 2. **Acquisition.** A second read snapshot requires the candidate's status to be `active` and acquires the stored IR and execution contract under the deploy's identity bounds. A caller that bounds concurrent document work claims its admission before this phase. Native read failures surface as the fixed `StartReadFailed`.
 3. **Facts.** A pure step decodes the acquired values with strict JSON (unique members, no constants, finite floats) and validates the `GraphDocument`. It returns the resolved manual overlap, the authored `runtime.limits.timeout`, the graph retention overrides and the exact version pin, or a refusal, checked in this order:
    1. the version declares `graph.params`;
@@ -1632,7 +1632,7 @@ Activation requires compatible participating readers and writers and qualified n
    3. an agent node, or an MCP server of an agent node, declares `secret_env`;
    4. the deploy's installation findings for the installation's selection.
 
-   A saved `parameters` member that is not exactly the closed-empty binding is checked with the [graph parameter interpretation](#graph-parameter-interpretation) reader and fails as unavailable.
+   A saved `parameters` member that the [graph parameter interpretation](#graph-parameter-interpretation) reader does not accept as the closed-empty binding is refused like a declared `graph.params`, as an unavailable interpretation.
    - **Binding to the request.** Only this step creates the facts. They are bound to the request's namespace, graph and digest, its explicit version if any, and its empty parameters, and acceptance refuses facts that belong to another request.
    - **Skipped re-verification.** The step skips the canonical re-render and digest recomputation of the stored values. The deploy writer produced them, the bounded acquisition admitted them, and promotion re-verifies the pinned contract, digests, header, overlap and timeout before any execution effect. A corrupt stored value can therefore leave a run pending but never executes it; `test_corrupted_stored_graph_never_executes` checks this.
    - **No database access.** The step makes no database call and holds no connection, so a caller can run it off its request loop.

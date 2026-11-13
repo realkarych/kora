@@ -96,11 +96,10 @@ class ManualStartFacts:
 
     def belongs_to(self, request: PreparedManualStartRequest) -> bool:
         identity = request.identity
-        return (
-            (identity.namespace_id, identity.graph_id, identity.request_digest)
-            == (self.namespace_id, self.pin.graph_id, self._request_digest)
-            and request.graph_version_id in (None, self.pin.version_id)
-            and request.parameter_bytes() == EMPTY_PARAMETERS
+        return (identity.namespace_id, identity.graph_id, identity.request_digest) == (
+            self.namespace_id,
+            self.pin.graph_id,
+            self._request_digest,
         )
 
     def __setattr__(self, name: str, value: object) -> Never:
@@ -169,11 +168,13 @@ def _facts(
     document = GraphDocument.model_validate(_strict_object(texts.ir))
     if document.graph.params is not MISSING:
         return StartRefusal.PARAMETERS_UNAVAILABLE
-    read_graph_parameter_binding(
-        document,
-        _strict_object(texts.execution_contract).get("parameters"),
-        max_encoded_bytes=limits.max_encoded_bytes,
-    )
+    saved = _strict_object(texts.execution_contract).get("parameters")
+    try:
+        read_graph_parameter_binding(
+            document, saved, max_encoded_bytes=limits.max_encoded_bytes
+        )
+    except GraphValueRejected:
+        return StartRefusal.PARAMETERS_UNAVAILABLE
     if request.parameter_bytes() != EMPTY_PARAMETERS:
         return StartRefusal.PARAMETERS
     if declares_agent_secrets(document):

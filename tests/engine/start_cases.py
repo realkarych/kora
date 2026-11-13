@@ -133,7 +133,7 @@ async def facts_for(
     candidate = await select_manual_start(database, case.user, request, key)
     if isinstance(candidate, StartAcceptance):
         return candidate
-    selected = await acquire_manual_start(database, candidate, limits=IDENTITY)
+    selected = await acquire_manual_start(database, request, candidate, limits=IDENTITY)
     if isinstance(selected, StartAcceptance):
         return selected
     return read_manual_start_facts(selected, request, selection, limits=IDENTITY)

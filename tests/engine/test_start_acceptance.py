@@ -43,6 +43,7 @@ from kora.engine.start_facts import (
 from kora.engine.start_records import (
     AcceptedStart,
     SkippedStart,
+    StartRecordRejected,
     decode_start_receipt,
 )
 from kora.ir.deployment_checks import DeploymentSelection
@@ -480,15 +481,22 @@ async def test_manual_start_facts_bind_their_request(
     assert isinstance(facts, ManualStartFacts)
 
     newer = await redeploy(database, evaluator, case, "A newer prompt.")
+    explicit = request_for(case, version=newer)
+    candidate = await select_manual_start(database, case.user, explicit, KEY)
+    assert isinstance(candidate, StartCandidate)
     selected = await acquire_manual_start(
-        database,
-        StartCandidate(case.namespace_id, case.graph_id, newer),
-        limits=IDENTITY,
+        database, explicit, candidate, limits=IDENTITY
     )
     assert isinstance(selected, SelectedStartVersion)
 
     with pytest.raises(StartAcceptanceFailed):
         await commit(database, case, request_for(case, {"extra": 1}), facts)
+    with pytest.raises(StartRecordRejected):
+        await acquire_manual_start(
+            database, request_for(case), candidate, limits=IDENTITY
+        )
+    with pytest.raises(TypeError):
+        StartCandidate(object(), explicit, newer)
     with pytest.raises(GraphValueRejected):
         read_manual_start_facts(
             selected,
@@ -680,3 +688,32 @@ async def test_cancelled_manual_start_settles_its_unit(
     assert replayed.outcome is AcceptanceOutcome.REPLAYED
     assert await lock_inventory(database) == []
     assert database.units_in_flight() == ledger.outstanding == 0
+
+
+@pytest.mark.asyncio
+async def test_manual_start_refuses_an_unavailable_saved_binding(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await deploy(database, evaluator)
+    async with database.transaction() as writer:
+        stored = await writer.scalar(
+            select(graph_version.c.execution_contract).where(
+                graph_version.c.id == case.version_id
+            )
+        )
+        assert isinstance(stored, str)
+        assert stored.count("kora.graph-parameters.v1") == 1
+        await writer.execute(
+            update(graph_version)
+            .where(graph_version.c.id == case.version_id)
+            .values(
+                execution_contract=stored.replace(
+                    "kora.graph-parameters.v1", "kora.graph-parameters.v9"
+                )
+            )
+        )
+
+    result = await start(database, case)
+
+    assert result is StartRefusal.PARAMETERS_UNAVAILABLE
+    assert all(not table for table in (await start_rows(database)).values())

@@ -2,11 +2,13 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Never, Self
 
 from sqlalchemy import insert, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from kora.cel_eval.errors import raise_safe
 from kora.db.connection import Database, clear_snapshot_error
 from kora.db.graph_version_reads import acquire_graph_version
 from kora.db.identifiers import IdentifierGenerator
@@ -109,11 +111,49 @@ def _replayed(replay: StartReplay) -> StartAcceptance:
     return StartAcceptance(REPLAYS[replay.outcome], replay.response)
 
 
-@dataclass(frozen=True, slots=True)
+_START_CANDIDATE = object()
+
+
 class StartCandidate:
+    __slots__ = ("namespace_id", "graph_id", "version_id", "_request_digest")
     namespace_id: str
     graph_id: str
     version_id: str
+    _request_digest: str
+
+    def __new__(
+        cls, issuer: object, request: PreparedManualStartRequest, version_id: str
+    ) -> Self:
+        if issuer is not _START_CANDIDATE:
+            del issuer, request, version_id
+            raise TypeError("a manual start candidate requires the selection read")
+        identity = request.identity
+        candidate = super().__new__(cls)
+        for name, value in (
+            ("namespace_id", identity.namespace_id),
+            ("graph_id", identity.graph_id),
+            ("version_id", version_id),
+            ("_request_digest", identity.request_digest),
+        ):
+            object.__setattr__(candidate, name, value)
+        return candidate
+
+    def belongs_to(self, request: PreparedManualStartRequest) -> bool:
+        identity = request.identity
+        return (identity.namespace_id, identity.graph_id, identity.request_digest) == (
+            self.namespace_id,
+            self.graph_id,
+            self._request_digest,
+        )
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        raise AttributeError("a manual start candidate is immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        raise AttributeError("a manual start candidate is immutable")
+
+    def __getstate__(self) -> Never:
+        raise TypeError("a manual start candidate requires explicit access")
 
 
 async def select_manual_start(
@@ -131,10 +171,7 @@ async def select_manual_start(
         return _completed(_replayed(replay))
     if candidate.version_id is None:
         return _completed(StartAcceptance(AcceptanceOutcome.MISSING))
-    identity = request.identity
-    return StartCandidate(
-        identity.namespace_id, identity.graph_id, candidate.version_id
-    )
+    return StartCandidate(_START_CANDIDATE, request, candidate.version_id)
 
 
 async def _acquire(
@@ -163,10 +200,13 @@ async def _acquire(
 
 async def acquire_manual_start(
     database: Database,
+    request: PreparedManualStartRequest,
     candidate: StartCandidate,
     *,
     limits: GraphVersionIdentityLimits,
 ) -> StartAcceptance | SelectedStartVersion:
+    if not candidate.belongs_to(request):
+        raise_safe(StartRecordRejected())
     try:
         async with database.read_snapshot() as connection:
             acquired = await _acquire(connection, candidate, limits)
@@ -197,7 +237,9 @@ def _response(
             graph_version_id=acceptance.facts.pin.version_id,
             status="pending",
         )
-    return SkippedStart(outcome="skipped", reason="overlap", run_id=None)
+    if capacity.outcome is CapacityOutcome.SKIPPED:
+        return SkippedStart(outcome="skipped", reason="overlap", run_id=None)
+    raise StartRecordRejected()
 
 
 def _receipt_values(
