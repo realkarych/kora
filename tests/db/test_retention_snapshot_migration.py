@@ -209,7 +209,7 @@ async def test_retention_snapshot_migration_recovers_compatible_schema(
                 assert validated is True
 
         assert report.to_revision == "0025"
-        assert report.steps == 22
+        assert report.steps == 23
         assert after == before.history
         assert differences == []
         assert snapshot == UnversionedRetention()

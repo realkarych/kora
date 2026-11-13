@@ -193,7 +193,7 @@ async def test_run_input_locators_exclude_noncanonical_historical_keys(
 
         assert observed_encoding == encoding
         assert report.to_revision == HEAD_REVISION
-        assert report.steps == 4
+        assert report.steps == 5
         assert before == after
         assert len(after[0]) == len(keys) - 1
         assert len(after[1]) == len(keys) - 2

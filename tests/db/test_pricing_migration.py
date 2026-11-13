@@ -222,7 +222,7 @@ async def test_pricing_migration_refuses_altered_column_defaults(
             ).one()
 
         assert recovered.to_revision == "0025"
-        assert recovered.steps == 23
+        assert recovered.steps == 24
         assert after == before
         assert tuple(amounts) == (None, None)
     finally:
@@ -303,7 +303,7 @@ async def test_pricing_migration_recovers_after_failure(
         again = await upgrade_database(empty_database_settings)
 
         assert recovered.to_revision == "0025"
-        assert recovered.steps == 23
+        assert recovered.steps == 24
         assert again.steps == 0
     finally:
         await database.close()
