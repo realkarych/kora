@@ -1,13 +1,16 @@
 import asyncio
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 import pytest
 from anyio import CancelScope
+from sqlalchemy import select
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from kora.api.exchange import ApiExchange
 from kora.client import KoraClient
 from kora.db.connection import Database
+from kora.db.tables import worker
 from tests.api.claim_support import BEARER, request
 from tests.api.deployment_cases import evaluator
 from tests.api.history_support import history_api, history_query
@@ -75,7 +78,7 @@ async def test_slow_history_releases_database_and_allows_same_client_claim(
     transport: str,
     capacity: int,
 ) -> None:
-    case, _, app = history_api
+    case, clock, app = history_api
     held = HeldHistory(app)
     ledger = ConnectionLedger(database)
 
@@ -95,9 +98,21 @@ async def test_slow_history_releases_database_and_allows_same_client_claim(
             try:
                 await asyncio.wait_for(held.reached.wait(), BOUND)
                 assert ledger.outstanding == database.units_in_flight() == 0
-                replay = await asyncio.wait_for(
-                    client.claim_worker(case.query.worker_id, request(case)), BOUND
+                clock.moment += timedelta(seconds=16)
+                written = await asyncio.wait_for(
+                    client.claim_worker(
+                        case.query.worker_id, request(case, "next-poll")
+                    ),
+                    BOUND,
                 )
+                async with database.read_transaction() as reader:
+                    last_seen = await reader.scalar(
+                        select(worker.c.last_seen_at).where(
+                            worker.c.id == case.query.worker_id
+                        )
+                    )
+                assert written.claim is None
+                assert last_seen == clock.now()
                 if capacity == 1:
                     with pytest.raises(asyncio.CancelledError):
                         await asyncio.wait_for(reading, BOUND)
@@ -111,6 +126,7 @@ async def test_slow_history_releases_database_and_allows_same_client_claim(
                 if not reading.done():
                     reading.cancel()
                 await asyncio.gather(reading, return_exceptions=True)
+            replay = await client.claim_worker(case.query.worker_id, request(case))
             resumed = await client.grant_history(case.binding.attempt_id, query)
 
             assert first == replay

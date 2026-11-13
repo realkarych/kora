@@ -13,12 +13,18 @@ async def scoped_history_attempt(
     limits: HistoryReadLimits,
 ) -> dict[str, object] | None:
     scoped = (
-        select(node_instance.c.id).join(run).where(run.c.namespace_id.in_(namespaces))
+        select(node_instance.c.id)
+        .join(run)
+        .where(
+            node_instance.c.id == attempt.c.node_instance_id,
+            run.c.namespace_id.in_(namespaces),
+        )
+        .exists()
     )
     row = await claim_row(
         connection,
         attempt,
-        (attempt.c.id == attempt_id) & attempt.c.node_instance_id.in_(scoped),
+        (attempt.c.id == attempt_id) & scoped,
         (
             "node_instance_id",
             "runtime",
