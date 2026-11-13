@@ -27,13 +27,18 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
 ) -> None:
     database = Database(empty_database_settings)
     ledger = ConnectionLedger(database)
+    original_columns = tuple(
+        field for field in attempt.c if field.name != "acknowledged_segment_offset"
+    )
     try:
         async with database.migration_connection() as migrator:
             await migrator.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), "0025")
             )
         case = await execution_case(database)
-        before = await case.snapshot(database)
+        async with database.read_transaction() as reader:
+            with await reader.execute(select(*original_columns)) as result:
+                before = result.mappings().one()
         async with database.transaction() as writer:
             await writer.exec_driver_sql(
                 "CREATE INDEX ix_attempt_physical_capacity ON attempt (id)"
@@ -76,8 +81,10 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
 
         report = await upgrade_database(empty_database_settings)
         repeated = await upgrade_database(empty_database_settings)
-        after = await case.snapshot(database)
         async with database.read_transaction() as reader:
+            with await reader.execute(select(*original_columns)) as result:
+                after = result.mappings().one()
+            offset = await reader.scalar(select(attempt.c.acknowledged_segment_offset))
             with await reader.execute(select(attempt.c.id)) as result:
                 ids = list(result.scalars())
             graph_indexes = await reader.run_sync(
@@ -94,6 +101,7 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
         )
         assert repeated.steps == 0
         assert after == before
+        assert offset is None
         assert ids == [case.attempt_id]
         assert (SQLITE_DEPLOYED_INDEX in graph_indexes) is (
             database.dialect is Dialect.SQLITE
