@@ -68,7 +68,7 @@ def test_db_upgrade_succeeds_and_reruns_as_a_no_op(tmp_path: Path) -> None:
         for record in records(second)
         if record["event"] == "db.migration.finished"
     ]
-    assert first_finished[0]["steps"] == 24
+    assert first_finished[0]["steps"] == 25
     assert second_finished[0]["steps"] == 0
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     with closing(sqlite3.connect(path)) as connection:
