@@ -272,7 +272,11 @@ Only `usage_record.source` uses its field-specific escaped JSON-text representat
 
 The source conversion and floor backfill run natively in the migration transaction. Database work, WAL or journal writes and possible temporary storage scale with retained usage history; no fixed migration duration, free-space allowance or online-availability guarantee is established.
 
-The storage migration, source codec and bounded inventory are implemented by #1479. They grant no accounting-write or execution authority. The cumulative acceptance state machine, exact pinned-node mapping selection, current-grant check, atomic database transition, public route and actual grant/price producer integration remain activation obligations of #1451.
+The storage migration, source codec and bounded inventory are implemented by #1479. They grant no accounting-write or execution authority. The exact pinned-node mapping selection, current-grant check, atomic database transition, public route and actual grant/price producer integration remain activation obligations of #1451.
+
+An identical row replay preserves its original reporting dispatcher. Cross-grant replacement cannot lower recorded completeness; a later partial tail from the same grant can preserve the adapter's post-result uncertainty. Rows and coverage keep independent source sequence checks; a newer coverage revision does not make an unchanged model row stale. Reusing an observation ID with a higher sequence or an earlier source timestamp alone is not a refusal. Coherent replacement can lose an exact known dimension or TTL split when a newer cumulative observation does not establish it; old fields are never combined into a fabricated coherent row.
+
+`engine.usage_acceptance` implements the bounded normalized state machine over admitted values and a trusted prepared adapter mapping. The current-grant check, exact pinned-node mapping selection, atomic database transition, public route and actual grant/price producer integration remain activation obligations of #1451.
 
 ### 7.3. Live observations and bounds
 
