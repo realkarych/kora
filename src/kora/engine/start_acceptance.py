@@ -486,6 +486,7 @@ async def accept_manual_start(
     identifiers: IdentifierGenerator,
     clock: Callable[[], datetime],
 ) -> StartResult:
+    stale = StartAcceptance(AcceptanceOutcome.STALE)
     for _ in range(START_ATTEMPTS):
         candidate = await select_manual_start(database, principal, request, key)
         if isinstance(candidate, StartAcceptance):
@@ -505,4 +506,4 @@ async def accept_manual_start(
         )
         if committed.outcome is not AcceptanceOutcome.STALE:
             return committed
-    return _completed(StartAcceptance(AcceptanceOutcome.STALE))
+    return stale

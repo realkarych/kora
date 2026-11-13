@@ -25,6 +25,7 @@ from kora.client.asgi import (
     AsgiResponseLimit,
     InProcessTransport,
 )
+from kora.client.documents import NAMESPACE
 from kora.client.errors import (
     ApiError,
     ApiErrorFields,
@@ -46,7 +47,6 @@ OPENAPI_RESPONSE_BYTES: int = 4 * 1024 * 1024
 GRAPH_VERSIONS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
 DEPLOY_RESPONSE_BYTES: int = 2 * 1024 * 1024
 GRAPH_RUNS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/runs"
-PATH_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 IDEMPOTENCY_KEY = re.compile(r"[!-~]{1,255}")
 OK: frozenset[int] = frozenset({200})
 CREATED_OR_OK: frozenset[int] = frozenset({200, 201})
@@ -308,7 +308,7 @@ class KoraClient:
         request: TriggerRequest,
         idempotency_key: str | None = None,
     ) -> TriggeredRun:
-        if not all(PATH_NAME.fullmatch(name) for name in (namespace, graph)):
+        if not all(NAMESPACE.fullmatch(name) for name in (namespace, graph)):
             raise ClientError(Failure.DESTINATION_POLICY, Outcome.NOT_SENT)
         return await self._request_json(
             "POST",
