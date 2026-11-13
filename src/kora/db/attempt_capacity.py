@@ -44,19 +44,37 @@ async def read_attempt_capacity(
     run_id: str,
     runtime: str,
 ) -> AttemptCapacity:
-    physical = attempt.join(
-        node_instance, attempt.c.node_instance_id == node_instance.c.id
-    ).join(run, node_instance.c.run_id == run.c.id)
+    owner = (
+        select(node_instance.c.run_id)
+        .where(node_instance.c.id == attempt.c.node_instance_id)
+        .correlate(attempt)
+        .limit(1)
+        .scalar_subquery()
+    )
+    owner_namespace = (
+        select(run.c.namespace_id)
+        .where(run.c.id == owner)
+        .correlate(attempt)
+        .limit(1)
+        .scalar_subquery()
+    )
+    owner_graph = (
+        select(run.c.graph_id)
+        .where(run.c.id == owner)
+        .correlate(attempt)
+        .limit(1)
+        .scalar_subquery()
+    )
     statement = (
         select(
             func.count(),
-            func.count(case((run.c.namespace_id == namespace_id, 1))),
-            func.count(case((run.c.graph_id == graph_id, 1))),
+            func.count(case((owner_namespace == namespace_id, 1))),
+            func.count(case((owner_graph == graph_id, 1))),
             func.count(case((attempt.c.runtime == runtime, 1))),
-            func.count(func.distinct(case((run.c.graph_id == graph_id, run.c.id)))),
-            func.count(case((run.c.id == run_id, 1))),
+            func.count(func.distinct(case((owner_graph == graph_id, owner)))),
+            func.count(case((owner == run_id, 1))),
         )
-        .select_from(physical)
+        .select_from(attempt)
         .where(
             attempt.c.status.in_(
                 tuple(
@@ -95,7 +113,7 @@ async def read_graph_cap_source(
         .limit(1)
     )
     with await connection.execute(
-        candidates.where(graph_version.c.status == "active")
+        candidates.where(graph_version.c.status == literal_column("'active'", String()))
     ) as result:
         row = result.one_or_none()
     if row is None:
