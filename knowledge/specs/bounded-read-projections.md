@@ -6,6 +6,8 @@ Governing decisions: [ADR-0002](../../docs/decisions/0002-ai-first-api-and-thin-
 
 Graph-version IR/contract document reads, authoring/validation, cost/daily routes other than the target-search aggregate, session logs/opaque transcripts, worker report/upload routes and [worker-only dispatcher history](protocols.md#resumable-retained-dispatcher-history-issue-226) keep their operation-specific contracts. The sixteen-tool MCP inventory and four console mutations remain. This contract introduces no token-rate limit or global concurrency policy. Storage's 64 KiB inline threshold is independent of response budgets. Existing immutable VcsRef validation, summary and digest selection remain authoritative.
 
+The internal scheduler [failure summary](data-model.md#failure-summary-read-admission-555) under #1445 observes one exact top-level failure count and at most 20 entries. Its selected identifier admission follows the owner decision in #555. This internal reader activates no public route or complete-current-failure navigation; the route owners below retain their own authorization and response/work budgets.
+
 ## 1. Response budgets and completeness
 
 All byte sizes below count compact UTF-8 JSON including the envelope, before content encoding. Byte accounting applies incrementally during construction and at clients before JSON parsing; a small compressed body is not permission for unbounded decompressed input.

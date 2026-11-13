@@ -129,9 +129,11 @@ async def _cancel_node_attempts(
         remaining = candidates.where(attempt.c.id > rows[-1].id)
 
 
-async def observe_run_expiry(context: ExpiryContext) -> ExpiryState:
+async def observe_run_expiry(
+    context: ExpiryContext, *, observed_at: datetime | None = None
+) -> ExpiryState:
     async with expiry_transition(context, "run_guard"):
-        return await _observe_run_expiry(context)
+        return await _observe_run_expiry(context, observed_at)
 
 
 async def _observe_run_expiry(
