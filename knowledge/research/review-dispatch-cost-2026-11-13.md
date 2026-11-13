@@ -58,14 +58,14 @@ The 39 reviewers:
 
 `.claude/agents/kora-reviewer.md` limits a Claude Code reviewer to the file reading, search and shell tools. A generic subagent inherits every tool of its session, including those of connected servers, and their descriptions are part of its first-turn context.
 
-The measurement is one dispatch of each kind with the same brief, which asks for a one-word reply and no tool call, in one session at the same revision.
+The measurement is one dispatch of each kind with the same brief, which asks for a one-word reply and no tool call, sent in one message of one Claude Code desktop session started at revision `87525a4`. The first-turn context is the sum of the uncached input and cache-write tokens of each subagent's only request; nothing was read from cache.
 
-| Subagent | Host | Revision | Tokens used by the single turn |
-|---|---|---|---|
-| Generic | Claude Code desktop application | branch base `fbdfd8e` plus this change | 60,119 |
-| `kora-reviewer` | not yet measured | | |
+| Subagent | Tools listed by the host | First-turn context |
+|---|---|---|
+| Generic (`general-purpose`) | every tool of the session | 60,642 tokens |
+| `kora-reviewer` | Read, Grep, Glob, Bash | 17,778 tokens |
 
-A Claude Code session lists agent definitions when it starts, so the second row needs a session started on a revision that contains the definition. Until it is measured, the 30% criterion is unverified and the definition is unproven.
+The definition lowers the first-turn context by 70.7%, above the 30% criterion, so it is kept. This is one pair of dispatches; it measures the start of a review, not a complete one. As arithmetic on the baseline, where the first-turn context accounts for 34% of reviewer cache reads, the same number of turns with the smaller context would remove about 24% of those reads.
 
 ## Prompt-cache lifetime
 
