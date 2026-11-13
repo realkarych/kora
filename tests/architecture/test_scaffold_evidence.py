@@ -234,6 +234,18 @@ def test_pull_request_evidence_requires_the_general_lanes_of_linux(
         verify(tmp_path, event="pull_request")
 
 
+def test_pull_request_evidence_keeps_the_general_lane_checks_of_linux(
+    tmp_path: Path,
+) -> None:
+    pull_request_evidence(tmp_path)
+    recollect(
+        tmp_path, "ubuntu-24.04", "3.11.17", "tests/test_unexecuted.py::test_value"
+    )
+
+    with pytest.raises(EvidenceFailure, match="differs from its assignment"):
+        verify(tmp_path, event="pull_request")
+
+
 def test_pull_request_evidence_refuses_a_repeated_macos_test(tmp_path: Path) -> None:
     pull_request_evidence(tmp_path)
     storage = lane_directory(tmp_path, "macos-15", "3.11.17", "storage")
@@ -241,7 +253,7 @@ def test_pull_request_evidence_refuses_a_repeated_macos_test(tmp_path: Path) -> 
     write_junit(storage / "junit.xml", repeated)
     rehash(storage, ["junit.xml"])
 
-    with pytest.raises(EvidenceFailure):
+    with pytest.raises(EvidenceFailure, match="duplicate tests"):
         verify(tmp_path, event="pull_request")
 
 

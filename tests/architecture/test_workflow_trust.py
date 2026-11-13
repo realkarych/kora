@@ -216,7 +216,10 @@ MACOS_GENERAL_CONDITION = (
     "&& needs.change-scope.outputs.full != 'false' "
     "&& needs.scaffold-plan.result == 'success' }}"
 )
-PUSH_ONLY = "github.event_name == 'push'"
+PUSH_ONLY_CONDITIONS = {
+    MACOS_GENERAL_JOB: MACOS_GENERAL_CONDITION,
+    "ci.yml:report-master-lanes": ISSUE_WRITER_CONDITIONS["ci.yml:report-master-lanes"],
+}
 EVENT_MATRIX = re.compile(
     r"\$\{\{ fromJSON\(github\.event_name == 'push' && '([^']*)' "
     r"\|\| '([^']*)'\) \}\}"
@@ -1591,13 +1594,21 @@ def uniform_plan(count: int) -> Plan:
     )
 
 
+def runs_only_for_pushes(location: str, job: dict[str, object]) -> bool:
+    return (
+        location in PUSH_ONLY_CONDITIONS
+        and job.get("if") == PUSH_ONLY_CONDITIONS[location]
+    )
+
+
 def required_jobs(jobs: dict[str, dict[str, object]], location: str) -> set[str]:
     workflow = location.partition(":")[0]
     required: set[str] = set()
     pending = [location]
     while pending:
-        job = jobs.get(pending.pop(), {})
-        if PUSH_ONLY in str(job.get("if", "")):
+        current = pending.pop()
+        job = jobs.get(current, {})
+        if runs_only_for_pushes(current, job):
             continue
         for need in needs_of(job):
             needed = f"{workflow}:{need}"
@@ -1720,9 +1731,9 @@ def pull_request_runners(job: dict[str, object]) -> list[object]:
     return runners
 
 
-def may_request_macos_for_a_pull_request(job: dict[str, object]) -> bool:
+def may_request_macos_for_a_pull_request(location: str, job: dict[str, object]) -> bool:
     runner = str(job.get("runs-on", ""))
-    if PUSH_ONLY in str(job.get("if", "")):
+    if runs_only_for_pushes(location, job):
         return False
     if runner != "${{ matrix.os }}":
         return MACOS in runner
@@ -1733,7 +1744,7 @@ def pull_request_macos_jobs(jobs: dict[str, dict[str, object]]) -> set[str]:
     return {
         location
         for location, job in jobs.items()
-        if may_request_macos_for_a_pull_request(job)
+        if may_request_macos_for_a_pull_request(location, job)
     }
 
 
@@ -1987,6 +1998,15 @@ def add_a_macos_job_to_pull_requests(workflows: Workflows, plan: Plan) -> None:
     jobs["macos-smoke"] = {"runs-on": MACOS, "steps": [{"run": "true"}]}
 
 
+def add_a_macos_job_that_only_mentions_pushes(workflows: Workflows, plan: Plan) -> None:
+    jobs = table(workflows["ci.yml"]["jobs"])
+    jobs["macos-smoke"] = {
+        "runs-on": MACOS,
+        "if": "${{ github.event_name == 'push' || always() }}",
+        "steps": [{"run": "true"}],
+    }
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1998,6 +2018,7 @@ def add_a_macos_job_to_pull_requests(workflows: Workflows, plan: Plan) -> None:
         plan_a_general_macos_lane_into_the_platform_matrix,
         run_the_macos_mutation_tooling_in_pull_requests,
         add_a_macos_job_to_pull_requests,
+        add_a_macos_job_that_only_mentions_pushes,
         run_the_macos_static_checks_in_their_own_job,
         run_a_macos_lane_in_its_own_job,
         plan_the_macos_static_checks_into_the_linux_matrix,

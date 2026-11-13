@@ -308,19 +308,9 @@ def test_a_master_push_lane_that_did_not_run_is_reported(
     assert f"- Result: `{rendered}`\n" in body
 
 
-def test_the_master_push_schedule_ignores_the_daily_lanes() -> None:
-    tracker = RecordingTracker(())
-    environment = {**RUN, "MACOS_GENERAL_LANES_RESULT": "success"}
-
-    actions = report(environment, tracker, MASTER_PUSH)
-
-    assert actions == ()
-    assert tracker.listings == 1
-
-
 @pytest.mark.parametrize(
     ("arguments", "schedule"),
-    [([], DAILY), (["daily"], DAILY), (["master-push"], MASTER_PUSH)],
+    [([], DAILY), (["master-push"], MASTER_PUSH)],
 )
 def test_the_report_schedule_is_selected_by_one_known_name(
     arguments: list[str], schedule: object
@@ -330,7 +320,9 @@ def test_the_report_schedule_is_selected_by_one_known_name(
     assert selected is schedule
 
 
-@pytest.mark.parametrize("arguments", [["weekly"], ["daily", "master-push"], [""]])
+@pytest.mark.parametrize(
+    "arguments", [["daily"], ["weekly"], ["master-push", "master-push"], [""]]
+)
 def test_an_unknown_report_schedule_is_refused(arguments: list[str]) -> None:
     with pytest.raises(ReportFailure, match="schedule is unknown"):
         selected_schedule(arguments)

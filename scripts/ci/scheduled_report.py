@@ -88,7 +88,7 @@ MASTER_PUSH = Schedule(
         ),
     ),
 )
-SCHEDULES = {"daily": DAILY, "master-push": MASTER_PUSH}
+SCHEDULES = {"master-push": MASTER_PUSH}
 
 
 @dataclass(frozen=True)

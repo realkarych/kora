@@ -57,5 +57,8 @@ Expected effect: three macOS scaffold jobs of 166 s, 304 s and 321 s, two at a t
 - A macOS-only defect in a general test reaches `master` and is found on the next `master` run. Revisit trigger: such a defect that a pull request lane would have caught.
 - For macOS in pull requests the join no longer proves that the lanes cover one complete collection. It still proves each lane's receipt, revision, run attempt and the named local-runtime host-fixture tests.
 - The unstable general tests listed above will open or update the issue on `master` at their current rate until they are fixed.
+- The report reads only the result of the general macOS job. A general lane cancelled because no runner was acquired is reported like a failed one, before any permitted infrastructure rerun.
+- Two other checks now happen only for pushes and have no automatic issue: the evidence join's collection, assignment and partition checks for macOS, and the macOS row of `Mutation tooling`. A failure there turns the `master` run red and nothing else. The plan's reason for limiting the report, that every other failure of a `master` run is a failure of a job that pull requests also run, does not hold for these two. Revisit trigger: the owner's decision whether the report also covers them.
+- The macOS row of `Local runtime diagnostics` continues on error, so its failure on `master` does not turn the run red.
 - The job that runs only for pushes cannot be executed by a pull request. Its first execution is the first `master` run after the merge.
 - The limit of two concurrent macOS scaffold jobs is per workflow run. Several runs at once still request more.
