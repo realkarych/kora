@@ -5,12 +5,12 @@ from kora.db.reads import SweepPage, highest_run_id
 from kora.db.tables import run
 
 
-class PendingRunSweep:
+class RunStatusSweep:
+    status: str = "pending"
+
     def __init__(self, page_size: int = 100) -> None:
         if type(page_size) is not int or not 1 <= page_size <= 100:
-            raise ValueError(
-                "a pending run page holds between one and one hundred rows"
-            )
+            raise ValueError("a run page holds between one and one hundred rows")
         self.page_size = page_size
         self._cursor: str | None = None
         self._ceiling: str | None = None
@@ -23,7 +23,7 @@ class PendingRunSweep:
         if self._ceiling is None:
             return SweepPage((), None, None, wrapped)
         statement = select(run.c.id).where(
-            run.c.status == "pending", run.c.id <= self._ceiling
+            run.c.status == self.status, run.c.id <= self._ceiling
         )
         if self._cursor is not None:
             statement = statement.where(run.c.id > self._cursor)
@@ -36,3 +36,7 @@ class PendingRunSweep:
         elif ids:
             self._cursor = ids[-1]
         return SweepPage(ids, self._cursor, self._ceiling, wrapped)
+
+
+class PendingRunSweep(RunStatusSweep):
+    pass

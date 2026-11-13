@@ -36,13 +36,8 @@ def _create_index(
         {"name": name, "table": table},
     ) as result:
         state = result.one_or_none()
-    if state is not None and tuple(state[1:]) != (
-        True,
-        len(columns),
-        False,
-        list(columns),
-        expected_predicate,
-    ):
+    expected = (True, len(columns), False, list(columns), expected_predicate)
+    if state is not None and tuple(state[1:]) != expected:
         raise RuntimeError("deadline discovery index conflicts with its migration")
     valid = None if state is None else state[0]
     if valid is True:

@@ -40,6 +40,6 @@ INDEXES: tuple[tuple[str, str, tuple[str, ...], str | None, str | None], ...] = 
         CANCEL_ROWS,
         f"({PG_CANCEL} AND ((desired_state)::text <> 'cancel'::text))",
     ),
-    ("ix_wait_node_status", "wait", ("node_instance_id", "status"), None, None),
+    ("ix_wait_node_status", "wait", ("node_instance_id", "status", "id"), None, None),
     ("ix_approval_request_wait", "approval_request", ("wait_id",), None, None),
 )

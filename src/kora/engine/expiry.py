@@ -35,7 +35,7 @@ from kora.engine.expiry_reads import (
 TERMINAL_NODES = ("succeeded", "failed", "cancelled", "skipped", "upstream_failed")
 
 
-async def request_attempt_cancellation(
+async def request_cancellation(
     context: ExpiryContext, now: datetime, attempt_id: str | None = None
 ) -> None:
     nodes = select(node_instance.c.id).where(node_instance.c.run_id == context.run_id)
@@ -49,6 +49,8 @@ async def request_attempt_cancellation(
             return
         for node_id in owners:
             await _cancel_node_attempts(context, now, node_id, attempt_id)
+            if attempt_id is None:
+                await close_expired_waits(context, now, node_id)
         nodes = owned_nodes.where(node_instance.c.id > owners[-1])
 
 
@@ -58,7 +60,9 @@ async def _cancel_node_attempts(
     granted = (
         select(attempt_dispatcher.c.id)
         .where(attempt_dispatcher.c.attempt_id == attempt.c.id)
-        .exists()
+        .limit(1)
+        .scalar_subquery()
+        .is_not(None)
     )
     uncertain = (
         granted
@@ -72,16 +76,17 @@ async def _cancel_node_attempts(
         attempt.c.number,
         attempt.c.recovery_required,
         uncertain.label("uncertain"),
-    ).where(
-        attempt.c.node_instance_id == node_id,
-        literal_column(CANCEL_ROWS),
+    )
+    candidates = select(attempt.c.id).where(
+        attempt.c.node_instance_id == node_id, literal_column(CANCEL_ROWS)
     )
     if attempt_id is not None:
-        statement = statement.where(attempt.c.id == attempt_id)
-    candidates = statement
+        candidates = candidates.where(attempt.c.id == attempt_id)
+    remaining = candidates
     while True:
+        page = remaining.order_by(attempt.c.id).limit(100)
         with await context.connection.execute(
-            statement.order_by(attempt.c.id).limit(100)
+            statement.where(attempt.c.id.in_(page)).order_by(attempt.c.id)
         ) as result:
             rows = result.all()
         if not rows:
@@ -121,7 +126,7 @@ async def _cancel_node_attempts(
                     row.node_instance_id,
                     row.id,
                 )
-        statement = candidates.where(attempt.c.id > rows[-1].id)
+        remaining = candidates.where(attempt.c.id > rows[-1].id)
 
 
 async def observe_run_expiry(context: ExpiryContext) -> ExpiryState:
@@ -145,7 +150,7 @@ async def _observe_run_expiry(
     await context.connection.execute(
         update(run).where(run.c.id == context.run_id).values(deadline_expired_at=now)
     )
-    await request_attempt_cancellation(context, now)
+    await request_cancellation(context, now)
     await context.mark(now)
     return ExpiryState.EXPIRED
 
@@ -199,16 +204,20 @@ async def observe_attempt_expiry(
             .where(attempt.c.id == attempt_id)
             .values(deadline_expired_at=now, updated_at=now)
         )
-        await request_attempt_cancellation(context, now, attempt_id)
+        await request_cancellation(context, now, attempt_id)
         await context.mark(now)
         return ExpiryState.EXPIRED
 
 
-async def close_expired_waits(context: ExpiryContext, now: datetime) -> None:
+async def close_expired_waits(
+    context: ExpiryContext, now: datetime, node_id: str
+) -> None:
     connection = context.connection
-    owned = select(node_instance.c.id).where(node_instance.c.run_id == context.run_id)
-    open_waits = select(wait.c.id).where(
-        wait.c.node_instance_id.in_(owned), wait.c.status == "open"
+    due = (
+        select(wait.c.id)
+        .where(wait.c.node_instance_id == node_id, wait.c.status == "open")
+        .order_by(wait.c.id)
+        .limit(100)
     )
     delivery = approval_request.c.delivery
     revision = func.coalesce(delivery["revision"].as_integer(), 0) + 1
@@ -219,32 +228,40 @@ async def close_expired_waits(context: ExpiryContext, now: datetime) -> None:
         connection, delivery, "desired_state", json_scalar(connection, "closed")
     )
     closed = set_json_field(connection, closed, "revision", next_revision)
-    await connection.execute(
-        update(approval_request)
-        .where(approval_request.c.wait_id.in_(open_waits))
-        .values(
-            status=case(
-                (approval_request.c.status == "pending", "cancelled"),
-                else_=approval_request.c.status,
-            ),
-            delivery=case(
-                (delivery["desired_state"].as_string() == "closed", delivery),
-                else_=closed,
-            ),
-            updated_at=now,
+    while True:
+        with await connection.execute(due) as result:
+            open_waits = list(result.scalars())
+        if not open_waits:
+            return
+        await connection.execute(
+            update(approval_request)
+            .where(approval_request.c.wait_id.in_(open_waits))
+            .values(
+                status=case(
+                    (approval_request.c.status == "pending", "cancelled"),
+                    else_=approval_request.c.status,
+                ),
+                delivery=case(
+                    (delivery["desired_state"].as_string() == "closed", delivery),
+                    else_=closed,
+                ),
+                updated_at=now,
+            )
         )
-    )
-    await connection.execute(
-        update(wait)
-        .where(wait.c.id.in_(open_waits))
-        .values(
-            status="cancelled",
-            observation=set_json_field(
-                connection, wait.c.observation, "current", json_scalar(connection, None)
-            ),
-            updated_at=now,
+        await connection.execute(
+            update(wait)
+            .where(wait.c.id.in_(open_waits))
+            .values(
+                status="cancelled",
+                observation=set_json_field(
+                    connection,
+                    wait.c.observation,
+                    "current",
+                    json_scalar(connection, None),
+                ),
+                updated_at=now,
+            )
         )
-    )
 
 
 async def expire_run(context: ExpiryContext) -> ExpiryState:
@@ -259,8 +276,7 @@ async def expire_run(context: ExpiryContext) -> ExpiryState:
         if saved.status != "running":
             return ExpiryState.EXPIRED
         now = normalise_timestamp(context.clock())
-        await request_attempt_cancellation(context, now)
-        await close_expired_waits(context, now)
+        await request_cancellation(context, now)
         while True:
             with await context.connection.execute(
                 select(node_instance.c.id, node_instance.c.node_path)

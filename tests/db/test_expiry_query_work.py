@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, Dialect
 from kora.db.deadline_discovery import DueAttemptSweep
-from kora.db.tables import approval_request, attempt, wait
+from kora.db.tables import approval_request, attempt, attempt_dispatcher, wait
 from kora.engine.expiry import expire_run
 from tests.db.seed import Seeder
 from tests.db.test_graph_read_admission import executed_queries
@@ -61,6 +61,10 @@ async def seed_query_history(
             "succeeded",
         )
         foreign_node = await seed.node(foreign, "history")
+        with await writer.execute(
+            select(attempt_dispatcher).where(attempt_dispatcher.c.id == case.grant_id)
+        ) as result:
+            grant = dict(result.mappings().one())
         for offset in range(0, history, 100):
             attempts: list[dict[str, object]] = []
             waits: list[dict[str, object]] = []
@@ -105,6 +109,18 @@ async def seed_query_history(
                     )
                 )
             await writer.execute(insert(attempt), attempts)
+            await writer.execute(
+                insert(attempt_dispatcher),
+                [
+                    {
+                        **grant,
+                        "id": seed.new_id(),
+                        "attempt_id": row["id"],
+                        "closed_at": case.promotion.clock.now(),
+                    }
+                    for row in attempts
+                ],
+            )
             await writer.execute(insert(wait), waits)
             await writer.execute(insert(approval_request), approvals)
         active = [
@@ -162,7 +178,13 @@ async def test_expiry_queries_exclude_finished_and_foreign_history(
     postgres = database.dialect is Dialect.POSTGRESQL
     if postgres:
         async with database.transaction() as writer:
-            for table in ("attempt", "node_instance", "wait", "approval_request"):
+            for table in (
+                "attempt",
+                "attempt_dispatcher",
+                "node_instance",
+                "wait",
+                "approval_request",
+            ):
                 await writer.exec_driver_sql("ANALYZE " + table)
 
     with pytest.raises(RolledBackExpiry) as expiry:
@@ -186,6 +208,12 @@ async def test_expiry_queries_exclude_finished_and_foreign_history(
             if query[0].startswith("UPDATE approval_request")
         )
         delivery_plan = await query_plan(writer, postgres, delivery)
+        open_waits = next(
+            query
+            for query in expiry.value.queries
+            if query[0].startswith("SELECT wait.id")
+        )
+        wait_plan = await query_plan(writer, postgres, open_waits)
         remaining = await writer.scalar(
             select(attempt.c.id).where(
                 attempt.c.id == case.attempt_id, attempt.c.desired_state == "run"
@@ -193,7 +221,8 @@ async def test_expiry_queries_exclude_finished_and_foreign_history(
         )
     (tmp_path / "native-plans.txt").write_text(
         "\n\n".join(
-            "\n".join(plan) for plan in (due_plan, cancellation_plan, delivery_plan)
+            "\n".join(plan)
+            for plan in (due_plan, cancellation_plan, wait_plan, delivery_plan)
         )
     )
 
@@ -215,8 +244,8 @@ async def test_expiry_queries_exclude_finished_and_foreign_history(
     assert any("ix_approval_request_wait" in line for line in delivery_plan), (
         delivery_plan
     )
-    assert any("ix_wait_node_status" in line for line in delivery_plan), "\n".join(
-        delivery_plan
+    assert any("ix_wait_node_status" in line for line in wait_plan), "\n".join(
+        wait_plan
     )
     if postgres:
         for plan, indexes in (
@@ -235,4 +264,5 @@ async def test_expiry_queries_exclude_finished_and_foreign_history(
                 if (match := re.search(r"Rows Removed by Filter: ([0-9]+)", line))
             ]
             assert sum(removed) <= 150
+        assert not any("Seq Scan" in line for line in wait_plan + delivery_plan)
     assert database.units_in_flight() == 0

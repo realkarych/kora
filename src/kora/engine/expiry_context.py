@@ -145,18 +145,13 @@ async def expiry_transition(
             and not await writable_postgres_transaction(context.connection)
         ):
             raise ValueError("expiry requires a writable authority transaction")
-        if not await context.connection.scalar(
-            select(
-                select(run.c.id)
-                .where(
-                    run.c.id == context.run_id,
-                    run.c.namespace_id == context.scope.namespace_id,
-                    run.c.graph_id == context.scope.graph_id,
-                    run.c.graph_version_id == context.scope.version_id,
-                )
-                .exists()
-            )
-        ):
+        owner = select(run.c.id).where(
+            run.c.id == context.run_id,
+            run.c.namespace_id == context.scope.namespace_id,
+            run.c.graph_id == context.scope.graph_id,
+            run.c.graph_version_id == context.scope.version_id,
+        )
+        if await context.connection.scalar(owner) is None:
             raise ValueError("expiry requires the original run scope")
         yield
     except asyncio.CancelledError as error:
