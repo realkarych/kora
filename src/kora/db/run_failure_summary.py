@@ -110,14 +110,6 @@ def failure_summary_statement(
         .limit(20)
         .cte("failure_sample")
     )
-    latest = (
-        select(attempt.c.id)
-        .where(attempt.c.node_instance_id == sample.c.id)
-        .order_by(attempt.c.number.desc())
-        .limit(1)
-        .correlate(sample)
-        .scalar_subquery()
-    )
     status = case(
         {value: index for index, value in enumerate(ATTEMPT_STATUSES, 1)},
         value=attempt.c.status,
@@ -134,10 +126,20 @@ def failure_summary_statement(
         )
     )
     last_status = (
-        select(status).where(attempt.c.id == latest).correlate(sample).scalar_subquery()
+        select(status)
+        .where(attempt.c.node_instance_id == sample.c.id)
+        .order_by(attempt.c.number.desc())
+        .limit(1)
+        .correlate(sample)
+        .scalar_subquery()
     )
     last_error = (
-        select(error).where(attempt.c.id == latest).correlate(sample).scalar_subquery()
+        select(error)
+        .where(attempt.c.node_instance_id == sample.c.id)
+        .order_by(attempt.c.number.desc())
+        .limit(1)
+        .correlate(sample)
+        .scalar_subquery()
     )
     maximum = 64 if connection.dialect.name == POSTGRESQL else 128
     return (
