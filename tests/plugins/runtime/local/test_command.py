@@ -98,7 +98,7 @@ from tests.support.local_runtime import (
     state_root,
 )
 
-HOLD_MARKER = f"kora-hold-{os.getpid()}-809-"
+HOLD_MARKER = f"kora-hold-p{os.getpid()}-809-"
 FD_REPORT = "\n".join(
     (
         "import os, time",
@@ -998,7 +998,7 @@ async def test_launch_failure_has_no_fabricated_exit(
 
 @pytest.mark.asyncio
 async def test_hold_marker_selects_only_processes_of_this_test_process() -> None:
-    foreign = HOLD_MARKER.replace(f"-{os.getpid()}-", "-0-")
+    foreign = HOLD_MARKER.replace(f"-p{os.getpid()}-", "-p0-")
     with carriers((*NEVER_READY, foreign), (*NEVER_READY, HOLD_MARKER)) as started:
         other, owned = started
         await until(lambda: other.pid in marker_pids(foreign))
