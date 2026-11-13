@@ -28,6 +28,7 @@ from kora.db.tables import (
     usage_record,
     worker,
 )
+from kora.db.usage_context import UsageBinding
 from kora.db.worker_usage import read_attempt_usage
 from kora.engine.locks import TransitionLocks
 from kora.engine.usage_acceptance import PricedUsage, UsageAcceptance, accept_usage
@@ -63,13 +64,13 @@ class UsageAccessRejected(ValueError):
 
 async def current_usage_target(
     connection: AsyncConnection,
-    context: UsageContext,
+    context: UsageBinding | None,
     attempt_id: str,
     principal: Principal,
 ) -> RowMapping:
     if principal.kind != "service":
         raise UsageAccessRejected(UsageAccess.FORBIDDEN)
-    if context.namespace_id not in {
+    if context is not None and context.namespace_id not in {
         grant.namespace_id for grant in principal.namespaces
     }:
         raise UsageAccessRejected(UsageAccess.NOT_FOUND)
@@ -107,14 +108,23 @@ async def current_usage_target(
         )
         .where(
             attempt.c.id == attempt_id,
-            run.c.id == context.run_id,
-            run.c.namespace_id == context.namespace_id,
-            run.c.graph_id == context.graph_id,
-            graph_version.c.id == context.graph_version_id,
-            graph_version.c.graph_id == context.graph_id,
-            graph_version.c.execution_contract_digest
-            == context.execution_contract_digest,
-            node_instance.c.node_path == context.node_path,
+            run.c.namespace_id.in_(
+                grant.namespace_id for grant in principal.namespaces
+            ),
+            *(
+                (
+                    run.c.id == context.run_id,
+                    run.c.namespace_id == context.namespace_id,
+                    run.c.graph_id == context.graph_id,
+                    graph_version.c.id == context.graph_version_id,
+                    graph_version.c.graph_id == context.graph_id,
+                    graph_version.c.execution_contract_digest
+                    == context.execution_contract_digest,
+                    node_instance.c.node_path == context.node_path,
+                )
+                if context is not None
+                else ()
+            ),
             node_instance.c.top_level.is_(True),
         )
     )
@@ -124,7 +134,6 @@ async def current_usage_target(
         result.close()
     if target is None:
         raise UsageAccessRejected(UsageAccess.NOT_FOUND)
-    admit_projection(target)
     if (
         target["worker_id"] != principal.owner
         or target["runtime"] != principal.runtime
@@ -142,13 +151,15 @@ async def require_usage_grant(
     epoch: int,
     principal: Principal,
     now: datetime,
+    *,
+    lock_worker: bool = True,
 ) -> None:
     until = stored_timestamp(target["lease_until"])
     if until is not None and until.utcoffset() is None:
         raise CostReadRefused()
     if target["lease_epoch"] != epoch or until is None or until <= now:
         raise UsageAccessRejected(UsageAccess.STALE_GRANT)
-    valid = await connection.scalar(
+    statement = (
         select(worker.c.id)
         .select_from(attempt_dispatcher.join(worker))
         .where(
@@ -161,7 +172,9 @@ async def require_usage_grant(
             worker.c.token_id == principal.token_id,
             worker.c.runtime == principal.runtime,
         )
-        .with_for_update(of=worker)
+    )
+    valid = await connection.scalar(
+        statement.with_for_update(of=worker) if lock_worker else statement
     )
     if not valid:
         raise UsageAccessRejected(UsageAccess.STALE_GRANT)
@@ -186,6 +199,7 @@ async def report_usage(
     await require_usage_grant(
         connection, target, attempt_id, dispatcher_id, epoch, principal, clock.now()
     )
+    admit_projection(target)
     if target["strategy"] == "resume" and target["strategy_fallback"] is None:
         raise CostReadRefused()
     price_namespace = (

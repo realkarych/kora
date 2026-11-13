@@ -23,17 +23,21 @@ from kora.api.responses import (
 from kora.api.routes import (
     PROTECTED_ROUTES,
     RECOGNIZED_METHODS,
+    SERVICE_ROUTES,
     ActiveCatalog,
     RouteName,
 )
 from kora.api.run_trigger_route import trigger_handler
 from kora.api.worker_registration_route import WorkerRegistrationRoute
+from kora.api.worker_usage_route import WorkerUsageRoute
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
 from kora.models.runs import AcceptedRun, SkippedRun, TriggerRequest
+from kora.models.worker_usage import AcceptedUsageReport, UsageReport
 from kora.models.workers import RegisteredWorker, WorkerRegistration
 from kora.observability import ProcessDiagnostics
 from kora.protocols.authentication import Authenticator
+from kora.protocols.identity_records import Identifier
 from kora.protocols.time import Clock
 
 
@@ -69,7 +73,7 @@ class ApiDispatch:
                 Request(scope),
                 self.authenticator,
                 self.clock,
-                "service" if matched.name == RouteName.WORKERS else "user",
+                "service" if matched.name in SERVICE_ROUTES else "user",
             )
             if isinstance(authority, ApiErrorEnvelope):
                 await error_response(authority, method=method)(scope, receive, send)
@@ -90,7 +94,7 @@ class ApiDispatch:
             )
             await response(scope, receive, send)
             return
-        if matched is not None and matched.name == RouteName.WORKERS:
+        if matched is not None and matched.name in SERVICE_ROUTES:
             body = bytearray()
             try:
                 async for chunk in Request(scope, receive).stream():
@@ -128,6 +132,7 @@ def create_application(
     deployment: GraphServices | None = None,
     *,
     worker_registration: WorkerRegistrationRoute | None = None,
+    worker_usage: WorkerUsageRoute | None = None,
 ) -> ApiExchange:
     framework = FastAPI(
         title="kora",
@@ -225,6 +230,20 @@ def create_application(
             methods=["POST"],
             operation_id="register_worker",
             response_model=RegisteredWorker,
+        )
+    if worker_usage is not None:
+
+        async def usage(
+            att: Identifier, body: UsageReport
+        ) -> AcceptedUsageReport | Response:
+            return await worker_usage(att, body)
+
+        framework.add_api_route(
+            RouteName.USAGE.value,
+            usage,
+            methods=["POST"],
+            operation_id="report_usage",
+            response_model=AcceptedUsageReport,
         )
     framework.add_exception_handler(HTTPException, framework_error)
     framework.add_exception_handler(RequestValidationError, validation_error)

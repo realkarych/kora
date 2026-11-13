@@ -8,6 +8,7 @@ from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import (
     attempt,
     attempt_dispatcher,
+    graph_version_resource_owner,
     node_instance,
     price_table,
     run,
@@ -22,7 +23,7 @@ from kora.engine.usage_context import UsageContext, prepare_usage_context
 from kora.engine.worker_registration import Registration, register_worker
 from kora.ir.cost import PriceRevision, UsageCoverage, UsageRow
 from kora.protocols.authentication import Principal
-from tests.api.worker_support import registration
+from tests.api.worker_support import bearer, registration
 from tests.db.seed import START, Seeder, fixed_randomness
 from tests.engine.test_graph_execution_contract import (
     LIMITS,
@@ -45,6 +46,7 @@ class UsageCase:
     principal: Principal
     clock: AuthorityClock
     identifiers: IdentifierGenerator
+    bearer_token: str
 
 
 async def usage_case(
@@ -53,6 +55,7 @@ async def usage_case(
     *,
     harness: str = "claude",
     node_path: str = "agent",
+    resources: bool = False,
 ) -> UsageCase:
     authority = await seed_case(database, "usage", "service")
     principal = authority.principal
@@ -85,7 +88,7 @@ async def usage_case(
         )
         graph_id = await seed.graph(namespace_id)
         scope = GraphResourceScope(namespace_id, graph_id, seed.new_id())
-    raw, envelope, refs, owners = complete_inputs(scope, resources=False)
+    raw, envelope, refs, owners = complete_inputs(scope, resources=resources)
     child(raw, "graph", "nodes", "agent", "config")["harness"] = harness
     prepared, pin = prepared_case(raw, envelope, scope)
     checked = check_detached_execution_contract(
@@ -94,6 +97,25 @@ async def usage_case(
     async with database.transaction() as connection:
         seed = Seeder(connection)
         await insert_case(seed, scope, 1, prepared, refs)
+        if owners:
+            await connection.execute(
+                insert(graph_version_resource_owner),
+                [
+                    {
+                        "graph_version_id": scope.version_id,
+                        "ordinal": ordinal,
+                        "subgraph_name": None,
+                        "node_name": item.path[-1],
+                        "file_name": item.name,
+                        "store_id": item.reference.address.storage_identity.store_id,
+                        "payload_digest": item.reference.address.payload_digest,
+                        "object_incarnation": item.reference.object_incarnation,
+                        "total_size": item.reference.total_size,
+                        "payload_state": "present",
+                    }
+                    for ordinal, item in enumerate(owners)
+                ],
+            )
         run_id = await seed.run(
             namespace_id, graph_id, scope.version_id, needs_scheduling=False
         )
@@ -158,6 +180,7 @@ async def usage_case(
         principal,
         clock,
         IdentifierGenerator(clock.now, fixed_randomness(500_000)),
+        bearer(authority),
     )
 
 
