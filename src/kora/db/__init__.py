@@ -69,6 +69,16 @@ CLOSE_TIMED_OUT: EventSpec = CATALOG.register(
     )
 )
 
+RUN_INPUT_PARENT_CHECKED: EventSpec = CATALOG.register(
+    EventSpec(
+        name="db.run_input_parent.checked",
+        component=DB_COMPONENT,
+        level=Level.DEBUG,
+        message="run input parent checked",
+        fields={"verified": FieldKind.BOOLEAN},
+    )
+)
+
 __all__ = [
     "BOOTSTRAP_COMPLETED",
     "CLOSE_TIMED_OUT",
@@ -77,5 +87,6 @@ __all__ = [
     "MIGRATION_FAILED",
     "MIGRATION_FINISHED",
     "MIGRATION_STARTED",
+    "RUN_INPUT_PARENT_CHECKED",
     "TRANSACTION_FAILED",
 ]
