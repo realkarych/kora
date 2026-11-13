@@ -35,6 +35,8 @@ async def live_caps(
     scope: GraphResourceScope,
     number: int,
     concurrency: JsonObject,
+    *,
+    max_ir_bytes: int = LIMITS.resources.logical.ir_bytes,
 ) -> PreparedGraphCaps:
     raw, saved, refs, owners = complete_inputs(
         scope, resources=False, runtime_settings={"concurrency": concurrency}
@@ -55,7 +57,7 @@ async def live_caps(
     checked = check_detached_execution_contract(
         acquired, pin, scope, refs, owners, limits=LIMITS
     )
-    return prepare_graph_caps(checked, max_ir_bytes=LIMITS.resources.logical.ir_bytes)
+    return prepare_graph_caps(checked, max_ir_bytes=max_ir_bytes)
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,10 @@ class CapacityCase:
 
 
 async def capacity_case(
-    database: Database, concurrency: JsonObject | None = None
+    database: Database,
+    concurrency: JsonObject | None = None,
+    *,
+    max_ir_bytes: int = LIMITS.resources.logical.ir_bytes,
 ) -> CapacityCase:
     async with database.transaction() as writer:
         seed = Seeder(writer)
@@ -100,7 +105,11 @@ async def capacity_case(
         scope = GraphResourceScope(namespace_id, graph_id, seed.new_id())
         run_id = seed.new_id()
     caps = await live_caps(
-        database, scope, 1, {} if concurrency is None else concurrency
+        database,
+        scope,
+        1,
+        {} if concurrency is None else concurrency,
+        max_ir_bytes=max_ir_bytes,
     )
     async with database.transaction() as writer:
         seed = Seeder(writer)
