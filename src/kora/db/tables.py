@@ -17,6 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.admission_wait_v1 import INDEXES as WAIT_INDEXES
 from kora.db.attempt_capacity_v1 import INDEXES as CAPACITY_INDEXES
 from kora.db.attempt_capacity_v1 import capacity_index_dialect
 from kora.db.bootstrap_initialization_v1 import (
@@ -683,7 +684,7 @@ for (
     sqlite_filter,
     pg_filter,
     _,
-) in CAPACITY_INDEXES:
+) in (*CAPACITY_INDEXES, *WAIT_INDEXES):
     Index(
         index_name,
         *(metadata.tables[owner_table].c[column] for column in index_columns),

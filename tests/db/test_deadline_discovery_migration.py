@@ -86,8 +86,8 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0024",
-            "0027",
-            3,
+            "0028",
+            4,
         )
         assert repeated.steps == 0
         assert after == before

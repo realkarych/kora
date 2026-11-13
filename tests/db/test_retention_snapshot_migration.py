@@ -138,10 +138,10 @@ async def test_retention_snapshot_migration_preserves_legacy_rows(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0002",
-            "0027",
-            25,
+            "0028",
+            26,
         )
-        assert revision == "0027"
+        assert revision == "0028"
         assert after == before.history
         assert differences == []
         assert foreign_keys == before.foreign_keys
@@ -208,8 +208,8 @@ async def test_retention_snapshot_migration_recovers_compatible_schema(
                 ).scalar_one()
                 assert validated is True
 
-        assert report.to_revision == "0027"
-        assert report.steps == 25
+        assert report.to_revision == "0028"
+        assert report.steps == 26
         assert after == before.history
         assert differences == []
         assert snapshot == UnversionedRetention()
