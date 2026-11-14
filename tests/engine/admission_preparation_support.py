@@ -19,8 +19,8 @@ from tests.engine.admission_snapshot_support import LIMITS as SNAPSHOT_LIMITS
 from tests.engine.admission_snapshot_support import AdmissionSnapshotCase
 
 LIMITS = AdmissionPreparationLimits(SNAPSHOT_LIMITS, 10**12, 10**22)
-CHECKS = frozenset(
-    function.__code__
+CHECK_CODE_IDS: frozenset[int] = frozenset(
+    id(function.__code__)
     for function in (
         check_detached_execution_contract,
         prepare_readiness,
@@ -37,7 +37,7 @@ def observe_detached_checks(database: Database) -> Generator[list[str]]:
     observed: list[str] = []
 
     def observe(frame: FrameType, event: str, argument: object) -> None:
-        if event == "call" and frame.f_code in CHECKS:
+        if event == "call" and id(frame.f_code) in CHECK_CODE_IDS:
             assert database.units_in_flight() == 0
             observed.append(frame.f_code.co_name)
 
