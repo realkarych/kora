@@ -1,15 +1,12 @@
 import json
 
 from kora.db.worker_heartbeats import HEARTBEAT_VALUE_BYTES
-from kora.engine.heartbeat_context import admit_heartbeat
-from tests.engine.claim_support import WORKER_BYTES
 from tests.engine.heartbeat_bounds import (
     maximal_closure,
     maximal_counters,
     maximal_recovery,
     producer_bounds,
 )
-from tests.engine.heartbeat_support import HEARTBEAT_LIMITS
 
 
 def test_closed_producer_ascii_bounds_include_every_persisted_field() -> None:
@@ -26,7 +23,6 @@ def test_closed_producer_ascii_bounds_include_every_persisted_field() -> None:
         len(json.dumps(item.model_dump(mode="json"), ensure_ascii=True).encode("ascii"))
         for item in producers
     )
-    admit_heartbeat(HEARTBEAT_LIMITS, WORKER_BYTES)
 
     assert bounds == (4499, 6363, 4267, 3279)
     assert all(

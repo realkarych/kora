@@ -39,14 +39,28 @@ from kora.protocols.worker_claim_system import GRANT_BYTES, PROCESS_BYTES
 from kora.protocols.worker_heartbeats import HeartbeatAction, WorkerHeartbeat
 
 
-def admit_heartbeat(limits: HistoryReadLimits, worker_bytes: int) -> None:
-    if type(worker_bytes) is not int or not 0 < worker_bytes < 2**63:
+def admit_heartbeat(
+    limits: HistoryReadLimits, worker_bytes: int, authority: ExpiryContext
+) -> None:
+    borrowed = (
+        authority.limits.parent_bytes,
+        authority.limits.receipt_row_bytes,
+        authority.attempt_bytes,
+    )
+    if any(
+        type(value) is not int or not 0 < value < 2**63
+        for value in (*borrowed, worker_bytes)
+    ):
         raise GrantHistoryRejected()
-    reserve = 3 * (96 * HEARTBEAT_VALUE_BYTES + 4096) + 2 * worker_bytes
+    expiry_bytes = sum(borrowed) + 300 * 4096
+    reserve = 3 * (96 * HEARTBEAT_VALUE_BYTES + 4096) + 2 * worker_bytes + expiry_bytes
     replace(
         limits,
         native_bytes=limits.native_bytes - reserve,
-        raw_bytes=limits.raw_bytes - 3 * HEARTBEAT_VALUE_BYTES - 64 * 4096,
+        raw_bytes=limits.raw_bytes
+        - 3 * HEARTBEAT_VALUE_BYTES
+        - 64 * 4096
+        - expiry_bytes,
     ).admit(
         129, GRANT_BYTES + HEARTBEAT_VALUE_BYTES, PROCESS_BYTES + HEARTBEAT_VALUE_BYTES
     )

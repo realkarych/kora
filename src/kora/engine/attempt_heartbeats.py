@@ -106,7 +106,7 @@ async def heartbeat_attempt(
     try:
         authority.locks.require_connection(connection)
         authority.locks.require(authority.run_id)
-        admit_heartbeat(limits, worker_bytes)
+        admit_heartbeat(limits, worker_bytes, authority)
         if (
             connection.dialect.name == POSTGRESQL
             and not await writable_postgres_transaction(connection)
@@ -255,7 +255,7 @@ async def _apply_heartbeat(
             and body.observation.exit_code not in (None, 0)
         )
     )
-    if not saved.recovery_required and (revoked or expired or lost):
+    if not saved.recovery_required and (revoked or lost):
         values["recovery_required"] = True
     events: list[tuple[str, JsonObject]] = []
     runtime = None if body.evidence is None else body.evidence.runtime
@@ -276,10 +276,10 @@ async def _apply_heartbeat(
                 {"execution_state": state},
             )
         )
-    version = saved.recovery_version + len(events)
+    version = saved.recovery_version + len(events) + int("recovery_required" in values)
     if version >= 2**63:
         raise GrantHistoryRejected()
-    if events:
+    if version != saved.recovery_version:
         values["recovery_version"] = version
     await reserve_heartbeat_row(
         connection,
@@ -338,7 +338,30 @@ async def _apply_heartbeat(
         "owner": principal.owner,
         "token_id": principal.token_id,
     }
-    for index, (kind, payload) in enumerate(events, 1):
+    events = [
+        (
+            kind,
+            {
+                "version": saved.recovery_version + index,
+                "domain": context.grant.execution_domain_id,
+                "reason": "worker_heartbeat",
+                "actor": actor,
+                "evidence": payload,
+            },
+        )
+        for index, (kind, payload) in enumerate(events, 1)
+    ]
+    if "recovery_required" in values:
+        events.append(
+            (
+                "attempt.recovery_required",
+                {
+                    "number": saved.number,
+                    "reasons": ["authority_revoked" if revoked else "execution_lost"],
+                },
+            )
+        )
+    for kind, payload in events:
         await connection.execute(
             insert(event).values(
                 id=authority.identifiers.new(),
@@ -348,13 +371,7 @@ async def _apply_heartbeat(
                 attempt_id=attempt_id,
                 kind=kind,
                 actor=actor,
-                payload={
-                    "version": saved.recovery_version + index,
-                    "domain": context.grant.execution_domain_id,
-                    "reason": "worker_heartbeat",
-                    "actor": actor,
-                    "evidence": payload,
-                },
+                payload=payload,
                 at=now,
                 created_at=now,
                 updated_at=now,
