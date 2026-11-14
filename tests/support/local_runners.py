@@ -119,7 +119,10 @@ def kill_runners(marker: Path) -> tuple[int, ...]:
     for pid in runner_pids(marker):
         observation = reader.read(pid)
         if observation.state is IdentityState.PRESENT:
-            os.kill(pid, signal.SIGKILL)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
             killed.append(pid)
     return tuple(killed)
 
