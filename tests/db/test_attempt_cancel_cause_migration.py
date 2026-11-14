@@ -17,6 +17,7 @@ from tests.db.cancel_cause_support import (
     seed_cause_predecessor,
 )
 from tests.db.seed import predecessor_snapshot
+from tests.db.test_claim_source_migration import assert_attempt_schema_extension
 from tests.db.test_db_upgrade_process import events, upgrade
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 
@@ -37,13 +38,15 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
     database = Database(empty_database_settings)
     try:
         before = await seed_cause_predecessor(database, rich=True)
+        await database.close()
 
         report = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             after = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
-            objects = await connection.run_sync(attempt_schema_objects)
+            objects = await connection.run_sync(attempt_schema_objects, True)
             columns = await connection.run_sync(
                 lambda sync: inspect(sync).get_columns("attempt")
             )
@@ -71,11 +74,13 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0003",
-            "0024",
-            21,
+            "0029",
+            26,
         )
         assert after == before.history
-        assert objects == before.schema_objects
+        assert_attempt_schema_extension(
+            before.schema_objects, objects, database.dialect
+        )
         assert values
         assert all(value is None for value in values)
         column = next(column for column in columns if column["name"] == "cancel_cause")
@@ -153,7 +158,9 @@ async def test_attempt_cancel_cause_upgrade_recovers_compatible_partial_schema(
                     )
                 ).scalar_one()
         locks = await migration_lock_count(database)
+        await database.close()
         recovered = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             differences = await connection.run_sync(
                 differences_ignoring_expression_indexes
@@ -167,8 +174,8 @@ async def test_attempt_cancel_cause_upgrade_recovers_compatible_partial_schema(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0003",
-            "0024",
-            21,
+            "0029",
+            26,
         )
         assert differences == []
         assert stage.database is not None

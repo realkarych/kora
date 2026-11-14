@@ -6,6 +6,8 @@ Governing decisions: [ADR-0002](../../docs/decisions/0002-ai-first-api-and-thin-
 
 Graph-version IR/contract document reads, authoring/validation, cost/daily routes other than the target-search aggregate, session logs/opaque transcripts, worker report/upload routes and [worker-only dispatcher history](protocols.md#resumable-retained-dispatcher-history-issue-226) keep their operation-specific contracts. The sixteen-tool MCP inventory and four console mutations remain. This contract introduces no token-rate limit or global concurrency policy. Storage's 64 KiB inline threshold is independent of response budgets. Existing immutable VcsRef validation, summary and digest selection remain authoritative.
 
+The internal scheduler [failure summary](data-model.md#failure-summary-read-admission-555) under #1445 observes one exact top-level failure count and at most 20 entries. Its selected identifier admission follows the owner decision in #555. This internal reader activates no public route or complete-current-failure navigation; the route owners below retain their own authorization and response/work budgets.
+
 ## 1. Response budgets and completeness
 
 All byte sizes below count compact UTF-8 JSON including the envelope, before content encoding. Byte accounting applies incrementally during construction and at clients before JSON parsing; a small compressed body is not permission for unbounded decompressed input.
@@ -107,6 +109,8 @@ A saved JSON field's selected transport bytes use a versioned canonical serializ
 Backfill processes the original saved value in bounded restartable work, never current pointers. Its final publication validates original owner/generation and eligibility without a full reconstruction under the lock. It cannot revive expired data, renew retention or create an independent readable owner. Inability to prepare a read representation is an explicit unavailable projection, not a claim that the original manifest is absent/invalid or permission to alter scheduling/input semantics. Read operations never fall back to loading the whole JSON then slicing. Existing eligible records must have a verified readable representation before their new selected routes activate; subsequent failure is an explicit read failure with no partial success.
 
 Engine and metadata owners measure bytes, nesting, repeated selections and large individual fields as well as node count, transaction duration and unrelated scheduler progress. Constant descriptor row count alone does not prove short transactions. No new graph/input-validity limit is introduced. The implementation must keep original manifest, descriptor and publication identity consistent through cancellation, crash/replay, stale preparation, backfill and shutdown on both databases.
+
+The internal [Claim source admission](data-model.md#attempt-source-read-admission-issue-1490) records conservative whole-value native/transport quantities and a source revision. It enables admission before selected JSON projection without copying payloads. It is not an exact byte-range descriptor, supplies no selected-history endpoint and does not satisfy the separate staged canonical representation requirement above. Its mutable revision includes request availability changes; reader activation still requires the actual source producer and final authority recheck.
 
 ## 6. Attempt comparison
 

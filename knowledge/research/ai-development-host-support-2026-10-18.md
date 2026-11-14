@@ -11,7 +11,7 @@ Checked: 2026-10-18. This record concerns contributor sessions, not supported ve
 - [Codex in GitHub](https://learn.chatgpt.com/docs/third-party/github) documents `Code Review Rules` in `AGENTS.md`, `@codex review`, repository automatic-review settings and the native review's severity threshold.
 - [Codex best practices](https://learn.chatgpt.com/docs/learn/best-practices) describes referencing shared review guidance from `AGENTS.md`.
 
-The canonical skill and relative Codex symlink share one instruction source. No custom agent definitions or global plugin changes are part of the setup. Official documentation establishes supported interfaces; the acceptance observations below establish what was actually exercised.
+The canonical skill and relative Codex symlink share one instruction source. No custom agent definitions or global plugin changes are part of the setup. Since 2026-11-13 the setup has one Claude Code agent definition, recorded in [review dispatch cost](review-dispatch-cost-2026-11-13.md); the observations below predate it. Official documentation establishes supported interfaces; the acceptance observations below establish what was actually exercised.
 
 ## Acceptance observations
 

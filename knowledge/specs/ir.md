@@ -168,6 +168,20 @@ A **`ReviewBundle`** (DD-33) has two parts: `facts`, written by kora from its ow
 
 **Trigger rules** (FR-1.6 plus DD-1): `all_success` (default), `all_done`, `one_success`, `one_failed`, `none_failed`, `all_skipped`, and `none_failed_min_one_success` (borrowed from Archon: no upstream failed and at least one succeeded, so a node after an all-skipped branch stays skipped). The enum is closed in IR v1.
 
+The terminal-dependency interpretation approved under [#1446](https://github.com/realkarych/kora/issues/1446) on 2026-11-14 waits for **all** concrete predecessors to finish, including for `one_success` and `one_failed`. Count each predecessor once across data and control edges. For a nonempty set of N predecessors, S counts `succeeded`, F counts `failed`, `upstream_failed` and individually `cancelled`, and K counts `skipped`:
+
+| Rule | Satisfied when | Otherwise |
+|---|---|---|
+| `all_success` | S = N | `upstream_failed` if F > 0, otherwise `skipped` |
+| `all_done` | Always, after all finish | Never false |
+| `one_success` | S > 0 | `upstream_failed` if F > 0, otherwise `skipped` |
+| `one_failed` | F > 0 | `skipped` |
+| `none_failed` | F = 0 | `upstream_failed` |
+| `none_failed_min_one_success` | F = 0 and S > 0 | `upstream_failed` if F > 0, otherwise `skipped` |
+| `all_skipped` | K = N | `skipped` |
+
+A genuine root with no predecessors in the pinned graph satisfies every rule. An absent, foreign or mismatched predecessor instance is unavailable evidence, never an empty root. Individual cancellation can satisfy a failure handler; cancellation or expiry of the enclosing run still prevents advancement. A satisfied rule supplies no accepted artifact, input binding, branch selection or execution authority. The separate unresolved-required-input question is unchanged. A false rule writes `node.skipped` or `node.upstream_failed` with the fixed reason `trigger_rule_unsatisfied`, atomically with the matching current node state and run scheduling marker. It does not create an attempt or certify physical release.
+
 The owner-approved [saved output binding inventory](data-model.md#saved-output-binding-inventory) associates every root-node output, stored-body node output and declared body export with its complete effective contract by value. Exact segmented declaration paths include unused bodies without expanding invocations; missing or unsupported members cannot be dropped from a successful section. This outer association neither supplies missing implicit roles nor replaces declared export interfaces, wider composition, installation validity or execution admission.
 
 ### 3.1 Fixed implicit outputs
@@ -1171,6 +1185,8 @@ Validation emits [shared diagnostics](diagnostics.md) and collects every indepen
 The authored first-slice configuration pass, `kora.ir.validate_first_slice_configuration`, is implemented under [issue #524](https://github.com/realkarych/kora/issues/524), with the same structurally validated, unchanged-snapshot precondition. It checks the root's one-agent → one-command → one-human-input topology, declared input/control ordering, nonmanual trigger kinds, `graph.target`, nonempty `graph.subgraphs` and the matrix's explicitly unsupported authored skills, subagents, hooks, MCP servers, repository trust, USD budgets/headroom and retry/provider-wait settings. Every stored definition and node is inspected once without invocation expansion, including unused or recursive definitions. Exact no-ops remain unchanged; provider zero durations are classified without integer conversion. Metadata, schemas and payload words are not configuration authority.
 
 Fixed `IR028` findings identify exact unsupported fields; cardinality/kind topology uses `graph.nodes`, and aggregate ordering uses the owning node path. Node/body/graph source metadata belongs only to that owner and is revalidated; runtime findings have no source. Only a root with exactly one of each supported kind receives ordering comparisons. Missing links, missing producer outputs, non-parameter reserved inputs and cyclic endpoints leave dependent comparisons unresolved rather than duplicating `IR001`/`IR002` or retry-legality findings. Independent configuration findings continue through the existing diagnostic count/byte bounds and omissions.
+
+The agent-secret rule `IR015` is implemented under [issue #1462](https://github.com/realkarych/kora/issues/1462) as `kora.ir.agent_secrets.agent_secret_findings`, which deploy runs with the other passes. Its trusted inputs are each installed runtime's declared `enforces_network_policy` and `isolates_tool_secrets` and the namespace's `allow_unenforced_agent_secrets` and `require_network_enforcement`. A node runs on its `config.runtime`, else on the document's `runtime.runtime`; a runtime the installation does not have declares neither capability. A `secret_env` counts only when it names at least one variable. A `network_policy` is non-empty when it declares `egress`, including an empty list that denies all egress; an absent policy, `{}` or one with only extension fields is empty. Each finding carries the path of the offending `secret_env`, with the shared placeholder in place of an MCP server name. The namespace permission lifts the agent and MCP-server cases only, never the command-node case.
 
 `FirstSliceConfigurationResult` exposes node, definition, trigger and checked/unresolved ordering counts. `authored_configuration_supported` requires no owned diagnostic and no unresolved ordering comparison; it is false for an unresolved chain even when this pass emits no error. It establishes only the authored configuration checks, without full graph validity, installed capability resolution, namespace security, defaults normalization, saved retry policies or installation readiness. No provider/secret resolution, mutation, public validate/deploy wiring, persistence or runtime behavior is activated. Those work-item-3 and consumer obligations remain pending.
 

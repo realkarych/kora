@@ -17,6 +17,7 @@ from kora.api.graph_deployment import (
 from kora.api.graph_deployment_limits import IR_BYTES, READ
 from kora.api.graph_deployment_writer import (
     GraphDeploymentTarget,
+    NamespacePolicyChanged,
     PublishedGraphVersion,
     publish_graph_deployment,
 )
@@ -34,7 +35,9 @@ from kora.engine.graph_version_identity import (
 )
 from kora.ir.json import JsonObject
 from tests.api.deployment_cases import (
+    ALLOW_AGENT_SECRETS,
     AT,
+    DEFAULT_POLICY,
     GRAPH,
     OWNER,
     SELECTION,
@@ -46,6 +49,7 @@ from tests.api.deployment_cases import (
     seeded_namespace,
     skeleton_ir,
     unresolved_approval,
+    with_agent_secret,
 )
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import FakeClock, Seeder, fixed_randomness
@@ -169,7 +173,9 @@ async def test_deployment_preparation_refuses_before_preparing(
     unresolved = unresolved_approval()
 
     outcomes = [
-        await prepare_graph_deployment(ir, SELECTORS, SELECTION, evaluator)
+        await prepare_graph_deployment(
+            ir, SELECTORS, SELECTION, DEFAULT_POLICY, evaluator
+        )
         for ir in (foreign, renamed, unselected, malformed, oversized, unresolved)
     ]
 
@@ -190,8 +196,12 @@ async def test_deployment_preparation_admits_documents_within_its_budgets(
     admitted = with_prompt("x" * 700_000)
     beyond = with_prompt("x" * 1_200_000)
 
-    within = await prepare_graph_deployment(admitted, SELECTORS, SELECTION, evaluator)
-    exhausted = await prepare_graph_deployment(beyond, SELECTORS, SELECTION, evaluator)
+    within = await prepare_graph_deployment(
+        admitted, SELECTORS, SELECTION, DEFAULT_POLICY, evaluator
+    )
+    exhausted = await prepare_graph_deployment(
+        beyond, SELECTORS, SELECTION, DEFAULT_POLICY, evaluator
+    )
 
     assert not isinstance(within, DeploymentRefusal | DeploymentFindings)
     assert exhausted is DeploymentRefusal.INCOMPLETE
@@ -358,3 +368,17 @@ async def test_deploy_writer_refuses_a_service_principal_before_reuse(
         )
 
     assert await row_counts(database) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_deploy_writer_refuses_a_changed_secret_policy(
+    database: Database, evaluator: Evaluator
+) -> None:
+    namespace_id, token_id = await seeded_namespace(database)
+    deployment = await prepared(evaluator, with_agent_secret(), ALLOW_AGENT_SECRETS)
+
+    with pytest.raises(NamespacePolicyChanged):
+        await publish(database, deployment, namespace_id, token_id)
+
+    assert await row_counts(database) == (0, 0)
+    assert database.writer_is_free()

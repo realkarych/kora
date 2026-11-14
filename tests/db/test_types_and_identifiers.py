@@ -335,3 +335,99 @@ async def test_price_snapshot_decimal_round_trip(database: Database) -> None:
                     .where(usage_record.c.id == usage_id)
                     .values(usd_estimate=invalid)
                 )
+
+
+@pytest.mark.asyncio
+async def test_finite_timestamp_extremes_preserve_native_order_and_queries(
+    database: Database,
+) -> None:
+    minimum = datetime.min.replace(tzinfo=UTC)
+    maximum = datetime.max.replace(tzinfo=UTC)
+    moments = (
+        minimum,
+        minimum + timedelta(microseconds=1),
+        START,
+        maximum - timedelta(microseconds=1),
+        maximum,
+    )
+    async with database.transaction() as connection:
+        seed = Seeder(connection)
+        identifiers = [
+            await seed.token(str(index + 1) * 64, expires_at=moment)
+            for index, moment in enumerate(moments)
+        ]
+
+    async with database.transaction() as connection:
+        await connection.execute(
+            update(api_token)
+            .where(api_token.c.id == identifiers[-1])
+            .values(expires_at=maximum)
+        )
+    async with database.read_transaction() as connection:
+        ordered = (
+            (
+                await connection.execute(
+                    select(api_token.c.expires_at).order_by(api_token.c.expires_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        lower = (
+            (
+                await connection.execute(
+                    select(api_token.c.id).where(api_token.c.expires_at <= minimum)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        upper = (
+            (
+                await connection.execute(
+                    select(api_token.c.id).where(api_token.c.expires_at == maximum)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if connection.dialect.name == "postgresql":
+            finite = (
+                (
+                    await connection.execute(
+                        select(func.isfinite(api_token.c.expires_at))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert finite == [True] * len(moments)
+
+    assert ordered == list(moments)
+    assert lower == identifiers[:1]
+    assert upper == identifiers[-1:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("positive", [False, True])
+async def test_timestamp_decoder_refuses_native_infinity_without_inventing_timezone(
+    database: Database, positive: bool
+) -> None:
+    async with database.transaction() as connection:
+        token_id = await Seeder(connection).token("8" * 64, expires_at=START)
+        expression = (
+            ("'infinity'::timestamptz" if positive else "'-infinity'::timestamptz")
+            if connection.dialect.name == "postgresql"
+            else "'0001-01-01T00:00:00'"
+        )
+        await connection.execute(
+            update(api_token)
+            .where(api_token.c.id == token_id)
+            .values(expires_at=text(expression))
+        )
+
+    async with database.read_transaction() as connection:
+        with pytest.raises(ValueError, match="timezone-aware|does not match format"):
+            (await connection.execute(select(api_token.c.expires_at))).scalar_one()
+
+    assert database.units_in_flight() == 0

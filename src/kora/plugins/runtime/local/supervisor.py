@@ -69,6 +69,7 @@ from kora.runner.registry import (
 PR_SET_DUMPABLE: Final[int] = 4
 PR_SET_CHILD_SUBREAPER: Final[int] = 36
 LISTEN_BACKLOG: Final[int] = 16
+EXIT_COMPLETED: Final[int] = 0
 EXIT_REFUSED: Final[int] = 3
 EXIT_FAILED: Final[int] = 1
 TOKEN: Final[re.Pattern[str]] = re.compile(r"[\x21-\x7e]{1,256}")
@@ -88,6 +89,15 @@ REGISTERED: Final[EventSpec] = CATALOG.register(
         COMPONENT,
         Level.INFO,
         "the attempt runner registered and is listening",
+        {},
+    )
+)
+COMPLETED: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.runner.completed",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner exits after normal completion",
         {},
     )
 )
@@ -350,7 +360,7 @@ async def supervise(
             server = prepared.server(clock, reader, identity, log, command)
             try:
                 server.start()
-                await asyncio.Event().wait()
+                await server.completed()
             finally:
                 try:
                     await server.close()
@@ -401,6 +411,7 @@ def run(argv: Sequence[str]) -> int:
     log.emit(STARTED)
     try:
         asyncio.run(supervise(arguments, log, diagnostics))
+        log.emit(COMPLETED)
     except RunnerRefused as refusal:
         log.emit(REFUSED, reason=str(refusal.args[0]))
         return EXIT_REFUSED
@@ -410,7 +421,7 @@ def run(argv: Sequence[str]) -> int:
         return EXIT_FAILED
     finally:
         diagnostics.shutdown()
-    return EXIT_FAILED
+    return EXIT_COMPLETED
 
 
 def main() -> None:

@@ -1,9 +1,11 @@
 from collections.abc import AsyncGenerator
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import cast
 
 import pytest_asyncio
+from sqlalchemy import update
 
 from kora.api.graph_deployment import PreparedDeployment, prepare_graph_deployment
 from kora.api.graph_deployment_worker import DeploymentPreparer
@@ -12,13 +14,16 @@ from kora.api.graph_deployment_writer import (
     PublishedGraphVersion,
     publish_graph_deployment,
 )
+from kora.api.graph_services import deployment_selection
 from kora.cel_eval.binding import load_binding
 from kora.cel_eval.thread import EvaluationThread, Evaluator
 from kora.db.connection import Database
 from kora.db.identifiers import IdentifierGenerator
+from kora.db.tables import namespace
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
-from kora.ir.deployment_checks import DeploymentSelection
+from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.json import JsonObject
+from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.protocols.authentication import NamespaceGrant, Principal
 from tests.cel_eval.pattern_validation_scenarios import assert_settled
 from tests.db.seed import FakeClock, Seeder
@@ -33,7 +38,14 @@ BUILTIN_TYPES = ("AgentSession", "CommandResult", "StructuredOutput", "VcsRef")
 SELECTORS = GraphDeploymentSelectors(
     authorized_namespace_name=NAMESPACE, route_graph=GRAPH, request_graph=GRAPH
 )
-SELECTION = DeploymentSelection(HARNESS)
+LOCAL_CAPABILITIES = LocalRuntimeConfiguration(state_root=None).capabilities()
+SELECTION = deployment_selection(HARNESS, LOCAL_CAPABILITIES)
+DEFAULT_POLICY = NamespaceSecretPolicy(
+    allow_unenforced_agent_secrets=False, require_network_enforcement=False
+)
+ALLOW_AGENT_SECRETS = NamespaceSecretPolicy(
+    allow_unenforced_agent_secrets=True, require_network_enforcement=False
+)
 
 
 def evaluation_clock() -> datetime:
@@ -94,6 +106,28 @@ def skeleton_ir(
     )
 
 
+def with_agent_secret() -> JsonObject:
+    ir = skeleton_ir()
+    ir["secrets"] = {"aliases": {"API_TOKEN": "secret://env/API_TOKEN"}}
+    nodes = cast(
+        "dict[str, dict[str, dict[str, object]]]",
+        cast("JsonObject", ir["graph"])["nodes"],
+    )
+    nodes["agent"]["config"]["secret_env"] = {"API_TOKEN": "API_TOKEN"}
+    return ir
+
+
+async def save_secret_policy(
+    database: Database, namespace_id: str, policy: NamespaceSecretPolicy
+) -> None:
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(namespace)
+            .where(namespace.c.id == namespace_id)
+            .values(policy=asdict(policy))
+        )
+
+
 def unresolved_approval() -> JsonObject:
     ir = skeleton_ir()
     nodes = cast(
@@ -145,10 +179,16 @@ async def evaluator() -> AsyncGenerator[Evaluator]:
 
 
 async def prepared(
-    evaluator: Evaluator, ir: JsonObject | None = None
+    evaluator: Evaluator,
+    ir: JsonObject | None = None,
+    policy: NamespaceSecretPolicy = DEFAULT_POLICY,
 ) -> PreparedDeployment:
     result = await prepare_graph_deployment(
-        skeleton_ir() if ir is None else ir, SELECTORS, SELECTION, evaluator
+        skeleton_ir() if ir is None else ir,
+        SELECTORS,
+        SELECTION,
+        policy,
+        evaluator,
     )
     assert isinstance(result, PreparedDeployment)
     return result

@@ -26,6 +26,7 @@ from tests.db.cancel_cause_support import (
     seed_cause_predecessor,
 )
 from tests.db.seed import predecessor_snapshot
+from tests.db.test_claim_source_migration import assert_attempt_schema_extension
 from tests.db.test_db_upgrade_process import events, upgrade
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 from tests.engine.test_outcome_records import prepared
@@ -54,12 +55,14 @@ async def test_outcome_migration_preserves_unrecorded_history(
     try:
         before = await seed_outcome_predecessor(database)
 
+        await database.close()
         report = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             after = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
-            objects = await connection.run_sync(attempt_schema_objects)
+            objects = await connection.run_sync(attempt_schema_objects, True)
             columns = await connection.run_sync(
                 lambda sync: inspect(sync).get_columns("attempt")
             )
@@ -93,11 +96,13 @@ async def test_outcome_migration_preserves_unrecorded_history(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0004",
-            "0024",
-            20,
+            "0029",
+            25,
         )
         assert after == before.history
-        assert objects == before.schema_objects
+        assert_attempt_schema_extension(
+            before.schema_objects, objects, database.dialect
+        )
         assert values
         assert all(tuple(value) == (None, None, None) for value in values)
         assert tuple(omitted) == (None, None, None)
@@ -210,8 +215,8 @@ async def test_outcome_migration_recovers_partial_schema(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0004",
-            "0024",
-            20,
+            "0029",
+            25,
         )
         assert differences == []
         assert stage.database is not None

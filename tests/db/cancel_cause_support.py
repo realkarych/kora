@@ -35,11 +35,24 @@ class CausePredecessor:
     schema_objects: tuple[str, str]
 
 
-def attempt_schema_objects(connection: Connection) -> tuple[str, str]:
+def attempt_schema_objects(
+    connection: Connection, later_indexes: bool = False
+) -> tuple[str, str]:
     inspector = inspect(connection)
+    indexes = inspector.get_indexes("attempt")
+    if later_indexes:
+        added = {
+            "ix_attempt_due_deadline",
+            "ix_attempt_due_lease",
+            "ix_attempt_cancel_due",
+            "ix_attempt_physical_capacity",
+            "ix_attempt_run_recovery",
+        }
+        assert added <= {index["name"] for index in indexes}
+        indexes = [index for index in indexes if index["name"] not in added]
     return (
         json.dumps(inspector.get_foreign_keys("attempt"), sort_keys=True, default=str),
-        json.dumps(inspector.get_indexes("attempt"), sort_keys=True, default=str),
+        json.dumps(indexes, sort_keys=True, default=str),
     )
 
 

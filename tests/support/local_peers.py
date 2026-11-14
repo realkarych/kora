@@ -41,6 +41,7 @@ from kora.runner.registry import Registry
 SOCKET_NAME: Final[str] = "control-socket"
 FAR_NS: Final[int] = 3600 * 1_000_000_000
 CONDITION_SECONDS: Final[float] = 10.0
+POLL_SECONDS: Final[float] = 0.01
 SLEEPER: Final[tuple[str, ...]] = (sys.executable, "-c", "import time; time.sleep(60)")
 
 
@@ -131,7 +132,7 @@ async def until(condition: Callable[[], bool]) -> None:
     deadline = time.monotonic() + CONDITION_SECONDS
     while not condition():
         assert time.monotonic() < deadline, "the condition did not hold in time"
-        await asyncio.sleep(0)
+        await asyncio.sleep(POLL_SECONDS)
 
 
 @asynccontextmanager

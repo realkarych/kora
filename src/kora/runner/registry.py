@@ -14,6 +14,7 @@ from pydantic import (
     Discriminator,
     Field,
     StrictBool,
+    StrictInt,
     StringConstraints,
     model_validator,
 )
@@ -31,8 +32,20 @@ from kora.protocols.evidence import (
     NormalCompletionQuiescence,
     TerminationReceipt,
 )
-from kora.protocols.identity import Handle, Identifier, Instant, ProcessIdentity
-from kora.protocols.runtime import RuntimePhase, RuntimeStatus
+from kora.protocols.identity import (
+    Count,
+    Handle,
+    Identifier,
+    Instant,
+    ProcessIdentity,
+)
+from kora.protocols.runtime import (
+    MAX_EXIT_CODE,
+    MIN_EXIT_CODE,
+    RuntimePhase,
+    RuntimeStatus,
+    TransferName,
+)
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
@@ -59,6 +72,8 @@ F_FULLFSYNC: Final[int] = 51
 LOCK_DEADLINE_NS: Final[int] = 2_000_000_000
 LOCK_RETRY_NS: Final[int] = 10_000_000
 WORKERS: Final[int] = 4
+RESULT_RECORD_BYTES: Final[int] = 1_048_576
+RESULT_FILE_BYTES: Final[int] = 16_777_216
 ADMITTED_JOBS: Final[int] = 64
 Result = TypeVar("Result")
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local")
@@ -107,6 +122,10 @@ MESSAGES: Final[dict[str, str]] = {
     "attempt_not_submitted": "the attempt has no submitted handle",
     "workload_conflict": "the request conflicts with the attempt's recorded binding",
     "attempt_retired": "the attempt is retired",
+    "attempt_completed": "the attempt completed normally",
+    "attempt_running": "the attempt has not completed",
+    "release_partial": "the attempt release removed part of its files",
+    "release_foreign_entry": "the attempt holds entries that release does not remove",
     "deadline_expired": "the attempt's inherited deadline has expired",
 }
 RETRYABLE: Final[frozenset[str]] = frozenset(
@@ -118,6 +137,8 @@ RETRYABLE: Final[frozenset[str]] = frozenset(
         "runner_stop_unconfirmed",
         "runner_starting",
         "runner_unreachable",
+        "attempt_running",
+        "release_partial",
     }
 )
 
@@ -178,6 +199,29 @@ class Running(BoundaryModel):
     socket_path: SocketPath
 
 
+class JournalRecordRef(BoundaryModel):
+    offset: Count
+    length: Annotated[Count, Field(ge=1, le=RESULT_RECORD_BYTES)]
+    digest: Digest
+
+
+class ControlFileRef(BoundaryModel):
+    name: TransferName
+    size: Annotated[Count, Field(le=RESULT_FILE_BYTES)]
+    digest: Digest
+
+
+class CompletedResult(BoundaryModel):
+    kind: Literal["command", "agent"]
+    ref: JournalRecordRef | ControlFileRef
+
+    @model_validator(mode="after")
+    def kind_matches_ref(self) -> Self:
+        if (self.kind == "command") != isinstance(self.ref, JournalRecordRef):
+            raise ValueError("the result kind does not match its reference")
+        return self
+
+
 class Completed(BoundaryModel):
     state: Literal["completed"]
     deadline: ExecutionDeadline | None
@@ -187,6 +231,8 @@ class Completed(BoundaryModel):
     quiescence: NormalCompletionQuiescence
     fence: Fence
     released_at: Instant | None
+    result: CompletedResult | None
+    exit_code: Annotated[StrictInt, Field(ge=MIN_EXIT_CODE, le=MAX_EXIT_CODE)] | None
 
 
 class Retiring(BoundaryModel):
@@ -350,6 +396,51 @@ def takeover_cell(
     )
 
 
+def completed_cell(
+    entry: Entry | None,
+    runner: ProcessIdentity,
+    submitter: Submitter,
+    quiescence: NormalCompletionQuiescence,
+    result: CompletedResult | None,
+    exit_code: int | None,
+    retirement_id: str,
+) -> Transition:
+    if isinstance(entry, Completed) and entry.runner == runner:
+        return Transition()
+    if (
+        not isinstance(entry, Running)
+        or entry.runner != runner
+        or entry.submitter != submitter
+    ):
+        return Transition(refusal="runner_unreachable")
+    fence = Fence(retirement_id=retirement_id, fenced_at=quiescence.observed_at)
+    completed = Completed(
+        state="completed",
+        deadline=entry.deadline,
+        gate_closed=entry.gate_closed,
+        request_digest=entry.request_digest,
+        runner=runner,
+        quiescence=quiescence,
+        fence=fence,
+        released_at=None,
+        result=result,
+        exit_code=exit_code,
+    )
+    return Transition(completed)
+
+
+def released_cell(
+    entry: Entry | None, runner: ProcessIdentity, released_at: datetime
+) -> Transition:
+    if not isinstance(entry, Completed) or entry.runner != runner:
+        return Transition(refusal="runner_unreachable")
+    if entry.released_at is not None:
+        return Transition()
+    return Transition(
+        Completed.model_validate({**entry.model_dump(), "released_at": released_at})
+    )
+
+
 def register_cell(
     entry: Entry | None, nonce: str, runner: ProcessIdentity, socket_path: str
 ) -> Transition:
@@ -384,8 +475,9 @@ def status_cell(entry: Entry | None, observed_at: datetime) -> RuntimeStatus:
     if isinstance(entry, Running | Retiring):
         raise refusal("runner_unreachable")
     phase: RuntimePhase = entry.phase if isinstance(entry, Retired) else "complete"
+    code = entry.exit_code if isinstance(entry, Completed) else None
     return RuntimeStatus(
-        state="exited", exit_code=None, phase=phase, observed_at=observed_at
+        state="exited", exit_code=code, phase=phase, observed_at=observed_at
     )
 
 

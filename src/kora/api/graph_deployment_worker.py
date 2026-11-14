@@ -13,6 +13,7 @@ from kora.api.graph_deployment import (
 )
 from kora.cel_eval.thread import EvaluationThread, Evaluator
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
+from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.deployment_checks import DeploymentSelection
 from kora.ir.json import JsonObject
 from kora.protocols.time import Clock
@@ -165,12 +166,13 @@ class DeploymentPreparer:
         ir: JsonObject,
         selectors: GraphDeploymentSelectors,
         selection: DeploymentSelection,
+        policy: NamespaceSecretPolicy,
     ) -> DeploymentPreparation:
         async with self.reserve() as reservation:
             if reservation is None:
                 return DeploymentRefusal.BUSY
             return await reservation.run(
                 lambda evaluator: prepare_graph_deployment(
-                    ir, selectors, selection, evaluator
+                    ir, selectors, selection, policy, evaluator
                 )
             )

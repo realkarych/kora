@@ -1,0 +1,27 @@
+{
+  "annotations": {},
+  "jobs": [],
+  "logs": {},
+  "run": {
+    "conclusion": "cancelled",
+    "created_at": "2026-11-12T08:16:43Z",
+    "event": "pull_request",
+    "head_branch": "ci/balanced-lanes-1348",
+    "head_commit": {
+      "tree_id": "fa168009c74315bfb74c3a5944eaa8a4db8e3a77"
+    },
+    "head_repository": {
+      "id": 1419776188
+    },
+    "head_sha": "7c31e90db105ad9c100c0dfd5957fed1631388ca",
+    "id": 43181623954,
+    "name": "CI",
+    "path": ".github/workflows/ci.yml",
+    "pull_requests": [],
+    "repository": {
+      "id": 1419776188
+    },
+    "run_attempt": 1
+  },
+  "source": "realkarych/kora run 43181623954 attempt 1"
+}

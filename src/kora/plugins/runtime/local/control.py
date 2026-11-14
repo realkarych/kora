@@ -28,11 +28,13 @@ from kora.plugins.runtime.local.channel import (
     read_observation,
     read_output_declaration,
     read_output_trailer,
+    read_quiescence,
     read_status,
     send_message,
     write_transfer_bytes,
 )
 from kora.protocols.errors import KoraProtocolError
+from kora.protocols.evidence import NormalCompletionQuiescence
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.runtime import CommandObservation, TransferItem, Workload
 from kora.protocols.time import Clock
@@ -146,7 +148,7 @@ async def start_command(
         channel.close()
 
 
-async def observe_command(
+async def attached_request(
     path: str,
     runner: ProcessIdentity,
     dispatcher_id: str,
@@ -154,7 +156,9 @@ async def observe_command(
     executor: TransitionExecutor,
     clock: Clock,
     request_id: str,
-) -> CommandObservation:
+    op: str,
+    reservation: int,
+) -> bytes:
     deadline = clock.monotonic_ns() + FRAME_PROGRESS_NS
     endpoint = await connected(path, clock, deadline)
     channel = BoundedChannel(endpoint, clock)
@@ -171,14 +175,60 @@ async def observe_command(
         read_delivery(payload, request_id, "attached")
         answered = clock.monotonic_ns() + START_PROGRESS_NS
         await channel.write_typed_frame(
-            FrameType.JSON, control_request("observe", request_id), answered
+            FrameType.JSON, control_request(op, request_id), answered
         )
         _, payload = await channel.read_typed_frame(
-            answered, {FrameType.JSON.value: OBSERVATION_BYTES}
+            answered, {FrameType.JSON.value: reservation}
         )
-        return read_observation(payload, request_id)
+        return payload
     finally:
         channel.close()
+
+
+async def observe_command(
+    path: str,
+    runner: ProcessIdentity,
+    dispatcher_id: str,
+    source: PeerSource,
+    executor: TransitionExecutor,
+    clock: Clock,
+    request_id: str,
+) -> CommandObservation:
+    payload = await attached_request(
+        path,
+        runner,
+        dispatcher_id,
+        source,
+        executor,
+        clock,
+        request_id,
+        "observe",
+        OBSERVATION_BYTES,
+    )
+    return read_observation(payload, request_id)
+
+
+async def quiesce_command(
+    path: str,
+    runner: ProcessIdentity,
+    dispatcher_id: str,
+    source: PeerSource,
+    executor: TransitionExecutor,
+    clock: Clock,
+    request_id: str,
+) -> NormalCompletionQuiescence:
+    payload = await attached_request(
+        path,
+        runner,
+        dispatcher_id,
+        source,
+        executor,
+        clock,
+        request_id,
+        "quiescence",
+        ENVELOPE_BYTES,
+    )
+    return read_quiescence(payload, request_id)
 
 
 async def transfer_input(

@@ -20,6 +20,7 @@ from kora.protocols.deadlines import (
     thresholds,
 )
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
+from kora.protocols.evidence import NormalCompletionQuiescence
 from kora.protocols.identity import Count, Identifier, Sha256
 from kora.protocols.runtime import (
     MAX_TRANSFER_BYTES,
@@ -678,6 +679,34 @@ def read_observation(payload: bytes, request_id: str) -> CommandObservation:
             raise message_refused(MessageRefusal.MALFORMED)
         raise error
     envelope = json_model(ObservationEnvelope, payload)
+    if envelope is None or envelope.request_id != request_id:
+        raise message_refused(MessageRefusal.MALFORMED)
+    return envelope.value
+
+
+class QuiescenceEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["quiescence"]
+    value: NormalCompletionQuiescence
+
+
+def quiescence_envelope(request_id: str, value: NormalCompletionQuiescence) -> bytes:
+    envelope = QuiescenceEnvelope(
+        request_id=request_id, result="quiescence", value=value
+    )
+    return canonical_bytes(envelope.model_dump(mode="json"))
+
+
+def read_quiescence(payload: bytes, request_id: str) -> NormalCompletionQuiescence:
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    envelope = json_model(QuiescenceEnvelope, payload)
     if envelope is None or envelope.request_id != request_id:
         raise message_refused(MessageRefusal.MALFORMED)
     return envelope.value

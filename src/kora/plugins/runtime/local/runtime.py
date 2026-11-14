@@ -29,6 +29,7 @@ from kora.plugins.runtime.local.channel import (
     SECTION_FRAME_BYTES,
     LogName,
     LogRequest,
+    LogSource,
     OutputRequest,
     checked_log,
     checked_output_name,
@@ -36,6 +37,13 @@ from kora.plugins.runtime.local.channel import (
     transfer_cutoff,
     workload_digest,
     write_transfer_bytes,
+)
+from kora.plugins.runtime.local.completed import (
+    attempt_token,
+    copied_log,
+    recorded_exited,
+    recorded_observation,
+    recorded_record,
 )
 from kora.plugins.runtime.local.configuration import CONFIG_SCHEMA as CONFIG_SCHEMA
 from kora.plugins.runtime.local.configuration import (
@@ -49,6 +57,7 @@ from kora.plugins.runtime.local.control import (
     ListenerRefused,
     deliver_workload,
     observe_command,
+    quiesce_command,
     runner_status,
     start_command,
     transfer_input,
@@ -82,7 +91,7 @@ from kora.plugins.runtime.local.spool import (
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline, duration_ns
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.evidence import TerminationReceipt
+from kora.protocols.evidence import NormalCompletionQuiescence, TerminationReceipt
 from kora.protocols.identity import Handle, ProcessIdentity
 from kora.protocols.runtime import (
     CommandObservation,
@@ -95,9 +104,15 @@ from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceTarget
 from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 from kora.runner.filesystem import (
+    RELEASE_DEPTH,
+    RELEASE_ENTRIES,
     DirectoryAnchor,
     FilesystemError,
+    ReleaseProgress,
+    ReleaseState,
     open_local_directory,
+    open_private_directory,
+    release_tree,
 )
 from kora.runner.identity import (
     SCAN_NS,
@@ -116,12 +131,14 @@ from kora.runner.registry import (
     RUNTIME_NAME,
     Applied,
     AttemptKey,
+    Completed,
     DomainRecord,
     Entry,
     Fence,
     LockOutcome,
     Registry,
     Retired,
+    Retiring,
     Running,
     Starting,
     Submitter,
@@ -132,6 +149,7 @@ from kora.runner.registry import (
     lookup_cell,
     open_domain,
     refusal,
+    released_cell,
     retire_cell,
     runner_argv,
     status_cell,
@@ -143,6 +161,8 @@ from kora.runner.registry import (
 STOP_MATCHES: Final[int] = 8
 SWEEP_WORKERS: Final[int] = 1
 SWEEP_ADMITTED: Final[int] = 4
+RELEASE_WORKERS: Final[int] = 1
+RELEASE_ADMITTED: Final[int] = 4
 ATTEMPT: Final[re.Pattern[str]] = re.compile(r"[\x21-\x7e]{1,256}")
 REJECTIONS: Final[dict[str, str]] = {
     "state_root_unsafe": "the local state root is missing or unsafe",
@@ -181,6 +201,27 @@ SWEPT: Final[EventSpec] = CATALOG.register(
         },
     )
 )
+RELEASED: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.release",
+        COMPONENT,
+        Level.INFO,
+        "a completed local attempt's files were released",
+        {
+            "outcome": FieldKind.STRING,
+            "removed": FieldKind.INTEGER,
+            "foreign": FieldKind.INTEGER,
+            "waited_ms": FieldKind.FLOAT,
+        },
+    )
+)
+RELEASE_REFUSALS: Final[dict[type, str]] = {
+    Retiring: "attempt_retired",
+    Retired: "attempt_retired",
+    Running: "attempt_running",
+    Starting: "runner_starting",
+}
+
 LISTENER_REFUSED: Final[EventSpec] = CATALOG.register(
     EventSpec(
         "runtime.local.listener_refused",
@@ -313,6 +354,10 @@ def launch_environment(home: Callable[[], Path]) -> dict[str, str]:
     if environment is None:
         raise rejection("state_root_unsafe")
     return environment
+
+
+def completed_code(entry: Completed) -> str:
+    return "attempt_completed" if entry.released_at is None else "attempt_retired"
 
 
 def own_identity(identities: IdentityReader) -> ProcessIdentity:
@@ -456,6 +501,8 @@ class LocalRuntime:
         self.registry = registry
         self.executor = executor
         self.sweeps = TransitionExecutor(SWEEP_WORKERS, SWEEP_ADMITTED)
+        self.releases = TransitionExecutor(RELEASE_WORKERS, RELEASE_ADMITTED)
+        self.release_entries = RELEASE_ENTRIES
         self._identities = identities
         self._scanner = scanner
         self._peers = peers
@@ -494,7 +541,10 @@ class LocalRuntime:
         scanner: NativeIdentityReader | None = None,
         peers: PeerSource | None = None,
         service_launcher: StepLauncher | None = None,
+        release_entries: int = RELEASE_ENTRIES,
     ) -> "LocalRuntime":
+        if release_entries <= RELEASE_DEPTH:
+            raise ValueError("the release bound must exceed its depth bound")
         executor = TransitionExecutor()
         located: tuple[Path, DirectoryAnchor] | None = None
         opened_registry: DirectoryAnchor | None = None
@@ -647,6 +697,7 @@ class LocalRuntime:
                             close_root()
             raise
         runtime.service_report = report
+        runtime.release_entries = release_entries
         return runtime
 
     def capabilities(self) -> RuntimeCapabilities:
@@ -747,6 +798,8 @@ class LocalRuntime:
         if self._closing is not None:
             raise refusal("runtime_closed")
         entry = await self.entry(key)
+        if isinstance(entry, Completed):
+            raise refusal(completed_code(entry))
         if not isinstance(entry, Running):
             raise refusal("runner_starting")
         try:
@@ -775,6 +828,11 @@ class LocalRuntime:
         if self._closing is not None:
             raise refusal("runtime_closed")
         entry = await self.entry(key)
+        if isinstance(entry, Completed):
+            result = entry.result
+            return await self._from_completed(
+                key, entry, lambda attempt: recorded_observation(attempt, result)
+            )
         if not isinstance(entry, Running):
             raise refusal("runner_starting")
         try:
@@ -793,6 +851,70 @@ class LocalRuntime:
             if error.code == "message_refused":
                 raise refusal("runner_unreachable") from None
             raise
+
+    async def quiescence(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> NormalCompletionQuiescence:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        entry = await self.entry(key)
+        if isinstance(entry, Completed):
+            return entry.quiescence
+        if isinstance(entry, Retiring | Retired):
+            raise refusal("attempt_retired")
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        try:
+            return await quiesce_command(
+                entry.socket_path,
+                entry.runner,
+                entry.submitter.dispatcher_id,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+            )
+        except (ListenerRefused, ChannelError, OSError):
+            pass
+        except KoraProtocolError as error:
+            if error.code != "message_refused":
+                raise
+        current = await self.entry(key)
+        if isinstance(current, Completed):
+            return current.quiescence
+        raise refusal("runner_unreachable")
+
+    async def _from_completed(
+        self,
+        key: AttemptKey,
+        entry: Completed,
+        read: Callable[[DirectoryAnchor], T],
+        dispose: Callable[[], None] | None = None,
+    ) -> T:
+        if entry.released_at is not None:
+            raise refusal("attempt_retired")
+
+        def answer() -> T:
+            if not recorded_exited(self._identities, entry.runner):
+                raise refusal("runner_unreachable")
+            attempt = self._attempt_anchor(key)
+            try:
+                return read(attempt)
+            finally:
+                attempt.close()
+
+        return await self.executor.run(answer, after_uncertain_submission=dispose)
+
+    def _attempt_anchor(self, key: AttemptKey) -> DirectoryAnchor:
+        try:
+            attempts = open_private_directory(self._root, "attempts")
+            try:
+                return open_private_directory(attempts, key.name)
+            finally:
+                attempts.close()
+        except (OSError, FilesystemError):
+            raise delivery_error("transfer_refused") from None
 
     async def transfer_in(
         self,
@@ -821,6 +943,8 @@ class LocalRuntime:
         clock = ctx.clock
         deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
         entry = await self.entry(key)
+        if isinstance(entry, Completed):
+            raise refusal(completed_code(entry))
         if not isinstance(entry, Running):
             raise refusal("runner_starting")
         if entry.gate_closed:
@@ -876,6 +1000,10 @@ class LocalRuntime:
         if self._closing is not None:
             raise refusal("runtime_closed")
         entry = self.registry.entry(key)
+        if isinstance(entry, Completed):
+            if entry.released_at is not None:
+                raise refusal("attempt_retired")
+            raise delivery_error("transfer_refused")
         if not isinstance(entry, Running):
             raise refusal("runner_starting")
         if entry.submitter.process != self._launch.identity:
@@ -949,8 +1077,18 @@ class LocalRuntime:
     def read_log(
         self, handle: Handle, which: LogName, from_offset: int, ctx: ProtocolContext
     ) -> AsyncGenerator[bytes]:
-        source = checked_log(which, from_offset)
-        return self._transfer_out(
+        return self._read_log(handle, checked_log(which, from_offset), ctx)
+
+    async def _read_log(
+        self, handle: Handle, source: LogSource, ctx: ProtocolContext
+    ) -> AsyncGenerator[bytes]:
+        key = self.key_of(handle, ctx)
+        entry = await self.entry(key)
+        if isinstance(entry, Completed):
+            async for chunk in self._completed_log(key, entry, source, ctx):
+                yield chunk
+            return
+        async for chunk in self._transfer_out(
             handle,
             lambda request_id: LogRequest(
                 op="read_log",
@@ -961,7 +1099,84 @@ class LocalRuntime:
             ctx,
             whole=source.from_offset == 0,
             gated=False,
-        )
+        ):
+            yield chunk
+
+    async def _completed_log(
+        self, key: AttemptKey, entry: Completed, source: LogSource, ctx: ProtocolContext
+    ) -> AsyncGenerator[bytes]:
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        if entry.released_at is not None:
+            raise refusal("attempt_retired")
+        if len(self._output_pulls) >= OUTPUT_PULLS:
+            raise delivery_error("workload_busy")
+        deadline = ctx.clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        admission = ctx.secret_admission
+        result = entry.result
+        pull = OutputPull(False)
+        self._output_pulls.add(pull)
+
+        def active() -> None:
+            if self._closing is not None:
+                raise refusal("runtime_closed")
+            if ctx.clock.monotonic_ns() >= deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+
+        def open_spool() -> None:
+            try:
+                pull.lease = self._spool.acquire(active)
+            except (OSError, FilesystemError):
+                raise refusal("runner_unreachable") from None
+
+        def copy(attempt: DirectoryAnchor) -> int:
+            token = attempt_token(attempt)
+            if admission is not None:
+                admission.admit(token)
+            record = recorded_record(attempt, result)
+            facts = record.stdout if source.which == "stdout" else record.stderr
+            if source.from_offset > facts.size:
+                raise delivery_error("transfer_refused")
+            copied_log(attempt, source.which, facts, pull.descriptor())
+            return facts.size
+
+        def read(length: int, offset: int) -> bytes:
+            if self._closing is not None:
+                raise refusal("runtime_closed")
+            return os.pread(pull.descriptor(), length, offset)
+
+        try:
+            await pull.run(
+                self._acquire_spool(open_spool, pull.dispose), ctx.clock, deadline
+            )
+            size = await pull.run(
+                self._from_completed(key, entry, copy, pull.dispose),
+                ctx.clock,
+                deadline,
+            )
+            offset = source.from_offset
+            while offset < size:
+                chunk = await pull.run(
+                    self.executor.run(
+                        partial(read, min(size - offset, SECTION_FRAME_BYTES), offset),
+                        after_uncertain_submission=pull.dispose,
+                    ),
+                    ctx.clock,
+                )
+                if not chunk:
+                    raise delivery_error("integrity_error")
+                offset += len(chunk)
+                yield chunk
+        except ChannelError:
+            raise refusal("runner_unreachable") from None
+        finally:
+            if self._closing is None and not pull.uncertain:
+                try:
+                    pull.dispose()
+                except OSError:
+                    raise refusal("runner_unreachable") from None
+                if pull.lease is None:
+                    self._output_pulls.discard(pull)
 
     async def _transfer_out(
         self,
@@ -1366,6 +1581,89 @@ class LocalRuntime:
         if outcome != Readiness.READY.value:
             raise refusal("runner_starting")
 
+    async def release(self, handle: Handle, ctx: ProtocolContext) -> None:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        started = ctx.clock.monotonic_ns()
+        try:
+            entry = await self.entry(key)
+            if not isinstance(entry, Completed):
+                raise refusal(
+                    "attempt_not_submitted"
+                    if entry is None
+                    else RELEASE_REFUSALS.get(type(entry), "attempt_not_submitted")
+                )
+            if entry.released_at is not None:
+                self._report_release(ctx, started, "already_released")
+                return
+            runner = entry.runner
+            if not await self.executor.run(
+                lambda: recorded_exited(self._identities, runner)
+            ):
+                raise refusal("runner_unreachable")
+            progress = await self.releases.run(lambda: self._release_files(key))
+        except KoraProtocolError:
+            self._report_release(ctx, started, "refused")
+            raise
+        if progress.state is ReleaseState.PARTIAL:
+            self._report_release(ctx, started, "partial", progress)
+            raise KoraProtocolError(
+                "release_partial",
+                "the attempt release removed part of its files",
+                True,
+                {"removed": progress.removed},
+            )
+        if progress.state is ReleaseState.FOREIGN:
+            self._report_release(ctx, started, "foreign_entry", progress)
+            raise KoraProtocolError(
+                "release_foreign_entry",
+                "the attempt holds entries that release does not remove",
+                False,
+                {"foreign": progress.foreign},
+            )
+        now = ctx.clock.now()
+        try:
+            await self.transition(
+                key, lambda current: released_cell(current, runner, now), ctx, "release"
+            )
+        except KoraProtocolError:
+            self._report_release(ctx, started, "refused", progress)
+            raise
+        self._report_release(ctx, started, "released", progress)
+
+    def _release_files(self, key: AttemptKey) -> ReleaseProgress:
+        try:
+            attempts = open_private_directory(self._root, "attempts")
+        except FileNotFoundError:
+            return ReleaseProgress(ReleaseState.COMPLETE, 0, 0)
+        except (OSError, FilesystemError):
+            raise refusal("registry_unavailable") from None
+        try:
+            return release_tree(attempts, key.name, max_entries=self.release_entries)
+        except (OSError, FilesystemError):
+            raise refusal("registry_unavailable") from None
+        finally:
+            attempts.close()
+
+    def _report_release(
+        self,
+        ctx: ProtocolContext,
+        started: int,
+        outcome: str,
+        progress: ReleaseProgress | None = None,
+    ) -> None:
+        ctx.logger.emit_at(
+            Level.INFO
+            if outcome in ("released", "already_released")
+            else Level.WARNING,
+            RELEASED,
+            outcome=outcome,
+            removed=0 if progress is None else progress.removed,
+            foreign=0 if progress is None else progress.foreign,
+            waited_ms=max(0, ctx.clock.monotonic_ns() - started) / 1_000_000,
+        )
+
     async def retire(
         self, attempt_id: str, grace: timedelta, ctx: ProtocolContext
     ) -> TerminationReceipt:
@@ -1555,6 +1853,7 @@ class LocalRuntime:
                     pull.pending.cancel()
             self.executor.closed = True
             self.sweeps.closed = True
+            self.releases.closed = True
             self._stopping.set_result(None)
             self._closing = asyncio.create_task(self._release())
         await asyncio.shield(self._closing)
@@ -1579,7 +1878,10 @@ class LocalRuntime:
             finally:
                 try:
                     await self._swept.wait()
-                    await self.sweeps.close()
+                    try:
+                        await self.sweeps.close()
+                    finally:
+                        await self.releases.close()
                 finally:
                     if self.executor.joined:
                         try:
