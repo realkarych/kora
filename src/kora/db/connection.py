@@ -35,15 +35,15 @@ from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.util import await_, greenlet_spawn
 
 from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
-from kora.db.maintenance import PostgreSQLDurabilityError as PostgreSQLDurabilityError
-from kora.db.maintenance import postgresql_transaction_active
-from kora.db.read_deadline import (
+from kora.db.maintenance import (
     NATIVE_READ_RETIRE,
     NativeReadExpired,
     NativeReadGuard,
     NativeReadUnavailable,
     handle_native_read_error,
+    postgresql_transaction_active,
 )
+from kora.db.maintenance import PostgreSQLDurabilityError as PostgreSQLDurabilityError
 from kora.db.transactions import (
     WriterTransactionError,
     managed_writer,
