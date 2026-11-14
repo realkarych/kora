@@ -4,6 +4,7 @@ from sqlalchemy import Executable, Text, column, literal_column, select, text, t
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.admission_wait_v1 import DUE_ROWS, OPEN_ROWS
+from kora.db.tables import wait
 from kora.db.types import SQLITE, UtcTimestamp
 
 
@@ -32,6 +33,25 @@ async def open_wait_matches(
     return rows == (
         [] if expected_wait_id is None else [(expected_wait_id, "admission", None)]
     )
+
+
+async def due_admission_wait(
+    connection: AsyncConnection, node_id: str, now: datetime
+) -> str | None:
+    with await connection.execute(
+        open_wait_statement(connection.dialect.name, node_id)
+    ) as result:
+        rows = result.all()
+    if len(rows) != 1:
+        return None
+    identity, kind, attempt_id = rows[0]
+    if kind != "admission" or attempt_id is not None:
+        return None
+    with await connection.execute(
+        select(wait.c.wake_at).where(wait.c.id == identity)
+    ) as result:
+        wake = result.scalar_one_or_none()
+    return str(identity) if wake is not None and wake <= now else None
 
 
 def due_admission_statement(

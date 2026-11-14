@@ -106,14 +106,14 @@ async def test_grant_history_migration_preserves_active_legacy_rows(
             await writer.execute(insert(attempt_dispatcher).values(**values))
         async with database.migration_connection() as connection:
             with pytest.raises(
-                RuntimeError, match="grant history cannot be downgraded"
+                RuntimeError, match="admission discovery cannot be downgraded"
             ):
                 await connection.run_sync(downgrade)
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0028",
-            "0029",
-            1,
+            "0030",
+            2,
         )
         assert after_attempt == before_attempt
         assert after_dispatcher == before_dispatcher
@@ -181,8 +181,8 @@ async def test_grant_history_upgrade_resumes_after_second_index_failure(
         )
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0028",
-            "0029",
-            1,
+            "0030",
+            2,
         )
         assert differences == []
     finally:

@@ -17,6 +17,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.admission_discovery_v1 import CANDIDATE_ROWS
+from kora.db.admission_discovery_v1 import INDEX_NAME as ADMISSION_DISCOVERY_INDEX
 from kora.db.admission_wait_v1 import INDEXES as WAIT_INDEXES
 from kora.db.admission_wait_v1 import wait_index_dialect
 from kora.db.attempt_capacity_v1 import INDEXES as CAPACITY_INDEXES
@@ -536,6 +538,12 @@ node_instance: Table = Table(
     *audit_columns(),
     UniqueConstraint("run_id", "node_path"),
     Index("ix_node_instance_run_top_level", "run_id", "top_level"),
+    Index(
+        ADMISSION_DISCOVERY_INDEX,
+        "id",
+        sqlite_where=literal_column(CANDIDATE_ROWS),
+        postgresql_where=literal_column(CANDIDATE_ROWS),
+    ),
 )
 
 attempt: Table = Table(

@@ -94,6 +94,14 @@ The read-only approval-cost calculator is implemented by #1517, with [its source
 
 Workers run a separate loop: claim `created` attempts of their runtime through the API (section 3), prepare the workspace, submit, stream, enforce, finalise.
 
+### Initial physical admission discovery (#1537)
+
+`AdmissionSweep` selects initial top-level `agent` and `command` instances in `pending`, `ready` or `waiting`, with subgraph attempt 1, attempt count zero and no current attempt. A shared partial index orders this combined source by `node_instance.id` across runs. Each page contains at most 100 IDs; the sweep freezes its highest eligible ID and advances by key until exhaustion, then wraps. New arrivals above that ceiling and eligibility changes behind the cursor enter the next sweep. Discovery reads no graph, node JSON, input or wait payload and supplies no execution authority. A caller can continue to another candidate when one is blocked; actual admission integration remains #1446.
+
+`due_admission_wait` reads at most two compact open-owner records, requires exactly one admission wait with no attempt, and point-reads only that wait's `wake_at`. It returns the exact owner ID only when due at the supplied time, including equality. This is a conditional observation, not a reservation or admission decision. Before activation, #1446 must refuse a future periodic wait before graph/Claim preparation and recheck the expected wait ID with fresh time under the original writer locks. A same-ID wait refreshed into the future invalidates that periodic proposal. Relevant state changes may permit earlier eligibility checks under section 6, while scope-only cap changes remain periodic. #1448 must classify the cause and cannot treat the wait writer's own scheduling marker as an independently enabling change.
+
+The reader retains only cursor/ceiling scalars between calls and closes each query result before returning. Caller-owned connections, candidate processing and yielding remain explicit integration responsibilities. Migration 0030 adds the index without rewriting history, transactionally on SQLite and concurrently with interrupted-build recovery on PostgreSQL. Native plan and tuple-visit evidence is diagnostic; the selected-page and retained ID-buffer bounds are blocking. This helper establishes neither complete processing-unit ownership nor NFR-3 scheduling latency. Root and dependent admission remain together in #1446; loop integration remains #1448.
+
 ## 3. Submission, execution uncertainty and recovery
 
 [ADR-0017](../../docs/decisions/0017-execution-uncertainty-and-safe-replacement.md) amends lease recovery. Lease defaults remain 120 s, renewed every 15 s; workers poll claims every 1 s. A lease is API ownership, not a physical execution lease.
