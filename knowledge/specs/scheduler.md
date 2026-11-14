@@ -94,6 +94,8 @@ The read-only approval-cost calculator is implemented by #1517, with [its source
 
 Workers run a separate loop: claim `created` attempts of their runtime through the API (section 3), prepare the workspace, submit, stream, enforce, finalise.
 
+`test_http_trigger_replay_preserves_initial_attempt` connects the real HTTP deploy and trigger handlers to promotion, complete Claim preparation and initial admission on both metadata databases. The trigger commits the pending run and receipt before any node or attempt exists. Replaying the accepted HTTP request and both engine transitions preserves one created attempt, its initialized price binding, the run clock and the original receipt; dependent nodes remain pending and the attempt has no worker, execution domain, lease or execution clock. This test supplies the public producer-to-initial-admission boundary, not a scheduler loop, worker Claim endpoint, accepted dependent-output path or complete graph execution. Those integrations remain with #1448, #1450 and #1472/#1446.
+
 ### Initial physical admission discovery (#1537)
 
 `AdmissionSweep` selects initial top-level `agent` and `command` instances in `pending`, `ready` or `waiting`, with subgraph attempt 1, attempt count zero and no current attempt. A shared partial index orders this combined source by `node_instance.id` across runs. Each page contains at most 100 IDs; the sweep freezes its highest eligible ID and advances by key until exhaustion, then wraps. New arrivals above that ceiling and eligibility changes behind the cursor enter the next sweep. Discovery reads no graph, node JSON, input or wait payload and supplies no execution authority. A caller can continue to another candidate when one is blocked; actual admission integration remains #1446.
