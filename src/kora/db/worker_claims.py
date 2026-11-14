@@ -34,13 +34,14 @@ async def claim_row(
     *,
     lock: bool = False,
     skip_locked: bool = False,
+    field_bytes: int = 4096,
 ) -> RowMapping | None:
-    if type(maximum) is not int or maximum <= 0:
+    if type(maximum) is not int or maximum <= 0 or field_bytes <= 0:
         raise ClaimSourcesRejected()
     valid = and_(
         *(
             owner.c[name].is_(None)
-            | (func.octet_length(cast(owner.c[name], Text())) <= 4096)
+            | (func.octet_length(cast(owner.c[name], Text())) <= field_bytes)
             for name in fields
         )
     )
