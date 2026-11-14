@@ -89,7 +89,6 @@ def prepare_attempt_admission(
     limits: AttemptPreparationLimits,
 ) -> PreparedAttemptAdmission:
     try:
-        admit_attempt_preparation(checked, limits)
         scope, pin = checked.scope, checked.pin
         node = next(
             (node for node in readiness.nodes if node.path == binding.node_path), None
@@ -98,13 +97,17 @@ def prepare_attempt_admission(
             not readiness.matches(scope, pin)
             or node is None
             or node.kind not in ("agent", "command")
-            or node.predecessors
-            or node.inputs
             or params.binding != binding.run
             or policy.namespace_id != scope.namespace_id
             or price.id != binding.price_table_id
             or not 1 <= len(binding.node_path) <= 1024
             or any(not "!" <= character <= "~" for character in binding.node_path)
+        ):
+            raise ClaimWireRejected()
+        admit_attempt_preparation(checked, limits, node.inputs)
+        if any(
+            not entry.optional or entry.producer not in node.predecessors
+            for entry in node.inputs
         ):
             raise ClaimWireRejected()
         for identifier in (
@@ -116,7 +119,9 @@ def prepare_attempt_admission(
             IDENTIFIER.validate_python(identifier)
         value = policy.value()
         _compatible(checked, value, installation)
-        inputs = prepare_attempt_inputs({}, {})
+        inputs = prepare_attempt_inputs(
+            node.declared_inputs(), {entry.name: None for entry in node.inputs}
+        )
         material = prepare_claim_material(
             checked, params, binding.node_path, inputs.claim_map(), price, selection
         )
@@ -136,6 +141,16 @@ def prepare_attempt_admission(
             selection.runtime,
             policy.revision,
             prepared_sources,
+            tuple(
+                predecessor
+                for predecessor in readiness.nodes
+                if predecessor.path in node.predecessors
+            ),
+            tuple(
+                path
+                for path in node.predecessors
+                if any(entry.producer == path for entry in node.inputs)
+            ),
         )
     except (ValueError, TypeError, RecursionError, OverflowError):
         del checked, readiness, params, binding, price, policy, selection, installation

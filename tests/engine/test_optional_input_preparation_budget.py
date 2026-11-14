@@ -43,9 +43,13 @@ async def test_optional_input_preparation_charges_generated_maps_and_strings(
 
     with pytest.raises(ClaimWireRejected):
         admit_attempt_preparation(case.checked, insufficient, node.inputs)
+    with pytest.raises(ClaimWireRejected):
+        case.prepare(limits=insufficient)
     admitted = admit_attempt_preparation(case.checked, exact, node.inputs)
+    prepared = case.prepare(limits=exact)
 
     assert admitted == reservation
+    assert prepared.binding == case.binding
     assert reservation.retained_units > root.retained_units
     assert reservation.work_units > root.work_units
     assert ledger.checkouts == ledger.outstanding == database.units_in_flight() == 0

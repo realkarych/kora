@@ -15,6 +15,7 @@ from kora.db.claim_sources import (
     verify_claim_source_binding,
 )
 from kora.db.connection import clear_snapshot_error
+from kora.db.dependency_reads import read_dependency_node
 from kora.db.native_values import native_value_bound
 from kora.db.tables import attempt, namespace, node_instance, price_table, wait
 from kora.db.transactions import raise_private_metadata_error
@@ -26,10 +27,16 @@ from kora.engine.admission_wait import (
 )
 from kora.engine.attempt_capacity import PreparedGraphCaps, check_attempt_capacity
 from kora.engine.claim_sources import insert_claim_attempt
+from kora.engine.dependency_rules import (
+    FAILURES,
+    DependencyOutcome,
+    decide_dependencies,
+)
 from kora.engine.expiry import observe_run_expiry
 from kora.engine.expiry_context import ExpiryContext, ExpiryFailed, ExpiryState
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.engine.locks import COMPONENT
+from kora.engine.readiness import ReadinessNode
 from kora.engine.run_promotion_read import read_promotion_status
 from kora.engine.writer_mode import writable_postgres_transaction
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
@@ -54,6 +61,8 @@ class PreparedAttemptAdmission:
     runtime: str
     namespace_revision: int
     sources: PreparedClaimSources
+    predecessors: tuple[ReadinessNode, ...]
+    absent_producers: tuple[str, ...]
 
 
 class AttemptAdmissionState(StrEnum):
@@ -165,7 +174,32 @@ async def _eligible(
         state
         if isinstance(state, str)
         and await open_wait_matches(connection, binding.node_id, expected_wait_id)
+        and await _dependencies_match(context, prepared)
         else None
+    )
+
+
+async def _dependencies_match(
+    context: ExpiryContext, prepared: PreparedAttemptAdmission
+) -> bool:
+    states: list[str] = []
+    for predecessor in prepared.predecessors:
+        saved = await read_dependency_node(
+            context.connection,
+            context.run_id,
+            predecessor.path,
+            predecessor.kind,
+            predecessor.trigger_rule,
+        )
+        if saved is None or (
+            predecessor.path in prepared.absent_producers
+            and saved.status not in ("skipped", *FAILURES)
+        ):
+            return False
+        states.append(saved.status)
+    return (
+        decide_dependencies(prepared.trigger_rule, tuple(states))
+        is DependencyOutcome.SATISFIED
     )
 
 

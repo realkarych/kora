@@ -43,6 +43,8 @@ async def readiness_source(
     parameter_input: bool = False,
     required_producers: tuple[str, ...] | None = None,
     command_optional: bool = False,
+    run_timeout: str | None = None,
+    inputless_command: bool = False,
 ) -> CheckedExecutionContract:
     async with database.transaction() as writer:
         seed = Seeder(writer)
@@ -50,6 +52,8 @@ async def readiness_source(
         graph = await seed.graph(namespace)
         scope = GraphResourceScope(namespace, graph, seed.new_id())
     raw = output_document("command")
+    if run_timeout is not None:
+        child(raw, "runtime")["limits"] = {"timeout": run_timeout}
     graph = child(raw, "graph")
     graph["params"] = {
         "type": "object",
@@ -80,6 +84,8 @@ async def readiness_source(
     }
     if command_optional:
         child(nodes, "producer", "inputs", "candidate")["optional"] = True
+    if inputless_command:
+        child(nodes, "producer").pop("inputs")
     approval["inputs"] = {
         "gate": {"type": "CommandResult", "from": "producer", "output": "result"},
         "candidate": {
