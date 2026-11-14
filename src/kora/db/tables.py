@@ -108,6 +108,7 @@ from kora.db.types import (
     collated_text,
 )
 from kora.db.usage_source import UsageSourceText
+from kora.db.worker_claims_v1 import CLAIM_INDEXES, claim_columns
 from kora.db.worker_registration_v1 import (
     EVENT_NAMESPACE_SCOPE,
     domain_elements,
@@ -639,6 +640,18 @@ attempt_dispatcher: Table = Table(
     UniqueConstraint("attempt_id", "lease_epoch"),
     *dispatcher_history_indexes(),
 )
+
+for owner_name, claim_field in claim_columns():
+    metadata.tables[owner_name].append_column(claim_field)
+for index_name, owner_name, fields, condition, unique in CLAIM_INDEXES:
+    predicate = None if condition is None else literal_column(condition, Boolean())
+    Index(
+        index_name,
+        *(metadata.tables[owner_name].c[field] for field in fields),
+        unique=unique,
+        postgresql_where=predicate,
+        sqlite_where=predicate,
+    )
 
 wait: Table = Table(
     "wait",

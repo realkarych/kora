@@ -38,6 +38,15 @@ TERMINAL_NODES = ("succeeded", "failed", "cancelled", "skipped", "upstream_faile
 async def request_cancellation(
     context: ExpiryContext, now: datetime, attempt_id: str | None = None
 ) -> None:
+    if attempt_id is not None:
+        node_id = await context.connection.scalar(
+            select(node_instance.c.id)
+            .join(attempt, attempt.c.node_instance_id == node_instance.c.id)
+            .where(attempt.c.id == attempt_id, node_instance.c.run_id == context.run_id)
+        )
+        if node_id is not None:
+            await _cancel_node_attempts(context, now, node_id, attempt_id)
+        return
     nodes = select(node_instance.c.id).where(node_instance.c.run_id == context.run_id)
     owned_nodes = nodes
     while True:
@@ -201,14 +210,30 @@ async def observe_attempt_expiry(
         now = normalise_timestamp(context.clock())
         if now < deadline.at:
             return ExpiryState.ACTIVE
+        await record_attempt_expiry(context, attempt_id, now)
+        return ExpiryState.EXPIRED
+
+
+async def record_attempt_expiry(
+    context: ExpiryContext, attempt_id: str, now: datetime
+) -> None:
+    async with expiry_transition(context, "attempt_expiry_intent"):
         await context.connection.execute(
             update(attempt)
-            .where(attempt.c.id == attempt_id)
+            .where(
+                attempt.c.id == attempt_id,
+                select(node_instance.c.id)
+                .where(
+                    node_instance.c.id == attempt.c.node_instance_id,
+                    node_instance.c.run_id == context.run_id,
+                )
+                .exists(),
+                attempt.c.deadline_expired_at.is_(None),
+            )
             .values(deadline_expired_at=now, updated_at=now)
         )
         await request_cancellation(context, now, attempt_id)
         await context.mark(now)
-        return ExpiryState.EXPIRED
 
 
 async def close_expired_waits(

@@ -63,6 +63,8 @@ class PreparedClaimMaterial:
     identity: ClaimMaterialIdentity
     immutable: PreparedClaimPart
     node_policy: bytes
+    attempt_timeout: str | None
+    run_timeout: str | None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -232,6 +234,10 @@ def _prepare(
         ),
         immutable,
         policy,
+        cast(str | None, node.limits.get("timeout")),
+        cast(
+            str | None, cast(JsonObject, node.runtime.get("limits", {})).get("timeout")
+        ),
     )
 
 

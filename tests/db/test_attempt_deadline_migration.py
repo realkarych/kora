@@ -89,8 +89,8 @@ async def test_deadline_migration_preserves_legacy_scalars(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0005",
-            "0029",
-            24,
+            "0030",
+            25,
         )
         assert after == before.history
         assert_attempt_schema_extension(
@@ -252,8 +252,8 @@ async def test_deadline_migration_recovers_partial_schema(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0005",
-            "0029",
-            24,
+            "0030",
+            25,
         )
         assert differences == []
         assert stage.database is not None

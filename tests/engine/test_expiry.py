@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import insert, select, update
 
-from kora.db.connection import Database
+from kora.db.connection import Database, Dialect
 from kora.db.deadline_discovery import DueAttemptSweep
 from kora.db.tables import (
     approval_request,
@@ -15,6 +15,7 @@ from kora.db.tables import (
     run_promotion_admission,
     wait,
 )
+from kora.db.types import as_json_value
 from kora.engine.deadline_records import deadline_document, prepare_deadline_record
 from kora.engine.expiry import expire_run, observe_attempt_expiry, observe_run_expiry
 from kora.engine.expiry_context import ExpiryFailed, ExpiryState
@@ -23,6 +24,8 @@ from kora.engine.lease_recovery import close_undispatched_attempt, recover_expir
 from kora.ir.json import parse_json_object
 from kora.protocols.deadlines import ExecutionDeadline
 from tests.db.seed import Seeder
+from tests.db.test_grant_history_reads import plan_nodes
+from tests.db.test_graph_read_admission import executed_queries
 from tests.engine.expiry_support import ExecutionCase, execution_case, expiry_context
 from tests.engine.promotion_support import promotion_case
 
@@ -77,6 +80,72 @@ async def test_deadline_equality_latches_before_effects(database: Database) -> N
     assert saved["status"] == "running"
     assert saved["needs_scheduling"] is True
     assert [row["kind"] for row in events].count("attempt.recovery_required") == 1
+
+
+@pytest.mark.asyncio
+async def test_single_attempt_expiry_does_not_page_unrelated_nodes(
+    database: Database,
+) -> None:
+    case = await execution_case(database)
+    async with database.transaction() as writer:
+        seed = Seeder(writer)
+        unrelated = [
+            await seed.node(case.promotion.run_id, f"other-{number}")
+            for number in range(2048)
+        ]
+        await writer.exec_driver_sql("ANALYZE node_instance")
+    case.promotion.clock.advance(60)
+
+    async with database.transaction() as writer:
+        with executed_queries(writer) as statements:
+            result = await observe_attempt_expiry(
+                await case.context(writer, False), case.attempt_id
+            )
+        [(sql, args)] = [
+            (sql, args)
+            for sql, args in statements
+            if sql.startswith("UPDATE attempt SET deadline_expired_at=")
+        ]
+        if database.dialect is Dialect.POSTGRESQL:
+            plan = as_json_value(
+                (
+                    await writer.exec_driver_sql("EXPLAIN (FORMAT JSON) " + sql, args)
+                ).scalar_one()
+            )
+            node_plan = [
+                entry
+                for entry in plan_nodes(plan)
+                if entry.get("Relation Name") == "node_instance"
+            ]
+            assert node_plan
+            assert all(
+                entry["Node Type"] == "Index Scan" and entry["Plan Rows"] == 1
+                for entry in node_plan
+            )
+        else:
+            plan = str(
+                list(await writer.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, args))
+            )
+            assert "SEARCH node_instance USING INDEX" in plan
+            assert "SCAN node_instance" not in plan
+            assert "LIST SUBQUERY" not in plan
+
+    assert result is ExpiryState.EXPIRED
+    node_reads = [
+        sql
+        for sql, _ in statements
+        if sql.startswith("SELECT") and "FROM node_instance" in sql
+    ]
+    assert node_reads
+    assert all("attempt.id =" in sql for sql in node_reads)
+    async with database.read_transaction() as reader:
+        assert list(
+            await reader.scalars(
+                select(node_instance.c.deadline_expired_at).where(
+                    node_instance.c.id.in_(unrelated)
+                )
+            )
+        ) == [None] * len(unrelated)
 
 
 @pytest.mark.asyncio
