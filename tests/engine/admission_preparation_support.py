@@ -2,12 +2,14 @@ import asyncio
 import sys
 from collections.abc import Generator
 from contextlib import contextmanager
+from time import monotonic
 from types import FrameType
 
 from kora.db.claim_source_values import decode_claim_source
 from kora.db.connection import Database
 from kora.engine.admission_preparation import (
     AdmissionPreparationLimits,
+    AdmissionPreparationRejected,
     PreparedAdmissionSnapshot,
     prepare_admission_snapshot,
 )
@@ -41,11 +43,23 @@ def observe_detached_checks(database: Database) -> Generator[list[str]]:
             assert database.units_in_flight() == 0
             observed.append(frame.f_code.co_name)
 
+    started = monotonic()
     try:
-        sys.setprofile(observe)
-        yield observed
-    finally:
-        sys.setprofile(previous)
+        try:
+            sys.setprofile(observe)
+            yield observed
+        finally:
+            sys.setprofile(previous)
+    except AdmissionPreparationRejected as error:
+        elapsed = monotonic() - started
+        error.add_note(
+            "admission_preparation_observation "
+            f"elapsed_seconds={elapsed:.6e} "
+            f"entered_count={len(observed):d} "
+            f"last_entered={','.join(observed[-8:])} "
+            f"owned_units={database.units_in_flight():d}"
+        )
+        raise
 
 
 async def prepare(
