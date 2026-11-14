@@ -56,8 +56,17 @@ from kora.models.worker_history import WorkerHistoryQuery
 from kora.models.worker_usage import AcceptedUsageReport, AcceptedUsageRow, UsageReport
 from kora.models.workers import RegisteredWorker, WorkerRegistration
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, ProcessDiagnostics
-from kora.protocols.history import MAX_ENVELOPE_BYTES, GrantHistoryPage
+from kora.protocols.history import (
+    MAX_ENVELOPE_BYTES,
+    GrantHistoryPage,
+    GrantHistorySnapshot,
+)
 from kora.protocols.worker_claim_wire import MAX_CLAIM_BYTES
+from kora.protocols.worker_heartbeats import (
+    HeartbeatResponse,
+    PublicationExpectation,
+    WorkerHeartbeat,
+)
 
 OPENAPI_PATH: str = "/api/v1/openapi.json"
 OPENAPI_RESPONSE_BYTES: int = 4 * 1024 * 1024
@@ -68,6 +77,8 @@ GRANT_HISTORY_PATH: str = "/api/v1/attempts/{att}/grants"
 IDEMPOTENCY_KEY = re.compile(r"[!-~]{1,255}")
 USAGE_PATH: str = "/api/v1/attempts/{att}/usage"
 USAGE_JSON_BYTES: int = 4 * 1024 * 1024
+HEARTBEAT_PATH: str = "/api/v1/attempts/{att}/heartbeat"
+HEARTBEAT_JSON_BYTES: int = 4 * 1024 * 1024
 OK: frozenset[int] = frozenset({200})
 CREATED_OR_OK: frozenset[int] = frozenset({200, 201})
 JSON_DEPTH: int = 64
@@ -162,6 +173,23 @@ def accepted_usage_report(value: JsonObject) -> AcceptedUsageReport:
             key: coverage[key] for key in UsageCoverage.model_fields if key in coverage
         }
     return AcceptedUsageReport.model_validate(fields)
+
+
+def heartbeat_response(value: JsonObject) -> HeartbeatResponse:
+    fields: dict[str, object] = {
+        key: value[key] for key in HeartbeatResponse.model_fields if key in value
+    }
+    for name, model in (
+        ("grant_history", GrantHistorySnapshot),
+        ("grant_history_verified", GrantHistorySnapshot),
+        ("publication", PublicationExpectation),
+    ):
+        nested = value.get(name)
+        if isinstance(nested, dict):
+            fields[name] = {
+                key: nested[key] for key in model.model_fields if key in nested
+            }
+    return HeartbeatResponse.model_validate(fields)
 
 
 def direct_origin(value: str) -> httpx.URL:
@@ -424,6 +452,21 @@ class KoraClient:
             accepted_usage_report,
             response_limit=USAGE_JSON_BYTES,
             body=body,
+        )
+
+    async def heartbeat_attempt(
+        self, attempt_id: str, heartbeat: WorkerHeartbeat
+    ) -> HeartbeatResponse:
+        if re.fullmatch(r"[!-~]{1,256}", attempt_id) is None:
+            raise ClientError(Failure.DESTINATION_POLICY, Outcome.NOT_SENT)
+        return await self._request_json(
+            "POST",
+            HEARTBEAT_PATH.format(att=quote(attempt_id, safe="").replace(".", "%2E")),
+            heartbeat_response,
+            response_limit=HEARTBEAT_JSON_BYTES,
+            body=parse_json_object(
+                heartbeat.model_dump(mode="json"), max_bytes=HEARTBEAT_JSON_BYTES
+            ),
         )
 
     async def _request_json(

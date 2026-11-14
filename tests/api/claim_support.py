@@ -8,6 +8,7 @@ from sqlalchemy import insert, select, update
 from kora.api.application import create_application
 from kora.api.exchange import ApiExchange
 from kora.api.worker_claims_route import WorkerClaimsRoute
+from kora.api.worker_heartbeat_route import WorkerHeartbeatRoute
 from kora.api.worker_history_route import WorkerHistoryRoute
 from kora.api.worker_usage_route import WorkerUsageRoute
 from kora.cel_eval.thread import Evaluator
@@ -64,6 +65,7 @@ async def application(
     history: WorkerHistoryRoute | None = None,
     *,
     usage: WorkerUsageRoute | None = None,
+    heartbeat: WorkerHeartbeatRoute | None = None,
 ) -> ApiExchange:
     async with database.transaction() as writer:
         await writer.execute(
@@ -79,6 +81,7 @@ async def application(
         worker_claims=WorkerClaimsRoute(poller(database, clock)),
         worker_history=history,
         worker_usage=usage,
+        worker_heartbeat=heartbeat,
     )
 
 

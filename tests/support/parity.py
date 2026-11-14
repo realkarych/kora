@@ -18,6 +18,7 @@ EXCLUDED_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/workers/{}/claims"),
         ("GET", "/api/v1/attempts/{}/grants"),
         ("POST", "/api/v1/attempts/{}/usage"),
+        ("POST", "/api/v1/attempts/{}/heartbeat"),
     }
 )
 
