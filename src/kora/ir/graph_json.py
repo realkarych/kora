@@ -202,17 +202,31 @@ class ReadFrame:
 class ObjectReader:
     text: str
     position: int = 0
+    allow_whitespace: bool = False
+
+    def space(self) -> None:
+        if self.allow_whitespace:
+            while self.text[self.position : self.position + 1] in (
+                " ",
+                "\t",
+                "\n",
+                "\r",
+            ):
+                self.position += 1
 
     def take(self, expected: str) -> None:
+        self.space()
         if not self.text.startswith(expected, self.position):
             raise GraphValueRejected(GraphValueFailure.INVALID)
         self.position += len(expected)
 
     def string(self) -> str:
+        self.space()
         value, self.position = decoded_string(self.text, self.position)
         return value
 
     def value(self) -> JsonValue:
+        self.space()
         character = self.text[self.position : self.position + 1]
         if character == '"':
             return self.string()
@@ -243,6 +257,7 @@ class ObjectReader:
         root: JsonObject = {}
         frames = [ReadFrame(root)]
         while frames:
+            self.space()
             frame = frames[-1]
             container = frame.container
             ending = "}" if isinstance(container, dict) else "]"
@@ -265,6 +280,7 @@ class ObjectReader:
                 container.append(value)
             if isinstance(value, dict | list):
                 frames.append(ReadFrame(value))
+        self.space()
         if self.position != len(self.text):
             raise GraphValueRejected(GraphValueFailure.INVALID)
         return root

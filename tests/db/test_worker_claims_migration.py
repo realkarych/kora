@@ -75,8 +75,8 @@ async def test_worker_claim_migration_preserves_legacy_grants_and_recovers(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0029",
-            "0030",
-            1,
+            "0031",
+            2,
         )
         assert repeated.steps == 0
         assert after_attempt == before_attempt
@@ -88,3 +88,28 @@ async def test_worker_claim_migration_preserves_legacy_grants_and_recovers(
     finally:
         await database.close()
     assert ledger.opened == ledger.closed
+
+
+@pytest.mark.asyncio
+async def test_worker_claim_revision_refuses_downgrade(
+    empty_database_settings: DatabaseSettings,
+) -> None:
+    database = Database(empty_database_settings)
+    try:
+        async with database.migration_connection() as migrator:
+            await migrator.run_sync(
+                lambda sync: command.upgrade(alembic_config(sync), "0030")
+            )
+
+        async with database.migration_connection() as migrator:
+            with pytest.raises(
+                RuntimeError, match="worker Claims cannot be downgraded"
+            ):
+                await migrator.run_sync(
+                    lambda sync: command.downgrade(alembic_config(sync), "0029")
+                )
+
+        async with database.read_transaction() as reader:
+            assert await reader.run_sync(current_revision) == "0030"
+    finally:
+        await database.close()
