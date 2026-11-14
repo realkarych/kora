@@ -282,6 +282,8 @@ The local runtime's registry in [#312](https://github.com/realkarych/kora/issues
 
 ## 8. Future executable evidence
 
+The proposed [execution-content deliveries](execution-content.md#7-activation-and-complete-implementation-deliveries) under #1557 retain the existing API, metadata/retention, worker and storage diagnostic owners. Their [acceptance matrix](execution-content.md#8-verification-ownership) assigns real producer/replay/cleanup, safe-field and blocked-sink evidence before activation. The design creates no executable component, new event family or additional verification campaign.
+
 These are release obligations for the owning implementation issues, not existing tests or results. Consolidate overlapping scenarios into real integration/conformance suites; do not write unit tests mirroring glue. Use constructor/configuration-selected protocol fakes, real handlers/pipes/processes and local services. No mocks, monkeypatch, patched HTTP transport or synchronization sleeps. Inject clock/identity sources; wait on explicit conditions with deadlines. Process-start environments may be explicit without runtime environment patching. Metadata cases use one parametrized SQLite/PostgreSQL fixture; container cases run on Linux, supported local paths on Linux/macOS.
 
 | Named obligation | Required assertion and activation owner |

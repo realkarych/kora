@@ -419,6 +419,8 @@ Manual retry first checks persistent run/ancestor deadlines and the target wrapp
 
 ### Worker route bodies (issue #139)
 
+The [execution-content proposal](execution-content.md#5-result-transfer-and-acceptance-proposals) under #1557 specifies a future command-capture kind, a bound session-transcript variant and output child bindings on the existing artifacts route. It also separates a ready child from accepted output. These are proposed extensions for owner review, not fields admitted by the current closed models below; activation requires the named API/client/worker and custody deliveries together.
+
 Bodies are closed models in `kora.models`; the outcome and evidence types are in `kora.protocols` ([protocols.md section 2](protocols.md#2-runtime-fr-81)). Unknown fields are `API003`. The authorization rows of these routes and their codes land with [issue #135](https://github.com/realkarych/kora/issues/135).
 
 | route | request | response |
@@ -551,6 +553,8 @@ One local stage permits one promotion operation/content generation. A later gene
 [CommandResult revision 1](artifacts/CommandResult.md) uses the existing output upload envelope for its one canonical JSON root, independently capped at 1 MiB raw/canonical bytes and depth 16. A noncanonical root is refused before promotion, without rewriting addressed content or inheriting VcsRef-specific framing. Its full root identity and saved contract are write-once even though selected approval and complete replay roles remain distinct. Its stdout/stderr descriptors do not authorize uploads under invented kinds or undeclared output names. Work item 12, coordinated with 11/13/14/17 and #216, must obtain approval for the existing-route capture completion/owner binding and implement current-authority, replay, read, retention and actual-release gates on both databases before real CommandResult activation. List[CommandResult], recursive derived-list and scheduler collect/export aggregate activation separately remains pending work items 3/9/10/11/12 under generic saved list semantics, with approved materialization/persistence/read bounds before activation; this publication selects no aggregate numerical default or campaign.
 
 ### Bounded chunked uploads (issue #224)
+
+The proposed [child-content variants](execution-content.md#51-common-wire-rules) retain these framing, part, authorization, immutable-progress and recovery rules while explicitly extending kind-specific selectors and ready/completed meanings. They do not activate through the generic upload contract alone.
 
 This contract applies to generic chunked output, execution-request and opaque transcript uploads on `POST /attempts/{att}/artifacts`. [VcsRef revision 1](artifacts/README.md#5-upload-replay-and-result-ownership) keeps its one complete canonical payload, exactly `meta` then `payload`, with `meta.part` absent; it does not acquire these modes. Segment chunks keep their separate offset/count/digest and 1,000-event/8 MiB rules. The [staged storage contract](protocols.md#7-artifact-storage-fr-44) owns provider effects; the API owns current authorization, progress, acceptance and the response union below. No new endpoint or per-token rate limit is introduced.
 

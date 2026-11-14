@@ -394,6 +394,8 @@ Frozen CEL projections separately require a lossless representation of their con
 
 ## 5. Verification and activation
 
+The [execution-content design](../execution-content.md#54-structuredoutput-and-projections) under #1557 names complete effective validation and the lossless frozen-projection producer as prerequisites of accepted content. Its proposed storage owners do not activate the reserved policy, common composition or a narrower exact-built-in exception. Canonical content existence and standalone provider success cannot replace those producers.
+
 Collection/export composition preserves conversion of the original admitted value under every destination's frozen checker view, not merely the child's already converted values. The [projection contract](../ir.md#75-projections-and-typed-conversion) requires sufficient original projected numeric provenance before lossy conversion and keeps original/converted bounds at each re-cut. An integer-view `-0.0` collected into dyn must retain negative double zero; a number-view integer `9007199254740993` exported into an integer view must retain that exact integer. The pending work-item-4/8/10 representation must support these existing full-binding/composition invariants without transactional storage I/O or current-schema lookup. The [vectors](StructuredOutput.vectors.json) declare both cases; publication does not execute them or select a storage codec.
 
 The two publication tests run through the existing ordinary pytest command:

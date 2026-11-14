@@ -20,6 +20,8 @@ Extension points are eleven provider protocols discovered through one entry-poin
 
 **No graph runs end to end.** The control-plane pieces that would run one exist only partly, and nothing connects them into a process yet. The packages that exist are foundations with their own tests.
 
+The [execution-content design](../specs/execution-content.md) under #1557 proposes the missing durable request and accepted-result owners over the existing local storage provider. Its records, capture/session transfer extensions and resource admissions are not implemented. Worker sealing #1453, reports #1454 and scheduler settlement #1472 still require their actual producers and applicable durability, validation, cleanup and closure evidence.
+
 This page uses three statuses:
 
 - **Used**: an installed command or a registered provider entry point runs this code.
