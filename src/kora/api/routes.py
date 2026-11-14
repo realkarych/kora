@@ -20,6 +20,7 @@ class RouteName(StrEnum):
     WORKER_CLAIMS = "/api/v1/workers/{worker_id:path}/claims"
     WORKER_HISTORY = "/api/v1/attempts/{att}/grants"
     USAGE = "/api/v1/attempts/{att}/usage"
+    HEARTBEAT = "/api/v1/attempts/{att}/heartbeat"
 
 
 ROUTE_METHODS: dict[RouteName, frozenset[str]] = {
@@ -31,6 +32,7 @@ ROUTE_METHODS: dict[RouteName, frozenset[str]] = {
     RouteName.WORKER_CLAIMS: frozenset({"POST"}),
     RouteName.WORKER_HISTORY: frozenset({"GET"}),
     RouteName.USAGE: frozenset({"POST"}),
+    RouteName.HEARTBEAT: frozenset({"POST"}),
 }
 REQUIRED_ROUTES: frozenset[RouteName] = frozenset({RouteName.HEALTH, RouteName.SCHEMA})
 PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
@@ -42,6 +44,7 @@ PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
         RouteName.WORKER_CLAIMS,
         RouteName.WORKER_HISTORY,
         RouteName.USAGE,
+        RouteName.HEARTBEAT,
     }
 )
 

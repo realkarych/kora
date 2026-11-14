@@ -29,6 +29,7 @@ from kora.api.routes import (
 )
 from kora.api.run_trigger_route import trigger_handler
 from kora.api.worker_claims_route import WorkerClaimsRoute
+from kora.api.worker_heartbeat_route import WorkerHeartbeatRoute
 from kora.api.worker_history_route import WorkerHistoryRoute
 from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.api.worker_usage_route import WorkerUsageRoute
@@ -45,6 +46,7 @@ from kora.protocols.authentication import Authenticator
 from kora.protocols.history import GrantHistoryPage
 from kora.protocols.identity import Identifier
 from kora.protocols.time import Clock
+from kora.protocols.worker_heartbeats import HeartbeatResponse, WorkerHeartbeat
 
 
 class Health(BaseModel):
@@ -87,6 +89,7 @@ class ApiDispatch:
                     RouteName.WORKERS,
                     RouteName.WORKER_CLAIMS,
                     RouteName.WORKER_HISTORY,
+                    RouteName.HEARTBEAT,
                     RouteName.USAGE,
                 )
                 else "user",
@@ -122,6 +125,7 @@ class ApiDispatch:
             RouteName.WORKERS,
             RouteName.WORKER_CLAIMS,
             RouteName.USAGE,
+            RouteName.HEARTBEAT,
         ):
             body = bytearray()
             try:
@@ -163,6 +167,7 @@ def create_application(
     worker_claims: WorkerClaimsRoute | None = None,
     worker_history: WorkerHistoryRoute | None = None,
     worker_usage: WorkerUsageRoute | None = None,
+    worker_heartbeat: WorkerHeartbeatRoute | None = None,
     admission_initialization: AdmissionInitialization | None = None,
 ) -> ApiExchange:
     @asynccontextmanager
@@ -318,6 +323,18 @@ def create_application(
             methods=["POST"],
             operation_id="report_usage",
             response_model=AcceptedUsageReport,
+        )
+    if worker_heartbeat is not None:
+
+        async def heartbeat(att: Identifier, body: WorkerHeartbeat) -> Response:
+            return await worker_heartbeat(att, body)
+
+        framework.add_api_route(
+            RouteName.HEARTBEAT.value,
+            heartbeat,
+            methods=["POST"],
+            operation_id="heartbeat_attempt",
+            response_model=HeartbeatResponse,
         )
     framework.add_exception_handler(HTTPException, framework_error)
     framework.add_exception_handler(RequestValidationError, validation_error)
