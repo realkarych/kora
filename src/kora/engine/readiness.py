@@ -45,6 +45,7 @@ class ReadinessNode:
     kind: str
     trigger_rule: str
     predecessors: tuple[str, ...]
+    required_predecessors: tuple[str, ...]
     inputs: tuple[ReadinessInput, ...]
 
     def declared_inputs(self) -> JsonObject:
@@ -94,6 +95,7 @@ def _prepare(checked: CheckedExecutionContract, maximum: int) -> PreparedReadine
         node = nodes[name]
         inputs: list[ReadinessInput] = []
         predecessors = set(() if node.depends_on is MISSING else node.depends_on)
+        required_predecessors: set[str] = set()
         for input_name, source in () if node.inputs is MISSING else node.inputs.items():
             if source.from_ is MISSING or (
                 source.from_ != "$params"
@@ -112,12 +114,15 @@ def _prepare(checked: CheckedExecutionContract, maximum: int) -> PreparedReadine
             )
             if source.from_ != "$params":
                 predecessors.add(source.from_)
+                if source.optional is not True:
+                    required_predecessors.add(source.from_)
         prepared.append(
             ReadinessNode(
                 name,
                 node.kind,
                 "all_success" if node.trigger_rule is MISSING else node.trigger_rule,
                 tuple(value for value in ordered if value in predecessors),
+                tuple(value for value in ordered if value in required_predecessors),
                 tuple(inputs),
             )
         )

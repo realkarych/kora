@@ -91,7 +91,7 @@ async def _settle_dependencies(
         return DependencySettlementState.UNCHANGED
     if current.status != "pending" or not current.unbound or not current.unexpired:
         return DependencySettlementState.REFUSED
-    states: list[str] = []
+    states: dict[str, str] = {}
     for path in target.predecessors:
         predecessor = nodes[path]
         saved = await read_dependency_node(
@@ -103,8 +103,14 @@ async def _settle_dependencies(
         )
         if saved is None:
             return DependencySettlementState.REFUSED
-        states.append(saved.status)
-    outcome = decide_dependencies(target.trigger_rule, tuple(states))
+        states[path] = saved.status
+    outcome = decide_dependencies(target.trigger_rule, tuple(states.values()))
+    reason = "trigger_rule_unsatisfied"
+    if outcome is DependencyOutcome.SATISFIED:
+        outcome = decide_dependencies(
+            "all_success", tuple(states[path] for path in target.required_predecessors)
+        )
+        reason = "required_input_unavailable"
     now = normalise_timestamp(context.clock())
     expiry = await observe_run_expiry(context, observed_at=now)
     if expiry is ExpiryState.EXPIRED:
@@ -120,7 +126,7 @@ async def _settle_dependencies(
     )
     await context.event(
         f"node.{outcome.value}",
-        {"node_path": target.path, "reason": "trigger_rule_unsatisfied"},
+        {"node_path": target.path, "reason": reason},
         now,
         node_id,
     )

@@ -8,6 +8,15 @@ from kora.engine.dependency_settlement import DependencySettlementState
 from tests.engine.dependency_settlement_support import dependency_case, dependency_cases
 from tests.engine.test_dependency_rules import OUTCOMES, PAIRS
 
+REQUIRED_GATE_OUTCOMES = (
+    "satisfied",
+    "upstream_failed",
+    "skipped",
+    "skipped",
+    "skipped",
+    "upstream_failed",
+)
+
 
 @pytest.mark.asyncio
 async def test_parameter_inputs_do_not_block_false_dependency_settlement(
@@ -58,9 +67,10 @@ async def test_failure_propagates_by_trigger_rule(
     assert len(
         {value for case in cases for value in case.node_ids.values()}
     ) == 3 * len(PAIRS)
-    for original, saved, result, expected in zip(
-        before, after, results, OUTCOMES[rule], strict=True
+    for original, saved, result, trigger, required in zip(
+        before, after, results, OUTCOMES[rule], REQUIRED_GATE_OUTCOMES, strict=True
     ):
+        expected = required if trigger == "satisfied" else trigger
         target = next(row for row in saved[1] if row["node_path"] == "approval")
         if expected == "satisfied":
             assert result is DependencySettlementState.UNCHANGED
@@ -70,10 +80,75 @@ async def test_failure_propagates_by_trigger_rule(
             assert target["status"] == expected
             assert saved[0]["needs_scheduling"] is True
             assert len(saved[2]) == len(original[2]) + 1
+            records = [row for row in saved[2] if row["kind"] == "node." + expected]
+            assert len(records) == 1
+            assert records[0]["payload"] == {
+                "node_path": "approval",
+                "reason": "required_input_unavailable"
+                if trigger == "satisfied"
+                else "trigger_rule_unsatisfied",
+            }
         assert target["attempt_count"] == 0
         assert target["consumed_versions"] == {}
         assert target["current_attempt_id"] is None
         assert target["started_at"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rule", "states", "required", "expected"),
+    [
+        ("all_done", ("failed", "succeeded"), ("producer",), "pending"),
+        ("all_done", ("succeeded", "failed"), ("producer",), "upstream_failed"),
+        ("one_failed", ("succeeded", "cancelled"), ("producer",), "upstream_failed"),
+        ("all_done", ("skipped", "failed"), ("agent", "producer"), "upstream_failed"),
+        ("all_done", ("failed", "skipped"), ("agent", "producer"), "upstream_failed"),
+        ("all_done", ("skipped", "skipped"), ("agent", "producer"), "skipped"),
+        ("one_failed", ("failed", "skipped"), ("producer",), "skipped"),
+        ("none_failed", ("succeeded", "skipped"), ("producer",), "skipped"),
+        (
+            "none_failed_min_one_success",
+            ("succeeded", "skipped"),
+            ("producer",),
+            "skipped",
+        ),
+        ("all_skipped", ("skipped", "skipped"), ("producer",), "skipped"),
+        ("one_failed", ("failed", "succeeded"), ("producer",), "pending"),
+        ("all_done", ("cancelled", "upstream_failed"), (), "pending"),
+    ],
+)
+async def test_required_inputs_settle_only_after_satisfied_trigger(
+    database: Database,
+    rule: str,
+    states: tuple[str, str],
+    required: tuple[str, ...],
+    expected: str,
+) -> None:
+    case = await dependency_case(database, rule, states, required_producers=required)
+    before = await case.promotion.snapshot(database)
+
+    result = await case.settle(database)
+    after = await case.promotion.snapshot(database)
+
+    target = next(row for row in after[1] if row["node_path"] == "approval")
+    assert target["status"] == expected
+    assert target["consumed_versions"] == {}
+    assert target["current_attempt_id"] is None
+    assert target["attempt_count"] == 0
+    assert target["started_at"] is None
+    if expected == "pending":
+        assert result is DependencySettlementState.UNCHANGED
+        assert after == before
+    else:
+        assert result is DependencySettlementState.SETTLED
+        assert len(after[2]) == len(before[2]) + 1
+        records = [row for row in after[2] if row["kind"] == "node." + expected]
+        assert len(records) == 1
+        assert records[0]["payload"] == {
+            "node_path": "approval",
+            "reason": "required_input_unavailable",
+        }
+        assert after[0]["needs_scheduling"] is True
 
 
 @pytest.mark.asyncio

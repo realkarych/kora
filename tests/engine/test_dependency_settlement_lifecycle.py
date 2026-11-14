@@ -25,10 +25,12 @@ async def rolled_back_settlement(database: Database, case: DependencyCase) -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rule", ["all_success", "all_done"])
 async def test_dependency_settlement_is_atomic_and_replay_safe(
     database: Database,
+    rule: str,
 ) -> None:
-    case = await dependency_case(database)
+    case = await dependency_case(database, rule)
     ledger = ConnectionLedger(database)
     before = await case.promotion.snapshot(database)
 

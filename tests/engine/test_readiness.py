@@ -41,6 +41,8 @@ async def readiness_source(
     disconnected: bool = False,
     rules: dict[str, str] | None = None,
     parameter_input: bool = False,
+    required_producers: tuple[str, ...] | None = None,
+    command_optional: bool = False,
 ) -> CheckedExecutionContract:
     async with database.transaction() as writer:
         seed = Seeder(writer)
@@ -76,6 +78,8 @@ async def readiness_source(
             "path": "commit_sha",
         }
     }
+    if command_optional:
+        child(nodes, "producer", "inputs", "candidate")["optional"] = True
     approval["inputs"] = {
         "gate": {"type": "CommandResult", "from": "producer", "output": "result"},
         "candidate": {
@@ -87,6 +91,10 @@ async def readiness_source(
     }
     approval["depends_on"] = ["producer", "agent"]
     approval["trigger_rule"] = "none_failed_min_one_success"
+    if required_producers is not None:
+        for declaration in child(approval, "inputs").values():
+            assert isinstance(declaration, dict)
+            declaration["optional"] = declaration["from"] not in required_producers
     if parameter_input:
         child(nodes, "agent")["inputs"] = {
             "requested": {
@@ -175,6 +183,11 @@ async def test_readiness_prepares_data_and_control_edges_in_chain_order(
         "all_success",
         "all_success",
         "none_failed_min_one_success",
+    )
+    assert tuple(node.required_predecessors for node in prepared.nodes) == (
+        (),
+        ("agent",),
+        ("producer",),
     )
     assert prepared.matches(checked.scope, checked.pin)
     assert ledger.checkouts == checkouts

@@ -68,11 +68,13 @@ async def dependency_cases(
     states: tuple[tuple[str, str], ...],
     *,
     parameter_input: bool = False,
+    required_producers: tuple[str, ...] | None = None,
 ) -> tuple[DependencyCase, ...]:
     checked = await readiness_source(
         database,
         rules={"agent": rule, "approval": rule},
         parameter_input=parameter_input,
+        required_producers=required_producers,
     )
     readiness = prepare_readiness(
         checked, max_ir_bytes=LIMITS.resources.logical.ir_bytes
@@ -123,9 +125,14 @@ async def dependency_case(
     states: tuple[str, str] = ("succeeded", "failed"),
     *,
     parameter_input: bool = False,
+    required_producers: tuple[str, ...] | None = None,
 ) -> DependencyCase:
     return (
         await dependency_cases(
-            database, rule, (states,), parameter_input=parameter_input
+            database,
+            rule,
+            (states,),
+            parameter_input=parameter_input,
+            required_producers=required_producers,
         )
     )[0]
