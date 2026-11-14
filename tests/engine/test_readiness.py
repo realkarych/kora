@@ -4,22 +4,26 @@ import pytest
 
 from kora.db.connection import Database
 from kora.db.graph_version_reads import acquire_graph_version
+from kora.engine.graph_command_manifests import build_declared_command_manifests
 from kora.engine.graph_execution_contract import (
     MEMBERS,
     CheckedExecutionContract,
     check_detached_execution_contract,
 )
 from kora.engine.graph_projection_paths import build_graph_cel_projection_paths
-from kora.engine.graph_resource_references import GraphResourceScope
+from kora.engine.graph_resource_references import (
+    GraphResourceScope,
+    build_graph_resource_references,
+)
 from kora.engine.readiness import ReadinessRejected, prepare_readiness
 from kora.ir.graph_json import ObjectReader
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
-from tests.engine.graph_output_cases import child
+from tests.engine.graph_output_cases import child, output_document
 from tests.engine.graph_projection_cases import projection_inputs
 from tests.engine.test_graph_execution_contract import (
     LIMITS,
-    complete_inputs,
+    MARKER,
     insert_case,
     prepared_case,
 )
@@ -42,10 +46,26 @@ async def readiness_source(
         namespace = await seed.namespace("readiness-" + seed.new_id())
         graph = await seed.graph(namespace)
         scope = GraphResourceScope(namespace, graph, seed.new_id())
-    raw, original, refs, owners = complete_inputs(scope, resources=False)
+    raw = output_document("command")
+    graph = child(raw, "graph")
+    graph["params"] = {
+        "type": "object",
+        "properties": {"enabled": {"type": "boolean"}},
+    }
+    nodes = child(graph, "nodes")
+    agent = child(output_document("agent"), "graph", "nodes", "producer")
+    approval = child(output_document("human_input"), "graph", "nodes", "producer")
+    nodes["agent"] = agent
+    nodes["approval"] = approval
+    child(agent, "outputs").pop("value")
+    child(nodes, "producer", "outputs").pop("value")
+    child(nodes, "producer")["depends_on"] = ["agent"]
+    approval["depends_on"] = ["producer"]
+    child(approval, "config")["approve_when"] = "response.decision == 'approve'"
+    child(raw, "type_contracts")["AgentSession"] = {"builtin_revision": "1"}
+    raw["x-protected"] = MARKER
     raw["x-private"] = PRIVATE
     child(raw, "type_contracts")["VcsRef"] = {"builtin_revision": "1"}
-    nodes = child(raw, "graph", "nodes")
     child(nodes, "agent", "outputs")["change"] = {"type": "VcsRef"}
     child(nodes, "producer")["inputs"] = {
         "candidate": {
@@ -55,7 +75,6 @@ async def readiness_source(
             "path": "commit_sha",
         }
     }
-    approval = child(nodes, "approval")
     approval["inputs"] = {
         "gate": {"type": "CommandResult", "from": "producer", "output": "result"},
         "candidate": {
@@ -94,8 +113,15 @@ async def readiness_source(
             child(nodes, path)["trigger_rule"] = rule
     text, saved = projection_inputs(raw)
     projection = build_graph_cel_projection_paths(text, saved, limits=LIMITS.projection)
+    manifest = build_declared_command_manifests(text, limits=LIMITS.resources.logical)
+    references = build_graph_resource_references(
+        text, scope, (), limits=LIMITS.resources
+    )
+    assert len(manifest.text) <= LIMITS.resources.source_bytes
+    assert len(references.text) <= LIMITS.physical_input_bytes
+    refs = ObjectReader(references.text).object()
     saved["cel_projection_paths"] = ObjectReader(projection.text).object()
-    saved["command_resources"] = original["command_resources"]
+    saved["command_resources"] = ObjectReader(manifest.text).object()
     prepared, pin = prepared_case(raw, {name: saved[name] for name in MEMBERS}, scope)
     async with database.transaction() as writer:
         await insert_case(Seeder(writer), scope, 1, prepared, refs)
@@ -109,7 +135,7 @@ async def readiness_source(
         )
     assert acquired is not None
     return check_detached_execution_contract(
-        acquired, pin, scope, refs, owners, limits=LIMITS
+        acquired, pin, scope, refs, (), limits=LIMITS
     )
 
 
