@@ -1,6 +1,6 @@
 # Run-list operation
 
-Status: proposed design under [#1555](https://github.com/realkarych/kora/issues/1555). The owner approved preparation of this design on 2026-11-14, not runtime implementation or its final wording. No route or client mode described here is active. Existing decision records and specifications remain authoritative until this design is accepted.
+Status: owner-approved design under [#1555](https://github.com/realkarych/kora/issues/1555), accepted through [#1556](https://github.com/realkarych/kora/pull/1556) on 2026-11-14. No route or client mode described here is active. Native snapshot deadlines are implemented separately under [#1564](https://github.com/realkarych/kora/issues/1564); run-list integration remains pending.
 
 This document defines one operation: `GET /api/v1/namespaces/{ns}/runs`, the shared Python client, `kora runs` and stdio `kora_runs(mode=list)`. It completes the list entry in the [bounded-read catalogue](bounded-read-projections.md#4-normative-route-catalogue). It does not activate the singleton run read, waits, selected content, events, approval responses, a worker or a scheduler.
 
@@ -101,7 +101,7 @@ Construct and measure the envelope incrementally, reserving the actual cursor an
 
 ## 4. Database and response ownership
 
-The API projection owns the monotonic deadline, row/workspace accounting and bounded detached result. The metadata read unit owns its connection, native statements, results and snapshot. Reuse `Database.read_snapshot(deadline=...)`, with native deadline support added at the DB boundary; the current async timeout alone is insufficient. No run/capacity writer lock or persistent cursor is acquired.
+The API projection owns the monotonic deadline, row/workspace accounting and bounded detached result. The metadata read unit owns its connection, native statements, results and snapshot. Reuse `Database.read_snapshot(deadline=...)`, whose native statement interruption and settlement are implemented at the DB boundary under [#1564](https://github.com/realkarych/kora/issues/1564) and specified in [scheduler section 10](scheduler.md#10-standalone-sqlite-versus-postgres). This foundation does not activate projection queries or their API integration. No run/capacity writer lock or persistent cursor is acquired.
 
 PostgreSQL uses a read-only repeatable-read transaction. Before each projection statement, set transaction-local `statement_timeout` to a positive millisecond interval no larger than remaining time, also preserving any tighter existing limit. Less than one millisecond remaining refuses before dispatch; zero must never disable the timeout. Deadline/cancellation stops new dispatches, cancels and settles the active driver operation, rolls back, and closes native portals before connection reuse. Settings revert at transaction end; no installation-wide setting changes. Bootstrap/setup statements and setting the next timeout remain covered by the original client deadline and cancellation owner.
 
