@@ -149,11 +149,13 @@ The engine also has a read-only calculator that builds exact whole-run approval-
 | `plugins.harness.fake`, `plugins.vcs.fake` | `FakeHarness` implements `HarnessAdapter` by playing a scripted session through the policy and the runner's limit helpers. `DirVcs` is a directory-backed VCS. Provider loading refuses both; tests construct them. | Tests only, by design. | [fakes](../specs/fakes.md), [fakes never reach a serving process](../specs/fakes.md#2-fakes-never-reach-a-serving-process) |
 | `web/` | A React, TypeScript and Vite placeholder page with browser smoke checks. Its build lands in the wheel under `kora/api/static`. | Not served. | [web console](../specs/api-and-agent-surface.md#6-web-console-fr-73-fr-115-nfr-131), [ADR-0015](../../docs/decisions/0015-web-console-design.md), [console design](../design/console/pages.md) |
 
+The sequential dependency transition (#1530) prepares pinned data/control edges and settles false trigger rules as `skipped` or `upstream_failed` under the original run lock, with atomic event and marker writes. Its native reader uses exact current-instance point lookups. This library transition has both-database fixtures; it is not invoked by a running scheduler loop. Satisfied rules still require input resolution and admission (#1446), accepted outputs (#1472), and loop activation (#1448). The [scheduler contract](../specs/scheduler.md#2-the-scheduling-loop) records its exact boundary.
+
 ### 4.5 Designed only
 
 | Component | Where it is specified | Owner |
 |---|---|---|
-| Scheduler: tick, readiness, admission, waits, leases, deadlines | [scheduler](../specs/scheduler.md#2-the-scheduling-loop) | work item 10 |
+| Scheduler: tick and complete readiness/admission/wait composition | [scheduler](../specs/scheduler.md#2-the-scheduling-loop) | work item 10 |
 | Worker: claims, heartbeats, request sealing, reports and uploads | [worker route bodies](../specs/api-and-agent-surface.md#worker-route-bodies-issue-139), [ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md) | work item 17 |
 | Graph and run operations on the API, with CLI and MCP parity | [operations](../specs/api-and-agent-surface.md#2-resources-and-operations), [parity checklist](../specs/api-and-agent-surface.md#7-parity-checklist-fr-03-release-gate) | work items 11, 12, 18, 19 |
 | Python DSL, `kora compile` and `kora test` | [DSL](../specs/dsl.md), [fakes and the testing composition](../specs/fakes.md) | after the first slice |

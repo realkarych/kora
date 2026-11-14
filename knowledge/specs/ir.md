@@ -168,6 +168,20 @@ A **`ReviewBundle`** (DD-33) has two parts: `facts`, written by kora from its ow
 
 **Trigger rules** (FR-1.6 plus DD-1): `all_success` (default), `all_done`, `one_success`, `one_failed`, `none_failed`, `all_skipped`, and `none_failed_min_one_success` (borrowed from Archon: no upstream failed and at least one succeeded, so a node after an all-skipped branch stays skipped). The enum is closed in IR v1.
 
+The terminal-dependency interpretation approved under [#1446](https://github.com/realkarych/kora/issues/1446) on 2026-11-14 waits for **all** concrete predecessors to finish, including for `one_success` and `one_failed`. Count each predecessor once across data and control edges. For a nonempty set of N predecessors, S counts `succeeded`, F counts `failed`, `upstream_failed` and individually `cancelled`, and K counts `skipped`:
+
+| Rule | Satisfied when | Otherwise |
+|---|---|---|
+| `all_success` | S = N | `upstream_failed` if F > 0, otherwise `skipped` |
+| `all_done` | Always, after all finish | Never false |
+| `one_success` | S > 0 | `upstream_failed` if F > 0, otherwise `skipped` |
+| `one_failed` | F > 0 | `skipped` |
+| `none_failed` | F = 0 | `upstream_failed` |
+| `none_failed_min_one_success` | F = 0 and S > 0 | `upstream_failed` if F > 0, otherwise `skipped` |
+| `all_skipped` | K = N | `skipped` |
+
+A genuine root with no predecessors in the pinned graph satisfies every rule. An absent, foreign or mismatched predecessor instance is unavailable evidence, never an empty root. Individual cancellation can satisfy a failure handler; cancellation or expiry of the enclosing run still prevents advancement. A satisfied rule supplies no accepted artifact, input binding, branch selection or execution authority. The separate unresolved-required-input question is unchanged. A false rule writes `node.skipped` or `node.upstream_failed` with the fixed reason `trigger_rule_unsatisfied`, atomically with the matching current node state and run scheduling marker. It does not create an attempt or certify physical release.
+
 The owner-approved [saved output binding inventory](data-model.md#saved-output-binding-inventory) associates every root-node output, stored-body node output and declared body export with its complete effective contract by value. Exact segmented declaration paths include unused bodies without expanding invocations; missing or unsupported members cannot be dropped from a successful section. This outer association neither supplies missing implicit roles nor replaces declared export interfaces, wider composition, installation validity or execution admission.
 
 ### 3.1 Fixed implicit outputs
