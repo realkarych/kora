@@ -1,5 +1,7 @@
 # Structured component diagnostics
 
+Agent-workload amendment dated 2026-11-13, issue #1395. `runtime.local.agent` records `outcome` (`started` at INFO, `refused` or `journal_unavailable` at WARNING) and `waited_ms` once per agent `start` request. It carries no workload field, harness name, path, digest or attempt id. The runner's agent session binds the host's `runner.agent.*` events to the runner's diagnostics, with the masking of the process secret registry. The cases in `tests/plugins/runtime/local/test_agent_session.py` own the activation evidence.
+
 Command-workspace amendment dated 2026-11-11, issue #1389. `runtime.local.workspace` records `outcome` (`prepared`, `failed`, `journal_unavailable` or `cancelled`) and `waited_ms` once per checkout. It uses INFO for prepared and WARNING otherwise, and carries no repository, revision, path or attempt id. The cases in `tests/plugins/runtime/local/test_command_workspace.py` own the activation evidence.
 
 Command-domain stop amendment dated 2026-11-07, issue #913. `runtime.local.command_stop` records `outcome` (`confirmed` or `unresolved`) and `waited_ms` once per runner-owned stop. The event uses INFO for confirmation and WARNING for incomplete evidence. Native environment bytes, paths, identities and tokens remain with the stop owner. The command-stop cases in `tests/plugins/runtime/local/test_command.py` own the activation evidence. Stop and its private outcome are independent of diagnostic delivery.

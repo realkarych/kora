@@ -8,7 +8,7 @@ from kora.plugins.runtime.local.capture import OpenedLog
 from kora.plugins.runtime.local.channel import LogName
 from kora.protocols.runtime import CommandObservation, TransferItem, Workload
 from kora.runner.filesystem import DirectoryAnchor, FileIdentity
-from kora.runner.registry import Submitter
+from kora.runner.registry import ControlFileRef, Submitter
 
 PhaseName = Literal["preparation", "execution", "complete", "failed"]
 StateName = Literal["starting", "running", "exited"]
@@ -109,9 +109,11 @@ class WorkloadSession(Protocol):
 
     def command_observation(self, submitter: Submitter) -> CommandObservation: ...
 
+    def session_observation(self, submitter: Submitter) -> ControlFileRef: ...
+
     def completion(self) -> Completion: ...
 
-    def result_reference(self) -> JournalReference | None: ...
+    def result_reference(self) -> JournalReference | ControlFileRef | None: ...
 
     def record_completion(self, data: JsonObject) -> bool: ...
 

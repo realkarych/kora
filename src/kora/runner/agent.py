@@ -186,6 +186,7 @@ class AgentHost:
         self._session: Session | None = None
         self._fenced = asyncio.Event()
         self._sealed: ResultFile | None = None
+        self._observation: SessionObservation | None = None
 
     def start(self, workload: Workload, workspace: WorkspaceRef) -> None:
         if self._session is not None or self._fenced.is_set():
@@ -310,6 +311,7 @@ class AgentHost:
                 log.emit(SESSION_FAILED, code="result_unsealed")
                 return
             self._sealed = written
+            self._observation = sealed
         if isinstance(sealed, SessionFailedObservation):
             log.emit(SESSION_FAILED, code=sealed.code)
             return
@@ -377,6 +379,10 @@ class AgentHost:
     def result_reference(self) -> ResultFile | None:
         with self._lock:
             return self._sealed
+
+    def observation(self) -> SessionObservation | None:
+        with self._lock:
+            return self._observation
 
     def _started(self) -> Session:
         if self._session is None:

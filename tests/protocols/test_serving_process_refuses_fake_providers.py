@@ -65,4 +65,9 @@ def test_serving_process_refuses_fake_providers(tmp_path: Path) -> None:
     }
     assert result["after_imported"] == []
     assert result["implemented"] == "provider_reserved"
+    assert result["runner"] == [
+        "kora.plugins.runtime.local.supervisor",
+        "kora.plugins.runtime.local.agent",
+    ]
+    assert result["after_runner"] == []
     assert result["drained"] is True

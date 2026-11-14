@@ -13,7 +13,12 @@ from kora.plugins.runtime.local.channel import (
 )
 from kora.plugins.runtime.local.observation import COMMAND_OBSERVED
 from kora.protocols.identity import ProcessIdentity
-from kora.protocols.runtime import MAX_TAIL_BYTES, CaptureFacts, CommandObservation
+from kora.protocols.runtime import (
+    MAX_TAIL_BYTES,
+    CaptureFacts,
+    CommandObservation,
+    SessionObservation,
+)
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
@@ -28,6 +33,7 @@ from kora.runner.registry import (
     ControlFileRef,
     JournalRecordRef,
 )
+from kora.runner.session_result import ResultFile, ResultUnreadable, read_observation
 
 RESULT_DIRECTORY: Final[str] = "result"
 CONTROL_DIRECTORY: Final[str] = "control"
@@ -100,6 +106,29 @@ def control_file(attempt: DirectoryAnchor, ref: ControlFileRef) -> bytes:
     if digest_of(payload) != ref.digest:
         raise delivery_error("integrity_error")
     return payload
+
+
+def sealed_session(attempt: DirectoryAnchor, ref: ControlFileRef) -> SessionObservation:
+    try:
+        control = open_private_directory(attempt, CONTROL_DIRECTORY)
+    except (OSError, FilesystemError):
+        raise delivery_error("transfer_refused") from None
+    try:
+        return read_observation(control, ResultFile(ref.name, ref.size, ref.digest))
+    except ResultUnreadable:
+        raise delivery_error("integrity_error") from None
+    except (OSError, FilesystemError):
+        raise delivery_error("transfer_refused") from None
+    finally:
+        control.close()
+
+
+def recorded_session(
+    attempt: DirectoryAnchor, result: CompletedResult | None
+) -> SessionObservation:
+    if result is None or not isinstance(result.ref, ControlFileRef):
+        raise delivery_error("session_unobserved")
+    return sealed_session(attempt, result.ref)
 
 
 def result_payload(attempt: DirectoryAnchor, result: CompletedResult) -> bytes:

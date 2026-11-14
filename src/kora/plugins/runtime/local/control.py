@@ -29,6 +29,7 @@ from kora.plugins.runtime.local.channel import (
     read_output_declaration,
     read_output_trailer,
     read_quiescence,
+    read_session_result,
     read_status,
     send_message,
     write_transfer_bytes,
@@ -47,7 +48,7 @@ from kora.runner.channels import (
 )
 from kora.runner.native_io import NativeIOSubmissionUncertain
 from kora.runner.peers import PeerRefused, PeerSource
-from kora.runner.registry import TransitionExecutor, refusal
+from kora.runner.registry import ControlFileRef, TransitionExecutor, refusal
 
 NOT_RUNNER: str = "not_runner"
 
@@ -206,6 +207,29 @@ async def observe_command(
         OBSERVATION_BYTES,
     )
     return read_observation(payload, request_id)
+
+
+async def observe_session(
+    path: str,
+    runner: ProcessIdentity,
+    dispatcher_id: str,
+    source: PeerSource,
+    executor: TransitionExecutor,
+    clock: Clock,
+    request_id: str,
+) -> ControlFileRef:
+    payload = await attached_request(
+        path,
+        runner,
+        dispatcher_id,
+        source,
+        executor,
+        clock,
+        request_id,
+        "session_observation",
+        ENVELOPE_BYTES,
+    )
+    return read_session_result(payload, request_id)
 
 
 async def quiesce_command(

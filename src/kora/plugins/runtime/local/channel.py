@@ -32,7 +32,7 @@ from kora.protocols.runtime import (
 )
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
-from kora.runner.registry import TransitionExecutor
+from kora.runner.registry import ControlFileRef, TransitionExecutor
 
 PRE_ATTACH_BYTES: Final[int] = 8192
 MAX_LOG_BYTES: Final[int] = 67_108_864
@@ -101,6 +101,9 @@ ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
     "transfer_refused": EnvelopeEntry("the input cannot be transferred", False),
     "command_unobserved": EnvelopeEntry(
         "no command observation was recorded for the attempt", False
+    ),
+    "session_unobserved": EnvelopeEntry(
+        "no session observation was sealed for the attempt", False
     ),
 }
 REFUSED_MESSAGE: Final[str] = "the control message was refused"
@@ -679,6 +682,34 @@ def read_observation(payload: bytes, request_id: str) -> CommandObservation:
             raise message_refused(MessageRefusal.MALFORMED)
         raise error
     envelope = json_model(ObservationEnvelope, payload)
+    if envelope is None or envelope.request_id != request_id:
+        raise message_refused(MessageRefusal.MALFORMED)
+    return envelope.value
+
+
+class SessionResultEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["session_result"]
+    value: ControlFileRef
+
+
+def session_result_envelope(request_id: str, value: ControlFileRef) -> bytes:
+    envelope = SessionResultEnvelope(
+        request_id=request_id, result="session_result", value=value
+    )
+    return canonical_bytes(envelope.model_dump(mode="json"))
+
+
+def read_session_result(payload: bytes, request_id: str) -> ControlFileRef:
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    envelope = json_model(SessionResultEnvelope, payload)
     if envelope is None or envelope.request_id != request_id:
         raise message_refused(MessageRefusal.MALFORMED)
     return envelope.value

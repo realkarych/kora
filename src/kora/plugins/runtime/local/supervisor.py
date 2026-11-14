@@ -8,7 +8,7 @@ import secrets
 import socket
 import sys
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,6 +24,11 @@ from kora.observability import (
     LoggingSettings,
     ProcessDiagnostics,
     configure_process,
+)
+from kora.plugins.runtime.local.agent import (
+    AgentSession,
+    AgentSources,
+    production_sources,
 )
 from kora.plugins.runtime.local.command import CommandSession
 from kora.plugins.runtime.local.reaper import AdoptedReaper
@@ -260,6 +265,7 @@ class PreparedRegistration:
         identity: ProcessIdentity,
         log: ComponentLogger,
         session: WorkloadSession | None = None,
+        agent: WorkloadSession | None = None,
     ) -> ControlServer:
         bound = self.bound
         if bound is None:
@@ -276,6 +282,7 @@ class PreparedRegistration:
             identity,
             reader,
             session=session,
+            agent=agent,
         )
         self.bound = None
         return server
@@ -333,7 +340,10 @@ def prepare_registration(arguments: RunnerArguments) -> PreparedRegistration:
 
 
 async def supervise(
-    arguments: RunnerArguments, log: ComponentLogger, diagnostics: ProcessDiagnostics
+    arguments: RunnerArguments,
+    log: ComponentLogger,
+    diagnostics: ProcessDiagnostics,
+    sources: AgentSources,
 ) -> None:
     clock = SystemClock()
     reader = NativeIdentityReader()
@@ -357,7 +367,10 @@ async def supervise(
                 diagnostics.logger(COMPONENT),
                 reaper,
             )
-            server = prepared.server(clock, reader, identity, log, command)
+            agent = AgentSession(
+                attempt, candidate, diagnostics, clock, reaper, sources
+            )
+            server = prepared.server(clock, reader, identity, log, command, agent)
             try:
                 server.start()
                 await server.completed()
@@ -388,7 +401,9 @@ def attempt_directory(arguments: RunnerArguments) -> DirectoryAnchor:
         root.close()
 
 
-def run(argv: Sequence[str]) -> int:
+def run(
+    argv: Sequence[str], compose: Callable[[ProcessDiagnostics], AgentSources]
+) -> int:
     harden()
     try:
         arguments = parsed_arguments(argv)
@@ -410,7 +425,7 @@ def run(argv: Sequence[str]) -> int:
     log = diagnostics.logger(COMPONENT).bind(attempt_id=arguments.attempt_id)
     log.emit(STARTED)
     try:
-        asyncio.run(supervise(arguments, log, diagnostics))
+        asyncio.run(supervise(arguments, log, diagnostics, compose(diagnostics)))
         log.emit(COMPLETED)
     except RunnerRefused as refusal:
         log.emit(REFUSED, reason=str(refusal.args[0]))
@@ -425,7 +440,7 @@ def run(argv: Sequence[str]) -> int:
 
 
 def main() -> None:
-    sys.exit(run(sys.argv[1:]))
+    sys.exit(run(sys.argv[1:], production_sources))
 
 
 if __name__ == "__main__":

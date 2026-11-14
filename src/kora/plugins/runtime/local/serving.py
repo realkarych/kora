@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Final, TypeVar
+from typing import Final, Generic, TypeVar
 
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.accepted_socket import accept_socket
@@ -46,6 +46,7 @@ from kora.plugins.runtime.local.channel import (
     read_transfer,
     read_transfer_bytes,
     receive_section,
+    session_result_envelope,
     status_envelope,
     transfer_cutoff,
     workload_digest,
@@ -88,6 +89,7 @@ from kora.runner.registry import (
     AttemptKey,
     Completed,
     CompletedResult,
+    ControlFileRef,
     JournalRecordRef,
     LockOutcome,
     Registry,
@@ -247,6 +249,38 @@ def rebound(path: Path, name: str) -> BoundSocket:
         raise
 
 
+@dataclass(frozen=True)
+class Answer(Generic[Result]):
+    missing: str
+    read: Callable[[WorkloadSession, Submitter], Result]
+    envelope: Callable[[str, Result], bytes]
+
+
+def command_read(session: WorkloadSession, submitter: Submitter) -> CommandObservation:
+    return session.command_observation(submitter)
+
+
+def session_read(session: WorkloadSession, submitter: Submitter) -> ControlFileRef:
+    return session.session_observation(submitter)
+
+
+command_answer: Final[Answer[CommandObservation]] = Answer(
+    "command_unobserved", command_read, observation_envelope
+)
+session_answer: Final[Answer[ControlFileRef]] = Answer(
+    "session_unobserved", session_read, session_result_envelope
+)
+
+
+async def stopped(sessions: tuple[WorkloadSession, ...]) -> None:
+    if not sessions:
+        return
+    try:
+        await sessions[0].stop()
+    finally:
+        await stopped(sessions[1:])
+
+
 def decoded_workload(section: bytearray) -> Workload:
     return decode_section(section, ACCEPT_WORKLOAD.sections[0], Workload)
 
@@ -294,6 +328,7 @@ class ControlServer:
         binder: Callable[[Path, str], BoundSocket] = rebound,
         decoder: Callable[[bytearray], Workload] = decoded_workload,
         session: WorkloadSession | None = None,
+        agent: WorkloadSession | None = None,
     ) -> None:
         bound.listener.setblocking(False)
         self._bound = bound
@@ -305,6 +340,8 @@ class ControlServer:
         self._binder = binder
         self._decoder = decoder
         self._session = session
+        self._agent = agent
+        self._sessions = tuple(item for item in (session, agent) if item is not None)
         self._deadline_closed = False
         self._registry = registry
         self._key = key
@@ -519,8 +556,21 @@ class ControlServer:
                     )
                     return
                 elif request.op == "observe":
-                    await self._send_observation(
-                        channel, submitter, observational, request.request_id
+                    await self._send_answer(
+                        channel,
+                        submitter,
+                        observational,
+                        request.request_id,
+                        command_answer,
+                    )
+                    return
+                elif request.op == "session_observation":
+                    await self._send_answer(
+                        channel,
+                        submitter,
+                        observational,
+                        request.request_id,
+                        session_answer,
                     )
                     return
                 else:
@@ -594,6 +644,8 @@ class ControlServer:
                         ):
                             raise delivery_error("workload_conflict")
                         if self._workload is None:
+                            if decoded.kind == "agent" and self._agent is not None:
+                                self._session = self._agent
                             command = self._session
                             if (
                                 sys.platform == "darwin"
@@ -832,27 +884,28 @@ class ControlServer:
             if command is not None and outcome is not None:
                 command.note_output(outcome, started_ns)
 
-    async def _send_observation(
+    async def _send_answer(
         self,
         channel: BoundedChannel,
         submitter: Submitter,
         observational: bool,
         request_id: str,
+        answer: Answer[Result],
     ) -> None:
         session = self._session
 
-        def observe() -> CommandObservation:
+        def observe() -> Result:
             if self._closing is not None:
                 raise delivery_error("transfer_refused")
             if session is None:
-                raise delivery_error("command_unobserved")
+                raise delivery_error(answer.missing)
             self._current_submitter(submitter)
-            return session.command_observation(submitter)
+            return answer.read(session, submitter)
 
         try:
             if observational:
                 raise delivery_error("execution_unauthorized")
-            observation = await self._transfer_native(observe)
+            value = await self._transfer_native(observe)
         except KoraProtocolError as error:
             if error.code == "registry_busy":
                 error = delivery_error("workload_busy")
@@ -860,7 +913,7 @@ class ControlServer:
         except (NativeIOSubmissionUncertain, NativeIOUnresolved):
             channel.close()
         else:
-            await self._answer(channel, observation_envelope(request_id, observation))
+            await self._answer(channel, answer.envelope(request_id, value))
 
     def _current_submitter(self, submitter: Submitter) -> None:
         if self._running().submitter != submitter:
@@ -908,6 +961,8 @@ class ControlServer:
         result = (
             None
             if reference is None
+            else CompletedResult(kind="agent", ref=reference)
+            if isinstance(reference, ControlFileRef)
             else CompletedResult(
                 kind="command",
                 ref=JournalRecordRef(
@@ -1277,9 +1332,9 @@ class ControlServer:
 
     async def _release(self) -> None:
         self._bound.listener.close()
-        if self._session is not None:
-            self._session.fence()
-            self._session.close_journal()
+        for session in self._sessions:
+            session.fence()
+            session.close_journal()
         tasks = [*self._connections]
         if self._accepting is not None:
             tasks.append(self._accepting)
@@ -1307,10 +1362,8 @@ class ControlServer:
                 workers_joined = True
             finally:
                 try:
-                    if self._session is not None and (
-                        workers_joined or self._transfer_native_settled
-                    ):
-                        await self._session.stop()
+                    if workers_joined or self._transfer_native_settled:
+                        await stopped(self._sessions)
                 finally:
                     if (
                         settled or self._transfer_native_settled

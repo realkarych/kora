@@ -91,7 +91,7 @@ from kora.runner.journal import (
     space_error,
 )
 from kora.runner.native_io import NativeExecutor, NativeIOUnresolved, observed
-from kora.runner.registry import Submitter, synchronize
+from kora.runner.registry import ControlFileRef, Submitter, synchronize
 
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
 COMMAND: Final[EventSpec] = CATALOG.register(
@@ -1376,6 +1376,12 @@ class CommandSession:
             with self._lock:
                 self._tails = tails
         return with_tails(observation, *tails)
+
+    def session_observation(self, submitter: Submitter) -> ControlFileRef:
+        with self._lock:
+            if self._execution != submitter:
+                raise delivery_error("execution_unauthorized")
+        raise delivery_error("workload_kind_unavailable")
 
     def note_output(self, outcome: str, started: int) -> None:
         waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)

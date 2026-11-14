@@ -44,6 +44,8 @@ from kora.plugins.runtime.local.completed import (
     recorded_exited,
     recorded_observation,
     recorded_record,
+    recorded_session,
+    sealed_session,
 )
 from kora.plugins.runtime.local.configuration import CONFIG_SCHEMA as CONFIG_SCHEMA
 from kora.plugins.runtime.local.configuration import (
@@ -57,6 +59,7 @@ from kora.plugins.runtime.local.control import (
     ListenerRefused,
     deliver_workload,
     observe_command,
+    observe_session,
     quiesce_command,
     runner_status,
     start_command,
@@ -97,6 +100,7 @@ from kora.protocols.runtime import (
     CommandObservation,
     RuntimeCapabilities,
     RuntimeStatus,
+    SessionObservation,
     TransferItem,
     Workload,
 )
@@ -850,6 +854,54 @@ class LocalRuntime:
         except KoraProtocolError as error:
             if error.code == "message_refused":
                 raise refusal("runner_unreachable") from None
+            raise
+
+    async def session_observation(
+        self, handle: Handle, ctx: ProtocolContext
+    ) -> SessionObservation:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        entry = await self.entry(key)
+        if isinstance(entry, Completed):
+            result = entry.result
+            return await self._from_completed(
+                key, entry, lambda attempt: recorded_session(attempt, result)
+            )
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        try:
+            reference = await observe_session(
+                entry.socket_path,
+                entry.runner,
+                entry.submitter.dispatcher_id,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+            )
+        except (ListenerRefused, ChannelError, OSError):
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code == "message_refused":
+                raise refusal("runner_unreachable") from None
+            raise
+
+        def read() -> SessionObservation:
+            attempt = self._attempt_anchor(key)
+            try:
+                return sealed_session(attempt, reference)
+            finally:
+                attempt.close()
+
+        try:
+            return await self.executor.run(read)
+        except KoraProtocolError as error:
+            if error.code != "transfer_refused":
+                raise
+            current = await self.entry(key)
+            if isinstance(current, Completed) and current.released_at is not None:
+                raise refusal("attempt_retired") from None
             raise
 
     async def quiescence(

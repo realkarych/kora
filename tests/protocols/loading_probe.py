@@ -165,6 +165,14 @@ def run_serving(log_path: str) -> dict[str, object]:
         for protocol, name in legs
     }
     result["after_imported"] = testing_modules()
+    import kora.plugins.runtime.local.agent
+    import kora.plugins.runtime.local.supervisor
+
+    result["runner"] = [
+        kora.plugins.runtime.local.supervisor.__name__,
+        kora.plugins.runtime.local.agent.__name__,
+    ]
+    result["after_runner"] = testing_modules()
     result["implemented"] = code_of(
         lambda: load_provider(harness, "implemented", diagnostics)
     )
