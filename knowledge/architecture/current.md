@@ -85,7 +85,7 @@ The [package layer table](detailed.md#package-layers) lists packages that do not
 
 ### Size
 
-`src/kora` holds 615 Python modules and about 127,520 lines. The metadata schema has 42 tables and 32 migrations. Loading the commands above at run time reaches none of `kora.api` or `kora.engine`. `kora doctor` loads `kora.cel_eval.binding`, which loads `kora.cel`, for its CEL binding check. `kora plugins list` reaches the Claude adapter module without the Claude SDK. `kora conformance harness claude` reaches that adapter and imports the Claude SDK when it builds a session. `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
+`src/kora` holds 615 Python modules and about 127,531 lines. The metadata schema has 42 tables and 32 migrations. Loading the commands above at run time reaches none of `kora.api` or `kora.engine`. `kora doctor` loads `kora.cel_eval.binding`, which loads `kora.cel`, for its CEL binding check. `kora plugins list` reaches the Claude adapter module without the Claude SDK. `kora conformance harness claude` reaches that adapter and imports the Claude SDK when it builds a session. `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
 
 ## 3. How the existing pieces connect
 

@@ -253,7 +253,11 @@ async def heartbeat_expiry(
     if fresh is None or parent is None:
         raise GrantHistoryRejected()
     return replace(
-        context, attempt=saved.model_copy(update=fresh.model_dump()), run=parent
+        context,
+        attempt=HeartbeatAttempt.model_validate(
+            saved.model_dump() | fresh.model_dump()
+        ),
+        run=parent,
     )
 
 

@@ -59,16 +59,16 @@ def heartbeat_observation(
     after = body.observation
     state = context.attempt.execution_state
     if after is not None:
-        recovery = recovery.model_copy(
-            update={
-                "last_observation": after,
-                "observation_grant": ObservationGrant(
-                    worker_id=context.grant.worker_id,
-                    incarnation_id=context.grant.incarnation_id,
-                    dispatcher_id=context.grant.id,
-                    lease_epoch=context.grant.lease_epoch,
-                ),
-            }
+        recovery = WorkerRecovery(
+            last_observation=after,
+            observation_grant=ObservationGrant(
+                worker_id=context.grant.worker_id,
+                incarnation_id=context.grant.incarnation_id,
+                dispatcher_id=context.grant.id,
+                lease_epoch=context.grant.lease_epoch,
+            ),
+            normal_completion=recovery.normal_completion,
+            termination=recovery.termination,
         )
         state = (
             "live" if after.state in ("queued", "starting", "running") else "unknown"
@@ -395,7 +395,7 @@ async def _apply_heartbeat(
     diagnostics = current_diagnostics()
     if diagnostics is not None:
         diagnostics.logger(COMPONENT).emit(PREPARED, events=len(events))
-    response = HeartbeatResponse(
+    return HeartbeatResponse(
         desired_state="cancel" if revoked or expired else "run",
         lease_until=until,
         mode="recover"
@@ -405,7 +405,5 @@ async def _apply_heartbeat(
             context, final_now, closed, state == "stopped", verified
         ),
         grant_history_verified=history if verified else None,
-    )
-    return (
-        response if verified else response.model_copy(update={"grant_history": history})
+        grant_history=None if verified else history,
     )
