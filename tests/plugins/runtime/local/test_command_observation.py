@@ -69,7 +69,12 @@ from tests.plugins.runtime.local.test_command_workspace import (
     step_plan,
 )
 from tests.support.local_delivery import ReapedSession
-from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
+from tests.support.local_peers import (
+    CONDITION_SECONDS,
+    POLL_SECONDS,
+    identity_of,
+    until,
+)
 from tests.support.local_runtime import private_directory
 
 __all__ = ["kora_capture"]
@@ -114,7 +119,7 @@ async def unless_busy(call: Callable[[], Awaitable[T]]) -> T:
         except KoraProtocolError as error:
             if error.code != "workload_busy" or time.monotonic() >= deadline:
                 raise
-        await asyncio.sleep(0)
+        await asyncio.sleep(POLL_SECONDS)
 
 
 async def runtime_answer(
@@ -188,6 +193,21 @@ def observed_records(attempt: Path) -> list[JsonObject]:
     return found
 
 
+def stop_outcomes(capture: Capture) -> list[object]:
+    return [
+        record.get("outcome")
+        for record in capture.reader.records()
+        if record.get("event") == "runtime.local.command_stop"
+    ]
+
+
+def recorded_events(capture: Capture) -> list[tuple[object, object]]:
+    return [
+        (record.get("event"), record.get("outcome"))
+        for record in capture.reader.records()
+    ]
+
+
 def workspace_prepared(capture: Capture) -> bool:
     return any(
         record.get("event") == "runtime.local.workspace"
@@ -220,11 +240,20 @@ def stray_children() -> tuple[str, ...]:
     return tuple(described_child(pid) for pid in sorted(listed))
 
 
+async def confirmed_stop(capture: Capture) -> None:
+    await until(lambda: bool(stop_outcomes(capture)))
+    outcomes = stop_outcomes(capture)
+    assert outcomes == ["confirmed"], (
+        f"the command stop was {outcomes}: {recorded_events(capture)}, "
+        f"children: {stray_children()}"
+    )
+
+
 async def without_stray_children() -> None:
     deadline = time.monotonic() + CONDITION_SECONDS
     while found := stray_children():
         assert time.monotonic() < deadline, f"the test process has children: {found}"
-        await asyncio.sleep(0)
+        await asyncio.sleep(POLL_SECONDS)
 
 
 @asynccontextmanager
@@ -634,15 +663,19 @@ async def test_command_observation_survives_late_drain_attachment(
         workload = checked_out(runtime, "import os; os.write(1, b'out')")
         async with observed_session(tmp_path, kora_capture) as (session, attempt):
             await accepted(session, workload)
+            await until(lambda: workspace_prepared(kora_capture))
             await supervised(session, workload)
-            await until(lambda: session.completion() is not Completion.PENDING)
+            await confirmed_stop(kora_capture)
             stopped = session.completion()
 
             session.attach_drains()
             answer = await settled_answer(session)
+            await until(lambda: session.completion() is Completion.COMPLETE)
+            reference = session.result_reference()
             records = observed_records(attempt)
 
-    assert stopped is Completion.COMPLETE
+    assert stopped is Completion.PENDING
     assert isinstance(answer, CommandObservation)
     assert answer.stdout.size == 3
     assert len(records) == 1
+    assert reference is not None

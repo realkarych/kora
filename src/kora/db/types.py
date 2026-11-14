@@ -3,9 +3,11 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TypeAlias, cast
 
-from sqlalchemy import Dialect, Numeric, String, Text
+from sqlalchemy import Dialect, Numeric, String, Text, type_coerce
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import TIMESTAMP as POSTGRESQL_TIMESTAMP
+from sqlalchemy.sql.elements import BindParameter, ColumnElement
 from sqlalchemy.types import JSON, DateTime, TypeDecorator, TypeEngine
 
 from kora.ir.cost import format_money, parse_money
@@ -70,10 +72,16 @@ def as_json_value(value: object) -> JsonValue:
         return value
     if isinstance(value, list):
         items = cast(list[object], value)
-        return [as_json_value(item) for item in items]
+        children: list[JsonValue] = []
+        for item in items:
+            children.append(as_json_value(item))
+        return children
     if isinstance(value, dict):
         entries = cast(dict[object, object], value)
-        return {str(key): as_json_value(item) for key, item in entries.items()}
+        fields: JsonObject = {}
+        for key, item in entries.items():
+            fields[str(key)] = as_json_value(item)
+        return fields
     raise ValueRejected("a JSON value is a scalar, a list or an object")
 
 
@@ -119,6 +127,18 @@ def normalise_timestamp(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+class UtcTimestampText(TypeDecorator[datetime]):
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(
+        self, value: datetime | None, dialect: Dialect
+    ) -> str | None:
+        if value is None:
+            return None
+        return normalise_timestamp(value).isoformat(timespec="microseconds")
+
+
 class UtcTimestamp(TypeDecorator[datetime]):
     impl = DateTime
     cache_ok = True
@@ -130,6 +150,16 @@ class UtcTimestamp(TypeDecorator[datetime]):
             return dialect.type_descriptor(String(TIMESTAMP_TEXT_LENGTH))
         return dialect.type_descriptor(POSTGRESQL_TIMESTAMP(timezone=True))
 
+    def bind_expression(
+        self, bindparam: BindParameter[datetime]
+    ) -> ColumnElement[datetime] | None:
+        if isinstance(self.impl_instance, DateTime):
+            return sql_cast(
+                type_coerce(bindparam, UtcTimestampText()),
+                POSTGRESQL_TIMESTAMP(timezone=True),
+            )
+        return bindparam
+
     def process_bind_param(
         self, value: datetime | None, dialect: Dialect
     ) -> datetime | str | None:
@@ -137,7 +167,7 @@ class UtcTimestamp(TypeDecorator[datetime]):
             return None
         moment = normalise_timestamp(value)
         if dialect.name == SQLITE:
-            return moment.strftime(TIMESTAMP_TEXT_FORMAT)
+            return moment.isoformat(timespec="microseconds")
         return moment
 
     def process_result_value(

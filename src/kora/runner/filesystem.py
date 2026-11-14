@@ -6,7 +6,8 @@ import platform
 import stat
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Final, Protocol, cast
 
@@ -261,6 +262,220 @@ def _remove_directory(
         os.fsync(parent.descriptor)
     finally:
         child.close()
+
+
+RELEASE_ENTRIES: Final[int] = 65_536
+RELEASE_DEPTH: Final[int] = 64
+RELEASE_DESCENT: Final[int] = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+class ReleaseState(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    FOREIGN = "foreign"
+
+
+@dataclass(frozen=True)
+class ReleaseProgress:
+    state: ReleaseState
+    removed: int
+    foreign: int
+
+
+@dataclass
+class ReleaseFrame:
+    descriptor: int
+    name: str
+    device: int
+    inode: int
+    retained: set[str] = field(default_factory=set[str])
+
+
+class ReleaseWalk:
+    def __init__(
+        self, parent: DirectoryAnchor, max_entries: int, max_depth: int
+    ) -> None:
+        self.parent = parent
+        self.device = parent.identity.device
+        self.max_entries = max_entries
+        self.max_depth = max_depth
+        self.removed = 0
+        self.foreign = 0
+        self.work = 0
+        self.interrupted = False
+        self.stack: list[ReleaseFrame] = []
+
+    def run(self, name: str) -> ReleaseProgress:
+        self.parent.verify()
+        try:
+            self._enter(self.parent.descriptor, name, None)
+            while self.stack and self.work < self.max_entries:
+                self._step(self.stack[-1])
+            unfinished = bool(self.stack) or self.interrupted
+            stalled = (
+                bool(self.stack)
+                and bool(self.foreign)
+                and not self.removed
+                and not self.interrupted
+            )
+        finally:
+            for frame in self.stack:
+                os.close(frame.descriptor)
+            self.stack.clear()
+        if unfinished and not stalled:
+            return ReleaseProgress(ReleaseState.PARTIAL, self.removed, self.foreign)
+        if self.foreign:
+            return ReleaseProgress(ReleaseState.FOREIGN, self.removed, self.foreign)
+        os.fsync(self.parent.descriptor)
+        return ReleaseProgress(ReleaseState.COMPLETE, self.removed, 0)
+
+    def _step(self, frame: ReleaseFrame) -> None:
+        with os.scandir(frame.descriptor) as entries:
+            for entry in entries:
+                if self.work >= self.max_entries:
+                    return
+                if entry.name in frame.retained:
+                    self.work += 1
+                    continue
+                depth = len(self.stack)
+                self._enter(frame.descriptor, entry.name, frame)
+                if len(self.stack) > depth:
+                    return
+        self._leave(frame)
+
+    def _enter(self, parent: int, name: str, owner: ReleaseFrame | None) -> None:
+        self.work += 1
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        directory = stat.S_ISDIR(metadata.st_mode)
+        if metadata.st_dev != self.device or (
+            directory
+            and (metadata.st_uid != os.getuid() or len(self.stack) >= self.max_depth)
+        ):
+            self._retain(name, owner)
+        elif not directory:
+            self._unlink(parent, name, owner)
+        else:
+            self._descend(parent, name, metadata, owner)
+
+    def _descend(
+        self,
+        parent: int,
+        name: str,
+        metadata: os.stat_result,
+        owner: ReleaseFrame | None,
+    ) -> None:
+        try:
+            descriptor = os.open(name, RELEASE_DESCENT, dir_fd=parent)
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            self._retain(name, owner)
+            return
+        except OSError as error:
+            if error.errno not in (errno.ELOOP, errno.ENOTDIR):
+                raise
+            self._changed(name, owner)
+            return
+        try:
+            current = os.fstat(descriptor)
+            if (current.st_dev, current.st_ino, current.st_uid) != (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_uid,
+            ):
+                os.close(descriptor)
+                self._changed(name, owner)
+                return
+            mode = stat.S_IMODE(current.st_mode)
+            if mode & stat.S_IRWXU != stat.S_IRWXU:
+                os.fchmod(descriptor, mode | stat.S_IRWXU)
+        except PermissionError:
+            os.close(descriptor)
+            self._retain(name, owner)
+            return
+        except OSError:
+            os.close(descriptor)
+            raise
+        self.stack.append(
+            ReleaseFrame(descriptor, name, current.st_dev, current.st_ino)
+        )
+
+    def _unlink(self, parent: int, name: str, owner: ReleaseFrame | None) -> None:
+        try:
+            os.unlink(name, dir_fd=parent)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            if error.errno == errno.EBUSY or (
+                error.errno == errno.EPERM and self._still_file(parent, name)
+            ):
+                self._retain(name, owner)
+            elif error.errno in (errno.EISDIR, errno.EPERM):
+                self._changed(name, owner)
+            else:
+                raise
+            return
+        self.removed += 1
+
+    def _still_file(self, parent: int, name: str) -> bool:
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return not stat.S_ISDIR(metadata.st_mode)
+
+    def _leave(self, frame: ReleaseFrame) -> None:
+        self.stack.pop()
+        os.close(frame.descriptor)
+        owner = self.stack[-1] if self.stack else None
+        parent = self.parent.descriptor if owner is None else owner.descriptor
+        if frame.retained:
+            if owner is not None:
+                owner.retained.add(frame.name)
+            return
+        self.work += 1
+        try:
+            current = os.stat(frame.name, dir_fd=parent, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (frame.device, frame.inode):
+                self._changed(frame.name, owner)
+                return
+            os.rmdir(frame.name, dir_fd=parent)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            if error.errno in (errno.EBUSY, errno.EPERM, errno.EACCES):
+                self._retain(frame.name, owner)
+            elif error.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                self._changed(frame.name, owner)
+            else:
+                raise
+            return
+        self.removed += 1
+
+    def _retain(self, name: str, owner: ReleaseFrame | None) -> None:
+        self.foreign += 1
+        if owner is not None:
+            owner.retained.add(name)
+
+    def _changed(self, name: str, owner: ReleaseFrame | None) -> None:
+        self.interrupted = True
+        if owner is not None:
+            owner.retained.add(name)
+
+
+def release_tree(
+    parent: DirectoryAnchor,
+    name: str,
+    *,
+    max_entries: int = RELEASE_ENTRIES,
+    max_depth: int = RELEASE_DEPTH,
+) -> ReleaseProgress:
+    if max_entries <= max_depth:
+        raise ValueError("the release bound must exceed its depth bound")
+    return ReleaseWalk(parent, max_entries, max_depth).run(name)
 
 
 LINUX_REFUSED_FILESYSTEMS: dict[int, str] = {

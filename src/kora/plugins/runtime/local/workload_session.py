@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
 
+from kora.ir.json import JsonObject
 from kora.plugins.runtime.local.capture import OpenedLog
 from kora.plugins.runtime.local.channel import LogName
 from kora.protocols.runtime import CommandObservation, TransferItem, Workload
@@ -111,6 +112,8 @@ class WorkloadSession(Protocol):
     def completion(self) -> Completion: ...
 
     def result_reference(self) -> JournalReference | None: ...
+
+    def record_completion(self, data: JsonObject) -> bool: ...
 
     def fence(self) -> None: ...
 

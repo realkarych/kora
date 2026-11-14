@@ -191,6 +191,21 @@ async def test_usage_inventory_uses_attempt_index_with_irrelevant_history(
                 )
                 unrelated.append(values)
         await connection.execute(insert(usage_record), unrelated)
+        attempt_template: dict[str, object] = dict(
+            (
+                await connection.execute(
+                    select(attempt).where(attempt.c.id == attempt_id)
+                )
+            )
+            .mappings()
+            .one()
+        )
+        unrelated_attempts: list[dict[str, object]] = [
+            {**attempt_template, "id": seed.new_id(), "number": number}
+            for number in range(34, 2082)
+        ]
+        await connection.execute(insert(attempt), unrelated_attempts)
+        await connection.exec_driver_sql("ANALYZE attempt")
         await connection.exec_driver_sql("ANALYZE usage_record")
     statements: list[tuple[str, tuple[object, ...]]] = []
 

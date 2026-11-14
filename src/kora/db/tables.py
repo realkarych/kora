@@ -17,11 +17,24 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.admission_wait_v1 import INDEXES as WAIT_INDEXES
+from kora.db.admission_wait_v1 import wait_index_dialect
+from kora.db.attempt_capacity_v1 import INDEXES as CAPACITY_INDEXES
+from kora.db.attempt_capacity_v1 import capacity_index_dialect
 from kora.db.bootstrap_initialization_v1 import (
     TABLE_NAME as BOOTSTRAP_INITIALIZATION_TABLE,
 )
 from kora.db.bootstrap_initialization_v1 import (
     bootstrap_initialization_elements_v1,
+)
+from kora.db.claim_sources_v1 import LOCATORS, SQLITE_KEY, claim_source_elements
+from kora.db.claim_sources_v1 import TABLE_NAME as CLAIM_SOURCE_TABLE
+from kora.db.deadline_discovery_v1 import INDEXES as DEADLINE_INDEXES
+from kora.db.grant_history_v1 import (
+    attempt_history_columns,
+    dispatcher_history_columns,
+    dispatcher_history_indexes,
+    lease_epoch_type,
 )
 from kora.db.graph_deployment_stage_v1 import (
     OCCURRENCE_TABLE,
@@ -533,7 +546,9 @@ attempt: Table = Table(
     Column("number", Integer, nullable=False),
     Column("runtime", name(), nullable=False),
     Column("worker_id", name(), ForeignKey("worker.id"), nullable=True),
-    Column("execution_domain_id", identifier(), nullable=True),
+    Column(
+        "execution_domain_id", collated_text(26, postgresql_length=256), nullable=True
+    ),
     Column("execution_state", name(), nullable=False),
     Column("recovery_version", Integer, nullable=False),
     flag("recovery_required"),
@@ -556,7 +571,7 @@ attempt: Table = Table(
     Column("strategy_fallback", name(), nullable=True),
     Column("infrastructure_retries", Integer, nullable=False),
     Column("lease_owner", name(), nullable=True),
-    Column("lease_epoch", Integer, nullable=False),
+    Column("lease_epoch", lease_epoch_type(), nullable=False),
     timestamp("lease_until", nullable=True),
     timestamp("last_heartbeat_at", nullable=True),
     document("counters"),
@@ -575,6 +590,7 @@ attempt: Table = Table(
     ),
     timestamp("deadline_expired_at", nullable=True),
     timestamp("finished_at", nullable=True),
+    *attempt_history_columns(),
     *audit_columns(),
     UniqueConstraint("node_instance_id", "number"),
     CheckConstraint(
@@ -592,21 +608,36 @@ attempt: Table = Table(
     ),
 )
 
+attempt.append_column(Column("acknowledged_segment_offset", BigInteger, nullable=True))
+attempt_claim_read_admission: Table = Table(
+    CLAIM_SOURCE_TABLE, metadata, *claim_source_elements()
+)
+for owner, key, locator in LOCATORS:
+    Index(
+        locator,
+        metadata.tables[owner].c[key],
+        sqlite_where=literal_column(SQLITE_KEY.replace("id", key)),
+    ).ddl_if(dialect="sqlite")
+
 attempt_dispatcher: Table = Table(
     "attempt_dispatcher",
     metadata,
     primary_identifier(),
     reference("attempt_id", "attempt.id"),
-    Column("execution_domain_id", identifier(), nullable=False),
+    Column(
+        "execution_domain_id", collated_text(26, postgresql_length=256), nullable=False
+    ),
     Column("worker_id", name(), ForeignKey("worker.id"), nullable=False),
-    Column("incarnation_id", identifier(), nullable=False),
-    Column("lease_epoch", Integer, nullable=False),
+    Column("incarnation_id", collated_text(26, postgresql_length=256), nullable=False),
+    Column("lease_epoch", lease_epoch_type(), nullable=False),
     Column("mode", name(), nullable=False),
     timestamp("granted_at"),
     timestamp("closed_at", nullable=True),
     document("evidence", nullable=True),
     *audit_columns(),
+    *dispatcher_history_columns(),
     UniqueConstraint("attempt_id", "lease_epoch"),
+    *dispatcher_history_indexes(),
 )
 
 wait: Table = Table(
@@ -651,6 +682,31 @@ approval_request: Table = Table(
     document("evaluation_error", nullable=True),
     *audit_columns(),
 )
+
+for index_name, owner_table, index_columns, predicate, _ in DEADLINE_INDEXES:
+    Index(
+        index_name,
+        *(metadata.tables[owner_table].c[column] for column in index_columns),
+        postgresql_where=None if predicate is None else literal_column(predicate),
+        sqlite_where=None if predicate is None else literal_column(predicate),
+    )
+
+for (
+    index_name,
+    owner_table,
+    index_columns,
+    sqlite_filter,
+    pg_filter,
+    _,
+) in (*CAPACITY_INDEXES, *WAIT_INDEXES):
+    Index(
+        index_name,
+        *(metadata.tables[owner_table].c[column] for column in index_columns),
+        postgresql_where=None if pg_filter is None else literal_column(pg_filter),
+        sqlite_where=None if sqlite_filter is None else literal_column(sqlite_filter),
+    ).ddl_if(
+        dialect=capacity_index_dialect(index_name) or wait_index_dialect(index_name)
+    )
 
 artifact_version: Table = Table(
     "artifact_version",

@@ -107,6 +107,8 @@ STATES: dict[str, Entry | None] = {
     ),
     "completed": Completed(
         state="completed",
+        result=None,
+        exit_code=None,
         request_digest=DIGEST,
         runner=RUNNER,
         quiescence=QUIESCENCE,
@@ -117,6 +119,8 @@ STATES: dict[str, Entry | None] = {
     ),
     "released_completed": Completed(
         state="completed",
+        result=None,
+        exit_code=None,
         request_digest=DIGEST,
         runner=RUNNER,
         quiescence=QUIESCENCE,

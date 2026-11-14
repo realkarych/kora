@@ -18,6 +18,7 @@ from kora.plugins.runtime.local.channel import (
     workload_digest,
 )
 from kora.plugins.runtime.local.command import CommandSession
+from kora.plugins.runtime.local.command_stop import CommandDomainStop, DomainStopFactory
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import (
@@ -101,6 +102,7 @@ async def delivery_server(
     identities: IdentityReader | None = None,
     command: CommandSession | None = None,
     server_type: type[ControlServer] = ControlServer,
+    workload: Callable[[LocalRuntime], Workload] | None = None,
 ) -> AsyncGenerator[DeliveryServer]:
     ctx = runtime_context(capture, clock or SystemClock())
     with short_directory() as base:
@@ -114,7 +116,9 @@ async def delivery_server(
         )
         reader = NativeIdentityReader()
         own = identity_of(os.getpid())
-        work = submitted(runtime, "attempt-1")
+        work = (
+            submitted(runtime, "attempt-1") if workload is None else workload(runtime)
+        )
         key = runtime.registry.key(work.attempt_id)
         bound = rebound(sockets, "delivery")
         entry = Running(
@@ -160,10 +164,18 @@ class ReapedSession(CommandSession):
         clock: Clock,
         log: ComponentLogger,
         capture_io: CaptureIO | None = None,
+        stopper: DomainStopFactory = CommandDomainStop,
     ) -> None:
         self.reaper = AdoptedReaper()
         super().__init__(
-            attempt, candidate, scope, clock, log, self.reaper, capture_io=capture_io
+            attempt,
+            candidate,
+            scope,
+            clock,
+            log,
+            self.reaper,
+            capture_io=capture_io,
+            stopper=stopper,
         )
 
     async def stop(self) -> None:
