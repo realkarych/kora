@@ -69,6 +69,8 @@ After that prerequisite, refused-created-object cleanup remains a separate usefu
 
 ### Design verification scope
 
+Compatibility was additionally checked against the concrete prepared #1320/#1569 deletion design at `7bccc58209a77d8e4a86b6f93bf1e2bdf64716c4`, `knowledge/specs/data-model.md` retention-delete custody, before it reached master. This input preserves immutable intent/write-once settlement and permits a fresh invocation of the same saved deletion after receiver capture and a positive current issuance check. The authority proposal therefore distinguishes original operation provenance from bounded invocation ownership and permits that exact control call through reserved recovery. It introduces no alternative delete DTO, generation or acknowledgment format; unmerged text is compatibility input, not a replacement for governing master contracts.
+
 | Affected boundary and integration owner | Risk and blocking design evidence | Diagnostics / independent profile |
 | --- | --- | --- |
 | Metadata/native completion to journal and original custody; database/engine integration | Exact original outcome, all-writer coverage, coherent restore and last-witness preservation; inspect the complete proposed transition/source matrices against governing contracts. | No runtime measurement claimed; independent correctness. |
