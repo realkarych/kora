@@ -87,8 +87,14 @@ async def test_admission_wait_migration_preserves_history_and_recovers_indexes(
                             f"({', '.join(columns)}){suffix}"
                         )
 
+        assert database.units_in_flight() == ledger.outstanding == 0
+        await database.close()
+        assert ledger.opened == ledger.closed
+
         report = await upgrade_database(empty_database_settings)
         repeated = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
+        ledger = ConnectionLedger(database)
         async with database.read_transaction() as reader:
             with await reader.execute(select(wait)) as result:
                 after = result.all()
@@ -100,8 +106,8 @@ async def test_admission_wait_migration_preserves_history_and_recovers_indexes(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0027",
-            "0028",
-            1,
+            "0029",
+            2,
         )
         assert repeated.steps == 0
         assert after == before

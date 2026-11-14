@@ -6,6 +6,7 @@ from sqlalchemy import Connection, select
 
 from kora.db.claim_sources_v1 import SQLITE_KEY
 from kora.db.connection import Database, DatabaseSettings, Dialect
+from kora.db.grant_history_v1 import ACK_FIELDS, TIP_FIELDS
 from kora.db.migrations import current_revision, upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt, attempt_claim_read_admission
@@ -41,13 +42,41 @@ def downgrade(connection: Connection) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("predecessor", "steps"), [("0025", 3), ("0026", 2)])
+async def test_claim_source_revision_refuses_downgrade(
+    empty_database_settings: DatabaseSettings,
+) -> None:
+    database = Database(empty_database_settings)
+    try:
+        async with database.migration_connection() as writer:
+            await writer.run_sync(
+                lambda sync: command.upgrade(alembic_config(sync), "0027")
+            )
+
+        async with database.migration_connection() as writer:
+            with pytest.raises(
+                RuntimeError, match="claim sources cannot be downgraded"
+            ):
+                await writer.run_sync(downgrade)
+
+        async with database.read_transaction() as reader:
+            assert await reader.run_sync(current_revision) == "0027"
+            assert (
+                await reader.execute(select(attempt_claim_read_admission))
+            ).all() == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("predecessor", "steps"), [("0025", 4), ("0026", 3)])
 async def test_claim_source_migration_preserves_legacy_without_admission(
     empty_database_settings: DatabaseSettings, predecessor: str, steps: int
 ) -> None:
     database = Database(empty_database_settings)
     selected = tuple(
-        field for field in attempt.c if field.name != "acknowledged_segment_offset"
+        field
+        for field in attempt.c
+        if field.name not in ("acknowledged_segment_offset", *TIP_FIELDS, *ACK_FIELDS)
     )
     try:
         async with database.migration_connection() as writer:
@@ -63,7 +92,9 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
             before = (await writer.execute(select(*selected))).one()
             schema_before = await writer.run_sync(attempt_schema_objects)
 
+        await database.close()
         report = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
         async with database.read_transaction() as reader:
             after = (await reader.execute(select(*selected))).one()
             offset = await reader.scalar(select(attempt.c.acknowledged_segment_offset))
@@ -72,6 +103,11 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
             ).all()
             differences = await reader.run_sync(differences_ignoring_expression_indexes)
             schema_after = await reader.run_sync(attempt_schema_objects)
+        async with database.migration_connection() as writer:
+            with pytest.raises(
+                RuntimeError, match="grant history cannot be downgraded"
+            ):
+                await writer.run_sync(downgrade)
         async with database.read_transaction() as reader:
             version = await reader.run_sync(current_revision)
     finally:
@@ -79,36 +115,13 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
 
     assert (report.from_revision, report.to_revision, report.steps) == (
         predecessor,
-        "0028",
+        "0029",
         steps,
     )
     assert after == before
     assert offset is None
     assert admitted == []
     assert differences == []
-    assert version == "0028"
+    assert version == "0029"
     if predecessor == "0026":
         assert_attempt_schema_extension(schema_before, schema_after, database.dialect)
-
-
-@pytest.mark.asyncio
-async def test_claim_source_revision_refuses_downgrade(
-    empty_database_settings: DatabaseSettings,
-) -> None:
-    database = Database(empty_database_settings)
-    try:
-        async with database.migration_connection() as writer:
-            await writer.run_sync(
-                lambda connection: command.upgrade(alembic_config(connection), "0027")
-            )
-
-        async with database.migration_connection() as writer:
-            with pytest.raises(
-                RuntimeError, match="claim sources cannot be downgraded"
-            ):
-                await writer.run_sync(downgrade)
-
-        async with database.read_transaction() as reader:
-            assert await reader.run_sync(current_revision) == "0027"
-    finally:
-        await database.close()

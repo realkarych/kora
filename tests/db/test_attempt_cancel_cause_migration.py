@@ -38,8 +38,10 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
     database = Database(empty_database_settings)
     try:
         before = await seed_cause_predecessor(database, rich=True)
+        await database.close()
 
         report = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             after = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
@@ -72,8 +74,8 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0003",
-            "0028",
-            25,
+            "0029",
+            26,
         )
         assert after == before.history
         assert_attempt_schema_extension(
@@ -156,7 +158,9 @@ async def test_attempt_cancel_cause_upgrade_recovers_compatible_partial_schema(
                     )
                 ).scalar_one()
         locks = await migration_lock_count(database)
+        await database.close()
         recovered = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             differences = await connection.run_sync(
                 differences_ignoring_expression_indexes
@@ -170,8 +174,8 @@ async def test_attempt_cancel_cause_upgrade_recovers_compatible_partial_schema(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0003",
-            "0028",
-            25,
+            "0029",
+            26,
         )
         assert differences == []
         assert stage.database is not None

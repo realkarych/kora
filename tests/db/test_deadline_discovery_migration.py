@@ -75,8 +75,14 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
                         "ON attempt (deadline, id) WHERE " + DEADLINE_ROWS
                     )
 
+        assert database.units_in_flight() == ledger.outstanding == 0
+        await database.close()
+        assert ledger.opened == ledger.closed
+
         report = await upgrade_database(empty_database_settings)
         repeated = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
+        ledger = ConnectionLedger(database)
         async with database.read_transaction() as reader:
             after = await reader.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.columns)
@@ -86,8 +92,8 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0024",
-            "0028",
-            4,
+            "0029",
+            5,
         )
         assert repeated.steps == 0
         assert after == before

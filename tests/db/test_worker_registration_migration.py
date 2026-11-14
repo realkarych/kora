@@ -89,7 +89,7 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
             )
 
         assert result.from_revision == "0022"
-        assert result.to_revision == "0028"
+        assert result.to_revision == "0029"
         assert after_worker == before_worker
         assert after_event == before_event
         assert after_delivery == before_delivery
