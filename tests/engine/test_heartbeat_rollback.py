@@ -51,9 +51,10 @@ async def test_heartbeat_cancellation_before_commit_rolls_back_every_owner(
 
     async def tentative() -> None:
         async with database.transaction() as writer:
-            context = await case.context(writer)
+            locks = TransitionLocks(writer)
+            await locks.acquire_run(case.binding.run.run_id)
             await heartbeat_attempt(
-                replace(context, clock=clock.now),
+                heartbeat_authority(case, writer, locks, clock),
                 grant.attempt_id,
                 body,
                 case.principal,
@@ -63,8 +64,8 @@ async def test_heartbeat_cancellation_before_commit_rolls_back_every_owner(
             ready.set()
             await never_released.wait()
 
-    async with asyncio.timeout(10):
-        task = asyncio.create_task(tentative())
+    async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+        task = tasks.create_task(tentative())
         await ready.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -132,8 +133,10 @@ async def test_heartbeat_shutdown_waits_for_admitted_writer_and_closes_resources
 
     async def pending() -> HeartbeatResponse:
         async with database.transaction() as writer:
+            locks = TransitionLocks(writer)
+            await locks.acquire_run(case.binding.run.run_id)
             result = await heartbeat_attempt(
-                await case.context(writer),
+                heartbeat_authority(case, writer, locks, AuthorityClock()),
                 grant.attempt_id,
                 body,
                 case.principal,
