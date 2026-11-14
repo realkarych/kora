@@ -28,6 +28,10 @@ from kora.ir.diagnostics import (
     Text1024,
     closed_fields,
 )
+from kora.protocols.worker_heartbeats import (
+    DispatcherEvidenceDetails,
+    RuntimeEvidenceDetails,
+)
 
 
 class ApiErrorCode(StrEnum):
@@ -196,13 +200,30 @@ class ApiError(WireRecord):
     message: Text1024
     location: None = None
     retryable: StrictBool
-    details: EmptyDetails | ConflictDetails | BacklogDetails | ValidationDetails
+    details: (
+        EmptyDetails
+        | ConflictDetails
+        | BacklogDetails
+        | ValidationDetails
+        | RuntimeEvidenceDetails
+        | DispatcherEvidenceDetails
+    )
     request_id: StrictStr
 
     @model_validator(mode="after")
     def require_code_contract(self) -> Self:
         require_api_error_fields(self.code, self.message, self.retryable)
-        if isinstance(self.details, ValidationDetails):
+        if isinstance(self.details, RuntimeEvidenceDetails | DispatcherEvidenceDetails):
+            expected = (
+                ApiErrorCode.VALIDATION
+                if self.details.reason == "evidence_unbound"
+                else ApiErrorCode.CONFLICT
+            )
+            if self.code != expected:
+                raise PydanticCustomError(
+                    "api_details", "API error details are invalid."
+                )
+        elif isinstance(self.details, ValidationDetails):
             if self.code != ApiErrorCode.VALIDATION:
                 raise PydanticCustomError(
                     "api_details", "API error details are invalid."

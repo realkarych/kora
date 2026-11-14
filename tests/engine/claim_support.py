@@ -152,7 +152,12 @@ async def wait_for_claim_waiter(database: Database) -> None:
 
 
 async def claim_case(
-    database: Database, evaluator: Evaluator, ir: JsonObject | None = None
+    database: Database,
+    evaluator: Evaluator,
+    ir: JsonObject | None = None,
+    *,
+    execution_domain_id: str = "original-domain",
+    process: ProcessIdentity | None = None,
 ) -> ClaimCase:
     binding, pin = await seed(database, evaluator, ir=ir)
     async with database.transaction() as writer:
@@ -184,10 +189,11 @@ async def claim_case(
             principal.owner,
             "original-incarnation",
             "local",
-            "original-domain",
+            execution_domain_id,
             "0.1.0",
             1,
-            ProcessIdentity(
+            process
+            or ProcessIdentity(
                 host_id="host",
                 boot_id="boot",
                 pid_namespace=None,

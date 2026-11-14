@@ -595,7 +595,7 @@ async def test_finishing_exception_requires_original_closed_reporting_grant(
     after = await case.snapshot(database)
 
     assert recovered
-    assert after["execution_state"] == "unknown"
+    assert after["execution_state"] == "stopped"
     assert after["recovery_required"] is True
     assert after["execution_domain_id"] == case.domain_id
 
