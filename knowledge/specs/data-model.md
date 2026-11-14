@@ -561,7 +561,7 @@ Compacting `release_delete` calls for a store have a finite minimum interval, se
 | Core deletion capacity full or address contention | Bounded retryable refusal before I/O. |
 | Generation exhausted, unknown deletion effect, or allocator exhausted without an existing fence | Refuse new deletion admission. Existing fences can still settle and compact without allocating another incarnation. |
 | Unverified activation, authority continuity or crash durability | Admit or dispatch nothing. Preserve unresolved witnesses and charges; independently permitted observation remains observational. |
-| New owner while the generation is pending | Existing generic bounded retryable address-contention refusal, or wait only within that operation's finite deadline. No promotion or acceptance relies on the address. Expose no digest, incarnation, generation, deletion-specific detail or other owner. |
+| New owner while the generation is pending | The owner's operation receives the existing bounded retryable refusal or waits only within its finite deadline. Public upload acceptance preserves `API002`, `retryable: true`, `details.reason: payload_deletion_pending`. No promotion or acceptance relies on the address. Expose no digest, incarnation, generation, owner identity or namespace. |
 | Exact settlement replay | Preserve the byte-identical row. Refuse conflicting or unverifiable replay without replacement. |
 | Lost admission, settlement or compaction commit response | Resolve the exact original record before the next step; never infer abort or mint replacement custody from response loss. |
 
