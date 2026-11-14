@@ -14,7 +14,11 @@ from kora.engine.dependency_settlement import (
 from kora.engine.locks import LockError, TransitionLocks
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
-from tests.engine.dependency_settlement_support import DependencyCase, dependency_case
+from tests.engine.dependency_settlement_support import (
+    DependencyCase,
+    dependency_case,
+    dependency_cases,
+)
 from tests.engine.lock_support import DeliberateRollback
 from tests.engine.test_dependency_rules import OUTCOMES, PAIRS
 
@@ -67,30 +71,37 @@ async def test_parameter_inputs_do_not_block_false_dependency_settlement(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rule", RULES)
-@pytest.mark.parametrize("pair", range(len(PAIRS)))
 async def test_failure_propagates_by_trigger_rule(
-    database: Database, rule: str, pair: int
+    database: Database, rule: str
 ) -> None:
-    case = await dependency_case(database, rule, PAIRS[pair])
-    before = await case.promotion.snapshot(database)
-    expected = OUTCOMES[rule][pair]
+    cases = await dependency_cases(database, rule, PAIRS)
+    before = [await case.promotion.snapshot(database) for case in cases]
 
-    result = await case.settle(database)
-    after = await case.promotion.snapshot(database)
+    results = [await case.settle(database) for case in cases]
+    after = [await case.promotion.snapshot(database) for case in cases]
 
-    target = next(row for row in after[1] if row["node_path"] == "approval")
-    if expected == "satisfied":
-        assert result is DependencySettlementState.UNCHANGED
-        assert after == before
-    else:
-        assert result is DependencySettlementState.SETTLED
-        assert target["status"] == expected
-        assert after[0]["needs_scheduling"] is True
-        assert len(after[2]) == len(before[2]) + 1
-    assert target["attempt_count"] == 0
-    assert target["consumed_versions"] == {}
-    assert target["current_attempt_id"] is None
-    assert target["started_at"] is None
+    assert len(cases) == len(PAIRS)
+    assert len({case.promotion.run_id for case in cases}) == len(PAIRS)
+    assert len({case.promotion.receipt_id for case in cases}) == len(PAIRS)
+    assert len(
+        {value for case in cases for value in case.node_ids.values()}
+    ) == 3 * len(PAIRS)
+    for original, saved, result, expected in zip(
+        before, after, results, OUTCOMES[rule], strict=True
+    ):
+        target = next(row for row in saved[1] if row["node_path"] == "approval")
+        if expected == "satisfied":
+            assert result is DependencySettlementState.UNCHANGED
+            assert saved == original
+        else:
+            assert result is DependencySettlementState.SETTLED
+            assert target["status"] == expected
+            assert saved[0]["needs_scheduling"] is True
+            assert len(saved[2]) == len(original[2]) + 1
+        assert target["attempt_count"] == 0
+        assert target["consumed_versions"] == {}
+        assert target["current_attempt_id"] is None
+        assert target["started_at"] is None
 
 
 @pytest.mark.asyncio
