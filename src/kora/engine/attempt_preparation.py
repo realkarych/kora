@@ -100,7 +100,6 @@ def prepare_attempt_admission(
             or node.kind not in ("agent", "command")
             or node.predecessors
             or node.inputs
-            or node.trigger_rule != "all_success"
             or params.binding != binding.run
             or policy.namespace_id != scope.namespace_id
             or price.id != binding.price_table_id
@@ -133,6 +132,7 @@ def prepare_attempt_admission(
             binding,
             pin,
             node.kind,
+            node.trigger_rule,
             selection.runtime,
             policy.revision,
             prepared_sources,

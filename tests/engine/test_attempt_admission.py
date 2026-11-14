@@ -35,10 +35,23 @@ from tests.engine.expiry_support import expiry_context
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "all_success",
+        "all_done",
+        "one_success",
+        "one_failed",
+        "none_failed",
+        "none_failed_min_one_success",
+        "all_skipped",
+    ],
+)
 async def test_attempt_admission_prepares_real_claim_and_commits_once(
     database: Database,
+    rule: str,
 ) -> None:
-    case = await attempt_admission_case(database)
+    case = await attempt_admission_case(database, root_trigger_rule=rule)
     ledger = ConnectionLedger(database)
     prepared = case.prepare()
     caps = PreparedGraphCaps(case.promotion.scope, None, None)
@@ -98,6 +111,7 @@ async def test_attempt_admission_prepares_real_claim_and_commits_once(
     )
     node = next(node for node in nodes if node["id"] == case.binding.node_id)
     assert node["status"] == "queued"
+    assert node["trigger_rule"] == prepared.trigger_rule == rule
     assert node["current_attempt_id"] == case.binding.attempt_id
     assert node["attempt_count"] == 1
     assert node["started_at"] is None

@@ -31,6 +31,7 @@ from kora.engine.start_records import (
 )
 from kora.ir.json import JsonObject
 from tests.db.seed import FakeClock, Seeder
+from tests.engine.graph_output_cases import child
 from tests.engine.test_graph_execution_contract import (
     LIMITS,
     complete_inputs,
@@ -103,6 +104,7 @@ async def promotion_case(
     overlap: Overlap = "allow",
     timeout: str | None = "01h",
     retention: JsonObject | None = None,
+    root_trigger_rule: str | None = None,
 ) -> PromotionCase:
     clock = FakeClock()
     async with database.transaction() as writer:
@@ -118,6 +120,8 @@ async def promotion_case(
         graph_settings={"overlap": overlap},
         runtime_settings={"limits": {} if timeout is None else {"timeout": timeout}},
     )
+    if root_trigger_rule is not None:
+        child(raw, "graph", "nodes", "agent")["trigger_rule"] = root_trigger_rule
     prepared, pin = prepared_case(raw, envelope, scope)
     trigger = {"kind": "manual", "overlap": overlap, "occurrence_key": receipt_id}
     identity = prepare_manual_start(scope.namespace_id, scope.graph_id, {})

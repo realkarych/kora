@@ -75,8 +75,10 @@ class AttemptAdmissionCase:
         )
 
 
-async def attempt_admission_case(database: Database) -> AttemptAdmissionCase:
-    promotion = await promotion_case(database)
+async def attempt_admission_case(
+    database: Database, *, root_trigger_rule: str | None = None
+) -> AttemptAdmissionCase:
+    promotion = await promotion_case(database, root_trigger_rule=root_trigger_rule)
     await promotion.promote(database)
     scope = promotion.scope
     policy = NamespacePolicyConfiguration.prepare(

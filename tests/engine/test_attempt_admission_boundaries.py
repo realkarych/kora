@@ -2,7 +2,7 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import literal, select
+from sqlalchemy import literal, select, update
 
 from kora.db.claim_sources import acquire_claim_sources, verify_claim_source_binding
 from kora.db.connection import Database, Dialect
@@ -35,6 +35,41 @@ from tests.engine.attempt_admission_support import (
 )
 from tests.engine.expiry_support import expiry_context
 from tests.engine.lock_support import lock_inventory
+
+
+@pytest.mark.asyncio
+async def test_attempt_admission_requires_the_exact_prepared_trigger_rule(
+    database: Database,
+) -> None:
+    case = await attempt_admission_case(
+        database, root_trigger_rule="none_failed_min_one_success"
+    )
+    prepared = case.prepare()
+    caps = PreparedGraphCaps(case.promotion.scope, None, None)
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(node_instance)
+            .where(node_instance.c.id == case.binding.node_id)
+            .values(trigger_rule="all_success")
+        )
+    before = await case.promotion.snapshot(database)
+
+    async with database.transaction() as writer:
+        result = await admit_attempt(
+            await expiry_context(writer, case.promotion),
+            prepared,
+            LIMITS,
+            caps,
+            global_limit=1,
+            runtime_limit=1,
+            interval=INTERVAL,
+        )
+
+    assert result is AttemptAdmissionState.REFUSED
+    assert await case.promotion.snapshot(database) == before
+    async with database.read_transaction() as reader:
+        assert await reader.scalar(select(attempt.c.id)) is None
+    assert database.units_in_flight() == 0
 
 
 @pytest.mark.asyncio

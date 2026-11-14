@@ -50,6 +50,7 @@ class PreparedAttemptAdmission:
     binding: ClaimSourceBinding
     pin: GraphVersionPin
     kind: str
+    trigger_rule: str
     runtime: str
     namespace_revision: int
     sources: PreparedClaimSources
@@ -150,7 +151,7 @@ async def _eligible(
             node_instance.c.id == binding.node_id,
             node_instance.c.status.in_(states),
             node_instance.c.kind == prepared.kind,
-            node_instance.c.trigger_rule == "all_success",
+            node_instance.c.trigger_rule == prepared.trigger_rule,
             node_instance.c.top_level.is_(True),
             node_instance.c.subgraph_attempt == 1,
             node_instance.c.attempt_count == 0,
