@@ -3,8 +3,10 @@ import hashlib
 import json
 import os
 import sys
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from time import monotonic_ns
 
 import pytest
 from sqlalchemy import update
@@ -51,30 +53,77 @@ class HistoryProbePhase(StrEnum):
     COMPLETE = "complete"
 
 
+@dataclass
+class PhaseTiming:
+    total_ns: int = 0
+    maximum_ns: int = 0
+
+
+@dataclass
+class ProbeProgress:
+    path: Path
+    phase: HistoryProbePhase = HistoryProbePhase.IMPORT
+    entered_ns: int = field(default_factory=monotonic_ns)
+    timings: dict[HistoryProbePhase, PhaseTiming] = field(
+        default_factory=lambda: dict[HistoryProbePhase, PhaseTiming]()
+    )
+
+    def enter(self, phase: HistoryProbePhase, completed: int) -> None:
+        now = monotonic_ns()
+        elapsed = now - self.entered_ns
+        previous = self.timings.setdefault(self.phase, PhaseTiming())
+        previous.total_ns += elapsed
+        previous.maximum_ns = max(previous.maximum_ns, elapsed)
+        self.phase = phase
+        self.entered_ns = now
+        fields = [phase.value, str(completed), str(now)]
+        for measured in (
+            HistoryProbePhase.SETUP,
+            HistoryProbePhase.INITIAL_CLAIM,
+            HistoryProbePhase.HISTORY_READ,
+            HistoryProbePhase.CONFLICT_READ,
+            HistoryProbePhase.CLAIM_REPLAY,
+        ):
+            timing = self.timings.get(measured, PhaseTiming())
+            fields.extend((str(timing.total_ns), str(timing.maximum_ns)))
+        pending = self.path.with_suffix(".next")
+        pending.write_text(" ".join(fields) + "\n", encoding="ascii")
+        pending.replace(self.path)
+
+
 def record_progress(path: Path, phase: HistoryProbePhase, completed: int) -> None:
-    pending = path.with_suffix(".next")
-    pending.write_text(f"{phase.value} {completed}\n", encoding="ascii")
-    pending.replace(path)
+    ProbeProgress(path).enter(phase, completed)
 
 
 def last_progress(path: Path) -> str:
     try:
         with path.open("rb") as source:
-            encoded = source.read(128)
+            encoded = source.read(512)
         fields = encoded.decode("ascii").split()
-        if len(encoded) == 128 or len(fields) != 2:
+        if len(encoded) == 512 or len(fields) != 13:
             return "unknown"
         phase = HistoryProbePhase(fields[0])
-        completed = int(fields[1])
+        numbers = tuple(int(value) for value in fields[1:])
     except (OSError, ValueError):
         return "unknown"
-    if not 0 <= completed <= 96:
+    completed, entered_ns, *timings = numbers
+    if not 0 <= completed <= 96 or any(value < 0 for value in numbers):
         return "unknown"
-    return f"{phase.value}; completed={completed}"
+    active = (monotonic_ns() - entered_ns) / 1_000_000_000
+    summary = [f"{phase.value}; completed={completed}; active_s={active:.3f}"]
+    for index, name in enumerate(
+        ("setup", "initial_claim", "read", "conflict", "replay")
+    ):
+        total, maximum = timings[index * 2 : index * 2 + 2]
+        summary.append(
+            f"{name}_s={total / 1_000_000_000:.3f}/{maximum / 1_000_000_000:.3f}"
+        )
+    return "; ".join(summary)
 
 
 def run(sink: str, configuration: Path, progress: Path) -> SinkReport:
-    record_progress(progress, HistoryProbePhase.SETUP, 0)
+    tracking = ProbeProgress(progress)
+    tracking.enter(HistoryProbePhase.SETUP, 0)
     data: object = json.loads(configuration.read_bytes())
     assert isinstance(data, str)
     read_end, write_end = os.pipe()
@@ -126,43 +175,37 @@ def run(sink: str, configuration: Path, progress: Path) -> SinkReport:
                 ),
             )
             async with KoraClient("http://127.0.0.1", BEARER, asgi_app=app) as client:
-                record_progress(progress, HistoryProbePhase.INITIAL_CLAIM, completed)
+                tracking.enter(HistoryProbePhase.INITIAL_CLAIM, completed)
                 first = await client.claim_worker(case.query.worker_id, request(case))
                 assert first.claim is not None
                 query = history_query(first.claim)
                 conflict = query.model_copy(update={"snapshot_digest": "f" * 64})
                 for _ in range(32):
-                    record_progress(progress, HistoryProbePhase.HISTORY_READ, completed)
+                    tracking.enter(HistoryProbePhase.HISTORY_READ, completed)
                     page = await client.grant_history(case.binding.attempt_id, query)
                     assert page.complete
                     completed += 1
-                    record_progress(
-                        progress, HistoryProbePhase.CONFLICT_READ, completed
-                    )
+                    tracking.enter(HistoryProbePhase.CONFLICT_READ, completed)
                     with pytest.raises(ApiError) as caught:
                         await client.grant_history(case.binding.attempt_id, conflict)
                     assert caught.value.code == "API002"
                     completed += 1
-                    record_progress(progress, HistoryProbePhase.CLAIM_REPLAY, completed)
+                    tracking.enter(HistoryProbePhase.CLAIM_REPLAY, completed)
                     replay = await client.claim_worker(
                         case.query.worker_id, request(case)
                     )
                     assert replay == first
                     completed += 1
-                record_progress(progress, HistoryProbePhase.CLIENT_CLOSE, completed)
+                tracking.enter(HistoryProbePhase.CLIENT_CLOSE, completed)
         finally:
             try:
                 try:
-                    record_progress(
-                        progress, HistoryProbePhase.EVALUATOR_CLOSE, completed
-                    )
+                    tracking.enter(HistoryProbePhase.EVALUATOR_CLOSE, completed)
                 finally:
                     await evaluator.close()
             finally:
                 try:
-                    record_progress(
-                        progress, HistoryProbePhase.DATABASE_CLOSE, completed
-                    )
+                    tracking.enter(HistoryProbePhase.DATABASE_CLOSE, completed)
                 finally:
                     await database.close()
 
@@ -172,9 +215,7 @@ def run(sink: str, configuration: Path, progress: Path) -> SinkReport:
         try:
             if diagnostics is not None:
                 try:
-                    record_progress(
-                        progress, HistoryProbePhase.DIAGNOSTICS_CLOSE, completed
-                    )
+                    tracking.enter(HistoryProbePhase.DIAGNOSTICS_CLOSE, completed)
                 finally:
                     snapshot = diagnostics.snapshot()
                     drained = diagnostics.shutdown(1)
@@ -199,7 +240,7 @@ def run(sink: str, configuration: Path, progress: Path) -> SinkReport:
         dropped=snapshot.dropped_total(),
         failed=snapshot.sink_failed,
     )
-    record_progress(progress, HistoryProbePhase.COMPLETE, completed)
+    tracking.enter(HistoryProbePhase.COMPLETE, completed)
     return result
 
 
