@@ -220,7 +220,7 @@ STATIC_CHECK_COMMANDS = (
     "uv lock --check",
     "uv run --no-sync ruff format --check .",
     "uv run --no-sync ruff check --ignore-noqa .",
-    "uv run --no-sync pyright",
+    "NODE_OPTIONS=--max-old-space-size=4096 uv run --no-sync pyright",
     "pnpm --dir web run typecheck",
     "pnpm --dir web run lint",
     "pnpm --dir web run build",
