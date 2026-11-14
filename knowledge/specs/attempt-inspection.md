@@ -1,0 +1,136 @@
+# Run-wide attempt inspection
+
+Status: proposed design under [#1570](https://github.com/realkarych/kora/issues/1570). The project owner approved the design plan on 2026-11-15; the wording awaits review. No operation described here is activated.
+
+This specification defines `GET /api/v1/namespaces/{ns}/runs/{run}/attempts`, `kora run <run> --attempts` and `kora_runs(mode=attempts)`. It completes one entry in the [bounded-read catalogue](bounded-read-projections.md#4-normative-route-catalogue), including the exact recovery continuation required by [run listing](run-list.md). It changes no execution, replacement, retention or reconciliation authority.
+
+Governing contracts are [API conventions](api-and-agent-surface.md#1-conventions), [historical records](api-and-agent-surface.md#historical-execution-records-adr-0018), [recovery projections](api-and-agent-surface.md#inherited-timing-projections-and-authority-adr-0022), [saved history](data-model.md#11-immutable-contracts-and-execution-records-adr-0018), [occupancy](data-model.md#131-exact-occupancy-predicates), [bounded reads](bounded-read-projections.md) and [observability](observability.md). ADR-0002, ADR-0011, ADR-0015, ADR-0017, ADR-0018, ADR-0020, ADR-0022 and ADR-0026 in the [decision index](../../docs/decisions/README.md) retain authority.
+
+## 1. Request and membership
+
+The operation accepts a personal bearer credential authorized for `ns`, without requiring `approve`, `platform` or `transcripts`. Each page authenticates again. Credential, principal-kind, namespace and method precedence follows the API contract before cursor interpretation or projection. A service principal receives API005. A missing run, including a run in another namespace, receives API001 after namespace authorization. No cursor, worker identity or reference grants authority.
+
+The query is closed. Each name occurs at most once, including equal duplicates. Empty values, unknown names, invalid encodings/types and invalid combinations are API003 without reflected values. Decode query values once; encoded separators remain inside one value. Booleans are exactly `true` or `false`.
+
+| Query | Exact meaning |
+| --- | --- |
+| `recovery_required` | Boolean equality with the saved attempt flag. This explicitly extends the previously closed catalogue. It does not test replacement eligibility. |
+| `replacement_blocked` | Boolean equality with the complete predicate in section 3. |
+| `worker` | Existing worker-name domain. Matches the saved `attempt.worker_id` or any retained dispatcher with that worker ID. It therefore includes an earlier holder after a handover. No current worker-registration lookup supplies historical membership. |
+| `incarnation` | Existing incarnation-identifier domain; requires `worker`. At least one retained dispatcher of this attempt must match that exact worker/incarnation pair in the same row. It is not the current registration's incarnation. |
+| `worker_attempts` | `held` or `recovery`; requires `worker`. Adds the current retained-assignment predicate below. It may combine with `incarnation`, which still identifies historical participation, not current grant authority. |
+| `node` | One public `node_…` instance ID belonging to this run, not a node path or declared-node name. |
+| `limit` | Decimal integer 1–100, default 100; no signs, whitespace, fractions or redundant leading zeroes. |
+| `cursor` | One version-1 continuation from section 4. |
+
+All supplied predicates combine with AND. A well-formed absent or foreign secondary worker/incarnation/node yields the same empty collection; do not issue a global existence probe. Invalid syntax remains API003. `worker_attempts` without `worker`, and `incarnation` without `worker`, are invalid. `worker_attempts=recovery&recovery_required=false` is valid and empty. Waiting, following, content selection and node-path selectors are not options of this operation.
+
+`worker_attempts=held` additionally requires `attempt.worker_id=worker` and at least one of: status in `created|claimed|submitted|running|finishing`, execution state in `live|unknown`, or `recovery_required=true`. `worker_attempts=recovery` adds `recovery_required=true` to that exact held predicate. These are the accepted run-list/worker-partition predicates. An earlier dispatcher alone does not create a held assignment. For example, after W1 hands over to W2, `worker=W1` can still return the history, while `worker=W1&worker_attempts=held` cannot claim W2's assignment. A matching old incarnation does not mean its grant remains open.
+
+Enumerate every retained physical attempt through attempt → node instance → run. Never restrict by `current_attempt_id`, active lease, current node status or nonterminal run status. Superseded attempts and terminal runs with retained work remain inspectable. The GET writes nothing and invokes no runtime, plugin or storage provider.
+
+## 2. Closed page and collection/detail placement
+
+HTTP 200 is exactly `{items, next_cursor, observed_at}`. There is no total count. `items` contains the closed rows below, `next_cursor` is a string or null, and `observed_at` is the UTC time captured after establishing the page snapshot. Every value and predicate belongs to that snapshot. Timestamps use canonical UTC `Z` text; IDs use existing public encodings. Invalid required saved facts are fixed API010, not a skipped row or invented default.
+
+This design makes collection/detail placement explicit. The collection contains the complete compact identity, state, timing and recovery-membership row below. The required `inspection_ref` leads to the ordinary attempt metadata detail, which owns the complete historical descriptors, actual runtime observations with provenance/time, recovery reason/observations, dispatcher counts and references, selected closure evidence, publication uncertainty, retained scopes and permitted reconciliation actions. These obligations are not removed or replaced by the compact row. The detail must be active and complete before this collection activates; a link to a future handler is not a successful implementation.
+
+| Row member | Type and meaning |
+| --- | --- |
+| `id`, `run_id`, `node_id`, `node_path` | Public attempt/run/node identities and the saved bounded instance path. |
+| `number` | Positive physical-attempt number within that instance. |
+| `runtime` | Saved runtime name, never a current configured alias substituted for history. |
+| `status` | Existing physical-attempt status enum. |
+| `desired_state` | Existing saved desired-state enum; not inferred from the run. |
+| `worker_id` | Saved last assigned worker name or null before assignment. A historical `worker` filter need not equal this field. |
+| `lease_until`, `last_heartbeat_at` | Saved nullable timestamps. Neither proves liveness or closure. No lease owner, epoch credential or dispatcher token is returned. |
+| `infrastructure_retries` | Saved nonnegative infrastructure resubmission count. |
+| `created_at`, `started_at`, `finished_at` | Saved creation and nullable first-executing-claim/finish times. An unclaimed attempt has no fabricated start. |
+| `record_version` | Saved positive execution-record format version, not the graph IR version or installed build. |
+| `execution_contract_digest` | Immutable digest of the run's pinned graph-version contract. |
+| `execution_policy_revision` | Saved sealed policy's namespace revision, or null when no policy was recorded. No current policy lookup or policy values. |
+| `deadline` | The closed binding projection below. |
+| `deadline_expired_at` | Saved nullable sticky expiry timestamp. |
+| `execution_state` | Existing `not_started\|live\|stopped\|unknown` enum. |
+| `execution_domain_id` | Saved original domain, null before one was assigned. Not a host, process identity or private runtime handle. |
+| `recovery_version` | Saved nonnegative version. |
+| `recovery_required` | Saved boolean. Healthy live work may be false while replacement remains blocked. |
+| `replacement_blocked` | Exact boolean from section 3, never a synonym for the preceding flag. |
+| `inspection_ref` | Non-null relative API reference to this exact attempt's ordinary metadata detail, encoded from its namespace/run/node path/attempt. No automatic follow or content selection. |
+
+`deadline` is exactly `{state, value, legacy_at}`. `state` is `not_recorded`, `unlimited` or `recorded`. For `not_recorded`, `value=null` and `legacy_at` preserves the old nullable scalar without inventing a scope. For `unlimited`, both other members are null. For `recorded`, `legacy_at=null` and `value` is exactly `{at, scope_kind, scope_id, clock_uncertainty_seconds, grace_seconds}`. The scope is `run|subgraph|attempt` with its concrete public owner ID; grace is 30. Clock uncertainty is canonical nonnegative decimal **text** in seconds, with no exponent, redundant leading/trailing fractional zeroes or negative zero; conversion from the saved exact microsecond integer is lossless. This explicit wire choice preserves the existing seconds field without a binary floating-point loss. The detail also exposes the applicable write-once scope starts and nominal escalation time under ADR-0022. Neither collection nor detail treats a threshold as proof of stopping.
+
+The detail's existing metadata/content boundary remains: complete input-manifest identity and descriptor, request/config digests, saved policy/contract identity and source availability are metadata; bytes, error/reason prose, full evidence and nested histories use their named selected/paged reads. Actual checkout/image/harness/resource/strategy facts carry their recorded source and time; unobserved facts are `unknown`, not today's expectations. The detail does not reconstruct the original full `ClosureEvidence` from a report fingerprint. These are implementation dependencies, not fields silently declared available on current master.
+
+## 3. Sources, absence and replacement
+
+The compact collection has the following complete source map. A source prerequisite is a blocking activation dependency, not permission to use raw JSON or substitute an empty value.
+
+| Public value or predicate | Persisted owner and native projection | Absence/validation and current boundary |
+| --- | --- | --- |
+| Identity/path/number/runtime/status/desired state/worker/times/retries/record version | Exact scalar columns of `attempt`, `node_instance` and the namespace-scoped `run` | Validate existing identifier, path, enum and integer domains before driver transfer. Nullable values mean only the absence stated in section 2. These columns exist. |
+| Execution contract digest | `run.graph_version_id` → that saved `graph_version.execution_contract_digest` | Missing/inconsistent owner or malformed digest is API010. Do not read IR, registry aliases or the contract body. |
+| Execution policy revision | Native scalar `attempt.execution_policy.namespace_revision` from the saved policy composition | SQL NULL is not recorded. A present record needs its existing closed saved-policy validation and scalar admission; malformed/missing revision is API010. Whole `values` is never transferred. First sealing owns publication; pending request/policy integration is an activation prerequisite. |
+| Deadline | Nullable `attempt.deadline_binding`, scalar `deadline`, start and sticky latch under [the three-state codec](data-model.md#163-complete-deadline-envelope-and-legacy-projection) | Preserve unrecorded/unlimited/recorded. Unknown versions, inconsistent known scalar or invalid complete binding refuse. Select and validate only the closed scalar members; no current configuration reconstruction. |
+| Execution domain/state and recovery version/flag | Exact attempt columns | Null domain before assignment is allowed; malformed saved identity/state/version refuses. Existing expiry writers own their current values. |
+| Worker/incarnation participation | Saved attempt assignment plus `attempt_dispatcher(worker_id,incarnation_id)` within this attempt | Retained grants, including closed grants, provide historical pairs. No `worker.incarnation_id`, token or `ProcessIdentity` lookup. |
+| Held/recovery worker predicates | Exact attempt scalar predicate in section 1 | Historical participation alone is not a retained assignment; no current-pointer or lease-validity shortcut. |
+| Replacement predicate | Execution state plus validated termination/publication observation and every retained dispatcher's closed status | Typed non-secret observation source and its native scalar admission are prerequisites below. A generic `recovery` object is not an admitted projection. |
+| `inspection_ref` | Original scoped identities, with the ordinary attempt detail route | Handler and all required downstream reads must exist; no storage address, external URL or worker-only grants path. |
+
+`replacement_blocked` is true if execution is `live` or `unknown`, required affirmative termination/retirement has not been established for work that could dispatch, any dispatcher remains unclosed, or any kora-managed publication outcome remains unresolved. False requires complete matching evidence for every applicable condition. A never-dispatched `not_started` attempt with no grant/effect requires no invented termination receipt. A `stopped` label alone cannot stand in for missing dispatch/publication evidence. Lease expiry, elapsed grace, a missing runtime handle, terminal status and `recovery_required=false` cannot establish false. This is the ADR-0017 replacement barrier, not a grant to retry or clear.
+
+The future recovery observation producer must expose, from its existing authoritative saved owners, closed typed facts for: whether execution could dispatch; affirmative termination/retirement with original-domain binding; publication absent/settled/unresolved and the observation's provenance; and pending action identity/version. Exact raw JSON paths and format validation belong to that producer's approved persisted contract. The reader must not choose a format for `attempt.recovery` or infer these facts from private scratch/checkpoints. Existing reason-only expiry updates are insufficient. The producer must also supply the detail's exact reason/last observation/time/evidence provenance; missing producer code blocks activation of the operation, rather than producing `unknown` for every row.
+
+Historical absence is different from a missing implementation. SQL NULL before request sealing is `not_recorded`; an actual runtime fact never observed is `unknown`; payload `present|expiring|expired|missing` belongs to its original byte owner. A missing `transcripts` capability yields permitted detail metadata with `content_access:forbidden`, not missing/expired content. Unknown saved versions, contradictory required facts and invalid present records refuse with fixed API010. Claim admission sizes are conservative read charges, not exact saved-field byte descriptors. Neither another owner with the same digest nor today's configuration repairs history.
+
+The detail's retained-scope projection attributes only this authorized attempt/run's own contributions. Shared global/runtime scope identity may be a redacted category; it must reveal no other namespace's occupancy, limits or identities. `platform` alone does not grant installation-wide disclosure. Permitted actions describe current personal authority and state, not an executed action: require namespace plus `platform`, original domain/version and existing reconciliation compatibility; `stop`/`confirm_stopped` escalation retains the accepted pending-action rules. No GET writes recovery intent or asserts that an operator attestation is provider verification.
+
+## 4. Cursor, finite work and access plan
+
+The unchanged limits are default/max 100 items, 1 MiB complete compact UTF-8 envelope, 8 KiB encoded cursor before decoding, one five-second monotonic deadline and at most 100,000 admitted domain rows. Start the deadline after authorization and before pool admission. All source reads, predicates, validation, selection and encoding share it. Row exhaustion is nonretryable API002 `read_budget_exceeded`, with no partial page. An individual row too large for an otherwise empty envelope is API002 `read_projection_too_large`. Fixed errors contain no raw query, saved data or native exception text.
+
+The cursor is unpadded canonical base64url of compact UTF-8 JSON with exactly `{version:1, operation:"list_run_attempts", namespace_id, run_id, filters, order:"id_asc", ceiling, after}`. `filters` contains exactly `recovery_required`, `replacement_blocked`, `worker`, `incarnation`, `worker_attempts`, `node` and `limit`, using explicit null for absent options. `ceiling` and `after` are public attempt IDs, with `after<=ceiling`. Reject duplicate/unknown JSON members, invalid shape/types/encodings, excessive nesting and mismatched namespace/run/filter/limit/order as API003. The cursor contains no permission, content, raw path, snapshot handle or credential. It is not signed authority.
+
+On the first page determine the maximum retained attempt ID in this run before filters, inside the page snapshot. An empty run returns an empty page and null cursor. IDs are emitted ascending, strictly after `after` and no greater than `ceiling`. The ceiling is not a commit watermark. Later pages see live membership: a newly committed or newly matching attempt behind `after` may be missed; refresh begins a new traversal. An exhausted page says nothing about a later commit.
+
+The initial access plan uses existing ownership without adding `run_id` to attempt or a second history relation:
+
+1. Enumerate this run's node IDs in indexed groups of at most 100, charging each node. Use a `(run_id,id)` access path, or a qualified equivalent. Do not retain an unbounded node-ID inventory.
+2. For one node group, enumerate attempt identity and necessary safe scalar predicates in `(node_instance_id,id)` keyset batches of at most 100 plus one lookahead, applying the attempt-ID lower/ceiling bounds. A composite `(node_instance_id,id)` index or qualified equivalent is required. Joins use only the current bounded parent set; there is no query per returned item.
+3. Batch retained dispatcher/observation predicates for those candidates. Charge every candidate and contributing source row, including rejected candidates, lookahead and repeated reads. Exact counts in the later detail operation retain their own bounded enumeration; the collection does not calculate them. Do not hide unlimited `COUNT`, aggregation or whole-run sorting behind a scalar or `LIMIT`.
+4. Keep only the smallest `limit+1` matching IDs in a bounded selection structure. For the first page, maintain the maximum run attempt ID from all enumerated candidates independently of filters. Complete the finite traversal or refuse; an unfinished scan cannot establish the next smallest ID or exhaustion. Hydrate the selected at-most-100 rows in source-family batches under the same snapshot and charge repeated source reads again.
+5. Emit the retained candidates in ascending attempt-ID order. A byte-shortened page resumes after its last emitted ID, not the last inspected row. The extra matching ID or an already selected but un-emitted row proves continuation. Null continuation requires established exhaustion. A failed scan/lookahead refuses the whole page, never returns a repeating empty cursor.
+
+This plan deliberately has bounded scan cost, not a constant-time promise for a sparse or late page. A run exceeding the admitted work budget may refuse even a small requested page. Per-page work is proportional to admitted run nodes and eligible attempt/source rows; it does not scan unrelated namespaces. The selection structure retains at most 101 IDs; live workspace additionally contains one bounded parent group, candidate/source batches, at most 100 detached row values and one response buffer. Source family buffers are released before advancing. No per-node/per-attempt unbounded map or all-history sort is retained. A more selective future persisted run-wide index requires its own approved producer/migration decision and cannot silently change cursor semantics or limits.
+
+The runtime issue must qualify concrete SQL and indexes on SQLite/PostgreSQL, including composite group traversal and sparse matches. A query plan is diagnostic; it is not proof of row admission or release. Index/page visits and JSON extraction/decompression are native work covered by the original statement deadline. Native scalar type/length checks precede driver transfer. SQLite physical-row admission must use a validated conservative source before wide owner records are touched; existing Claim admission can be reused only for exactly matching source/charge inputs. Recovery/observation facts outside that coverage need their own approved admission producer. PostgreSQL likewise must not transfer a whole JSONB value just to discard it. Missing compact/admitted source is an activation dependency.
+
+## 5. Lifetime, clients and diagnostics
+
+Use one `Database.read_snapshot(deadline=...)` with the native interruption/settlement owner implemented by #1564/#1568 and specified in [scheduler section 10](scheduler.md#10-standalone-sqlite-versus-postgres). The DB owner owns checkout, snapshot, statements/results and native cleanup. The projection owns row/workspace accounting, selection and the bounded detached response. It acquires no writer/capacity lock and makes no provider call.
+
+On success release DB results and transaction before response backpressure; finish bounded encoding and recheck the original deadline before success. On failure, expiry, disconnect, cancellation or shutdown, stop admission and settle native work before reuse. Unverified cleanup stays owned and the connection unavailable; it cannot become a successful result. A slow receiver retains only bounded response/client resources. No new timeout, detached cleanup or process-heap guarantee is introduced.
+
+The shared Python client encodes query values individually through its common HTTP/ASGI transport and admits the complete response byte bound before JSON parsing. Preserve origin/TLS/proxy/redirect and client-error rules. One invocation reads one page, with no automatic continuation, follow-up detail, retry or local domain aggregation. CLI exposes all query names as hyphenated options and `--namespace`, `--limit`, `--cursor`, `--json`; human output escapes terminal controls and marks continuation. MCP accepts the same values in `kora_runs(mode=attempts)` with a required run identity. `--json` and MCP preserve the API result and errors. Cancellation, closed output and shutdown release transport resources under existing client rules. Only active modes are advertised; the sixteen-tool inventory is unchanged.
+
+The operation owns one DEBUG completion/refusal diagnostic with fixed operation, outcome/code, returned rows/bytes and elapsed duration. No cursor, query, URL, user value, identity, payload, raw SQL or exception text enters it. Preserve safe request correlation, stdout purity and failure-independent cleanup. Existing DB cleanup WARNING/ERROR ownership remains. This is a pending activation row, with evidence required by the implementing issue; a diagnostic sink failure cannot delay release or change the response.
+
+## 6. Dependencies and acceptance
+
+Activation requires the real personal attempt detail and every history/content continuation its required projection advertises; a complete typed recovery/observation producer and native admission; exact selected-field descriptor producers where the detail needs them; concrete bounded node/attempt access; and the complete API/shared-client/CLI/MCP integration. Worker-only retained history #1523 is reusable source evidence, not the personal route. Request/report producers #1453/#1454, heartbeat evidence #1535, scheduler settlement #1472 and content ownership #216 retain their boundaries. The [delivery record](../research/attempt-inspection-design-2026-11-15.md) names the remaining public-read work and size limits. This document implements none of them and grants no format or production-size exception.
+
+| Future acceptance trace | Required behavior |
+| --- | --- |
+| `test_run_attempts_authorizes_each_page` | Real missing/revoked/expired/service/foreign credentials; namespace/run precedence; secondary foreign IDs indistinguishable from absence; revocation between pages; no private/shared-scope leakage. |
+| `test_run_attempts_filters_retained_history` | All filters/combinations; saved boolean versus replacement predicate; W1→W2 handover and re-registration; same-row worker/incarnation pair; historical/superseded attempts and terminal retained work; healthy held work; exact run-list recovery continuation. |
+| `test_run_attempts_preserves_saved_sources` | Pinned contract/policy and all deadline states, including legacy scalar and exact uncertainty; unknown versus malformed facts; poisoned private JSON and large bodies never transferred; no current-pointer/registration/configuration substitution. |
+| `test_run_attempts_detail_continuations_are_active` | Every inspection/history/selected reference reaches its actual scoped handler; full required detail metadata/absence/access semantics; no worker-only route substitution or missing producer disguised as empty history. |
+| `test_run_attempts_has_one_observation` | Deterministically synchronized concurrent changes cannot mix candidate membership, fields or source facts inside a page; later pages observe live membership. |
+| `test_run_attempts_continuation_is_bound` | Ascending global ID order across interleaved node histories; ceiling before filters; cursor scope/filter/limit/order binding; duplicate/type/encoding/8 KiB boundaries; byte-shortened continuation and exact exhaustion. |
+| `test_run_attempts_bounds_projection_work` | 1/50/100 requested items; sparse matches and node groups spanning batches; all admitted/rejected/re-read rows charged; 100,000/100,001 boundary; bounded selection/workspace; no N+1/body transfer/unlimited aggregate or hidden sort; explicit finite refusal. |
+| `test_run_attempts_releases_resources` | Both native backends on success, failure, timeout, repeated cancellation, disconnect and shutdown; actual settled query/rollback and ordinary subsequent progress; slow HTTP/ASGI transfer holds no DB resource. |
+| `test_run_attempts_surface_parity` | Real HTTP/ASGI, CLI and stdio MCP; exact query encoding, one call/page, bounded response, active OpenAPI/mode parity, safe terminal output, refusal and cancellation. |
+| `test_run_attempts_diagnostics_are_content_free` | Completion/refusal and broken/blocked sink preserve bounded diagnostics, clean stdout, private content exclusion and release behavior. |
+
+These are future integration requirements, not executed evidence. Use real SQLite/PostgreSQL and supported-platform fixtures, no mocks and deterministic synchronization. Product byte/work limits, exact predicates, authorization, source integrity and actual release block readiness. Query-plan, latency and process-memory observations remain diagnostics unless an existing approved method states otherwise. Required final-head CI and the bounded MVP verification policy remain unchanged.
