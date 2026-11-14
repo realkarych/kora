@@ -25,6 +25,30 @@ IDENTITY = "01J00000000000000000000000"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("field", "one_graph_allowance"),
+    [("native_bytes", 150_000_000), ("raw_bytes", 100_000_000)],
+)
+async def test_admission_snapshot_one_graph_budget_never_checks_out(
+    database: Database, field: str, one_graph_allowance: int
+) -> None:
+    limits = replace(LIMITS, **{field: one_graph_allowance})
+    ledger = ConnectionLedger(database)
+
+    with pytest.raises(AdmissionSnapshotRejected):
+        await acquire_admission_snapshot(
+            database,
+            IDENTITY,
+            limits,
+            observed_at=START,
+            periodic_recheck=True,
+            deadline=asyncio.get_running_loop().time() + 10.0,
+        )
+
+    assert ledger.checkouts == ledger.outstanding == database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "field",
     ["node_row", "graph_native_bytes", "owner_text_bytes", "native_bytes", "raw_bytes"],
 )
