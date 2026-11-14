@@ -153,6 +153,8 @@ The sequential dependency transition (#1530) prepares pinned data/control edges 
 
 The initial-admission discovery component (#1537) reads globally ordered pages of at most 100 physical-node IDs and checks the exact due admission-wait owner without decoding retained payloads. Its partial index, finite cursor rotation and resource-release tests work on both metadata databases. It grants no execution authority; the combined root/dependent admission writer and its processing ownership remain #1446, and scheduler-loop composition remains #1448.
 
+The internal initial-admission source readers (#1542) resolve a discovered node's exact current owner and select a latest-effective price revision without parsing source JSON. SQLite admits complete owner rows before later fields; PostgreSQL projects bounded scalars. They own no connection or transaction and grant no execution authority. Complete scheduler snapshot composition remains part of #1542, and processing plus the common root/dependent writer remain #1446.
+
 ### 4.5 Designed only
 
 | Component | Where it is specified | Owner |

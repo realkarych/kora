@@ -102,6 +102,12 @@ Workers run a separate loop: claim `created` attempts of their runtime through t
 
 The reader retains only cursor/ceiling scalars between calls and closes each query result before returning. Caller-owned connections, candidate processing and yielding remain explicit integration responsibilities. Migration 0030 adds the index without rewriting history, transactionally on SQLite and concurrently with interrupted-build recovery on PostgreSQL. Native plan and tuple-visit evidence is diagnostic; the selected-page and retained ID-buffer bounds are blocking. This helper establishes neither complete processing-unit ownership nor NFR-3 scheduling latency. Root and dependent admission remain together in #1446; loop integration remains #1448.
 
+### Initial admission source readers (#1542)
+
+`read_admission_candidate` resolves one validated discovered node ID to its exact run, namespace, graph, pinned version and node path. It reuses the initial-admission predicate and refuses persisted node or run expiry and any run not currently `running`. SQLite uses the existing main-schema compact node/run locator indexes and admits the complete row before evaluating later fields. PostgreSQL reads only schema-bounded scalars. Returned identities and paths are bounded and validated; missing or malformed owners never substitute another candidate. Each result closes before the next point read. This observation grants no execution authority and does not replace the locked writer's fresh checks.
+
+`read_admission_price_id` selects only the latest effective namespace revision ID, otherwise the latest effective default ID, with at most two indexed latest-row reads. An empty namespace map still wins; a selected invalid identity or unavailable payload does not permit older/default fallback. Payload acquisition and detached price validation remain separate. The final writer must reselect at its own injected admission time. Neither helper parses graph, parameter, price or policy JSON or allocates attempts. Complete coherent scheduler source composition and its release/diagnostic owner remain #1542; the common root/dependent writer remains #1446.
+
 ## 3. Submission, execution uncertainty and recovery
 
 [ADR-0017](../../docs/decisions/0017-execution-uncertainty-and-safe-replacement.md) amends lease recovery. Lease defaults remain 120 s, renewed every 15 s; workers poll claims every 1 s. A lease is API ownership, not a physical execution lease.
