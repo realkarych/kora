@@ -44,6 +44,11 @@ def _bounded_text(
     fits = func.octet_length(field) <= 4 * maximum
     if dialect == SQLITE:
         fits = and_(func.typeof(field) == "text", fits)
+        text_fits = and_(
+            func.length(field) <= maximum,
+            func.instr(field, func.char(0)) == 0,
+        )
+        return case((fits, case((text_fits, field))))
     return case((fits, field))
 
 

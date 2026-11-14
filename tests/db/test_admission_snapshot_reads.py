@@ -240,6 +240,39 @@ async def test_admission_candidate_sqlite_encoding_and_scalar_refusal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["UTF-8", "UTF-16le", "UTF-16be"])
+@pytest.mark.parametrize("prefix", ["", "nul\0"])
+async def test_admission_candidate_bounds_text_before_driver_transfer(
+    tmp_path: Path, encoding: str, prefix: str
+) -> None:
+    database = await open_sqlite(tmp_path, encoding)
+    try:
+        expected = await candidate(database)
+        path = prefix + "界" * (2 * PATH_LENGTH - len(prefix))
+        async with database.transaction() as writer:
+            await writer.exec_driver_sql(
+                "UPDATE main.node_instance SET node_path = ? WHERE id = ?",
+                (path, expected.node_id),
+            )
+
+        async with database.read_transaction() as reader:
+            with executed_queries(reader) as queries:
+                acquired = await read_admission_candidate(
+                    reader, expected.node_id, node_row=ROW_BYTES, run_row=ROW_BYTES
+                )
+            [(statement, arguments)] = queries
+            with await reader.exec_driver_sql(statement, arguments) as result:
+                projected: tuple[object, ...] = tuple(result.one())
+                projected_path = projected[1]
+    finally:
+        await database.close()
+
+    assert acquired is None
+    assert projected_path is None
+    assert database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
 async def test_admission_price_selects_latest_effective_whole_revision(
     database: Database, tmp_path: Path
 ) -> None:
