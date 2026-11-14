@@ -302,6 +302,8 @@ The final credential check sets the trusted internal `RequestInfo.requires_curre
 
 The normative [bounded read projections](bounded-read-projections.md) catalogue defines affected route fields, exact client selectors, 100-item/1-MiB ordinary metadata responses, the approval-list exception, explicit owner-pinned content representations, finite query/comparison budgets and implementation activation. Metadata contains descriptors and bounded identities, never implicit saved payload/summary bodies or unbounded history arrays. Full originals retain their existing access and availability. Pagination, counts, live membership and refusal are explicit. The API owns aggregates and advisory mutation previews; every client forwards the same operations. Worker report/upload routes and worker-only retained grant transfer keep their separate contracts.
 
+The [run-list design](run-list.md) under #1555 proposes the exact list wire shape, sources, filters, deadline ownership and API/CLI/MCP delivery. It remains unimplemented and pending final owner acceptance; it neither activates a route nor supersedes this contract.
+
 ## 2. Resources and operations
 
 | operation | method and path | notes |
