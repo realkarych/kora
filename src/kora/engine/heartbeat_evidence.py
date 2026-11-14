@@ -99,7 +99,16 @@ def accept_heartbeat_evidence(
                 RuntimeEvidenceDetails(reason="evidence_conflict", item="runtime")
             )
         if prior is None:
-            after = before.model_copy(update={name: item})
+            after = WorkerRecovery(
+                last_observation=before.last_observation,
+                observation_grant=before.observation_grant,
+                normal_completion=item
+                if isinstance(item, NormalCompletionQuiescence)
+                else before.normal_completion,
+                termination=item
+                if isinstance(item, TerminationReceipt)
+                else before.termination,
+            )
             runtime_changed = 1
     by_key = {(grant.id, grant.lease_epoch): grant for grant in grants}
     changed: list[DispatcherClosure] = []
