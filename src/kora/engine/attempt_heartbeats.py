@@ -222,7 +222,7 @@ async def _apply_heartbeat(
                 ColumnElement[object],
                 encoded
                 if connection.dialect.name == POSTGRESQL
-                else func.json(encoded),
+                else func.json_extract(encoded, "$"),
             ),
         )
     closed = (
