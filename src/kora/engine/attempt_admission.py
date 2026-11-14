@@ -7,7 +7,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.elements import ColumnElement
 
-from kora.db.admission_waits import open_wait_matches
+from kora.db.admission_waits import due_admission_wait, open_wait_matches
 from kora.db.claim_source_values import PreparedClaimSources
 from kora.db.claim_sources import (
     ClaimSourceBinding,
@@ -121,6 +121,7 @@ async def _eligible(
     prepared: PreparedAttemptAdmission,
     limits: ClaimSourceReadLimits,
     expected_wait_id: str | None,
+    periodic_recheck: bool,
 ) -> str | None:
     connection, binding = context.connection, prepared.binding
     parent = binding.run
@@ -173,7 +174,14 @@ async def _eligible(
     return (
         state
         if isinstance(state, str)
-        and await open_wait_matches(connection, binding.node_id, expected_wait_id)
+        and (
+            await due_admission_wait(
+                connection, binding.node_id, normalise_timestamp(context.clock())
+            )
+            == expected_wait_id
+            if periodic_recheck and expected_wait_id is not None
+            else await open_wait_matches(connection, binding.node_id, expected_wait_id)
+        )
         and await _dependencies_match(context, prepared)
         else None
     )
@@ -212,8 +220,11 @@ async def _admit(
     runtime_limit: int | None,
     interval: timedelta,
     expected_wait_id: str | None,
+    periodic_recheck: bool,
 ) -> AttemptAdmissionState:
-    state = await _eligible(context, prepared, limits, expected_wait_id)
+    state = await _eligible(
+        context, prepared, limits, expected_wait_id, periodic_recheck
+    )
     if state is None or interval <= timedelta(0):
         return AttemptAdmissionState.REFUSED
     observation = await check_attempt_capacity(
@@ -323,6 +334,7 @@ async def admit_attempt(
     runtime_limit: int | None,
     interval: timedelta,
     expected_wait_id: str | None = None,
+    periodic_recheck: bool = False,
 ) -> AttemptAdmissionState:
     try:
         result = await _admit(
@@ -334,6 +346,7 @@ async def admit_attempt(
             runtime_limit,
             interval,
             expected_wait_id,
+            periodic_recheck,
         )
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)

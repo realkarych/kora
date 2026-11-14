@@ -42,6 +42,8 @@ async def test_attempt_admission_diagnostics_exclude_sources_and_describe_prepar
     states: list[AttemptAdmissionState] = []
     expected: str | None = None
     for limit in (1, 2, 2):
+        if expected is not None:
+            case.promotion.clock.advance(INTERVAL.total_seconds())
         async with database.transaction() as writer:
             states.append(
                 await admit_attempt(
@@ -53,6 +55,7 @@ async def test_attempt_admission_diagnostics_exclude_sources_and_describe_prepar
                     runtime_limit=None,
                     interval=INTERVAL,
                     expected_wait_id=expected,
+                    periodic_recheck=True,
                 )
             )
         async with database.read_transaction() as reader:

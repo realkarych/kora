@@ -207,6 +207,7 @@ async def test_attempt_admission_wait_reserves_nothing_then_closes_exact_wait(
             saved_wait = dict(rows.mappings().one())
         with await reader.execute(select(attempt.c.id)) as rows:
             attempts = rows.scalars().all()
+    case.promotion.clock.advance(INTERVAL.total_seconds())
     async with database.transaction() as writer:
         admitted = await admit_attempt(
             await expiry_context(writer, case.promotion),
@@ -217,6 +218,7 @@ async def test_attempt_admission_wait_reserves_nothing_then_closes_exact_wait(
             runtime_limit=None,
             interval=INTERVAL,
             expected_wait_id=str(saved_wait["id"]),
+            periodic_recheck=True,
         )
     async with database.read_transaction() as reader:
         with await reader.execute(select(wait)) as rows:
