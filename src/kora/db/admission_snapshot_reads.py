@@ -78,17 +78,17 @@ def _owner_statement(
             literal(9 * (len(owner.c) + 1)),
         )
         valid = case((width <= allowance, valid), else_=False)
-        source = text(
-            "main.node_instance INDEXED BY ix_claim_node_locator"
+        source = (
+            text("main.node_instance INDEXED BY ix_claim_node_locator")
             if node
-            else "main.run INDEXED BY ix_run_input_locator"
+            else text("main.run INDEXED BY ix_run_input_locator")
         )
         predicate = and_(
             key.collate("BINARY") == identity,
             literal_column(SQLITE_KEY if node else SQLITE_RUN_KEY),
         )
     else:
-        source = text("ONLY node_instance" if node else "ONLY run")
+        source = text("ONLY node_instance") if node else text("ONLY run")
     return (
         select(
             *(
