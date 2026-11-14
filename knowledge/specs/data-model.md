@@ -480,6 +480,8 @@ Refused or expired uploads finish their staging ownership under the same physica
 
 ### Durable storage address coordination
 
+The [execution custody authority proposal](execution-custody-authority.md) under #1572 gives a candidate independent journal/commit and issuer-lifetime mechanism for the continuity obligations below. Its placement, persistent owner and bounds await owner acceptance; existing settings and fence primitives do not implement it. It does not change #1320's deletion representation or activate address-fenced effects.
+
 The project owner accepted the stored contract and lock order on 2026-11-06 under [#855](https://github.com/realkarych/kora/issues/855#issuecomment-6685074866). Implementation and qualification remain with #216 and the participating owners. Keep each owner kind in its own typed relation. Those authoritative records and the applicable holds are the sole source of eligibility. All applicable kinds participate in the same serialized physical-address boundary.
 
 `storage_address_fence` has an exact unique address key on the version-1 storage `store_id` and full `payload_digest`, including the `sha256:` prefix. Use the existing protocol widths and exact binary comparison. Namespaces, logical aliases and object incarnations share this key when they refer to the same address. Use it for address lookups and the established address lock order. `last_deletion_generation` starts at zero and increases within the incarnation. `pending_deletion_generation` is NULL or the latest positive issued generation. Both counters use the existing signed 64-bit `Count` domain. Deletion generation exhaustion or an unknown effect refuses further admission at that address.
@@ -507,6 +509,8 @@ A committed fence row requires a retaining durable owner, a hold, a ready-promot
 Use the [storage row-lock phase](scheduler.md#12-execution-backend-boundary-nfr-55) for owner publication, eligibility changes and deletion reservation. One participating metadata authority must cover every writer in an enabled physical deduplication domain. Before indexed deletion activates, prove coverage of all applicable owners, holds and writers, including legacy rows. A missing, incompatible, unindexed or malformed potential owner blocks deletion for its affected address or domain. An absent owner row can refuse new effects but supplies no proof of absence for deletion. Check the applicable authoritative predicate through exact indexes with bounded positive and negative work even as same-address ineligible history grows. Use content-free refusals. Keep owner identities, presence and creation attribution private across namespaces.
 
 #### Crash-durable metadata profile
+
+The [custody qualification matrix](execution-custody-authority.md#6-qualification-and-delivery-limits) separates current settings observations from actual native persistence, whole-image restore and prior-issuer exclusion. Its proposed journal needs its own crash qualification; moving a frontier outside this database is not proof by itself.
 
 The project owner accepted an explicit installation-wide profile on 2026-11-07 under [#954](https://github.com/realkarych/kora/issues/954#issuecomment-6712053449). Enable address-fenced custody only in a metadata authority with the verified profile. Include every actual writer and checkpoint path that can change or carry relied-on state, including pooled replacement connections, migrations, recovery and alternate writers. Installations in ordinary mode keep address-fenced effects disabled.
 

@@ -22,6 +22,8 @@ Extension points are eleven provider protocols discovered through one entry-poin
 
 The [execution-content design](../specs/execution-content.md) under #1557 proposes the missing durable request and accepted-result owners over the existing local storage provider. Its records, capture/session transfer extensions and resource admissions are not implemented. Worker sealing #1453, reports #1454 and scheduler settlement #1472 still require their actual producers and applicable durability, validation, cleanup and closure evidence.
 
+The [custody authority proposal](../specs/execution-custody-authority.md) under #1572 separates existing database settings/provider epochs from missing commit-continuity and core-issuer evidence. Its independent journal, placement restrictions and write serialization await owner acceptance and implementation; no address-fenced storage operation becomes active.
+
 The [attempt-inspection design](../specs/attempt-inspection.md) under #1570 specifies the proposed run-wide collection and its exact recovery selector. Personal attempt detail/history and complete source producers are prerequisites; no inspection route, CLI command or MCP mode is active.
 
 This page uses three statuses:
