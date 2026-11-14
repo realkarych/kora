@@ -79,7 +79,9 @@ class EmptyDetails(WireRecord):
 
 
 class ConflictDetails(WireRecord):
-    reason: Literal["lock_timeout", "grant_history_conflict"]
+    reason: Literal[
+        "lock_timeout", "grant_history_conflict", "usage_conflict", "usage_regression"
+    ]
 
 
 class LimitScope(WireRecord):

@@ -36,8 +36,14 @@ from kora.client.errors import (
 )
 from kora.client.history_admission import HistoryAdmission
 from kora.client.network import DirectTransport
+from kora.ir.cost import UsageCoverage
 from kora.ir.graph_json import ObjectReader
-from kora.ir.json import JsonObject, JsonShapeError, parse_json_object
+from kora.ir.json import (
+    DEFAULT_MAX_DEPTH,
+    JsonObject,
+    JsonShapeError,
+    parse_json_object,
+)
 from kora.models.errors import HTTP_STATUSES, ApiErrorCode, require_api_error_fields
 from kora.models.graphs import DeployRequest, DeployResponse
 from kora.models.runs import AcceptedRun, SkippedRun, StartOutcome, TriggerRequest
@@ -47,6 +53,7 @@ from kora.models.worker_claims import (
     decoded_claim,
 )
 from kora.models.worker_history import WorkerHistoryQuery
+from kora.models.worker_usage import AcceptedUsageReport, AcceptedUsageRow, UsageReport
 from kora.models.workers import RegisteredWorker, WorkerRegistration
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, ProcessDiagnostics
 from kora.protocols.history import MAX_ENVELOPE_BYTES, GrantHistoryPage
@@ -59,6 +66,8 @@ DEPLOY_RESPONSE_BYTES: int = 2 * 1024 * 1024
 GRAPH_RUNS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/runs"
 GRANT_HISTORY_PATH: str = "/api/v1/attempts/{att}/grants"
 IDEMPOTENCY_KEY = re.compile(r"[!-~]{1,255}")
+USAGE_PATH: str = "/api/v1/attempts/{att}/usage"
+USAGE_JSON_BYTES: int = 4 * 1024 * 1024
 OK: frozenset[int] = frozenset({200})
 CREATED_OR_OK: frozenset[int] = frozenset({200, 201})
 JSON_DEPTH: int = 64
@@ -133,6 +142,26 @@ def registered_worker(value: JsonObject) -> RegisteredWorker:
     return RegisteredWorker.model_validate(
         {key: value[key] for key in RegisteredWorker.model_fields if key in value}
     )
+
+
+def accepted_usage_report(value: JsonObject) -> AcceptedUsageReport:
+    fields: dict[str, object] = {
+        key: value[key] for key in AcceptedUsageReport.model_fields if key in value
+    }
+    rows = value.get("rows")
+    if isinstance(rows, list) and len(rows) <= 64:
+        fields["rows"] = [
+            {key: row[key] for key in AcceptedUsageRow.model_fields if key in row}
+            if isinstance(row, dict)
+            else row
+            for row in rows
+        ]
+    coverage = value.get("coverage")
+    if isinstance(coverage, dict):
+        fields["coverage"] = {
+            key: coverage[key] for key in UsageCoverage.model_fields if key in coverage
+        }
+    return AcceptedUsageReport.model_validate(fields)
 
 
 def direct_origin(value: str) -> httpx.URL:
@@ -379,6 +408,22 @@ class KoraClient:
                 for name, value in query.model_dump(exclude_none=True).items()
             ),
             history=True,
+        )
+
+    async def report_usage(
+        self, attempt_id: str, report: UsageReport
+    ) -> AcceptedUsageReport:
+        body = parse_json_object(
+            report.model_dump(mode="json"),
+            max_depth=DEFAULT_MAX_DEPTH + 3,
+            max_bytes=USAGE_JSON_BYTES,
+        )
+        return await self._request_json(
+            "POST",
+            USAGE_PATH.format(att=quote(attempt_id, safe="")),
+            accepted_usage_report,
+            response_limit=USAGE_JSON_BYTES,
+            body=body,
         )
 
     async def _request_json(

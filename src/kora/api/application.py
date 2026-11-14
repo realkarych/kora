@@ -31,12 +31,14 @@ from kora.api.run_trigger_route import trigger_handler
 from kora.api.worker_claims_route import WorkerClaimsRoute
 from kora.api.worker_history_route import WorkerHistoryRoute
 from kora.api.worker_registration_route import WorkerRegistrationRoute
+from kora.api.worker_usage_route import WorkerUsageRoute
 from kora.engine.admission_initialization import AdmissionInitialization
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
 from kora.models.runs import AcceptedRun, SkippedRun, TriggerRequest
 from kora.models.worker_claims import WorkerClaimRequest, WorkerClaimResponse
 from kora.models.worker_history import WorkerHistoryQuery
+from kora.models.worker_usage import AcceptedUsageReport, UsageReport
 from kora.models.workers import RegisteredWorker, WorkerName, WorkerRegistration
 from kora.observability import ProcessDiagnostics
 from kora.protocols.authentication import Authenticator
@@ -85,6 +87,7 @@ class ApiDispatch:
                     RouteName.WORKERS,
                     RouteName.WORKER_CLAIMS,
                     RouteName.WORKER_HISTORY,
+                    RouteName.USAGE,
                 )
                 else "user",
                 current_authority=matched.name is RouteName.WORKER_CLAIMS,
@@ -118,6 +121,7 @@ class ApiDispatch:
         if matched is not None and matched.name in (
             RouteName.WORKERS,
             RouteName.WORKER_CLAIMS,
+            RouteName.USAGE,
         ):
             body = bytearray()
             try:
@@ -158,6 +162,7 @@ def create_application(
     worker_registration: WorkerRegistrationRoute | None = None,
     worker_claims: WorkerClaimsRoute | None = None,
     worker_history: WorkerHistoryRoute | None = None,
+    worker_usage: WorkerUsageRoute | None = None,
     admission_initialization: AdmissionInitialization | None = None,
 ) -> ApiExchange:
     @asynccontextmanager
@@ -299,6 +304,20 @@ def create_application(
                     for name, field in WorkerHistoryQuery.model_fields.items()
                 ]
             },
+        )
+    if worker_usage is not None:
+
+        async def usage(
+            att: Identifier, body: UsageReport
+        ) -> AcceptedUsageReport | Response:
+            return await worker_usage(att, body)
+
+        framework.add_api_route(
+            RouteName.USAGE.value,
+            usage,
+            methods=["POST"],
+            operation_id="report_usage",
+            response_model=AcceptedUsageReport,
         )
     framework.add_exception_handler(HTTPException, framework_error)
     framework.add_exception_handler(RequestValidationError, validation_error)
