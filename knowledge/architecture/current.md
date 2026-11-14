@@ -186,6 +186,8 @@ The internal initial-admission snapshot (#1542) resolves a discovered node's exa
 
 Work-item numbers refer to the [implementation plan](../../docs/implementation-plan.md#6-work-items).
 
+The internal candidate processor (#1446) joins complete source preparation to the original attempt writer, with fresh parameter/Claim allowances, the original run lock, ordered capacity scopes and an operation deadline through settlement. Both-database integration tests cover public sources, replay, current-state refusal, conditional absent dependencies and cleanup. It is not called by a scheduler process. Accepted present outputs remain required in the same common admission deliverable through #1472; loop composition remains #1448.
+
 ## 5. The walking skeleton and the first slice
 
 This section changes most often. It summarizes the owner decisions of 2026-11-11 in [#1356](https://github.com/realkarych/kora/issues/1356); the documents linked below are the authority.

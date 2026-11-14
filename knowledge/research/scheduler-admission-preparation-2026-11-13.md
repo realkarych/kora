@@ -41,6 +41,16 @@ The compatibility path refuses nonempty node and namespace allow/deny patterns b
 
 ## Verification obligations
 
+### Canonical parameter reconstruction and processing ownership
+
+`AdmissionProcessor` consumes the complete observation prepared by `admission_preparation.py`. Its derived retained reservation supplies `owned_units`; the processor supplies a fresh `claim_work` allowance rather than reusing spent native/checker work. The source observation includes both checked graphs, readiness/caps, immutable parameter bytes, policy and price, and remains owned through original-writer settlement.
+
+`prepare_attempt_admission` also accepts canonical parameter bytes. For this path, `attempt_preparation_reservation(..., reconstruct_params=True)` adds one decode, one canonical render/comparison and one bounded traversal at the existing `MAX_PARAMS_BYTES` width `Q`. Additional retained units are `512 + (12 + 36 + 12)*Q`; fresh work is `512 + 3*32*(Q+1)^2`. The fixed term covers the added wrapper and binding bookkeeping. These allowances are checked together with complete Claim preparation before decoding the parameter bytes. The source bytes are already charged by the retained observation; existing callers that pass `ReadRunInput` retain their original caller-owned parameter accounting. No product limit is reduced.
+
+The processing owner performs complete detached preparation, a cooperative cancellation/deadline handoff and the normal timed writer entry. It tries the original run lock before ordered capacity scopes. Its outer operation deadline remains active during the writer body and settlement, after the database's entry deadline has handed off. Failure, cancellation and refusal release prepared ownership after actual transaction cleanup; fixed diagnostic outcomes are emitted afterwards. This accounting does not establish a loop-wide retained-state bound, scheduling latency or accepted-output authority.
+
+`test_admission_processing_admits_fresh_parameter_and_claim_work` checks exact and one-unit-short retained/work allowances through real HTTP publication and manual acceptance on both databases. Short allowances stop before the second parameter decode or writer checkout. Public replay, changed policy/price/cap sources, conditional dependent inputs, periodic wait refresh, original-run contention, detached handoff expiry/cancellation and partial-write rollback exercise the same processing owner. The lower-level full-size workload below retains its original boundaries and does not become a public maximum-size deployment claim.
+
 `test_attempt_preparation_refuses_incomplete_fresh_allowance` exercises insufficient retained/work/source allowances, preservation of already-owned units and exact-bound admission with real checked graphs on both databases. Functional tests use actual preparation and cover replay, expiry, policy/price freshness, wait closure and rollback.
 
 Those tests establish the implemented comparison and lack of metadata effects. They do not prove the complete allocation/conversion inventory. Independent performance review inspected the concrete call sequence and logical coefficients; its conclusion does not establish caller-owned provenance or a physical memory envelope.

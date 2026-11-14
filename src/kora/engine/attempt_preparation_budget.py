@@ -51,6 +51,8 @@ def attempt_preparation_reservation(
     checked: CheckedExecutionContract,
     limits: AttemptPreparationLimits,
     inputs: tuple[ReadinessInput, ...] = (),
+    *,
+    reconstruct_params: bool = False,
 ) -> AttemptPreparationReservation:
     count = len(inputs)
     input_work = 32 * (count + 1) ** 2 if count else 0
@@ -132,6 +134,9 @@ def attempt_preparation_reservation(
         ir + 11,
     )
     work = input_work + sum(32 * (width + 1) ** 2 for width in operations)
+    if reconstruct_params:
+        retained += 512 + 60 * params
+        work += 512 + 3 * 32 * (params + 1) ** 2
     return AttemptPreparationReservation(retained, work)
 
 
@@ -139,8 +144,12 @@ def admit_attempt_preparation(
     checked: CheckedExecutionContract,
     limits: AttemptPreparationLimits,
     inputs: tuple[ReadinessInput, ...] = (),
+    *,
+    reconstruct_params: bool = False,
 ) -> AttemptPreparationReservation:
-    reservation = attempt_preparation_reservation(checked, limits, inputs)
+    reservation = attempt_preparation_reservation(
+        checked, limits, inputs, reconstruct_params=reconstruct_params
+    )
     if (
         reservation.retained_units > limits.retained_units
         or reservation.work_units > limits.work_units

@@ -4,6 +4,7 @@ from kora.cel_eval.errors import raise_safe
 from kora.db.claim_source_values import prepare_claim_sources
 from kora.db.claim_sources import ClaimSourceBinding, ClaimSourceReadLimits
 from kora.db.claim_sources_v1 import SOURCE_FIELDS
+from kora.db.run_input_reads import RunInputField
 from kora.engine.attempt_admission import PreparedAttemptAdmission
 from kora.engine.attempt_inputs import prepare_attempt_inputs
 from kora.engine.attempt_preparation_budget import (
@@ -16,7 +17,9 @@ from kora.engine.graph_types import read_document
 from kora.engine.namespace_policy import NamespacePolicyConfiguration
 from kora.engine.readiness import PreparedReadiness
 from kora.engine.run_input_reads import ReadRunInput
+from kora.engine.run_input_values import decode_run_input_value
 from kora.engine.start_facts import declares_agent_secrets
+from kora.engine.start_records import MAX_PARAMS_BYTES
 from kora.ir.agent_secrets import NamespaceSecretPolicy, agent_secret_findings
 from kora.ir.config import AgentConfig, CommandConfig
 from kora.ir.cost import PriceRevision
@@ -78,7 +81,7 @@ def _compatible(
 def prepare_attempt_admission(
     checked: CheckedExecutionContract,
     readiness: PreparedReadiness,
-    params: ReadRunInput,
+    params: ReadRunInput | bytes,
     binding: ClaimSourceBinding,
     price: PriceRevision,
     policy: NamespacePolicyConfiguration,
@@ -97,14 +100,22 @@ def prepare_attempt_admission(
             not readiness.matches(scope, pin)
             or node is None
             or node.kind not in ("agent", "command")
-            or params.binding != binding.run
+            or (isinstance(params, ReadRunInput) and params.binding != binding.run)
             or policy.namespace_id != scope.namespace_id
             or price.id != binding.price_table_id
             or not 1 <= len(binding.node_path) <= 1024
             or any(not "!" <= character <= "~" for character in binding.node_path)
         ):
             raise ClaimWireRejected()
-        admit_attempt_preparation(checked, limits, node.inputs)
+        admit_attempt_preparation(
+            checked, limits, node.inputs, reconstruct_params=isinstance(params, bytes)
+        )
+        if isinstance(params, bytes):
+            params = ReadRunInput(
+                binding.run,
+                RunInputField.PARAMS,
+                decode_run_input_value(params, max_bytes=MAX_PARAMS_BYTES),
+            )
         if any(
             not entry.optional or entry.producer not in node.predecessors
             for entry in node.inputs

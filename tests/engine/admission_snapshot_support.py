@@ -89,6 +89,8 @@ async def snapshot_case(
     capture: Capture,
     *,
     namespace_price: bool = True,
+    ir: JsonObject | None = None,
+    node_path: str = "agent",
 ) -> AdmissionSnapshotCase:
     identity = await seed_case(database, NAMESPACE)
     namespace_id = identity.principal.namespaces[0].namespace_id
@@ -118,7 +120,11 @@ async def snapshot_case(
     async with client_for(app) as client:
         publication = await client.post(
             VERSIONS,
-            json={"graph": GRAPH, "ir": skeleton_ir(), "resources": []},
+            json={
+                "graph": GRAPH,
+                "ir": skeleton_ir() if ir is None else ir,
+                "resources": [],
+            },
             headers=headers,
         )
         assert publication.status_code == 201
@@ -166,7 +172,7 @@ async def snapshot_case(
     async with database.read_transaction() as reader:
         node_id = await reader.scalar(
             select(node_instance.c.id).where(
-                node_instance.c.run_id == run_id, node_instance.c.node_path == "agent"
+                node_instance.c.run_id == run_id, node_instance.c.node_path == node_path
             )
         )
     assert type(node_id) is str
