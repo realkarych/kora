@@ -20,7 +20,7 @@ The formula sums representations across stages rather than taking a smaller peak
 
 ## Complete operation inventory
 
-The existing allowances are parameters 4 MiB, immutable Claim 12 MiB, node policy 256 KiB, composed policy 1 MiB, trusted namespace native source 64 KiB and immutable price 64 KiB. The namespace native admission dominates its canonical UTF-8 projection. Graph widths are the actual checked canonical strings. No new smaller product limit is introduced.
+The existing allowances are parameters 4 MiB, immutable Claim 12 MiB, node policy 256 KiB, composed policy 1 MiB, trusted namespace native source 65,536 conservative native units and immutable price 64 KiB. The namespace native admission dominates its canonical UTF-8 projection; its units are not canonical JSON bytes. Graph widths are the actual checked canonical strings. No new smaller product limit is introduced.
 
 | Group | Representations charged |
 |---|---|
@@ -53,4 +53,32 @@ The optional admission tests exercise fresh producer authority, immutable bindin
 
 `test_attempt_admission_keeps_final_node_within_claim_read_allowance` checks SQLite's complete row bound after the current-attempt pointer is written. A previously admitted row that exceeds the allowance after mutation rolls the whole transition back; the exact final bound preserves Claim-source readability. PostgreSQL keeps its existing compact-source admission rather than applying SQLite's physical-row formula. Successful admission satisfies the exact open wait under the existing wait state machine.
 
-Full-size partition coverage, dependent accepted-output authority, discovery, the actual processing-unit owner and final CI remain required before readiness.
+## Full-size preparation workload
+
+`test_full_claim_preparation_precedes_physical_reservation` exercises immutable material exactly at 12 MiB and one byte above, and node-policy metadata exactly at 256 KiB and one byte above, on SQLite and PostgreSQL. The dedicated helper derives each graph's type, output, parameter, retry, CEL, projection and resource sections with their real producers after adding inert ASCII padding. It saves a new immutable version and manual-start admission witness, reads that version through native acquisition and the complete checker, and promotes the run through the scheduler. It neither mutates a published version nor constructs checked authority directly.
+
+The immutable workload calibrates fixed overhead once from small complete material. The target uses the same fixed-width identifiers, digests, price and selection shape. Exact-bound admission creates one unclaimed attempt and its source witness; replay creates no second attempt. Reconstruction uses the saved graph, run parameters and immutable attempt bindings through their native readers. Each oversized case first admits its own preparation reservation, including the additional byte, then calls actual preparation and requires the fixed wire refusal with unchanged metadata and no attempt, source or wait row. The existing exact and one-unit-short allowance tests remain independent coverage.
+
+There are eight cases per invocation. Exact immutable cases prepare once and reconstruct once; oversized immutable cases prepare once. This gives six near-12-MiB Claim materialization attempts across both databases. Writer replay reuses the prepared proposal. This adds no repetition campaign; the existing changed-test CI check retains its own approved workload.
+
+### Fixture allowances and ownership
+
+The fixture sets `I = 2 * MAX_IMMUTABLE_BYTES` and `S = 16 * I`. IR rendering and applicable section outputs are limited to `I` or `S`; the canonical pair is limited to `2 * I`, with the existing pair-hash formula. CEL inventory has 100 declarations and no triggers, and typed work and payload allowances of `S`. Projection source admission is `9 * I + 8 * S`, following its declared source-pass equation; scratch is the typed allowance plus `10 * I`, covering its initial reservation and path rendering. Command and resource preparation retain their explicit finite source, work and scratch allowances. The complete reader uses `1024 * I` retained units and `1024 * S**2` work units; these are conservative caller inputs, not physical memory guarantees or new product limits.
+
+Raw authored graphs, staged sections and prepared persistence values belong to setup. The helper releases their large representations before native checking. Acquired native graph values are released after checking. The resulting checked contract, readiness, parameter value, price and namespace policy remain caller-owned through preparation and writing. Their declared allowance is the complete reader's retained reservation plus `16 * I`; no optional parameter-schema arena is enabled. Preparation receives fresh work and retained allowances, and no spent reader work supplies credit.
+
+The exact-size assertion also retains the original case while it reconstructs material from saved sources; this second checked graph and the resulting Claim belong to test verification, outside the first preparation's allowance. Database connections and results must close, and detached preparation/reconstruction must perform no checkout. These assertions do not certify all fixture heap allocations, a production processing-unit owner, RSS, latency or leak freedom.
+
+The current HTTP deploy limits canonical documents to 4 MiB. A single prompt filling the immutable Claim therefore exercises lower-level scheduler and native metadata interfaces with finite caller allowances, not a publicly deployable maximum-size prompt. The fixture does not produce publication's `graph_version_read_admission` witness and does not qualify `acquire_claim_snapshot` or an HTTP deploy-to-Claim flow. Genuine publication-backed snapshot coverage remains separate. The namespace producer keeps its conservative native limit; system/lease/dispatcher material remains first-Claim ownership. Filling the composed-policy or system partition with an artificial producer would not establish that integration.
+
+### Local result on 2026-11-14
+
+The implementation snapshot is based on `4f8d2ca5729495babb50bd7d9c31b431025cd8a7`; the complete dirty diff containing both new test files and the analysis above has SHA-256 `cea7352aebf516344202bfa64187c6c3ae40cbd5a7fc71bbab2d7e893245ab30`. The final evidence paragraph does not change its source or method.
+
+`KORA_TEST_DATABASES=sqlite,postgresql uv run --no-sync pytest -q tests/engine/test_full_claim_admission.py --basetemp=/private/tmp/kora-full-claim-order-1446 --junitxml=/private/tmp/kora-full-claim-order-1446.xml --maxfail=2 --tb=short` exited zero: **8 passed in 238.56 seconds**, with no failure, error or skip. The JUnit SHA-256 is `b7ba9db888b669bf9df842b50b1bb3438771c90412e8c30beb84d1a7ca5b80be`. The environment was Darwin arm64, Python 3.11.17, SQLite 3.53.1 and the repository's pinned PostgreSQL 16.15 fixture. Elapsed time is diagnostic and includes the real source preparation and persistence workload.
+
+Two earlier setup runs failed and are not successful boundary evidence: the first stopped after two projection-budget refusals; the second stopped after two complete-checker refusals because the new fixture emitted envelope members in the wrong order. The fixes corrected explicit fixture allowances and the existing envelope order. They changed no production implementation, product limit, timeout or acceptance criterion. The final run above used the corrected source and did not repeat unchanged failing content.
+
+Full `ruff check --ignore-noqa .`, `ruff format --check .` and strict `pyright` passed, with 1,590 formatted Python files and zero type errors or warnings. The no-suppression, import-layer and transition-ownership architecture modules passed all 40 cases in 13.60 seconds; JUnit SHA-256 `0ac61d060a9ed37e8da0b57d26c8afabb395f970158decc0859593d3e1ef9bf9`. No production file changed in this test refinement.
+
+Dependent accepted-output authority, the actual processing-unit owner, complete producer-to-worker integration and final CI remain required before readiness. Bounded global admission discovery has separate tests for page size, history, rotation and exact metadata resource release; it does not supply execution authority.
