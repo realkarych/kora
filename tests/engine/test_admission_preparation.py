@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from dataclasses import replace
 from typing import cast
 
@@ -24,7 +25,7 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import START
 from tests.engine.admission_preparation_support import (
     LIMITS,
-    observe_detached_checks,
+    observe_source_release,
     prepare,
 )
 from tests.engine.admission_snapshot_support import snapshot_case
@@ -49,10 +50,13 @@ async def test_admission_preparation_checks_complete_sources_after_release(
         cap_version = (await case.publish(ir)).graph_version_id.removeprefix("gv_")
     before = await case.promotion.snapshot(database)
     ledger = ConnectionLedger(database)
+    previous_profile = sys.getprofile()
 
-    with observe_detached_checks(database) as checks:
+    with observe_source_release(database, ledger):
         prepared = await prepare(database, case)
+        assert sys.getprofile() is previous_profile
     checkouts = ledger.checkouts
+    assert ledger.outstanding == database.units_in_flight() == 0
     parameters = decode_run_input_value(
         prepared.acquired.params, max_bytes=LIMITS.snapshot.inputs.params
     )
@@ -73,9 +77,7 @@ async def test_admission_preparation_checks_complete_sources_after_release(
     assert "consumer-local" not in prepared.policy.value()
     assert prepared.price.id == case.price_id
     assert prepared.reservation == admission_preparation_reservation(LIMITS)
-    assert checks.count("check_detached_execution_contract") == (2 if distinct else 1)
-    assert checks.count("prepare_readiness") == checks.count("prepare_graph_caps") == 1
-    assert checks.count("decode_run_input_value") == 1
+    assert sys.getprofile() is previous_profile
     assert checkouts == 1
     assert before == after
     assert ledger.outstanding == database.units_in_flight() == 0
@@ -159,17 +161,20 @@ async def test_admission_preparation_reserves_the_second_checker_before_checkout
 ) -> None:
     limits = replace(LIMITS, retained_units=retained, work_units=work)
     ledger = ConnectionLedger(database)
+    previous_profile = sys.getprofile()
 
     with pytest.raises(AdmissionPreparationRejected):
-        await prepare_admission_snapshot(
-            database,
-            "01J00000000000000000000000",
-            limits,
-            observed_at=START,
-            periodic_recheck=True,
-            deadline=asyncio.get_running_loop().time() + 10.0,
-        )
+        with observe_source_release(database, ledger):
+            await prepare_admission_snapshot(
+                database,
+                "01J00000000000000000000000",
+                limits,
+                observed_at=START,
+                periodic_recheck=True,
+                deadline=asyncio.get_running_loop().time() + 10.0,
+            )
 
+    assert sys.getprofile() is previous_profile
     assert ledger.checkouts == ledger.outstanding == database.units_in_flight() == 0
 
 

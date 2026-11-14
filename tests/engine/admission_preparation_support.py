@@ -21,6 +21,7 @@ from kora.engine.attempt_capacity import prepare_graph_caps
 from kora.engine.graph_execution_contract import check_detached_execution_contract
 from kora.engine.readiness import prepare_readiness
 from kora.engine.run_input_values import decode_run_input_value
+from tests.db.closing import ConnectionLedger
 from tests.engine.admission_snapshot_support import LIMITS as SNAPSHOT_LIMITS
 from tests.engine.admission_snapshot_support import AdmissionSnapshotCase
 
@@ -38,6 +39,32 @@ CHECK_CODE_IDS: frozenset[int] = frozenset(
 FINAL_GUARD_CODE_ID: int = id(require_snapshot_time.__code__)
 PREPARATION_CODE_ID: int = id(prepare_admission_snapshot.__code__)
 SNAPSHOT_REFUSAL_CODE_ID: int = id(DatabaseSnapshotRejected.__init__.__code__)
+FIRST_CHECK_CODE_ID: int = id(check_detached_execution_contract.__code__)
+
+
+@contextmanager
+def observe_source_release(
+    database: Database, ledger: ConnectionLedger
+) -> Generator[None]:
+    previous = sys.getprofile()
+    entered = False
+
+    def observe(frame: FrameType, event: str, argument: object) -> None:
+        nonlocal entered
+        if event != "call" or id(frame.f_code) != FIRST_CHECK_CODE_ID:
+            return
+        assert not entered
+        assert ledger.checkouts == 1
+        assert ledger.outstanding == database.units_in_flight() == 0
+        entered = True
+        sys.setprofile(previous)
+
+    try:
+        sys.setprofile(observe)
+        yield
+        assert entered
+    finally:
+        sys.setprofile(previous)
 
 
 @contextmanager

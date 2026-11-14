@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from types import FrameType
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 
@@ -16,7 +16,8 @@ from kora.engine.admission_preparation import (
     PreparedAdmissionSnapshot,
     prepare_admission_snapshot,
 )
-from tests.api.deployment_cases import preparer
+from kora.ir.json import JsonObject
+from tests.api.deployment_cases import preparer, skeleton_ir
 from tests.api.support import api_capture
 from tests.db.closing import ConnectionLedger, WriterCutoffLoop
 from tests.engine.admission_preparation_support import LIMITS, observe_detached_checks
@@ -32,6 +33,7 @@ def observe_preparation_outcome(
     node_id: str,
     observed_at: datetime,
     outcome: ObservationOutcome,
+    distinct: bool,
 ) -> None:
     loop = WriterCutoffLoop()
 
@@ -133,8 +135,8 @@ def observe_preparation_outcome(
         assert checks == (
             []
             if outcome in {"early", "acquisition"}
-            else [
-                "check_detached_execution_contract",
+            else ["check_detached_execution_contract"] * (2 if distinct else 1)
+            + [
                 "prepare_readiness",
                 "prepare_graph_caps",
                 "decode_run_input_value",
@@ -149,15 +151,28 @@ def observe_preparation_outcome(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "outcome", ["success", "early", "acquisition", "deadline", "cancel"]
+    ("outcome", "distinct"),
+    [
+        pytest.param("success", False, id="success"),
+        pytest.param("early", False, id="early"),
+        pytest.param("acquisition", False, id="acquisition"),
+        pytest.param("deadline", False, id="deadline"),
+        pytest.param("cancel", False, id="cancel"),
+        pytest.param("deadline", True, id="deadline-distinct"),
+    ],
 )
 async def test_admission_observer_identifies_final_deadline_branch(
     database: Database,
     preparer: DeploymentPreparer,
     api_capture: Capture,
     outcome: ObservationOutcome,
+    distinct: bool,
 ) -> None:
     case = await snapshot_case(database, preparer, api_capture)
+    if distinct:
+        ir = skeleton_ir()
+        cast(JsonObject, ir["runtime"])["concurrency"] = {"max_running_nodes": 2}
+        await case.publish(ir)
     before = await case.promotion.snapshot(database)
 
     await asyncio.to_thread(
@@ -166,6 +181,7 @@ async def test_admission_observer_identifies_final_deadline_branch(
         case.node_id,
         case.promotion.clock.now(),
         outcome,
+        distinct,
     )
     after = await case.promotion.snapshot(database)
 
