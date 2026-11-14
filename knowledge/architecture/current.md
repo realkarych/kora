@@ -68,7 +68,7 @@ The [package layer table](detailed.md#package-layers) lists packages that do not
 
 ### Size
 
-`src/kora` holds 568 Python modules and about 120,316 lines. The metadata schema has 42 tables and 31 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel`, `kora.cel_eval` or the harness packages; `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
+`src/kora` holds 573 Python modules and about 121,362 lines. The metadata schema has 42 tables and 31 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel`, `kora.cel_eval` or the harness packages; `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
 
 ## 3. How the existing pieces connect
 
@@ -123,6 +123,8 @@ Each row names the package under `src/kora`, what it does today, its status, and
 | `plugins.authentication.static_token` | Parses `Authorization: Bearer`, hashes the token and looks it up in `api_token`, refusing revoked or expired tokens; can revoke a token. It returns the stored principal, user or service; telling the two apart for an operation is the API's authorization. | Constructed only by `kora conformance`; `kora plugins list` reads its metadata. Tests use it for protected schema, deploy, worker registration and worker usage routes; no installed API process exists yet. | [authentication](../specs/protocols.md#10-authentication-fr-124-nfr-44), [static-token provider](../specs/protocols.md#static-token-provider-issue-506), [ADR-0011](../../docs/decisions/0011-namespaces-and-personal-tokens.md) |
 | `plugins.storage` | The `local` artifact storage: SHA-256 content addresses, write into a stage, seal, create-only promotion, reads and range reads, deletion and a bounded inventory scan, with private SQLite bookkeeping in `control.sqlite`. There is no S3 provider. | Constructed only by `kora conformance`; `kora plugins list` reads its metadata. | [artifact storage](../specs/protocols.md#7-artifact-storage-fr-44), [local provider contract](../specs/protocols.md#74-local-provider-implementation-contract-issue-255), [storage contracts](../specs/protocols.md#artifact-storage-contracts-issue-229) |
 | `plugins.artifact_type` | `AgentSession`, `CommandResult`, `StructuredOutput` and `VcsRef`, each revision 1: binding checks, payload validation, digest fields and summaries. | Constructed only by `kora conformance`; `kora plugins list` reads its metadata. | [artifact type](../specs/protocols.md#8-artifact-type-fr-4143), [revision catalogue](../specs/artifacts/README.md) |
+
+The engine has an internal atomic worker-heartbeat transition ([#1535](https://github.com/realkarych/kora/issues/1535)). It renews current leases, records bounded runtime/liveness and closure evidence, shares usage coverage ordering, and acknowledges retained history under the run and worker guards. It preserves stopped execution, immutable evidence and physical reservations through lease expiry and replay. No heartbeat route calls it yet; HTTP/client activation remains [#1452](https://github.com/realkarych/kora/issues/1452), and absent publication ownership permits no recovered effect.
 
 The engine also has a read-only calculator that builds exact whole-run approval-cost snapshots from persisted accounting under the original run lock ([#1517](https://github.com/realkarych/kora/issues/1517)). It does not open or save approval requests.
 

@@ -99,7 +99,9 @@ async def recover_expired_lease(context: ExpiryContext, attempt_id: str) -> bool
                 .values(
                     lease_owner=None,
                     lease_until=None,
-                    execution_state="unknown",
+                    execution_state="stopped"
+                    if saved.execution_state == "stopped"
+                    else "unknown",
                     recovery_required=True,
                     recovery_version=saved.recovery_version + 1,
                     recovery=set_json_field(
@@ -112,7 +114,9 @@ async def recover_expired_lease(context: ExpiryContext, attempt_id: str) -> bool
                 )
             )
             await context.event(
-                "attempt.execution_unknown",
+                "attempt.execution_observed"
+                if saved.execution_state == "stopped"
+                else "attempt.execution_unknown",
                 {
                     "version": saved.recovery_version + 1,
                     "domain": saved.execution_domain_id,

@@ -227,7 +227,9 @@ async def _grant(
             lease_epoch=grant.lease_epoch,
             lease_until=until,
             execution_domain_id=query.execution_domain_id,
-            execution_state="unknown",
+            execution_state="stopped"
+            if saved.execution_state == "stopped"
+            else "unknown",
             current_dispatcher_open=True,
             status="claimed" if first else saved.status,
             started_at=now if first else saved.started_at,
