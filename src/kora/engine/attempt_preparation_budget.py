@@ -6,6 +6,7 @@ from kora.engine.graph_execution_contract import (
     ExecutionContractReadLimits,
     execution_contract_read_reservation,
 )
+from kora.engine.readiness import ReadinessInput
 from kora.engine.start_records import MAX_PARAMS_BYTES
 from kora.ir.cost import PriceRevision
 from kora.ir.diagnostic_collection import MAX_DIAGNOSTIC_BYTES
@@ -47,8 +48,14 @@ def _typed_units(width: int) -> int:
 
 
 def attempt_preparation_reservation(
-    checked: CheckedExecutionContract, limits: AttemptPreparationLimits
+    checked: CheckedExecutionContract,
+    limits: AttemptPreparationLimits,
+    inputs: tuple[ReadinessInput, ...] = (),
 ) -> AttemptPreparationReservation:
+    count = len(inputs)
+    input_work = 32 * (count + 1) ** 2 if count else 0
+    if input_work > limits.work_units:
+        raise ClaimWireRejected()
     execution_contract_read_reservation(limits.graph)
     ir, contract = len(checked.canonical_ir), len(checked.canonical_contract)
     if (
@@ -63,6 +70,11 @@ def attempt_preparation_reservation(
     params = MAX_PARAMS_BYTES
     price = PriceRevision.byte_limit
     logical_input, input_storage, source_wrapper = 2, 25, 37
+    if inputs:
+        text_width = sum(len(entry.name) + len(entry.path or "") for entry in inputs)
+        logical_input = 2 + 128 * count + 6 * text_width
+        input_storage = logical_input + 23 + 7 * count
+        source_wrapper = 6 * input_storage + 8
     decodes = (ir, ir, contract, namespace, namespace, namespace, node, source_wrapper)
     renders = (
         namespace,
@@ -87,7 +99,7 @@ def attempt_preparation_reservation(
         namespace,
         source_wrapper,
         immutable + policy,
-    )
+    ) + ((logical_input,) if inputs else ())
     encodings = (
         params,
         logical_input,
@@ -119,14 +131,16 @@ def attempt_preparation_reservation(
         MAX_DIAGNOSTIC_BYTES,
         ir + 11,
     )
-    work = sum(32 * (width + 1) ** 2 for width in operations)
+    work = input_work + sum(32 * (width + 1) ** 2 for width in operations)
     return AttemptPreparationReservation(retained, work)
 
 
 def admit_attempt_preparation(
-    checked: CheckedExecutionContract, limits: AttemptPreparationLimits
+    checked: CheckedExecutionContract,
+    limits: AttemptPreparationLimits,
+    inputs: tuple[ReadinessInput, ...] = (),
 ) -> AttemptPreparationReservation:
-    reservation = attempt_preparation_reservation(checked, limits)
+    reservation = attempt_preparation_reservation(checked, limits, inputs)
     if (
         reservation.retained_units > limits.retained_units
         or reservation.work_units > limits.work_units

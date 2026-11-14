@@ -76,9 +76,14 @@ class AttemptAdmissionCase:
 
 
 async def attempt_admission_case(
-    database: Database, *, root_trigger_rule: str | None = None
+    database: Database,
+    *,
+    root_trigger_rule: str | None = None,
+    promotion: PromotionCase | None = None,
+    node_path: str = "agent",
 ) -> AttemptAdmissionCase:
-    promotion = await promotion_case(database, root_trigger_rule=root_trigger_rule)
+    if promotion is None:
+        promotion = await promotion_case(database, root_trigger_rule=root_trigger_rule)
     await promotion.promote(database)
     scope = promotion.scope
     policy = NamespacePolicyConfiguration.prepare(
@@ -95,7 +100,7 @@ async def attempt_admission_case(
         node_id = await writer.scalar(
             select(node_instance.c.id).where(
                 node_instance.c.run_id == promotion.run_id,
-                node_instance.c.node_path == "agent",
+                node_instance.c.node_path == node_path,
             )
         )
     assert isinstance(node_id, str)
@@ -106,7 +111,7 @@ async def attempt_admission_case(
         node_id,
         promotion.identifiers.new(),
         price.id,
-        "agent",
+        node_path,
     )
     async with database.read_transaction() as reader:
         acquired = await acquire_graph_version(
