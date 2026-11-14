@@ -4,6 +4,7 @@ import pytest
 
 from kora.db.connection import Database
 from kora.db.graph_version_reads import acquire_graph_version
+from kora.engine.attempt_inputs import prepare_attempt_inputs, read_attempt_inputs
 from kora.engine.graph_command_manifests import build_declared_command_manifests
 from kora.engine.graph_execution_contract import (
     MEMBERS,
@@ -189,7 +190,11 @@ async def test_readiness_preserves_an_independent_input_inventory(
         checked, max_ir_bytes=LIMITS.resources.logical.ir_bytes
     )
     command, approval = prepared.nodes[1:]
+    artifact_id = checked.scope.version_id
+    versions = {"gate": artifact_id, "candidate": None}
 
+    inputs = prepare_attempt_inputs(approval.declared_inputs(), versions)
+    restored = read_attempt_inputs(inputs.storage, approval.declared_inputs())
     declarations = command.declared_inputs()
     candidate = declarations["candidate"]
     assert isinstance(candidate, dict)
@@ -197,6 +202,12 @@ async def test_readiness_preserves_an_independent_input_inventory(
     declarations.clear()
 
     assert tuple(entry.name for entry in approval.inputs) == ("gate", "candidate")
+    assert tuple(entry.name for entry in restored.entries) == ("gate", "candidate")
+    assert tuple(entry.artifact_version_id for entry in restored.entries) == (
+        artifact_id,
+        None,
+    )
+    assert inputs.storage == restored.storage
     assert command.inputs[0].path == "commit_sha"
     assert command.inputs[0].producer == "agent"
     assert command.inputs[0].output == "change"
