@@ -29,15 +29,19 @@ from kora.api.routes import (
 )
 from kora.api.run_trigger_route import trigger_handler
 from kora.api.worker_claims_route import WorkerClaimsRoute
+from kora.api.worker_history_route import WorkerHistoryRoute
 from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.engine.admission_initialization import AdmissionInitialization
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
 from kora.models.runs import AcceptedRun, SkippedRun, TriggerRequest
 from kora.models.worker_claims import WorkerClaimRequest, WorkerClaimResponse
+from kora.models.worker_history import WorkerHistoryQuery
 from kora.models.workers import RegisteredWorker, WorkerName, WorkerRegistration
 from kora.observability import ProcessDiagnostics
 from kora.protocols.authentication import Authenticator
+from kora.protocols.history import GrantHistoryPage
+from kora.protocols.identity import Identifier
 from kora.protocols.time import Clock
 
 
@@ -53,11 +57,13 @@ class ApiDispatch:
         catalog: ActiveCatalog,
         authenticator: Authenticator,
         clock: Clock,
+        worker_history: WorkerHistoryRoute | None = None,
     ) -> None:
         self.application = app
         self.catalog = catalog
         self.authenticator = authenticator
         self.clock = clock
+        self.worker_history = worker_history
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -74,7 +80,12 @@ class ApiDispatch:
                 self.authenticator,
                 self.clock,
                 "service"
-                if matched.name in (RouteName.WORKERS, RouteName.WORKER_CLAIMS)
+                if matched.name
+                in (
+                    RouteName.WORKERS,
+                    RouteName.WORKER_CLAIMS,
+                    RouteName.WORKER_HISTORY,
+                )
                 else "user",
                 current_authority=matched.name is RouteName.WORKER_CLAIMS,
             )
@@ -97,6 +108,13 @@ class ApiDispatch:
             )
             await response(scope, receive, send)
             return
+        if matched is not None and matched.name is RouteName.WORKER_HISTORY:
+            if self.worker_history is None:
+                raise RuntimeError("the worker history route is not configured")
+            refusal = await self.worker_history.admit(scope)
+            if refusal is not None:
+                await refusal(scope, receive, send)
+                return
         if matched is not None and matched.name in (
             RouteName.WORKERS,
             RouteName.WORKER_CLAIMS,
@@ -139,6 +157,7 @@ def create_application(
     *,
     worker_registration: WorkerRegistrationRoute | None = None,
     worker_claims: WorkerClaimsRoute | None = None,
+    worker_history: WorkerHistoryRoute | None = None,
     admission_initialization: AdmissionInitialization | None = None,
 ) -> ApiExchange:
     @asynccontextmanager
@@ -257,6 +276,30 @@ def create_application(
             operation_id="claim_worker",
             response_model=WorkerClaimResponse,
         )
+    if worker_history is not None:
+
+        async def history(att: Identifier, request: Request) -> Response:
+            return await worker_history(att, request)
+
+        properties = WorkerHistoryQuery.model_json_schema()["properties"]
+        framework.add_api_route(
+            RouteName.WORKER_HISTORY.value,
+            history,
+            methods=["GET"],
+            operation_id="grant_history",
+            response_model=GrantHistoryPage,
+            openapi_extra={
+                "parameters": [
+                    {
+                        "name": name,
+                        "in": "query",
+                        "required": field.is_required(),
+                        "schema": properties[name],
+                    }
+                    for name, field in WorkerHistoryQuery.model_fields.items()
+                ]
+            },
+        )
     framework.add_exception_handler(HTTPException, framework_error)
     framework.add_exception_handler(RequestValidationError, validation_error)
     framework.add_exception_handler(Exception, unexpected_error)
@@ -265,5 +308,6 @@ def create_application(
         catalog=ActiveCatalog(framework),
         authenticator=authenticator,
         clock=clock,
+        worker_history=worker_history,
     )
     return ApiExchange(framework, diagnostics, request_id)

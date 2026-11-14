@@ -34,6 +34,7 @@ from kora.client.errors import (
     Failure,
     Outcome,
 )
+from kora.client.history_admission import HistoryAdmission
 from kora.client.network import DirectTransport
 from kora.ir.graph_json import ObjectReader
 from kora.ir.json import JsonObject, JsonShapeError, parse_json_object
@@ -45,8 +46,10 @@ from kora.models.worker_claims import (
     WorkerClaimResponse,
     decoded_claim,
 )
+from kora.models.worker_history import WorkerHistoryQuery
 from kora.models.workers import RegisteredWorker, WorkerRegistration
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, ProcessDiagnostics
+from kora.protocols.history import MAX_ENVELOPE_BYTES, GrantHistoryPage
 from kora.protocols.worker_claim_wire import MAX_CLAIM_BYTES
 
 OPENAPI_PATH: str = "/api/v1/openapi.json"
@@ -54,6 +57,7 @@ OPENAPI_RESPONSE_BYTES: int = 4 * 1024 * 1024
 GRAPH_VERSIONS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
 DEPLOY_RESPONSE_BYTES: int = 2 * 1024 * 1024
 GRAPH_RUNS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/runs"
+GRANT_HISTORY_PATH: str = "/api/v1/attempts/{att}/grants"
 IDEMPOTENCY_KEY = re.compile(r"[!-~]{1,255}")
 OK: frozenset[int] = frozenset({200})
 CREATED_OR_OK: frozenset[int] = frozenset({200, 201})
@@ -264,6 +268,7 @@ class KoraClient:
             else InProcessTransport(asgi_app, max_connections)
         )
         self._active: dict[asyncio.Task[object], CancelScope] = {}
+        self._history_admission = HistoryAdmission(max_connections)
         self._closing: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> Self:
@@ -357,6 +362,25 @@ class KoraClient:
             body=parse_json_object(request.model_dump(mode="json")),
         )
 
+    async def grant_history(
+        self, attempt_id: str, query: WorkerHistoryQuery
+    ) -> GrantHistoryPage:
+        if re.fullmatch(r"[!-~]{1,256}", attempt_id) is None:
+            raise ClientError(Failure.DESTINATION_POLICY, Outcome.NOT_SENT)
+        return await self._request_json(
+            "GET",
+            GRANT_HISTORY_PATH.format(
+                att=quote(attempt_id, safe="").replace(".", "%2E")
+            ),
+            GrantHistoryPage.model_validate,
+            response_limit=MAX_ENVELOPE_BYTES,
+            query=tuple(
+                (name, str(value))
+                for name, value in query.model_dump(exclude_none=True).items()
+            ),
+            history=True,
+        )
+
     async def _request_json(
         self,
         method: str,
@@ -367,6 +391,8 @@ class KoraClient:
         body: JsonObject | None = None,
         success: frozenset[int] = OK,
         headers: tuple[tuple[str, str], ...] = (),
+        query: tuple[tuple[str, str], ...] = (),
+        history: bool = False,
     ) -> T:
         if self._closing is not None:
             raise RuntimeError("The API client is closed.")
@@ -385,9 +411,10 @@ class KoraClient:
                 path,
                 decode,
                 response_limit,
-                (body, headers),
+                (body, headers, query),
                 success,
                 exchange,
+                history,
             )
         )
         self._active[task] = exchange.scope
@@ -430,11 +457,14 @@ class KoraClient:
         path: str,
         decode: Callable[[JsonObject], T],
         response_limit: int,
-        payload: tuple[JsonObject | None, tuple[tuple[str, str], ...]],
+        payload: tuple[
+            JsonObject | None, tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]
+        ],
         success: frozenset[int],
         exchange: Exchange,
+        history: bool,
     ) -> T:
-        body, headers = payload
+        body, headers, query = payload
         request = httpx.Request(
             method,
             self._origin.copy_with(path=path),
@@ -445,15 +475,17 @@ class KoraClient:
                 **dict(headers),
             },
             json=body,
+            params=query,
             extensions={"trace": exchange.observe},
         )
         with exchange.scope, exchange.handoff:
-            status, content = await self._receive(
-                request, response_limit, success, exchange
-            )
-            return self._decode_response(
-                content, status, decode, response_limit, success, exchange
-            )
+            async with self._history_admission.enter(exchange.scope, history=history):
+                status, content = await self._receive(
+                    request, response_limit, success, exchange
+                )
+                return self._decode_response(
+                    content, status, decode, response_limit, success, exchange
+                )
         raise asyncio.CancelledError
 
     async def _receive(
