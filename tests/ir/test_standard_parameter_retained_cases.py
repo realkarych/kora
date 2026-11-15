@@ -11,6 +11,7 @@ from tests.ir.structured_output_cases import nested
 @pytest.mark.parametrize(
     ("schema", "value", "valid"),
     [
+        ({"multipleOf": 0.1}, -0.0, True),
         ({"multipleOf": 2.0}, 2**63 - 1, False),
         ({"multipleOf": 2.0}, -(2**63), True),
         ({"const": float(2**63)}, 2**63 - 1, False),
@@ -182,6 +183,7 @@ def test_standard_parameters_retain_logical_and_array_decisions(
 @pytest.mark.parametrize(
     "schema",
     [
+        {"$vocabulary": {"urn:kora:example": True}},
         {"type": "string", "$ref": "#"},
         {"if": True, "then": True, "else": {"$ref": "#"}},
         {"prefixItems": [True, {"$ref": "#"}]},

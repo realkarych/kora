@@ -14,10 +14,10 @@ The old engine tests directly exercised `arena_object_lookup` as well as the ret
 
 All new semantic cases run `validate_standard_schema` with the exact PARAMETERS binding. They do not infer parameter coverage from OUTPUT-only tests. `tests/ir/test_standard_parameter_retained_cases.py` supplies these named checks:
 
-- `test_standard_parameters_retain_scalar_shape_and_presence`: signed-domain numeric boundaries, inclusive/exclusive comparisons, nonnumeric type alternatives, Unicode code-point lengths, immediate container counts, large schema counts, NUL/astral property names and no Unicode normalization.
+- `test_standard_parameters_retain_scalar_shape_and_presence`: signed-domain numeric boundaries, a negative-zero dividend with a positive decimal divisor, inclusive/exclusive comparisons, nonnumeric type alternatives, Unicode code-point lengths, immediate container counts, large schema counts, NUL/astral property names and no Unicode normalization.
 - `test_standard_parameters_retain_recursive_equality`: sorted object keys, array order, canonical-decimal versus binary-rounded integers, Unicode inequality, enum and uniqueness, and depth18 equality within the parameter domain. Original value/source serialization stays unchanged.
 - `test_standard_parameters_retain_logical_and_array_decisions`: Boolean roots, logical and conditional branches, annotation-only legacy keywords, prefix/tail/nested arrays and exact contains bounds.
-- `test_standard_parameters_refuse_invalid_source_before_applicability`: hidden cyclic references and malformed keyword arguments refuse before value applicability. A branch or non-array value cannot hide an unsupported source.
+- `test_standard_parameters_refuse_invalid_source_before_applicability`: unknown required vocabulary, hidden cyclic references and malformed keyword arguments refuse before value applicability. A branch or non-array value cannot hide an unsupported source.
 
 Existing tests supply the rest of the replacement obligations:
 
@@ -46,7 +46,7 @@ Each row covers all parameterized variants of that function. Mixed rows distingu
 
 | Removed test | Disposition |
 |---|---|
-| `test_parameter_schema_evaluates_direct_and_logical_assertions` | Logical/array, scalar/presence and existing decimal/membership cases preserve supported truth. The two conditional branches hiding `{$ref: "#"}` now refuse whole-source cycles, covered by invalid-source admission; section 3 forbids branch-dependent support. |
+| `test_parameter_schema_evaluates_direct_and_logical_assertions` | Logical/array, scalar/presence and existing decimal/membership cases preserve supported truth. The two conditional branches hiding `{$ref: "#"}` now refuse whole-source cycles; the annotation case's unknown required `$vocabulary` also refuses complete support. Invalid-source admission covers all three distinctions under section 3; `test_standard_schema_source_arguments` separately checks required versus optional unknown vocabulary. The remaining legacy annotation members retain their inert meaning. |
 | `test_parameter_schema_skips_decided_and_orphan_children` | Logical/array cases preserve Boolean decisions and orphan `if`; custom frame allowances and early-return accounting are replaced by sections 4–5. |
 | `test_parameter_schema_does_not_use_later_results_after_entered_refusal` | Old frame2 exhaustion is superseded by root-inclusive call certificates. Existing hidden-support and combined-admission tests preserve refusal outside truth for all/any/one/not/conditional contexts. |
 | `test_parameter_schema_checks_type_before_unavailable_or_costly_heads` | The recursive source refuses before type mismatch under section 3, covered by invalid-source admission. The costly const case's private work threshold is replaced by the complete certificate. |
