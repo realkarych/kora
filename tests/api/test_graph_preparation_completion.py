@@ -235,7 +235,10 @@ async def test_cancellation_after_delivery_discards_unclaimed_completion(
     interruptions: list[bool] = []
 
     def interrupt(frame: FrameType, event: str, _: object) -> None:
-        if event == "return" and frame.f_code is PreparationDelivery.receive.__code__:
+        if (
+            event == "return"
+            and frame.f_code is PreparationDelivery[PreparedSource].receive.__code__
+        ):
             assert caller is not None
             interruptions.append(caller.cancel())
 
