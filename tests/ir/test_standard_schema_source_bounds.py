@@ -48,7 +48,7 @@ def test_standard_schema_source_node_boundary_counts_repeated_occurrences(
     arrays: list[list[object]] = [[], [], [], []]
     candidate = source(True, metadata=arrays)
     limits = domain_limits(SchemaDomain.OUTPUT)
-    baseline = SourceScan(limits).measure(candidate).nodes
+    baseline = SourceScan(limits).measure(candidate).tree.nodes
     remaining = 16384 + delta - baseline
     for items in arrays:
         count = min(remaining, 4096)
@@ -208,8 +208,8 @@ def test_standard_schema_source_preparation_admission_is_aggregate_and_saturatin
     saturated = preparation_score(measured, limits["max_validation_score"])
 
     assert admitted.outcome == "source_checks_completed"
-    assert measured.encoded < limits["max_schema_source_bytes"]
-    assert measured.nodes < limits["max_schema_nodes"]
+    assert measured.tree.encoded < limits["max_schema_source_bytes"]
+    assert measured.tree.nodes < limits["max_schema_nodes"]
     assert saturated == limits["max_validation_score"] + 1
     assert refused.reason == "evaluation_exhausted"
 
@@ -222,5 +222,5 @@ def test_standard_schema_source_counts_binding_metadata_before_schema_lookup() -
 
     result = check_standard_schema_source(candidate, SchemaDomain.OUTPUT, binding())
 
-    assert baseline.nodes > 60
+    assert baseline.tree.nodes > 60
     assert result.reason == "evaluation_exhausted"

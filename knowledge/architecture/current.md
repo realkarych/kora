@@ -18,7 +18,7 @@ Extension points are eleven provider protocols discovered through one entry-poin
 
 ## 2. What runs today
 
-The [standard-schema contract](../specs/schema-validation.md) under #1577 specifies the accepted shared evaluator and separate output/parameter policies needed by #1361. The pure source check #1585 is built and tested, with no active producer or consumer: it checks supplied sources and returns scalar completion or refusal. Complete native value evaluation remains #1582. This does not replace current execution or activate output acceptance, Worker reports or scheduler settlement.
+The [standard-schema contract](../specs/schema-validation.md) under #1577 specifies the accepted shared evaluator and separate output/parameter policies needed by #1361. The pure source check #1585 and complete native value decision #1582 are built and tested, with no active producer or consumer. They check supplied sources and admitted detached values under exact v2 bindings, returning scalar completion, truth or refusal. Complete trusted behavior composition and saved writer/reader activation remain #1361. This does not replace current execution or activate output acceptance, Worker reports or scheduler settlement.
 
 **No graph runs end to end.** The control-plane pieces that would run one exist only partly, and nothing connects them into a process yet. The packages that exist are foundations with their own tests.
 

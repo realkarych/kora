@@ -1,6 +1,6 @@
 # Standard schema validation
 
-Design under [#1577](https://github.com/realkarych/kora/issues/1577), [accepted by the project owner](https://github.com/realkarych/kora/pull/1578#issuecomment-6893087004) on 2026-11-15. This document defines the selected replacement of the custom metered evaluators under [#1361](https://github.com/realkarych/kora/issues/1361). The source-only operation under #1585 checks supplied schema sources; complete value evaluation, stored binding construction, deployment and consumers remain pending. [ADR-0027](../../docs/decisions/0027-bounded-effective-schema-validation.md) governs adoption. Existing policies and their implementation remain unchanged until the accepted replacement is implemented.
+Design under [#1577](https://github.com/realkarych/kora/issues/1577), [accepted by the project owner](https://github.com/realkarych/kora/pull/1578#issuecomment-6893087004) on 2026-11-15. This document defines the selected replacement of the custom metered evaluators under [#1361](https://github.com/realkarych/kora/issues/1361). The source-only operation under #1585 checks supplied schema sources, and #1582 supplies complete native value decisions. Stored binding construction, trusted behavior composition, deployment and consumers remain pending. [ADR-0027](../../docs/decisions/0027-bounded-effective-schema-validation.md) governs adoption. Existing policies and their implementation remain unchanged until the accepted replacement is implemented.
 
 ## 1. Scope and immutable identity
 
@@ -159,6 +159,12 @@ The operation returns only `source_checks_completed` or a fixed `unsupported_pol
 Source admission checks native types, complete bounds, keyword arguments, both original reference keywords, all-position cycles and root-inclusive potential depth from actual constraint roots. The accepted preparation contribution is admitted before indexed source work. Symbolic applicator categories preserve future value weights. No dummy value or zero A/M produces a purported whole-operation certificate. #1582 must reuse the internal source algorithm during its own lifetime and separately admit every E/W/Q, representation and simultaneous allocation before numerical views or library execution. There is no external preparation token or required double preparation.
 
 The [implementation ownership record](../research/standard-schema-source-2026-11-15.md) maps actual source structures and scoped tests. Ordinary completion disposes of them before its caller-bound DEBUG event; unexpected exceptions remain with the caller's safe-failure boundary. Source checking does not activate a v2 writer, value validator or behavior composition.
+
+### Complete native value implementation (#1582)
+
+`kora.ir.standard_schema_validation.validate_standard_schema` returns valid, invalid or a fixed refusal with eight scalar accounting fields for an already detached native value, complete private source and exact domain binding. It reuses the source algorithm in one operation lifetime, admits the value-dependent certificate before numerical views, and applies the pinned library with the three specified handlers. Source-only completion remains a separate result and grants no value authority.
+
+The [implementation ownership record](../research/standard-schema-decision-2026-11-15.md) maps actual source/value/registry/error owners to every ledger row and records the tested library path. Ordinary completion disposes of temporary operation state before its caller-bound DEBUG event. Original wire admission, trusted role/behavior composition, whole saved producer/reader dispatch, aggregate slots and real caller cancellation/settlement remain unactivated #1361 obligations. This pure operation cannot accept an artifact or settle an attempt.
 
 ### Complete value and integration cases
 

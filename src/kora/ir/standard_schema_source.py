@@ -181,6 +181,9 @@ class Site:
     )
     depth: int = 1
     remaining: int = 0
+    calls: int = 1
+    work: int = 0
+    reachable: bool = False
 
 
 class Sources:

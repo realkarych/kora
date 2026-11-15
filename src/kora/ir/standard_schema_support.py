@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from kora.ir.standard_schema_policy import (
     SchemaDomain,
     SchemaRefused,
@@ -8,6 +10,7 @@ from kora.ir.standard_schema_policy import (
 )
 from kora.ir.standard_schema_scan import SourceScan, preparation_score
 from kora.ir.standard_schema_source import Sources
+from kora.ir.standard_schema_values import Statistics
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
 COMPONENT: str = CATALOG.register_component("ir")
@@ -58,22 +61,29 @@ def check_graph(sources: Sources) -> None:
     )
 
 
-def source_checks(
-    source: object, domain: SchemaDomain, binding: object
-) -> SourceAccounting:
-    limits = bind_policy(domain, binding)
+def prepare_source(
+    source: object, limits: Mapping[str, int]
+) -> tuple[Statistics, Sources]:
     measured = SourceScan(limits).measure(source)
     score = preparation_score(measured, limits["max_validation_score"])
     require(score <= limits["max_validation_score"], capacity=True)
     sources = Sources(source, limits)
     check_graph(sources)
+    return measured, sources
+
+
+def source_checks(
+    source: object, domain: SchemaDomain, binding: object
+) -> SourceAccounting:
+    limits = bind_policy(domain, binding)
+    measured, sources = prepare_source(source, limits)
     return SourceAccounting(
-        measured.encoded,
-        measured.nodes,
+        measured.tree.encoded,
+        measured.tree.nodes,
         len(sources.sites),
         len(sources.references),
         len(sources.documents),
-        score,
+        preparation_score(measured, limits["max_validation_score"]),
     )
 
 

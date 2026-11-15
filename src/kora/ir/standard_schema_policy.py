@@ -115,3 +115,22 @@ class SourceDecision:
     outcome: Literal["source_checks_completed", "refused"]
     reason: Reason | Literal["none"] = "none"
     accounting: SourceAccounting = SourceAccounting()
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaAccounting:
+    value_nodes: int = 0
+    schema_nodes: int = 0
+    schema_positions: int = 0
+    reference_edges: int = 0
+    expanded_calls: int = 0
+    validation_score: int = 0
+    variable_bytes: int = 0
+    auxiliary_entries: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaDecision:
+    outcome: Literal["valid", "invalid", "refused"]
+    reason: Reason | Literal["none"] = "none"
+    accounting: SchemaAccounting = SchemaAccounting()
