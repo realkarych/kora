@@ -1,6 +1,6 @@
 # Standard schema validation
 
-Design under [#1577](https://github.com/realkarych/kora/issues/1577), [accepted by the project owner](https://github.com/realkarych/kora/pull/1578#issuecomment-6893087004) on 2026-11-15. This document defines the selected replacement of the custom metered evaluators under [#1361](https://github.com/realkarych/kora/issues/1361). It implements no validator, stored binding, deployment or consumer. [ADR-0027](../../docs/decisions/0027-bounded-effective-schema-validation.md) governs adoption. Existing policies and their implementation remain unchanged until the accepted replacement is implemented.
+Design under [#1577](https://github.com/realkarych/kora/issues/1577), [accepted by the project owner](https://github.com/realkarych/kora/pull/1578#issuecomment-6893087004) on 2026-11-15. This document defines the selected replacement of the custom metered evaluators under [#1361](https://github.com/realkarych/kora/issues/1361). The source-only operation under #1585 checks supplied schema sources; complete value evaluation, stored binding construction, deployment and consumers remain pending. [ADR-0027](../../docs/decisions/0027-bounded-effective-schema-validation.md) governs adoption. Existing policies and their implementation remain unchanged until the accepted replacement is implemented.
 
 ## 1. Scope and immutable identity
 
@@ -148,7 +148,19 @@ Executable publication under v2 verifies support, immutable behavior map and com
 
 ## 7. Verification and delivery
 
-The design PR has no production code, dependency or CI change. Implementation remains #1361: shared validator, effective StructuredOutput composition and distinct parameter composition, followed by removal of retired evaluators under the normal 1,000-line ceiling. The [planning record](https://github.com/realkarych/kora/issues/1577#issuecomment-6886921639) gives component estimates; exact implementation scope is reconciled against this design before edits.
+The accepted design remains the contract for #1361. The source-only implementation #1585 precedes the complete native value decision #1582, effective StructuredOutput composition and distinct parameter composition, followed by removal of retired evaluators under the normal 1,000-line ceiling. The [planning record](https://github.com/realkarych/kora/issues/1577#issuecomment-6886921639) gives component estimates; exact implementation scope is reconciled against this design before edits.
+
+### Source-only implementation (#1585)
+
+`kora.ir.standard_schema_support.check_standard_schema_source` checks the complete supplied native source under an exact domain binding. The private input has ordered `documents`, `constraints`, `metadata` members. Each document has ordered `name` (an optional saved artifact name) and `schema` members. Nonempty `constraints` selects document indexes in required order, retaining repetitions. Every supplied document is checked; reference-only documents are not extra assertions. Complete wrappers, names and metadata count toward source limits; each original schema and metadata tree retains its own root-depth origin. This internal shape is not a stored format.
+
+The operation returns only `source_checks_completed` or a fixed `unsupported_policy`, `unsupported_schema` or `evaluation_exhausted` refusal, plus scalar accounting. A false Boolean schema can pass source checking. Success supplies no value decision, source provenance, behavior availability, prepared holder, publication permission or retained-resource settlement evidence. The composition owner still establishes complete role/source selection and immutable behavior. Exact binding admission does not repair the metadata or select a current policy for the caller.
+
+Source admission checks native types, complete bounds, keyword arguments, both original reference keywords, all-position cycles and root-inclusive potential depth from actual constraint roots. The accepted preparation contribution is admitted before indexed source work. Symbolic applicator categories preserve future value weights. No dummy value or zero A/M produces a purported whole-operation certificate. #1582 must reuse the internal source algorithm during its own lifetime and separately admit every E/W/Q, representation and simultaneous allocation before numerical views or library execution. There is no external preparation token or required double preparation.
+
+The [implementation ownership record](../research/standard-schema-source-2026-11-15.md) maps actual source structures and scoped tests. Ordinary completion disposes of them before its caller-bound DEBUG event; unexpected exceptions remain with the caller's safe-failure boundary. Source checking does not activate a v2 writer, value validator or behavior composition.
+
+### Complete value and integration cases
 
 Named blocking implementation cases:
 
