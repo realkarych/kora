@@ -1,6 +1,6 @@
 # Reading one saved graph version
 
-Design delivery: [#1634](https://github.com/realkarych/kora/issues/1634). Status: proposed contract, pending final owner acceptance; no route or client is activated. Implementation requires a separately approved plan and the prerequisites in section 8. This proposal makes the single-version operation in [the API specification](api-and-agent-surface.md#2-resources-and-operations) precise. It does not implement graph lists, latest-version lookup, starts, execution, attempt reads or a console view.
+Design delivery: [#1634](https://github.com/realkarych/kora/issues/1634). Status: [accepted by the project owner on 2026-11-15](https://github.com/realkarych/kora/pull/1639#issuecomment-6900690600); no route or client is activated. Implementation requires a separately approved plan and the prerequisites in section 8. This design makes the single-version operation in [the API specification](api-and-agent-surface.md#2-resources-and-operations) precise. It does not implement graph lists, latest-version lookup, starts, execution, attempt reads or a console view.
 
 The governing decisions are [ADR-0002](../../docs/decisions/0002-ai-first-api-and-thin-clients.md), [ADR-0011](../../docs/decisions/0011-namespaces-and-personal-tokens.md) and [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md). Saved values and their identity follow [data-model section 11.1](data-model.md#111-graph-version-contract). General authentication, request correlation, methods and error envelopes follow [API conventions](api-and-agent-surface.md#1-conventions). The [source and delivery inventory](../research/graph-version-read-2026-11-15.md) records implementation gaps, not executable evidence.
 
@@ -81,7 +81,7 @@ Copy admitted source text and fixed metadata out, end the snapshot and settle ba
 
 ## 5. Finite resources and lifetime
 
-These are proposed operation-specific product and deterministic accounting limits, not inherited graph-deploy limits or the separate [bounded-read projections](bounded-read-projections.md) defaults. MiB is 1,048,576 bytes. The limits do not assert a process RSS or wall-clock performance guarantee.
+These are accepted operation-specific product and deterministic accounting limits, not inherited graph-deploy limits or the separate [bounded-read projections](bounded-read-projections.md) defaults. MiB is 1,048,576 bytes. The limits do not assert a process RSS or wall-clock performance guarantee.
 
 | Resource | Bound and admission point |
 |---|---|
@@ -140,6 +140,6 @@ Latency, throughput and process RSS are diagnostics. Deterministic owned limits,
 
 ## 8. Delivery and activation
 
-Issue #1634 delivers this design and its source inventory only. The final owner decision must explicitly accept the tagged-document public format, legacy integrity distinction, explicit version selector, operation limits and text-only MCP result. No persisted format, dependency, supported platform or existing migration exception changes here.
+Issue #1634 delivers this design and its source inventory only. The owner accepted the tagged-document public format, legacy integrity distinction, explicit version selector, operation limits and text-only MCP result on 2026-11-15, including terminal cleanup after partial MCP output. No persisted format, dependency, supported platform or existing migration exception changes here.
 
 Runtime activation depends on qualified native historical acquisition on both databases, the shared PostgreSQL migration lease and end-to-end API/client/CLI/MCP ownership. Existing internal readers prove neither the complete history domain nor these new resource bounds. A future plan must name the implementing issues and record the actual production-line estimate before editing. It must include all native acquisition, codec/projection, lifecycle, client and transport glue, and preserve the 1,000-line limit for each independently useful deliverable. The [delivery inventory](../research/graph-version-read-2026-11-15.md#implementation-deliveries) identifies a reusable migration-coordination result and the unresolved size of the complete public operation. Do not start a knowingly oversized implementation or split route/client/parity into artificial intermediate deliveries. If the complete operation still exceeds the limit, return a bounded alternative or indivisibility request to the owner first.

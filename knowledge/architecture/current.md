@@ -28,7 +28,7 @@ The [custody authority design](../specs/execution-custody-authority.md), accepte
 
 The [attempt-inspection design](../specs/attempt-inspection.md) under #1570 specifies the proposed run-wide collection and its exact recovery selector. Personal attempt detail/history and complete source producers are prerequisites; no inspection route, CLI command or MCP mode is active.
 
-The proposed [single graph-version read](../specs/graph-version-read.md) under #1634 specifies authorized history independently of current execution eligibility, exact document transport, bounded native acquisition and API/client/CLI/MCP ownership. Native legacy acquisition and PostgreSQL migration coordination still need implementation and qualification; no graph-history GET, CLI command or MCP selector is active.
+The accepted [single graph-version read](../specs/graph-version-read.md) under #1634 specifies authorized history independently of current execution eligibility, exact document transport, bounded native acquisition and API/client/CLI/MCP ownership. Native legacy acquisition and PostgreSQL migration coordination still need implementation and qualification; no graph-history GET, CLI command or MCP selector is active.
 
 This page uses three statuses:
 
