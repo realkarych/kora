@@ -1739,6 +1739,8 @@ Before provider adoption, qualify real 64-slot admission, refusal of the next st
 
 ## 8. Artifact type (FR-4.1–4.3)
 
+The proposed [standard-schema replacement](schema-validation.md) under #1577 retains this ABI and specifies the shared exact decision, safe result boundary and explicit trusted behavior-identity map. Its two error-aggregation handlers and numerical view belong to the pure core, not provider code or persisted executable data. A loaded provider alone does not prove its saved behavior identity. Old reserved v1 semantics below remain historical; the new v2 binding requires its complete implementation and owner acceptance before use. Actual output acceptance, projection and provenance are separate consumers.
+
 ```python
 @dataclass(frozen=True)
 class BuiltinArtifactTypeBinding:
