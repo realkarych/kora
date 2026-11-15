@@ -8,6 +8,11 @@ from kora.db.graph_value_json import (
     TextBudget,
     render_object,
 )
+from kora.engine.graph_output_policy import (
+    GraphOutputRefusal,
+    OutputPublicationBinding,
+    read_output_policy,
+)
 from kora.engine.graph_output_sources import (
     GraphOutputSource,
     graph_output_source,
@@ -22,13 +27,14 @@ from kora.engine.graph_output_values import (
     general_closure,
     saved_array,
 )
-from kora.engine.graph_schema_preparation import prepare_graph_schema
+from kora.engine.graph_schema_preparation import (
+    prepare_graph_schema,
+    prepare_installed_graph_schema,
+)
 from kora.engine.graph_type_references import array_text, root_reference_text
 from kora.engine.graph_types import read_document, read_graph_type_contracts
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.output_schemas import validate_output_schemas
-from kora.ir.structured_schema_evaluation_policy import PARAMETERS, POLICY
-from kora.ir.structured_schema_input import StructuredSchemaPreparationRefusal
 
 
 def declared_chain(name: str, records: dict[str, JsonObject]) -> list[str]:
@@ -69,7 +75,10 @@ def constraint_text(chain: list[str], inline: bool, budget: TextBudget) -> str:
 
 
 def effective_text(
-    source: GraphOutputSource, records: list[JsonObject], budget: TextBudget
+    source: GraphOutputSource,
+    records: list[JsonObject],
+    budget: TextBudget,
+    schema_validation: JsonObject,
 ) -> str:
     by_name = {cast(str, record["name"]): record for record in records}
     chain = declared_chain(source.declared_type, by_name)
@@ -121,7 +130,7 @@ def effective_text(
     budget.reserve(len(',"constraints":'))
     constraints = constraint_text(chain, source.inline is not None, budget)
     budget.reserve(len(',"schema_validation":'))
-    policy = render_object({"policy": POLICY, "parameters": dict(PARAMETERS)}, budget)
+    policy = render_object(schema_validation, budget)
     return (
         header[:-1]
         + ',"type_contracts":'
@@ -138,7 +147,9 @@ def effective_text(
     )
 
 
-def derive_output(inputs: OutputInputs) -> tuple[str, list[JsonObject]]:
+def derive_output(
+    inputs: OutputInputs, policy: JsonObject
+) -> tuple[str, list[JsonObject]]:
     document = read_document(inputs.ir_text, TextBudget(len(inputs.ir_text)))
     records = cast(list[JsonObject], saved_array(inputs.types_text))
     read_graph_type_contracts(
@@ -154,12 +165,18 @@ def derive_output(inputs: OutputInputs) -> tuple[str, list[JsonObject]]:
         for record in records
     }
     source = graph_output_source(ObjectReader(inputs.ir_text).object(), selected, roots)
-    return effective_text(source, records, TextBudget(inputs.remaining)), records
+    return effective_text(
+        source, records, TextBudget(inputs.remaining), policy
+    ), records
 
 
 def prepared_output(
-    ir_text: str, records: list[JsonObject], text: str, max_encoded_bytes: int
-) -> GraphOutputContract | StructuredSchemaPreparationRefusal:
+    ir_text: str,
+    records: list[JsonObject],
+    text: str,
+    max_encoded_bytes: int,
+    binding: OutputPublicationBinding | None = None,
+) -> GraphOutputContract | GraphOutputRefusal:
     saved = ObjectReader(text).object()
     inline = saved["inline_schema"]
     candidate: JsonObject = {
@@ -174,22 +191,35 @@ def prepared_output(
         "checker_binding": saved["checker_binding"],
         "schema_validation": saved["schema_validation"],
     }
-    prepared = prepare_graph_schema(
-        ir_text, records, candidate, max_encoded_bytes=max_encoded_bytes
+    prepared = (
+        prepare_graph_schema(
+            ir_text, records, candidate, max_encoded_bytes=max_encoded_bytes
+        )
+        if binding is None
+        else prepare_installed_graph_schema(
+            ir_text, records, candidate, binding, max_encoded_bytes=max_encoded_bytes
+        )
     )
-    if isinstance(prepared, StructuredSchemaPreparationRefusal):
+    if isinstance(prepared, GraphOutputRefusal):
         return prepared
     return GraphOutputContract(text, hashlib.sha256(text.encode("ascii")).hexdigest())
 
 
 def build_graph_output_contract(
-    ir_text: str, type_contracts: object, path: object, *, max_encoded_bytes: int
-) -> GraphOutputContract | StructuredSchemaPreparationRefusal:
+    ir_text: str,
+    type_contracts: object,
+    path: object,
+    *,
+    binding: OutputPublicationBinding,
+    max_encoded_bytes: int,
+) -> GraphOutputContract | GraphOutputRefusal:
+    if type(binding) is not OutputPublicationBinding:
+        raise GraphValueRejected(GraphValueFailure.VERSION)
     inputs = admit_output_inputs(
         ir_text, type_contracts, path, TextBudget(max_encoded_bytes)
     )
-    text, records = derive_output(inputs)
-    return prepared_output(ir_text, records, text, max_encoded_bytes)
+    text, records = derive_output(inputs, binding.policy())
+    return prepared_output(ir_text, records, text, max_encoded_bytes, binding)
 
 
 def read_graph_output_contract(
@@ -200,7 +230,7 @@ def read_graph_output_contract(
     digest: str,
     *,
     max_encoded_bytes: int,
-) -> GraphOutputContract | StructuredSchemaPreparationRefusal:
+) -> GraphOutputContract | GraphOutputRefusal:
     budget = TextBudget(max_encoded_bytes)
     inputs = admit_output_inputs(ir_text, type_contracts, path, budget)
     text = render_object(value, budget)
@@ -212,7 +242,8 @@ def read_graph_output_contract(
         raise GraphValueRejected(GraphValueFailure.INVALID)
     if hashlib.sha256(text.encode("ascii")).hexdigest() != digest:
         raise GraphValueRejected(GraphValueFailure.INVALID)
-    expected, records = derive_output(inputs)
+    policy = read_output_policy(ObjectReader(text).object().get("schema_validation"))
+    expected, records = derive_output(inputs, policy)
     if text != expected:
         raise GraphValueRejected(GraphValueFailure.INVALID)
     return prepared_output(ir_text, records, text, max_encoded_bytes)

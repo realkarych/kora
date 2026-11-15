@@ -86,6 +86,7 @@ from tests.engine.test_graph_execution_contract import LIMITS as READ_LIMITS
 from tests.engine.test_graph_execution_contract import complete_inputs
 from tests.engine.test_graph_output_inventory import observe_calls
 from tests.engine.test_graph_resource_references import SCOPE, assert_refused, content
+from tests.support.output_bindings import publication_binding
 
 MARKER = "private-preparation-837"
 OWNER_MARKER = "second-object"
@@ -109,8 +110,8 @@ DEPLOYMENT_LIMITS = GraphDeploymentPreparationLimits(
 )
 TIGHT_PROJECTION = replace(READ_LIMITS.projection, section_bytes=650)
 DIMENSIONS: tuple[tuple[Literal["max_retained_bytes", "max_work"], int], ...] = (
-    ("max_retained_bytes", 156_349_497),
-    ("max_work", 346_560_682_373_459),
+    ("max_retained_bytes", 156_461_529),
+    ("max_work", 358_548_790_373_459),
 )
 
 
@@ -226,7 +227,12 @@ def check_roundtrip() -> None:
             loop,
             loop.create_task(
                 prepare_execution_contract(
-                    ir_text, SCOPE, owners, evaluator, limits=LIMITS
+                    ir_text,
+                    SCOPE,
+                    owners,
+                    evaluator,
+                    limits=LIMITS,
+                    binding=publication_binding(),
                 )
             ),
             evaluator.owner,
@@ -271,10 +277,10 @@ def check_roundtrip() -> None:
         "6534672a556ec7f25abb64cd89236ff67ee710636144de4055f2f1e90fe1c44f"
     )
     assert draft.digests.execution_contract_digest == (
-        "4a82670802109990959313ee8149e69f5eca4c2e5814fa6132dac91ed6a51801"
+        "f8f17d8b7198a909087f1bcf15aa8d5fa210810e4fd0c72a67678b8e5d9cc3eb"
     )
     assert draft.digests.deployment_digest == (
-        "55b8235631ae365a9d40e63aa2f45bb0a5ea839a261e7e1d4dc4cd0c8ea635b9"
+        "137bec52603b2d8364dbf52f0cb5af10bf6c52bd5c2b02a5010d177a7d990d19"
     )
     assert '"x-signed-zero":-0.0' in draft.canonical_ir
     assert draft.digests.ir_digest == digest(ir_text)
@@ -314,14 +320,28 @@ def check_logical_roundtrip() -> None:
 
     with borrowed() as (runner, evaluator):
         logical = runner.run(
-            prepare_logical_execution_contract(ir_text, evaluator, limits=LIMITS)
+            prepare_logical_execution_contract(
+                ir_text, evaluator, limits=LIMITS, binding=publication_binding()
+            )
         )
         original = runner.run(
-            prepare_execution_contract(ir_text, SCOPE, owners, evaluator, limits=LIMITS)
+            prepare_execution_contract(
+                ir_text,
+                SCOPE,
+                owners,
+                evaluator,
+                limits=LIMITS,
+                binding=publication_binding(),
+            )
         )
         alternative = runner.run(
             prepare_execution_contract(
-                ir_text, SCOPE, other_owners, evaluator, limits=LIMITS
+                ir_text,
+                SCOPE,
+                other_owners,
+                evaluator,
+                limits=LIMITS,
+                binding=publication_binding(),
             )
         )
         assert_idle(evaluator.owner, 1)
@@ -401,7 +421,14 @@ def reject_before_native(
 ) -> None:
     loop = runner.get_loop()
     task = loop.create_task(
-        prepare_execution_contract(ir_text, SCOPE, owners, evaluator, limits=limits)
+        prepare_execution_contract(
+            ir_text,
+            SCOPE,
+            owners,
+            evaluator,
+            limits=limits,
+            binding=publication_binding(),
+        )
     )
 
     run_loop_turn(loop)
@@ -446,7 +473,12 @@ def check_capacity() -> None:
             short = replace(exact, **{dimension: units - 1})
             exact_result = runner.run(
                 prepare_execution_contract(
-                    ir_text, SCOPE, owners, evaluator, limits=exact
+                    ir_text,
+                    SCOPE,
+                    owners,
+                    evaluator,
+                    limits=exact,
+                    binding=publication_binding(),
                 )
             )
             assert isinstance(exact_result, PreparedExecutionContract)
@@ -517,25 +549,45 @@ def check_refusals() -> None:
     with borrowed() as (runner, evaluator):
         native = runner.run(
             prepare_execution_contract(
-                invalid_ir, SCOPE, owners, evaluator, limits=LIMITS
+                invalid_ir,
+                SCOPE,
+                owners,
+                evaluator,
+                limits=LIMITS,
+                binding=publication_binding(),
             )
         )
         incomplete = runner.run(
             prepare_execution_contract(
-                valid_ir, SCOPE, owners, evaluator, limits=limited
+                valid_ir,
+                SCOPE,
+                owners,
+                evaluator,
+                limits=limited,
+                binding=publication_binding(),
             )
         )
         with pytest.raises(GraphValueRejected) as assembled:
             runner.run(
                 prepare_execution_contract(
-                    valid_ir, SCOPE, owners, evaluator, limits=reader_limited
+                    valid_ir,
+                    SCOPE,
+                    owners,
+                    evaluator,
+                    limits=reader_limited,
+                    binding=publication_binding(),
                 )
             )
         runner.run(evaluator.close())
         unavailable = runner.run(
             closed_under_context(
                 prepare_execution_contract(
-                    valid_ir, SCOPE, owners, evaluator, limits=LIMITS
+                    valid_ir,
+                    SCOPE,
+                    owners,
+                    evaluator,
+                    limits=LIMITS,
+                    binding=publication_binding(),
                 )
             )
         )
@@ -586,11 +638,16 @@ def check_released_paths_on_manifest_refusal(*, logical: bool = False) -> None:
         try:
             if logical:
                 operation = prepare_logical_execution_contract(
-                    ir_text, evaluator, limits=limits
+                    ir_text, evaluator, limits=limits, binding=publication_binding()
                 )
             else:
                 operation = prepare_execution_contract(
-                    ir_text, SCOPE, owners, evaluator, limits=limits
+                    ir_text,
+                    SCOPE,
+                    owners,
+                    evaluator,
+                    limits=limits,
+                    binding=publication_binding(),
                 )
             with pytest.raises(GraphValueRejected) as refused:
                 runner.run(operation)
@@ -632,10 +689,14 @@ def check_logical_refusals() -> None:
             exact = replace(LIMITS, **{dimension: units})
             short = replace(exact, **{dimension: units - 1})
             result = runner.run(
-                prepare_logical_execution_contract(ir_text, evaluator, limits=exact)
+                prepare_logical_execution_contract(
+                    ir_text, evaluator, limits=exact, binding=publication_binding()
+                )
             )
             task = loop.create_task(
-                prepare_logical_execution_contract(ir_text, evaluator, limits=short)
+                prepare_logical_execution_contract(
+                    ir_text, evaluator, limits=short, binding=publication_binding()
+                )
             )
             run_loop_turn(loop)
             assert task.done()
@@ -646,18 +707,26 @@ def check_logical_refusals() -> None:
             assert_protected(early.value, boundary)
             assert_idle(evaluator.owner, 1)
         invalid = runner.run(
-            prepare_logical_execution_contract(invalid_ir, evaluator, limits=LIMITS)
+            prepare_logical_execution_contract(
+                invalid_ir, evaluator, limits=LIMITS, binding=publication_binding()
+            )
         )
         incomplete = runner.run(
             prepare_logical_execution_contract(
-                ir_text, evaluator, limits=replace(LIMITS, rendering_characters=1)
+                ir_text,
+                evaluator,
+                limits=replace(LIMITS, rendering_characters=1),
+                binding=publication_binding(),
             )
         )
         for reader in readers:
             with pytest.raises(GraphValueRejected) as late:
                 runner.run(
                     prepare_logical_execution_contract(
-                        ir_text, evaluator, limits=replace(LIMITS, reader=reader)
+                        ir_text,
+                        evaluator,
+                        limits=replace(LIMITS, reader=reader),
+                        binding=publication_binding(),
                     )
                 )
             assert_refused(late.value, GraphValueFailure.BUDGET)
@@ -666,7 +735,9 @@ def check_logical_refusals() -> None:
         runner.run(evaluator.close())
         unavailable = runner.run(
             closed_under_context(
-                prepare_logical_execution_contract(ir_text, evaluator, limits=LIMITS)
+                prepare_logical_execution_contract(
+                    ir_text, evaluator, limits=LIMITS, binding=publication_binding()
+                )
             )
         )
 
@@ -691,10 +762,17 @@ def check_cancellation(*, logical: bool = False) -> None:
         owner = evaluator.owner
         for prior_deliveries in (0, 1):
             task = loop.create_task(
-                prepare_logical_execution_contract(ir_text, evaluator, limits=LIMITS)
+                prepare_logical_execution_contract(
+                    ir_text, evaluator, limits=LIMITS, binding=publication_binding()
+                )
                 if logical
                 else prepare_execution_contract(
-                    ir_text, SCOPE, owners, evaluator, limits=LIMITS
+                    ir_text,
+                    SCOPE,
+                    owners,
+                    evaluator,
+                    limits=LIMITS,
+                    binding=publication_binding(),
                 ),
             )
             for _ in range(prior_deliveries):
@@ -711,10 +789,17 @@ def check_cancellation(*, logical: bool = False) -> None:
             assert_protected(cancelled.value, boundary)
             assert_idle(owner, 1)
         reused = runner.run(
-            prepare_logical_execution_contract(ir_text, evaluator, limits=LIMITS)
+            prepare_logical_execution_contract(
+                ir_text, evaluator, limits=LIMITS, binding=publication_binding()
+            )
             if logical
             else prepare_execution_contract(
-                ir_text, SCOPE, owners, evaluator, limits=LIMITS
+                ir_text,
+                SCOPE,
+                owners,
+                evaluator,
+                limits=LIMITS,
+                binding=publication_binding(),
             )
         )
 
@@ -790,7 +875,9 @@ def check_deployment_roundtrip() -> None:
 
     with borrowed() as (runner, evaluator):
         expected = runner.run(
-            prepare_logical_execution_contract(ir_text, evaluator, limits=LIMITS)
+            prepare_logical_execution_contract(
+                ir_text, evaluator, limits=LIMITS, binding=publication_binding()
+            )
         )
         variants = [
             runner.run(
@@ -801,6 +888,7 @@ def check_deployment_roundtrip() -> None:
                     selectors=DEPLOYMENT_SELECTORS,
                     storage_identity=storage,
                     limits=DEPLOYMENT_LIMITS,
+                    binding=publication_binding(),
                 )
             )
             for text, contents, storage in (
@@ -904,6 +992,7 @@ def check_deployment_refusals() -> None:
                     selectors=DEPLOYMENT_SELECTORS,
                     storage_identity=storage,
                     limits=limits,
+                    binding=publication_binding(),
                 )
             )
             run_loop_turn(loop)
@@ -921,6 +1010,7 @@ def check_deployment_refusals() -> None:
                 selectors=DEPLOYMENT_SELECTORS,
                 storage_identity=DEPLOYMENT_STORE,
                 limits=DEPLOYMENT_LIMITS,
+                binding=publication_binding(),
             )
         )
         incomplete = runner.run(
@@ -933,6 +1023,7 @@ def check_deployment_refusals() -> None:
                 limits=replace(
                     DEPLOYMENT_LIMITS, execution=replace(LIMITS, rendering_characters=1)
                 ),
+                binding=publication_binding(),
             )
         )
         runner.run(evaluator.close())
@@ -945,6 +1036,7 @@ def check_deployment_refusals() -> None:
                     selectors=DEPLOYMENT_SELECTORS,
                     storage_identity=DEPLOYMENT_STORE,
                     limits=DEPLOYMENT_LIMITS,
+                    binding=publication_binding(),
                 )
             )
         )
@@ -1019,6 +1111,7 @@ def check_deployment_selector_refusals() -> None:
                         selectors=selectors,
                         storage_identity=DEPLOYMENT_STORE,
                         limits=DEPLOYMENT_LIMITS,
+                        binding=publication_binding(),
                     )
                 )
 
@@ -1035,6 +1128,7 @@ def check_deployment_selector_refusals() -> None:
                     selectors=DEPLOYMENT_SELECTORS,
                     storage_identity=DEPLOYMENT_STORE,
                     limits=DEPLOYMENT_LIMITS,
+                    binding=publication_binding(),
                 )
             )
 
@@ -1074,6 +1168,7 @@ def check_deployment_cancellation() -> None:
                     selectors=DEPLOYMENT_SELECTORS,
                     storage_identity=DEPLOYMENT_STORE,
                     limits=DEPLOYMENT_LIMITS,
+                    binding=publication_binding(),
                 )
             )
             for _ in range(prior_deliveries):
@@ -1099,6 +1194,7 @@ def check_deployment_cancellation() -> None:
                 selectors=DEPLOYMENT_SELECTORS,
                 storage_identity=DEPLOYMENT_STORE,
                 limits=DEPLOYMENT_LIMITS,
+                binding=publication_binding(),
             )
         )
 

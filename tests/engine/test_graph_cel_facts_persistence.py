@@ -30,6 +30,7 @@ from kora.ir.document import GraphDocument
 from kora.ir.graph_cel_inventory import checked_graph_sites
 from kora.ir.json import JsonObject
 from kora.ir.structured_schema_input import StructuredSchemaPreparationRefusal
+from kora.protocols.effective_artifact_type import EffectiveRefusal
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
 from tests.engine.graph_inventory_cases import (
@@ -42,6 +43,7 @@ from tests.engine.graph_output_cases import (
     output_document,
     output_preparation_capacity_document,
 )
+from tests.engine.saved_output_history import historical_outputs
 
 READ_LIMITS: GraphCelReadLimits = GraphCelReadLimits(
     ir_bytes=LIMIT,
@@ -255,11 +257,21 @@ def test_saved_cel_reader_refuses_drift_and_comparison_capacity() -> None:
     assert expected_alone.text == facts
 
 
-def test_saved_cel_reader_preserves_output_context_exhaustion() -> None:
+@pytest.mark.parametrize("historical", [False, True])
+def test_saved_cel_reader_preserves_output_context_exhaustion(historical: bool) -> None:
     raw = output_preparation_capacity_document()
     ir_text, types = inventory_arguments(raw)
     _, _, contract, _ = expression_version()
     contract["type_contracts"] = types
+    outputs = cast(
+        list[JsonObject],
+        saved_array(complete_inventory(inventory_arguments(output_document()))),
+    )
+    if historical:
+        old = historical_outputs().leaves[0]
+        outputs[1]["contract"] = ObjectReader(old.contract).object()
+        outputs[1]["contract_digest"] = old.digest
+    contract["outputs"] = list(outputs)
 
     output_refusal = read_graph_output_inventory(
         ir_text, types, contract["outputs"], max_encoded_bytes=LIMIT
@@ -267,8 +279,12 @@ def test_saved_cel_reader_preserves_output_context_exhaustion() -> None:
     with pytest.raises(GraphValueRejected) as refused:
         read_graph_cel_facts(ir_text, contract, limits=READ_LIMITS)
 
-    assert isinstance(output_refusal, StructuredSchemaPreparationRefusal)
-    assert output_refusal.reason == "preparation_exhausted"
+    if historical:
+        assert output_refusal == StructuredSchemaPreparationRefusal(
+            "preparation_exhausted"
+        )
+    else:
+        assert output_refusal == EffectiveRefusal("evaluation_exhausted")
     assert refused.value.reason is GraphValueFailure.BUDGET
 
 

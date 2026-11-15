@@ -2,8 +2,8 @@ import pytest
 
 from kora.db.graph_value_json import GraphValueRejected
 from kora.engine.graph_outputs import GraphOutputContract, build_graph_output_contract
-from kora.ir.structured_schema_input import StructuredSchemaPreparationRefusal
 from kora.observability import Level, LoggingSettings
+from kora.protocols.effective_artifact_type import EffectiveRefusal
 from tests.engine.graph_output_cases import (
     LIMIT,
     child,
@@ -16,6 +16,7 @@ from tests.observability.conftest import (
     configured_with_reader,
     finished_output,
 )
+from tests.support.output_bindings import publication_binding
 
 
 @pytest.mark.parametrize("mode", ["saved", "refused", "invalid"])
@@ -38,15 +39,17 @@ def test_graph_output_diagnostics_exclude_retained_content(
 
     if mode == "invalid":
         with pytest.raises(GraphValueRejected) as failure:
-            build_graph_output_contract(*arguments, max_encoded_bytes=LIMIT)
+            build_graph_output_contract(
+                *arguments, max_encoded_bytes=LIMIT, binding=publication_binding()
+            )
         assert str(failure.value) == "invalid graph value representation"
     else:
-        result = build_graph_output_contract(*arguments, max_encoded_bytes=LIMIT)
+        result = build_graph_output_contract(
+            *arguments, max_encoded_bytes=LIMIT, binding=publication_binding()
+        )
         assert isinstance(
             result,
-            GraphOutputContract
-            if mode == "saved"
-            else StructuredSchemaPreparationRefusal,
+            GraphOutputContract if mode == "saved" else EffectiveRefusal,
         )
     output = finished_output(diagnostics, pipe)
 

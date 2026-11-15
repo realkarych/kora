@@ -21,6 +21,7 @@ from tests.api.deployment_cases import (
 from tests.cel_eval.pattern_validation_scenarios import assert_settled
 from tests.db.closing import until
 from tests.plugins.authentication.support import AuthorityClock
+from tests.support.output_bindings import publication_binding
 
 __all__ = ["evaluator"]
 
@@ -50,7 +51,9 @@ async def test_preparer_prepares_off_the_caller_loop_and_releases_its_thread(
     owner = EvaluationThread(load_binding())
     expected = await prepared(evaluator)
 
-    async with DeploymentPreparer(AuthorityClock(), owner) as preparer:
+    async with DeploymentPreparer(
+        AuthorityClock(), owner, binding=publication_binding()
+    ) as preparer:
         running = preparation_threads()
         outcome = await preparer.prepare(
             skeleton_ir(), SELECTORS, SELECTION, DEFAULT_POLICY
@@ -70,7 +73,9 @@ async def test_preparer_prepares_off_the_caller_loop_and_releases_its_thread(
 async def test_preparer_keeps_its_slot_until_cancelled_work_ends() -> None:
     owner = EvaluationThread(load_binding())
 
-    async with DeploymentPreparer(AuthorityClock(), owner) as preparer:
+    async with DeploymentPreparer(
+        AuthorityClock(), owner, binding=publication_binding()
+    ) as preparer:
         cancelled = asyncio.create_task(
             preparer.prepare(heavy_ir(), SELECTORS, SELECTION, DEFAULT_POLICY)
         )
@@ -101,7 +106,9 @@ async def test_preparer_stops_its_thread_when_opening_fails() -> None:
     occupying = Evaluator(evaluation_clock, owner)
 
     with pytest.raises(EvaluatorUnavailable):
-        async with DeploymentPreparer(AuthorityClock(), owner):
+        async with DeploymentPreparer(
+            AuthorityClock(), owner, binding=publication_binding()
+        ):
             pass
 
     await occupying.close()
@@ -118,7 +125,9 @@ async def test_reservation_keeps_its_slot_until_cancelled_work_ends() -> None:
         await asyncio.to_thread(gate.wait)
         return "settled"
 
-    async with DeploymentPreparer(AuthorityClock(), owner) as preparer:
+    async with DeploymentPreparer(
+        AuthorityClock(), owner, binding=publication_binding()
+    ) as preparer:
 
         async def caller() -> str:
             async with preparer.reserve() as reservation:

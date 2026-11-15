@@ -51,6 +51,7 @@ from tests.api.test_graph_execution_preparation import (
 from tests.engine.graph_output_cases import child
 from tests.engine.test_graph_command_manifests import ZERO, authored_manifest, resource
 from tests.engine.test_graph_resource_references import SCOPE, assert_refused, content
+from tests.support.output_bindings import publication_binding
 
 ROOT_PATH = ("graph", "nodes", "producer")
 SECOND_PATH = ("graph", "nodes", "second")
@@ -119,6 +120,7 @@ def prepare_inputs(
                 selectors=DEPLOYMENT_SELECTORS,
                 storage_identity=DEPLOYMENT_STORE if files else None,
                 limits=DEPLOYMENT_LIMITS,
+                binding=publication_binding(),
             )
         )
     assert isinstance(prepared, PreparedGraphDeploymentInputs)
@@ -184,10 +186,18 @@ def nonempty_preparation() -> tuple[
                 selectors=DEPLOYMENT_SELECTORS,
                 storage_identity=DEPLOYMENT_STORE,
                 limits=DEPLOYMENT_LIMITS,
+                binding=publication_binding(),
             )
         )
         legacy = runner.run(
-            prepare_execution_contract(ir_text, scope, owners, evaluator, limits=LIMITS)
+            prepare_execution_contract(
+                ir_text,
+                scope,
+                owners,
+                evaluator,
+                limits=LIMITS,
+                binding=publication_binding(),
+            )
         )
     assert isinstance(prepared, PreparedGraphDeploymentInputs)
     assert isinstance(legacy, PreparedExecutionContract)

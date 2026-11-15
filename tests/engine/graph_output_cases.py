@@ -6,6 +6,7 @@ from kora.engine.graph_type_references import array_text
 from kora.engine.graph_types import build_graph_type_contracts
 from kora.ir.json import JsonObject, JsonValue
 from tests.engine.graph_schema_cases import declaration
+from tests.support.output_bindings import publication_binding
 
 LIMIT = 1_000_000
 
@@ -109,7 +110,9 @@ def output_arguments(
 def built(
     arguments: tuple[str, list[JsonValue], list[str]], limit: int = LIMIT
 ) -> GraphOutputContract:
-    result = build_graph_output_contract(*arguments, max_encoded_bytes=limit)
+    result = build_graph_output_contract(
+        *arguments, max_encoded_bytes=limit, binding=publication_binding()
+    )
     assert isinstance(result, GraphOutputContract)
     return result
 

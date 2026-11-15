@@ -8,19 +8,30 @@ from kora.db.graph_value_json import (
     TextBudget,
     render_object,
 )
+from kora.engine.graph_output_policy import GraphOutputRefusal, OutputPublicationBinding
 from kora.engine.graph_type_references import array_text
 from kora.engine.graph_types import invalid_schema, read_graph_type_contracts
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.schema_keywords import KeywordValidation
 from kora.ir.schema_locations import Location, SavedReferences, schema_sites
 from kora.ir.schema_validation import validate_schema
+from kora.ir.standard_output_preparation import (
+    PreparedStandardOutput,
+    StandardOutputInput,
+    prepare_standard_output,
+)
+from kora.ir.standard_schema_policy import SchemaDomain, SchemaRefused
 from kora.ir.structured_schema_evaluation_policy import bind_evaluation_policy
 from kora.ir.structured_schema_input import (
     PreparedStructuredSchemaInput,
     StructuredSchemaPreparationInput,
-    StructuredSchemaPreparationRefusal,
 )
 from kora.ir.structured_schema_preparation import prepare_structured_schema_input
+from kora.protocols.effective_artifact_type import (
+    EffectiveArtifactType,
+    EffectiveRefusal,
+    prepare_effective_artifact_type,
+)
 
 CANDIDATE_FIELDS: frozenset[str] = frozenset(
     {
@@ -120,13 +131,13 @@ def select_records(
     ]
 
 
-def prepare_graph_schema(
+def checked_graph_schema_input(
     ir_text: str,
     type_contracts: object,
     candidate: object,
     *,
     max_encoded_bytes: int,
-) -> PreparedStructuredSchemaInput | StructuredSchemaPreparationRefusal:
+) -> StandardOutputInput:
     types_text, candidate_text = admit_inputs(
         ir_text, type_contracts, candidate, max_encoded_bytes
     )
@@ -137,7 +148,6 @@ def prepare_graph_schema(
     read_graph_type_contracts(
         ir_text, saved, max_encoded_bytes=len(ir_text) + len(types_text)
     )
-    policy = bind_evaluation_policy(owned["schema_validation"])
     records = cast(list[JsonObject], saved)
     roots = {
         cast(str, record["name"]): cast(JsonObject, record["schema"])
@@ -145,13 +155,63 @@ def prepare_graph_schema(
     }
     inline = checked_inline(owned["inline_schema"], roots)
     selected = select_records(records, owned["declared_type"], inline)
+    return StandardOutputInput(
+        declared_type=owned["declared_type"],
+        type_contracts=selected,
+        inline_schema=owned["inline_schema"],
+        execution_semantics=owned["execution_semantics"],
+        checker_binding=owned["checker_binding"],
+        schema_validation=owned["schema_validation"],
+    )
+
+
+def prepare_graph_schema(
+    ir_text: str,
+    type_contracts: object,
+    candidate: object,
+    *,
+    max_encoded_bytes: int,
+) -> PreparedStructuredSchemaInput | PreparedStandardOutput | GraphOutputRefusal:
+    value = checked_graph_schema_input(
+        ir_text, type_contracts, candidate, max_encoded_bytes=max_encoded_bytes
+    )
+    binding = value.schema_validation
+    if (
+        type(binding) is dict
+        and cast(dict[object, object], binding).get("policy")
+        == SchemaDomain.OUTPUT.value
+    ):
+        try:
+            return prepare_standard_output(value)
+        except SchemaRefused as refused:
+            return EffectiveRefusal(refused.reason)
+    policy = bind_evaluation_policy(value.schema_validation)
     return prepare_structured_schema_input(
         StructuredSchemaPreparationInput(
-            declared_type=cast(str, owned["declared_type"]),
-            type_contracts=selected,
-            inline_schema=owned["inline_schema"],
-            execution_semantics=cast(str, owned["execution_semantics"]),
-            checker_binding=cast(str, owned["checker_binding"]),
+            declared_type=cast(str, value.declared_type),
+            type_contracts=value.type_contracts,
+            inline_schema=value.inline_schema,
+            execution_semantics=cast(str, value.execution_semantics),
+            checker_binding=cast(str, value.checker_binding),
             preparation_parameters=policy.preparation_parameters(),
         )
     )
+
+
+def prepare_installed_graph_schema(
+    ir_text: str,
+    type_contracts: object,
+    candidate: object,
+    binding: OutputPublicationBinding,
+    *,
+    max_encoded_bytes: int,
+) -> GraphOutputRefusal | None:
+    value = checked_graph_schema_input(
+        ir_text, type_contracts, candidate, max_encoded_bytes=max_encoded_bytes
+    )
+    prepared = prepare_effective_artifact_type(value, binding.behaviors)
+    if isinstance(prepared, EffectiveRefusal):
+        return prepared
+    if not isinstance(prepared, EffectiveArtifactType):
+        raise GraphValueRejected(GraphValueFailure.VERSION)
+    return None

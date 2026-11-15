@@ -8,6 +8,7 @@ from kora.engine.graph_types import build_graph_type_contracts
 from kora.ir.json import JsonObject, JsonValue
 from tests.engine.graph_native_cases import native_document
 from tests.engine.graph_output_cases import LIMIT, child, output_document
+from tests.support.output_bindings import publication_binding
 
 
 def inventory_arguments(raw: JsonObject) -> tuple[str, list[JsonValue]]:
@@ -17,7 +18,9 @@ def inventory_arguments(raw: JsonObject) -> tuple[str, list[JsonValue]]:
 
 
 def complete_inventory(arguments: tuple[str, list[JsonValue]]) -> str:
-    result = build_graph_output_inventory(*arguments, max_encoded_bytes=LIMIT)
+    result = build_graph_output_inventory(
+        *arguments, max_encoded_bytes=LIMIT, binding=publication_binding()
+    )
     assert isinstance(result, str)
     return result
 

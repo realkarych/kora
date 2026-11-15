@@ -36,6 +36,7 @@ from kora.engine.parameter_schema_source import (
     build_parameter_schema_arena,
 )
 from kora.ir.json import JsonObject
+from kora.ir.standard_schema_policy import LIMITS as STANDARD_SCHEMA_LIMITS
 from kora.ir.structured_schema_work import PARAMETERS as SCHEMA_PREPARATION_LIMITS
 
 MEMBERS = (
@@ -161,8 +162,36 @@ def structured_output_preparation_reservation(output_bytes: int) -> tuple[int, i
         + SCHEMA_PREPARATION_LIMITS["max_auxiliary_bytes"]
         + SCHEMA_PREPARATION_LIMITS["max_auxiliary_entries"]
     )
-    return scratch, preparations * (
-        source + SCHEMA_PREPARATION_LIMITS["max_preparation_work"]
+    limits = STANDARD_SCHEMA_LIMITS
+    nodes, positions, edges, documents = (
+        limits["max_schema_nodes"],
+        limits["max_schema_positions"],
+        limits["max_reference_edges"],
+        limits["max_schema_documents"],
+    )
+    entries = (
+        8 * nodes
+        + 12 * positions
+        + 12 * edges
+        + 28 * documents
+        + 256 * (limits["max_schema_depth"] + 1)
+        + 2 * limits["max_schema_array_items"]
+        + 64
+    )
+    variable = (
+        13 * limits["max_schema_source_bytes"]
+        + 32 * limits["max_schema_string_bytes"]
+        + 128 * documents
+        + 2 * limits["max_schema_integer_bits"]
+    )
+    work = 4 * (
+        limits["max_validation_score"]
+        + limits["max_schema_source_bytes"]
+        + nodes
+        + entries
+    )
+    return max(scratch, variable + entries), preparations * max(
+        source + SCHEMA_PREPARATION_LIMITS["max_preparation_work"], work
     )
 
 

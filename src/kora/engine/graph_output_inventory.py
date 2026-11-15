@@ -9,14 +9,22 @@ from kora.db.graph_value_json import (
 )
 from kora.engine.graph_native_outputs import build_graph_native_output_contract
 from kora.engine.graph_native_sources import VIEW_BYTES
+from kora.engine.graph_output_policy import (
+    GraphOutputRefusal,
+    OutputPublicationBinding,
+    read_output_policy,
+)
 from kora.engine.graph_output_sources import object_at
-from kora.engine.graph_output_values import saved_array
-from kora.engine.graph_outputs import build_graph_output_contract
+from kora.engine.graph_output_values import admit_output_inputs, saved_array
+from kora.engine.graph_outputs import (
+    build_graph_output_contract,
+    derive_output,
+    prepared_output,
+)
 from kora.engine.graph_type_references import array_text
 from kora.engine.graph_types import read_document, read_graph_type_contracts
-from kora.ir.json import JsonObject
+from kora.ir.json import JsonObject, JsonValue
 from kora.ir.output_schemas import validate_output_schemas
-from kora.ir.structured_schema_input import StructuredSchemaPreparationRefusal
 
 
 def capture_inventory_types(
@@ -58,8 +66,12 @@ def structured_ancestry(name: str, records: dict[str, JsonObject]) -> bool:
 
 
 def derive_inventory(
-    ir_text: str, types_text: str, budget: TextBudget
-) -> str | StructuredSchemaPreparationRefusal:
+    ir_text: str,
+    types_text: str,
+    budget: TextBudget,
+    binding: OutputPublicationBinding | None,
+    saved: list[JsonValue],
+) -> str | GraphOutputRefusal:
     document = read_document(ir_text, TextBudget(len(ir_text)))
     records = cast(list[JsonObject], saved_array(types_text))
     source_size = len(ir_text) + len(types_text)
@@ -74,7 +86,7 @@ def derive_inventory(
     paths.sort()
     budget.reserve(2)
     entries: list[str] = []
-    for path_text in paths:
+    for index, path_text in enumerate(paths):
         budget.reserve(
             len('{"path":,"contract":,"contract_digest":""}')
             + 64
@@ -87,6 +99,18 @@ def derive_inventory(
         if len(selected) == 5 and selected[1] == "subgraphs":
             raise GraphValueRejected(GraphValueFailure.VERSION)
         name = cast(str, object_at(raw, selected)["type"])
+        if binding is None:
+            if index >= len(saved):
+                raise GraphValueRejected(GraphValueFailure.INVALID)
+            entry = saved[index]
+            if (
+                not isinstance(entry, dict)
+                or tuple(entry) != ("path", "contract", "contract_digest")
+                or entry["path"] != selected
+                or not isinstance(entry["contract"], dict)
+                or entry["contract"].get("declared_type") != name
+            ):
+                raise GraphValueRejected(GraphValueFailure.INVALID)
         if name == "AgentSession":
             budget.reserve(VIEW_BYTES)
             prepaid += VIEW_BYTES
@@ -98,15 +122,31 @@ def derive_inventory(
                 max_encoded_bytes=prepaid + budget.remaining,
             )
         elif structured_ancestry(name, by_name):
-            result = build_graph_output_contract(
-                ir_text,
-                records,
-                selected,
-                max_encoded_bytes=prepaid + budget.remaining,
-            )
+            limit = prepaid + budget.remaining
+            if binding is not None:
+                result = build_graph_output_contract(
+                    ir_text,
+                    records,
+                    selected,
+                    binding=binding,
+                    max_encoded_bytes=limit,
+                )
+            else:
+                entry = saved[index]
+                if not isinstance(entry, dict) or not isinstance(
+                    entry.get("contract"), dict
+                ):
+                    raise GraphValueRejected(GraphValueFailure.INVALID)
+                contract = cast(JsonObject, entry["contract"])
+                policy = read_output_policy(contract.get("schema_validation"))
+                inputs = admit_output_inputs(
+                    ir_text, records, selected, TextBudget(limit)
+                )
+                text, checked = derive_output(inputs, policy)
+                result = prepared_output(ir_text, checked, text, limit)
         else:
             raise GraphValueRejected(GraphValueFailure.VERSION)
-        if isinstance(result, StructuredSchemaPreparationRefusal):
+        if isinstance(result, GraphOutputRefusal):
             return result
         budget.reserve(len(result.text))
         entries.append(
@@ -118,27 +158,35 @@ def derive_inventory(
             + result.digest
             + '"}'
         )
+    if binding is None and len(saved) != len(paths):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
     return "[" + ",".join(entries) + "]"
 
 
 def build_graph_output_inventory(
-    ir_text: str, type_contracts: object, *, max_encoded_bytes: int
-) -> str | StructuredSchemaPreparationRefusal:
+    ir_text: str,
+    type_contracts: object,
+    *,
+    binding: OutputPublicationBinding,
+    max_encoded_bytes: int,
+) -> str | GraphOutputRefusal:
     budget = TextBudget(max_encoded_bytes)
     types_text = capture_inventory_types(ir_text, type_contracts, budget)
-    return derive_inventory(ir_text, types_text, budget)
+    if type(binding) is not OutputPublicationBinding:
+        raise GraphValueRejected(GraphValueFailure.VERSION)
+    return derive_inventory(ir_text, types_text, budget, binding, [])
 
 
 def read_graph_output_inventory(
     ir_text: str, type_contracts: object, value: object, *, max_encoded_bytes: int
-) -> str | StructuredSchemaPreparationRefusal:
+) -> str | GraphOutputRefusal:
     budget = TextBudget(max_encoded_bytes)
     types_text = capture_inventory_types(ir_text, type_contracts, budget)
     if type(value) is not list:
         raise GraphValueRejected(GraphValueFailure.INVALID)
     text = array_text(cast(list[object], value), budget)
-    expected = derive_inventory(ir_text, types_text, budget)
-    if isinstance(expected, StructuredSchemaPreparationRefusal):
+    expected = derive_inventory(ir_text, types_text, budget, None, saved_array(text))
+    if isinstance(expected, GraphOutputRefusal):
         return expected
     if text != expected:
         raise GraphValueRejected(GraphValueFailure.INVALID)

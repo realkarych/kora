@@ -22,12 +22,13 @@ from kora.engine.graph_output_inventory import (
     build_graph_output_inventory,
     read_graph_output_inventory,
 )
+from kora.engine.graph_output_policy import GraphOutputRefusal
 from kora.engine.graph_output_values import GraphOutputContract
 from kora.engine.graph_outputs import build_graph_output_contract
-from kora.engine.graph_schema_preparation import prepare_graph_schema
+from kora.engine.graph_schema_preparation import prepare_installed_graph_schema
 from kora.ir.json import JsonObject
 from kora.ir.output_schemas import validate_output_schemas
-from kora.ir.structured_schema_input import StructuredSchemaPreparationRefusal
+from kora.protocols.effective_artifact_type import EffectiveRefusal
 from tests.engine.graph_inventory_cases import (
     canonical_size,
     complete_inventory,
@@ -37,6 +38,7 @@ from tests.engine.graph_inventory_cases import (
 )
 from tests.engine.graph_output_cases import LIMIT, child, output_document
 from tests.engine.graph_schema_cases import declaration
+from tests.support.output_bindings import publication_binding
 
 
 def calls(profile: cProfile.Profile, name: str) -> int:
@@ -75,14 +77,23 @@ def test_complete_inventory_preserves_mixed_root_and_unused_body_leaves() -> Non
     text = complete_inventory(arguments)
     saved = entries(text)
     restored = read_graph_output_inventory(*arguments, saved, max_encoded_bytes=LIMIT)
-    leaves: list[GraphOutputContract | StructuredSchemaPreparationRefusal] = []
+    leaves: list[GraphOutputContract | GraphOutputRefusal] = []
     for record in saved:
-        builder = (
-            build_graph_output_contract
+        result = (
+            build_graph_output_contract(
+                *arguments,
+                record["path"],
+                max_encoded_bytes=LIMIT,
+                binding=publication_binding(),
+            )
             if child(record, "contract")["declared_type"] == "StructuredOutput"
-            else build_graph_native_output_contract
+            else build_graph_native_output_contract(
+                *arguments,
+                record["path"],
+                max_encoded_bytes=LIMIT,
+            )
         )
-        leaves.append(builder(*arguments, record["path"], max_encoded_bytes=LIMIT))
+        leaves.append(result)
 
     paths = [record["path"] for record in saved]
     assert paths == [
@@ -135,11 +146,16 @@ def test_empty_inventory_still_requires_real_document_and_types(nested: bool) ->
     profile = cProfile.Profile()
 
     text = profile.runcall(
-        build_graph_output_inventory, *arguments, max_encoded_bytes=exact
+        build_graph_output_inventory,
+        *arguments,
+        max_encoded_bytes=exact,
+        binding=publication_binding(),
     )
     restored = read_graph_output_inventory(*arguments, [], max_encoded_bytes=exact + 2)
     with pytest.raises(GraphValueRejected) as failure:
-        build_graph_output_inventory(*arguments, max_encoded_bytes=exact - 1)
+        build_graph_output_inventory(
+            *arguments, max_encoded_bytes=exact - 1, binding=publication_binding()
+        )
 
     assert text == restored == "[]"
     assert failure.value.reason is GraphValueFailure.BUDGET
@@ -286,7 +302,10 @@ def test_unsupported_late_output_refuses_complete_inventory(mode: str) -> None:
 
     with pytest.raises(GraphValueRejected) as failure:
         profile.runcall(
-            build_graph_output_inventory, *arguments, max_encoded_bytes=LIMIT
+            build_graph_output_inventory,
+            *arguments,
+            max_encoded_bytes=LIMIT,
+            binding=publication_binding(),
         )
 
     assert failure.value.reason is GraphValueFailure.VERSION
@@ -309,12 +328,16 @@ def test_inventory_preserves_real_preparation_refusal(schema: JsonObject) -> Non
     profile = cProfile.Profile()
 
     result = profile.runcall(
-        build_graph_output_inventory, *arguments, max_encoded_bytes=LIMIT
+        build_graph_output_inventory,
+        *arguments,
+        max_encoded_bytes=LIMIT,
+        binding=publication_binding(),
     )
-    restored = read_graph_output_inventory(*arguments, [], max_encoded_bytes=LIMIT)
+    with pytest.raises(GraphValueRejected) as missing:
+        read_graph_output_inventory(*arguments, [], max_encoded_bytes=LIMIT)
 
-    assert isinstance(result, StructuredSchemaPreparationRefusal)
-    assert restored == result
+    assert isinstance(result, EffectiveRefusal)
+    assert missing.value.reason is GraphValueFailure.INVALID
     assert calls(profile, "build_graph_output_contract") == 1
 
 
@@ -343,16 +366,20 @@ def test_inventory_exact_cumulative_budget_and_source_passes(kind: str) -> None:
         graph_types.read_document.__code__,
         graph_types.read_graph_type_contracts.__code__,
         validate_output_schemas.__code__,
-        prepare_graph_schema.__code__,
+        prepare_installed_graph_schema.__code__,
     )
 
     with observe_calls(owners) as counts:
-        actual = build_graph_output_inventory(*arguments, max_encoded_bytes=exact)
+        actual = build_graph_output_inventory(
+            *arguments, max_encoded_bytes=exact, binding=publication_binding()
+        )
     restored = read_graph_output_inventory(
         *arguments, saved, max_encoded_bytes=exact + len(text)
     )
     with pytest.raises(GraphValueRejected) as failure:
-        build_graph_output_inventory(*arguments, max_encoded_bytes=exact - 1)
+        build_graph_output_inventory(
+            *arguments, max_encoded_bytes=exact - 1, binding=publication_binding()
+        )
     with pytest.raises(GraphValueRejected) as reader_failure:
         read_graph_output_inventory(
             *arguments, saved, max_encoded_bytes=exact + len(text) - 1
@@ -397,7 +424,10 @@ def test_inventory_admits_before_any_unpaid_leaf(stage: str) -> None:
     else:
         with pytest.raises(GraphValueRejected) as failure:
             profile.runcall(
-                build_graph_output_inventory, *arguments, max_encoded_bytes=limit
+                build_graph_output_inventory,
+                *arguments,
+                max_encoded_bytes=limit,
+                binding=publication_binding(),
             )
 
     assert failure.value.reason is GraphValueFailure.BUDGET
@@ -464,7 +494,9 @@ def test_observer_preserves_occupied_slot_and_clears_after_refusal() -> None:
             pass
         after_nested: object = sys.getprofile()
     with pytest.raises(GraphValueRejected) as failure, observe_calls(owners):
-        build_graph_output_inventory(*arguments, max_encoded_bytes=1)
+        build_graph_output_inventory(
+            *arguments, max_encoded_bytes=1, binding=publication_binding()
+        )
 
     assert incumbent is not None
     assert incumbent is after_nested

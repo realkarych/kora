@@ -152,7 +152,7 @@ def checked_saved_facts(
     if not isinstance(outputs, str):
         reason = (
             GraphValueFailure.BUDGET
-            if outputs.reason == "preparation_exhausted"
+            if outputs.reason in {"preparation_exhausted", "evaluation_exhausted"}
             else GraphValueFailure.VERSION
         )
         raise GraphValueRejected(reason)

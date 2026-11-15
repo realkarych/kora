@@ -32,6 +32,7 @@ from kora.engine.graph_execution_contract import (
     structured_output_preparation_reservation,
 )
 from kora.engine.graph_output_inventory import build_graph_output_inventory
+from kora.engine.graph_output_policy import OutputPublicationBinding
 from kora.engine.graph_output_values import saved_array
 from kora.engine.graph_parameters import build_graph_parameter_binding
 from kora.engine.graph_projection_paths import (
@@ -257,7 +258,7 @@ def _admit(limits: ExecutionPreparationLimits) -> None:
     )
     construction_copies = SECTION_COPIES * sections + 2 * HASH_CHUNK_BYTES
     retained = (
-        2 * read_retained
+        2 * (read_retained - output_preparation)
         + logical.ir_bytes
         + logical.scratch
         + output_preparation
@@ -286,7 +287,10 @@ def _admit(limits: ExecutionPreparationLimits) -> None:
 
 
 def _contract(
-    ir_text: str, facts: GraphCelFacts, limits: ExecutionPreparationLimits
+    ir_text: str,
+    facts: GraphCelFacts,
+    limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
 ) -> JsonObject:
     reader = limits.reader
     projection = reader.projection
@@ -295,12 +299,12 @@ def _contract(
         build_graph_type_contracts(ir_text, max_encoded_bytes=cel.output_context_bytes)
     )
     outputs = build_graph_output_inventory(
-        ir_text, types, max_encoded_bytes=cel.output_context_bytes
+        ir_text, types, binding=binding, max_encoded_bytes=cel.output_context_bytes
     )
     if not isinstance(outputs, str):
         reason = (
             GraphValueFailure.BUDGET
-            if outputs.reason == "preparation_exhausted"
+            if outputs.reason in {"preparation_exhausted", "evaluation_exhausted"}
             else GraphValueFailure.VERSION
         )
         raise GraphValueRejected(reason)
@@ -327,12 +331,15 @@ def _contract(
 
 
 def _checked_pair(
-    ir_text: str, facts: GraphCelFacts, limits: ExecutionPreparationLimits
+    ir_text: str,
+    facts: GraphCelFacts,
+    limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
 ) -> tuple[PreparedGraphVersionIdentity, DecodedGraphValues]:
     reader = limits.reader
     prepared = prepare_graph_version_identity(
         ObjectReader(ir_text).object(),
-        _contract(ir_text, facts, limits),
+        _contract(ir_text, facts, limits, binding),
         limits=reader.identity,
     )
     values = prepared.values
@@ -356,8 +363,9 @@ def _draft(
     scope: GraphResourceScope,
     owners: tuple[GraphResourceOwner, ...],
     limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
 ) -> PreparedExecutionContract:
-    prepared, saved = _checked_pair(ir_text, facts, limits)
+    prepared, saved = _checked_pair(ir_text, facts, limits, binding)
     values = prepared.values
     resources, _ = check_execution_contract_members(
         values.ir,
@@ -430,6 +438,7 @@ async def _prepare(
     owners: tuple[GraphResourceOwner, ...],
     evaluator: Evaluator,
     limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
 ) -> PreparedExecutionContract | GraphCelResult:
     document = _prepare_document(ir_text, limits)
     reader = limits.reader
@@ -444,17 +453,20 @@ async def _prepare(
     facts = _complete_facts(result)
     if facts is None:
         return result
-    return _draft(ir_text, facts, physical, scope, owners, limits)
+    return _draft(ir_text, facts, physical, scope, owners, limits, binding)
 
 
 async def _prepare_logical(
-    ir_text: str, evaluator: Evaluator, limits: ExecutionPreparationLimits
+    ir_text: str,
+    evaluator: Evaluator,
+    limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
 ) -> PreparedLogicalExecutionContract | GraphCelResult:
     result = await _verification(_prepare_document(ir_text, limits), evaluator, limits)
     facts = _complete_facts(result)
     if facts is None:
         return result
-    prepared, saved = _checked_pair(ir_text, facts, limits)
+    prepared, saved = _checked_pair(ir_text, facts, limits, binding)
     values = prepared.values
     reader = limits.reader
     check_execution_contract_projection_members(
@@ -474,18 +486,19 @@ async def prepare_logical_execution_contract(
     ir_text: str,
     evaluator: Evaluator,
     *,
+    binding: OutputPublicationBinding,
     limits: ExecutionPreparationLimits,
 ) -> PreparedLogicalExecutionContract | GraphCelResult:
     error: BaseException
     try:
-        return await _prepare_logical(ir_text, evaluator, limits)
+        return await _prepare_logical(ir_text, evaluator, limits, binding)
     except GraphValueRejected as rejected:
         error = GraphValueRejected(rejected.reason)
     except EvaluatorUnavailable as unavailable:
         error = EvaluatorUnavailable(unavailable.reason)
     except CancelledError:
         error = CancelledError()
-    del ir_text, evaluator
+    del ir_text, evaluator, binding
     raise_safe(error)
 
 
@@ -494,6 +507,7 @@ async def prepare_graph_deployment_inputs(
     contents: tuple[CommandResourceContent, ...],
     evaluator: Evaluator,
     *,
+    binding: OutputPublicationBinding,
     selectors: GraphDeploymentSelectors,
     storage_identity: StorageIdentity | None,
     limits: GraphDeploymentPreparationLimits,
@@ -516,7 +530,7 @@ async def prepare_graph_deployment_inputs(
             del selectors
         contents = ()
         storage_identity = None
-        result = await _prepare_logical(ir_text, evaluator, limits.execution)
+        result = await _prepare_logical(ir_text, evaluator, limits.execution, binding)
         if isinstance(result, PreparedLogicalExecutionContract):
             return PreparedGraphDeploymentInputs(result, groups)
         return GraphDeploymentCelRefusal(result)
@@ -526,7 +540,7 @@ async def prepare_graph_deployment_inputs(
         error = EvaluatorUnavailable(unavailable.reason)
     except CancelledError:
         error = CancelledError()
-    del ir_text, contents, storage_identity, evaluator, groups, limits
+    del ir_text, contents, storage_identity, evaluator, groups, limits, binding
     raise_safe(error)
 
 
@@ -536,16 +550,17 @@ async def prepare_execution_contract(
     owners: tuple[GraphResourceOwner, ...],
     evaluator: Evaluator,
     *,
+    binding: OutputPublicationBinding,
     limits: ExecutionPreparationLimits,
 ) -> PreparedExecutionContract | GraphCelResult:
     error: BaseException
     try:
-        return await _prepare(ir_text, scope, owners, evaluator, limits)
+        return await _prepare(ir_text, scope, owners, evaluator, limits, binding)
     except GraphValueRejected as rejected:
         error = GraphValueRejected(rejected.reason)
     except EvaluatorUnavailable as unavailable:
         error = EvaluatorUnavailable(unavailable.reason)
     except CancelledError:
         error = CancelledError()
-    del ir_text, scope, owners, evaluator
+    del ir_text, scope, owners, evaluator, binding
     raise_safe(error)

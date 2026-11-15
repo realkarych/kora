@@ -13,9 +13,11 @@ from kora.cel_eval.thread import EvaluationThread, Settings
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.db.tables import graph, graph_version, namespace
+from kora.engine.graph_output_policy import OutputPublicationBinding
 from kora.ir.json import JsonObject
 from kora.models.errors import ApiErrorEnvelope
 from kora.models.graphs import DeployResponse
+from kora.protocols.effective_artifact_type import BehaviorBinding, Role
 from tests.api.deployment_cases import (
     ALLOW_AGENT_SECRETS,
     GRAPH,
@@ -33,7 +35,9 @@ from tests.api.support import (
     client_for,
     deployment_services,
 )
+from tests.engine.test_saved_output_publication import ObservedInstallation
 from tests.plugins.authentication.support import AuthorityClock, seed_case
+from tests.support.output_bindings import publication_binding
 
 __all__ = ["api_capture", "preparer"]
 
@@ -282,7 +286,9 @@ async def test_deploy_route_reports_an_unavailable_evaluator(
     headers = await authorized(database)
     owner = EvaluationThread(load_binding(), Settings(outstanding_bytes=1))
 
-    async with DeploymentPreparer(AuthorityClock(), owner) as constrained:
+    async with DeploymentPreparer(
+        AuthorityClock(), owner, binding=publication_binding()
+    ) as constrained:
         app = application(
             database, api_capture, deployment_services(database, constrained, HARNESS)
         )
@@ -498,3 +504,45 @@ async def test_deploy_route_refuses_unenforced_network_policies(
         ("IR028", ["graph", "nodes", node, "config", "network_policy"])
     ]
     assert await rows(database) == (0, 0)
+
+
+class FailingInstallation(ObservedInstallation):
+    def __getitem__(self, key: tuple[Role, str]) -> BehaviorBinding:
+        super().__getitem__(key)
+        raise ValueError("private installed schema source")
+
+
+@pytest.mark.asyncio
+async def test_deploy_unexpected_preparation_failure_keeps_safe_api010(
+    database: Database,
+    api_capture: Capture,
+) -> None:
+    headers = await authorized(database)
+    owner = EvaluationThread(load_binding())
+    installed = publication_binding()
+    broken = OutputPublicationBinding(
+        installed.policy(),
+        FailingInstallation(dict(installed.behaviors)),
+    )
+
+    async with DeploymentPreparer(AuthorityClock(), owner, binding=broken) as preparer:
+        app = application(
+            database,
+            api_capture,
+            deployment_services(database, preparer, HARNESS),
+        )
+        async with client_for(app) as client:
+            response = await client.post(PATH, json=body(), headers=headers)
+        async with preparer.reserve() as reservation:
+            released = reservation is not None
+    counts = await rows(database)
+    records = api_capture.finish()
+
+    assert (response.status_code, error_of(response).error.code) == (500, "API010")
+    assert error_of(response).error.retryable is False
+    assert released
+    assert counts == (0, 0)
+    assert "private installed" not in response.text
+    assert "private installed" not in json.dumps(records)
+    errors = [record for record in records if record["level"] == "ERROR"]
+    assert len(errors) == 1
