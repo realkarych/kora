@@ -1010,6 +1010,11 @@ class Database:
             async with self._unit(
                 self._reader, deadline=deadline, snapshot=snapshot
             ) as connection:
+                if self.dialect is Dialect.POSTGRESQL and not snapshot:
+                    await complete(
+                        connection.execute(text("SET TRANSACTION READ ONLY"))
+                    )
+                    self._refuse_when_closed()
                 yield connection
         except asyncio.CancelledError:
             cancelled = True

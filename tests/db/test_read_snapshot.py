@@ -125,7 +125,7 @@ def assert_snapshot_settings(
         assert ordinary == snapshot == (1,)
     else:
         pid = ordinary[0]
-        assert ordinary == (pid, "read committed", "off")
+        assert ordinary == (pid, "read committed", "on")
         assert snapshot == (pid, "repeatable read", "on")
 
 
