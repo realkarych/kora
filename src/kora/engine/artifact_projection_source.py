@@ -1,24 +1,24 @@
-import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import cast
 
-from kora.cel import PathSet, SchemaTypes
-from kora.cel.cost import Variable
-from kora.cel.schema import SchemaView
-from kora.db.graph_value_json import ObjectReader
-from kora.engine.artifact_projection_codec import (
+from kora.cel_eval.artifact_projection_codec import (
     ProjectionAdmission,
     ProjectionFailure,
     ProjectionLimits,
     ProjectionRejected,
 )
+from kora.cel_eval.artifact_projection_view import (
+    STRUCTURED_OUTPUT_VIEW,
+    ProjectionView,
+    prepare_projection_view,
+)
+from kora.db.graph_value_json import ObjectReader
 from kora.engine.graph_execution_contract import (
     CheckedExecutionContract,
     structured_output_preparation_reservation,
 )
 from kora.engine.graph_output_sources import output_path
-from kora.ir.cel_inventory_admission import CheckedInventoryAdmission, inventory_meter
+from kora.engine.graph_schema_preparation import select_records
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.standard_output_preparation import StandardOutputInput
 from kora.ir.standard_schema_policy import SchemaDomain
@@ -39,8 +39,7 @@ class ProjectionBinding:
 class ProjectionSource:
     binding: ProjectionBinding
     schema: StandardOutputInput = field(repr=False)
-    paths: PathSet = field(repr=False)
-    view: Variable = field(repr=False)
+    view: ProjectionView = field(repr=False)
     admission: ProjectionAdmission = field(repr=False)
 
 
@@ -66,17 +65,20 @@ def output_schema(contract: JsonObject) -> StandardOutputInput:
     if (
         policy is None
         or policy.get("policy") != SchemaDomain.OUTPUT.value
-        or contract.get("checker_binding") != SchemaView.STRUCTURED_OUTPUT.value
+        or contract.get("checker_binding") != STRUCTURED_OUTPUT_VIEW
     ):
         raise ProjectionRejected(ProjectionFailure.UNAVAILABLE)
     inline = contract["inline_schema"]
     records = cast(list[JsonObject], contract["type_contracts"])
     return StandardOutputInput(
         declared_type=contract["declared_type"],
-        type_contracts=[
-            {key: value for key, value in record.items() if key != "references"}
-            for record in records
-        ],
+        type_contracts=select_records(
+            records,
+            contract["declared_type"],
+            None
+            if inline is None
+            else cast(JsonObject | bool, cast(JsonObject, inline)["schema"]),
+        ),
         inline_schema=None
         if inline is None
         else {
@@ -87,26 +89,6 @@ def output_schema(contract: JsonObject) -> StandardOutputInput:
         checker_binding=contract["checker_binding"],
         schema_validation=policy,
     )
-
-
-def checker_variable(contract: JsonObject, admission: ProjectionAdmission) -> Variable:
-    records = cast(list[JsonObject], contract["type_contracts"])
-    roots = {
-        "urn:kora:artifact:" + cast(str, record["name"]).replace("/", ":"): record[
-            "schema"
-        ]
-        for record in records
-    }
-    checker = cast(JsonObject, contract["checker"])
-    schema = (
-        cast(JsonObject, contract["inline_schema"])["schema"]
-        if checker["kind"] == "inline_schema"
-        else roots["urn:kora:artifact:" + cast(str, checker["name"]).replace("/", ":")]
-    )
-    meter = inventory_meter(CheckedInventoryAdmission(admission.work, 0))
-    view = SchemaTypes(roots.get, meter).variable(schema, SchemaView.STRUCTURED_OUTPUT)
-    admission.reserve(0, 0, meter.steps)
-    return view
 
 
 def projection_source(
@@ -140,15 +122,7 @@ def projection_source(
     path_section = cast(JsonObject, saved["cel_projection_paths"])
     path_entry = selected_entry(path_section["outputs"], path)
     selected = cast(JsonObject, path_entry["paths"])
-    paths = PathSet(
-        tuple(cast(list[str], selected["whole"])),
-        tuple(cast(list[str], selected["presence"])),
-    )
-    path_bytes = json.dumps(
-        {"whole": paths.whole, "presence": paths.presence},
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("ascii")
+    view = prepare_projection_view(contract, selected, admission)
     scope = checked.scope
     binding = ProjectionBinding(
         scope.namespace_id,
@@ -157,8 +131,6 @@ def projection_source(
         checked.pin.execution_contract_digest,
         path,
         cast(str, output["contract_digest"]),
-        hashlib.sha256(path_bytes).hexdigest(),
+        view.path_set_digest,
     )
-    return ProjectionSource(
-        binding, schema, paths, checker_variable(contract, admission), admission
-    )
+    return ProjectionSource(binding, schema, view, admission)

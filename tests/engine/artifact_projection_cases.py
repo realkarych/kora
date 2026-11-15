@@ -2,13 +2,13 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import cast
 
+from kora.cel_eval.artifact_projection_codec import REPRESENTATION, ProjectionLimits
 from kora.conformance.capture import Capture, captured
 from kora.db.graph_value_json import ObjectReader
 from kora.engine.artifact_projection import (
     PreparedArtifactProjection,
     ProjectionReadMetadata,
 )
-from kora.engine.artifact_projection_codec import REPRESENTATION, ProjectionLimits
 from kora.engine.graph_execution_contract import (
     CheckedExecutionContract,
     check_detached_execution_contract,
@@ -23,7 +23,6 @@ from kora.ir.json import JsonObject, JsonValue
 from kora.observability import Level, LoggingSettings
 from tests.engine.graph_output_cases import child, output_document
 from tests.engine.graph_projection_cases import approval, projection_inputs
-from tests.engine.graph_schema_cases import declaration
 from tests.engine.test_graph_execution_contract import LIMITS as GRAPH_LIMITS
 from tests.engine.test_graph_execution_contract import prepared_case, transport
 from tests.engine.test_graph_resource_references import SCOPE, declared
@@ -49,20 +48,14 @@ def projection_graph(
     predicate: str = "has(inputs.data) && inputs.data == inputs.data",
     *,
     second: bool = False,
-    named: bool = False,
     scope: GraphResourceScope = SCOPE,
+    document: JsonObject | None = None,
 ) -> CheckedExecutionContract:
-    raw = output_document()
+    raw = output_document() if document is None else document
     if schema is not None:
         child(raw, "graph", "nodes", "producer", "outputs", "value")["schema"] = schema
     nodes = child(raw, "graph", "nodes")
     nodes["gate"] = approval(predicate)
-    if named:
-        child(raw, "type_contracts")["example/Value"] = declaration(
-            {} if schema is None else schema
-        )
-        child(nodes, "producer", "outputs", "value")["type"] = "example/Value"
-        child(nodes, "gate", "inputs", "data")["type"] = "example/Value"
     if second:
         nodes["another"] = child(output_document(), "graph", "nodes", "producer")
         if schema is not None:

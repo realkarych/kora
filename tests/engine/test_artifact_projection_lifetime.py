@@ -4,18 +4,19 @@ from dataclasses import replace
 
 import pytest
 
-from kora.conformance.common import context_for
-from kora.engine.artifact_projection import (
-    check_artifact_projection,
-    prepare_artifact_projection,
-)
-from kora.engine.artifact_projection_codec import (
+from kora.cel_eval.artifact_projection_codec import (
     RECORD_ENTRIES,
     RECORD_VARIABLE_BYTES,
     ProjectionFailure,
     ProjectionRejected,
 )
+from kora.conformance.common import context_for
+from kora.engine.artifact_projection import (
+    check_artifact_projection,
+    prepare_artifact_projection,
+)
 from kora.engine.artifact_projection_source import source_reservation
+from kora.observability import Level
 from kora.protocols.effective_artifact_type import ValidationBinding
 from tests.engine.artifact_projection_cases import (
     LIMITS,
@@ -178,11 +179,12 @@ def test_projection_survives_unavailable_diagnostic_sink(broken: bool) -> None:
     assert not diagnostics.writer_is_alive()
 
 
-def test_projection_debug_diagnostics_exclude_content() -> None:
+@pytest.mark.parametrize("level", [Level.DEBUG, Level.INFO])
+def test_projection_debug_diagnostics_exclude_content(level: Level) -> None:
     marker = "private-projection-marker"
     checked = projection_graph({"description": marker})
 
-    with diagnostics_pipe() as (diagnostics, pipe):
+    with diagnostics_pipe(level) as (diagnostics, pipe):
         pipe.reader.start()
         prepared = prepare_artifact_projection(
             checked,
@@ -209,7 +211,6 @@ def test_projection_debug_diagnostics_exclude_content() -> None:
     assert marker.encode() not in output
     assert marker not in repr(prepared)
     assert marker not in str(refused.value)
-    assert [(item["operation"], item["outcome"]) for item in records] == [
-        ("prepare", "prepared"),
-        ("check", "binding"),
-    ]
+    assert [(item["operation"], item["outcome"]) for item in records] == (
+        [("prepare", "prepared"), ("check", "binding")] if level is Level.DEBUG else []
+    )

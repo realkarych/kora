@@ -6,15 +6,24 @@ from typing import cast
 
 import pytest
 
+from kora.cel_eval.artifact_projection_codec import (
+    ProjectionFailure,
+    ProjectionRejected,
+)
 from kora.conformance.common import context_for
 from kora.engine.artifact_projection import (
     ProjectionReadMetadata,
     check_artifact_projection,
     prepare_artifact_projection,
 )
-from kora.engine.artifact_projection_codec import ProjectionFailure, ProjectionRejected
+from kora.engine.artifact_projection_source import projection_source
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.structured_output import StructuredOutput
+from kora.protocols.effective_artifact_type import (
+    EffectiveArtifactType,
+    EffectiveValid,
+    prepare_effective_artifact_type,
+)
 from tests.engine.artifact_projection_cases import (
     LIMITS,
     PATH,
@@ -23,6 +32,8 @@ from tests.engine.artifact_projection_cases import (
     projection_capture,
     projection_graph,
 )
+from tests.engine.graph_output_cases import child, output_document
+from tests.engine.graph_schema_cases import declaration
 from tests.protocols.effective_artifact_cases import installed
 
 
@@ -95,6 +106,78 @@ def test_projection_requires_effective_validation_and_installed_behavior() -> No
     assert invalid.value.reason is ProjectionFailure.VALIDATION
     assert unavailable.value.reason is ProjectionFailure.UNAVAILABLE
     assert standalone.canonical_bytes() == b"1"
+
+
+def test_projection_keeps_schema_capacity_refusal_distinct_from_invalid_value() -> None:
+    checked = projection_graph({"type": "array", "uniqueItems": True})
+
+    with projection_capture() as capture, pytest.raises(ProjectionRejected) as refused:
+        prepare_artifact_projection(
+            checked,
+            PATH,
+            list(range(129)),
+            installed(),
+            context_for(capture),
+            limits=LIMITS,
+        )
+
+    assert refused.value.reason is ProjectionFailure.CAPACITY
+
+
+def test_projection_does_not_execute_inert_schema_dependencies() -> None:
+    document = output_document()
+    child(document, "type_contracts")["example/Inert"] = declaration(
+        {"pattern": "unsupported-but-inert"}
+    )
+    checked = projection_graph(
+        {"type": "integer", "$recursiveRef": "urn:kora:artifact:example:Inert"},
+        document=document,
+    )
+
+    with projection_capture() as capture:
+        prepared = prepare_artifact_projection(
+            checked, PATH, 7, installed(), context_for(capture), limits=LIMITS
+        )
+        restored = check_artifact_projection(
+            checked, PATH, prepared.encoded(), metadata(prepared), limits=LIMITS
+        )
+
+    assert native_values(json.loads(restored.encoded())) == (7, 7)
+
+
+def test_projection_does_not_accept_unassociated_validation_as_payload() -> None:
+    checked = projection_graph({"type": "integer"})
+    source = projection_source(checked, PATH, LIMITS, validating=True)
+    effective = prepare_effective_artifact_type(source.schema, installed())
+    assert isinstance(effective, EffectiveArtifactType)
+    with projection_capture() as capture:
+        valid = effective.validate(7, context_for(capture))
+    assert isinstance(valid, EffectiveValid)
+
+    with projection_capture() as capture, pytest.raises(ProjectionRejected) as refused:
+        prepare_artifact_projection(
+            checked, PATH, valid, installed(), context_for(capture), limits=LIMITS
+        )
+
+    assert refused.value.reason is ProjectionFailure.VALIDATION
+
+
+@pytest.mark.parametrize(
+    ("name", "reason"),
+    [("session", ProjectionFailure.UNAVAILABLE), ("absent", ProjectionFailure.BINDING)],
+)
+def test_projection_refuses_other_artifact_kinds_and_unknown_outputs(
+    name: str, reason: ProjectionFailure
+) -> None:
+    checked = projection_graph()
+    path = (*PATH[:-1], name)
+
+    with projection_capture() as capture, pytest.raises(ProjectionRejected) as refused:
+        prepare_artifact_projection(
+            checked, path, None, installed(), context_for(capture), limits=LIMITS
+        )
+
+    assert refused.value.reason is reason
 
 
 def test_projection_handoff_cannot_swap_equal_output_values() -> None:

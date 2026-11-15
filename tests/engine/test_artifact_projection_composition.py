@@ -6,6 +6,10 @@ from dataclasses import replace
 import pytest
 
 from kora.cel import CheckedExpression, Environment, ResultKind, check_typed
+from kora.cel_eval.artifact_projection_codec import (
+    ProjectionFailure,
+    ProjectionRejected,
+)
 from kora.cel_eval.binding import load_binding
 from kora.cel_eval.errors import ErrorContext
 from kora.cel_eval.evaluate import Machine, ResultType
@@ -14,7 +18,6 @@ from kora.engine.artifact_projection import (
     check_artifact_projection,
     prepare_artifact_projection,
 )
-from kora.engine.artifact_projection_codec import ProjectionFailure, ProjectionRejected
 from kora.engine.artifact_projection_source import projection_source
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.structured_json import encode_snapshot
@@ -53,7 +56,7 @@ def test_cel_projection_composes_through_collect_and_exports(
     destination = projection_graph(destination_schema)
     source = projection_source(destination, PATH, LIMITS, validating=False)
     checked = check_typed(
-        expression, Environment({"value": source.view}, ResultKind.BOOL)
+        expression, Environment({"value": source.view.variable}, ResultKind.BOOL)
     )
     assert isinstance(checked, CheckedExpression)
     machine = Machine(load_binding(), clock)
@@ -87,14 +90,14 @@ def test_cel_projection_composes_through_collect_and_exports(
     full_decision = machine.evaluate(
         checked,
         {"value": value},
-        {"value": source.view.type},
+        {"value": source.view.variable.type},
         ErrorContext("projection"),
         ResultType.BOOL,
     )
     cut_decision = machine.evaluate(
         checked,
         {"value": converted},
-        {"value": source.view.type},
+        {"value": source.view.variable.type},
         ErrorContext("projection"),
         ResultType.BOOL,
     )
@@ -119,17 +122,13 @@ def test_cel_projection_composes_through_collect_and_exports(
             b'{"whole":[""],"presence":[]}',
         ),
         (
-            "has(inputs.data) && '😀' in inputs.data",
-            rb"""{"whole":[],"presence":["","['\\U0001f600']"]}""",
+            "has(inputs.data) && inputs.data['😀'] == true",
+            rb"""{"whole":["['\\U0001f600']"],"presence":[""]}""",
         ),
     ],
 )
 def test_projection_path_digest_vectors(predicate: str, expected: bytes) -> None:
-    checked = projection_graph(
-        {"type": "object", "additionalProperties": {"type": "integer"}},
-        predicate=predicate,
-        named=True,
-    )
+    checked = projection_graph(predicate=predicate)
 
     source = projection_source(checked, PATH, LIMITS, validating=False)
 
@@ -170,7 +169,7 @@ def test_projection_selected_fields_match_the_full_cel_decision(
     source = projection_source(graph, PATH, LIMITS, validating=False)
     expression = check_typed(
         "has(value.flag) && value.flag",
-        Environment({"value": source.view}, ResultKind.BOOL),
+        Environment({"value": source.view.variable}, ResultKind.BOOL),
     )
     assert isinstance(expression, CheckedExpression)
     machine = Machine(load_binding(), clock)
@@ -183,14 +182,14 @@ def test_projection_selected_fields_match_the_full_cel_decision(
     full = machine.evaluate(
         expression,
         {"value": value},
-        {"value": source.view.type},
+        {"value": source.view.variable.type},
         ErrorContext("projection"),
         ResultType.BOOL,
     )
     projected = machine.evaluate(
         expression,
         {"value": converted},
-        {"value": source.view.type},
+        {"value": source.view.variable.type},
         ErrorContext("projection"),
         ResultType.BOOL,
     )

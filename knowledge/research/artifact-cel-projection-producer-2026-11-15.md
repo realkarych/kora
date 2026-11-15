@@ -12,6 +12,8 @@ The first delivery supports StructuredOutput only. No migration, actual derived 
 
 ## Finite temporary admission
 
+The existing `cel_eval` layer owns pure view preparation, cutting/conversion and the byte codec; `engine` owns complete graph/output association and installed effective composition. Existing package allowlists and ADR-0026 remain unchanged. The source adapter reuses executable-reference selection, retaining inert references in the immutable general closure without executing their targets. Completed schema mismatch remains `validation`; schema budget refusal is `capacity`, and unsupported policy/behavior is `unavailable`.
+
 `ProjectionLimits` separates source characters, variable data bytes, logical entries and work units. A logical entry is a fixed record or a container/index/frame slot; it is not a Python heap byte. Variable bytes count text, encoded buffers and numeric storage separately. The caller owns already admitted input/graph data and reserves these additional allowances before invoking the operation. Reservations accumulate conservatively across phases; later disposal does not refund this operation's allowance. No RSS, allocation-header, latency or concurrent-serving guarantee follows.
 
 Let S be the combined lengths of the already checked canonical IR/contract strings; these encodings are ASCII. The selected caller path is separately included in the source admission. Let B = 8515, V = 256, J = 1048576 and C = 4096 + 32V. The following are conservative ownership reservations, not newly narrowed product value limits.

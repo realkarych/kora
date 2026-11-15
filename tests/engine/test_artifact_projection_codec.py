@@ -5,15 +5,15 @@ from typing import cast
 
 import pytest
 
+from kora.cel_eval.artifact_projection_codec import (
+    MAX_RECORD_BYTES,
+    ProjectionFailure,
+    ProjectionRejected,
+)
 from kora.conformance.common import context_for
 from kora.engine.artifact_projection import (
     check_artifact_projection,
     prepare_artifact_projection,
-)
-from kora.engine.artifact_projection_codec import (
-    MAX_RECORD_BYTES,
-    ProjectionFailure,
-    ProjectionRejected,
 )
 from kora.ir.json import JsonValue
 from tests.engine.artifact_projection_cases import (

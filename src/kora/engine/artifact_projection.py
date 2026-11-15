@@ -2,10 +2,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Never
 
-from kora.cel import BoundError, SchemaError, cut
-from kora.cel_eval.errors import raise_safe
-from kora.db.graph_value_json import GraphValueRejected
-from kora.engine.artifact_projection_codec import (
+from kora.cel_eval.artifact_projection_codec import (
     RECORD_ENTRIES,
     RECORD_VARIABLE_BYTES,
     RECORD_WORK,
@@ -15,17 +12,16 @@ from kora.engine.artifact_projection_codec import (
     ProjectionLimits,
     ProjectionRecord,
     ProjectionRejected,
-    checked_conversion,
     decode_record,
-    encode_record,
 )
+from kora.cel_eval.artifact_projection_view import prepare_record
+from kora.cel_eval.errors import raise_safe
+from kora.db.graph_value_json import GraphValueRejected
 from kora.engine.artifact_projection_source import ProjectionBinding, projection_source
 from kora.engine.graph_execution_contract import CheckedExecutionContract
 from kora.engine.locks import COMPONENT
 from kora.ir.cel_inventory_admission import (
-    CheckedInventoryAdmission,
     InventoryAdmissionExhausted,
-    inventory_meter,
 )
 from kora.ir.standard_schema_policy import LIMITS as SCHEMA_LIMITS
 from kora.ir.structured_json import MAX_JSON_BYTES
@@ -33,6 +29,7 @@ from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_dia
 from kora.protocols.common import ProtocolContext
 from kora.protocols.effective_artifact_type import (
     EffectiveArtifactType,
+    EffectiveRefusal,
     EffectiveValid,
     InstalledBehaviors,
     prepare_effective_artifact_type,
@@ -129,20 +126,29 @@ def _prepare(
         return rejected.reason
     except InventoryAdmissionExhausted:
         return ProjectionFailure.CAPACITY
-    except (BoundError, SchemaError, GraphValueRejected):
+    except GraphValueRejected:
         return ProjectionFailure.BINDING
     effective = prepare_effective_artifact_type(source.schema, behaviors)
+    if isinstance(effective, EffectiveRefusal):
+        return (
+            ProjectionFailure.CAPACITY
+            if effective.reason == "evaluation_exhausted"
+            else ProjectionFailure.UNAVAILABLE
+        )
     if not isinstance(effective, EffectiveArtifactType):
         return ProjectionFailure.UNAVAILABLE
     decision = effective.validate(value, ctx)
+    if isinstance(decision, EffectiveRefusal):
+        return (
+            ProjectionFailure.CAPACITY
+            if decision.reason == "evaluation_exhausted"
+            else ProjectionFailure.UNAVAILABLE
+        )
     if not isinstance(decision, EffectiveValid):
         return ProjectionFailure.VALIDATION
     try:
         original_model = decision.value
         canonical = original_model.canonical_bytes()
-        meter = inventory_meter(CheckedInventoryAdmission(source.admission.work, 0))
-        original = cut(original_model.value, source.paths, meter)
-        converted = checked_conversion(original, source.view)
         identity = ProjectionIdentity(
             source.binding.contract_digest,
             hashlib.sha256(canonical).hexdigest(),
@@ -150,15 +156,15 @@ def _prepare(
         )
         return PreparedArtifactProjection(
             source.binding,
-            encode_record(identity, original, converted),
+            prepare_record(
+                identity, original_model.value, source.view, source.admission
+            ),
             issuer=_PROJECTION_ISSUER,
         )
     except ProjectionRejected as rejected:
         return rejected.reason
     except InventoryAdmissionExhausted:
         return ProjectionFailure.CAPACITY
-    except BoundError:
-        return ProjectionFailure.VALUE
 
 
 def prepare_artifact_projection(
@@ -211,7 +217,7 @@ def _check(
             owner.identity,
             owner.content_digest,
             owner.content_bytes,
-            source.view,
+            source.view.variable,
             source.admission,
         )
         return PreparedArtifactProjection(
@@ -221,7 +227,7 @@ def _check(
         return rejected.reason
     except InventoryAdmissionExhausted:
         return ProjectionFailure.CAPACITY
-    except (BoundError, SchemaError, GraphValueRejected):
+    except GraphValueRejected:
         return ProjectionFailure.BINDING
 
 
