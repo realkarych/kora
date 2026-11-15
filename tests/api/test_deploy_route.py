@@ -38,6 +38,7 @@ from tests.api.support import (
 from tests.engine.test_saved_output_publication import ObservedInstallation
 from tests.plugins.authentication.support import AuthorityClock, seed_case
 from tests.support.output_bindings import publication_binding
+from tests.support.parameter_bindings import parameter_binding
 
 __all__ = ["api_capture", "preparer"]
 
@@ -287,7 +288,10 @@ async def test_deploy_route_reports_an_unavailable_evaluator(
     owner = EvaluationThread(load_binding(), Settings(outstanding_bytes=1))
 
     async with DeploymentPreparer(
-        AuthorityClock(), owner, binding=publication_binding()
+        AuthorityClock(),
+        owner,
+        parameter_binding=parameter_binding(),
+        binding=publication_binding(),
     ) as constrained:
         app = application(
             database, api_capture, deployment_services(database, constrained, HARNESS)
@@ -525,7 +529,9 @@ async def test_deploy_unexpected_preparation_failure_keeps_safe_api010(
         FailingInstallation(dict(installed.behaviors)),
     )
 
-    async with DeploymentPreparer(AuthorityClock(), owner, binding=broken) as preparer:
+    async with DeploymentPreparer(
+        AuthorityClock(), owner, parameter_binding=parameter_binding(), binding=broken
+    ) as preparer:
         app = application(
             database,
             api_capture,
@@ -546,3 +552,50 @@ async def test_deploy_unexpected_preparation_failure_keeps_safe_api010(
     assert "private installed" not in json.dumps(records)
     errors = [record for record in records if record["level"] == "ERROR"]
     assert len(errors) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schema", "code", "diagnostic"),
+    [
+        (
+            {"anyOf": [True, {"pattern": "private-parameter-pattern"}]},
+            "API003",
+            "IR028",
+        ),
+        ({"description": "p" * 65537}, "API010", None),
+        ({"$schema": "https://private.invalid/dialect"}, "API003", "IR022"),
+    ],
+)
+async def test_parameter_publication_refusals_preserve_deploy_disposition(
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    schema: JsonObject,
+    code: str,
+    diagnostic: str | None,
+) -> None:
+    headers = await authorized(database)
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+    ir = skeleton_ir()
+    cast(JsonObject, ir["graph"])["params"] = schema
+
+    async with client_for(app) as client:
+        refused = await client.post(PATH, json=body(ir), headers=headers)
+        reused = await client.post(PATH, json=body(), headers=headers)
+
+    assert error_of(refused).error.code == code
+    if diagnostic is not None:
+        details = error_of(refused).error.details
+        assert details is not None
+        assert diagnostic in details.model_dump_json()
+    assert "private-parameter-pattern" not in refused.text
+    assert "https://private.invalid" not in refused.text
+    assert reused.status_code == 201
+    assert not preparer.busy
+    assert await rows(database) == (1, 1)
+    records = json.dumps(api_capture.finish())
+    assert "private-parameter-pattern" not in records
+    assert "https://private.invalid" not in records

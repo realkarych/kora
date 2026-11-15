@@ -26,6 +26,7 @@ from tests.db.closing import until
 from tests.plugins.authentication.support import AuthorityClock
 from tests.protocols.effective_artifact_cases import prepared
 from tests.support.output_bindings import publication_binding
+from tests.support.parameter_bindings import parameter_binding
 
 Mode = Literal["value", "fault", "group", "cancelled", "unavailable", "invocation"]
 
@@ -105,7 +106,10 @@ async def test_preparation_failure_disposes_sources_before_next_slot(
     work_reference = weakref.ref(work)
 
     async with DeploymentPreparer(
-        AuthorityClock(), owner, binding=publication_binding()
+        AuthorityClock(),
+        owner,
+        parameter_binding=parameter_binding(),
+        binding=publication_binding(),
     ) as preparer:
         operation = invoke(preparer, work)
         del work
@@ -145,7 +149,10 @@ async def test_abandoned_preparation_disposes_success_and_failure(mode: Mode) ->
     work_reference = weakref.ref(work)
 
     async with DeploymentPreparer(
-        AuthorityClock(), owner, binding=publication_binding()
+        AuthorityClock(),
+        owner,
+        parameter_binding=parameter_binding(),
+        binding=publication_binding(),
     ) as preparer:
         caller = asyncio.create_task(invoke(preparer, work))
         del work
@@ -184,7 +191,10 @@ async def test_preparation_success_transfers_only_the_live_result() -> None:
     work = PreparedWork("value", release, threading.Event(), sources, tasks)
 
     async with DeploymentPreparer(
-        AuthorityClock(), owner, binding=publication_binding()
+        AuthorityClock(),
+        owner,
+        parameter_binding=parameter_binding(),
+        binding=publication_binding(),
     ) as preparer:
         operation = invoke(preparer, work)
         del work
@@ -243,7 +253,10 @@ async def test_cancellation_after_delivery_discards_unclaimed_completion(
             interruptions.append(caller.cancel())
 
     async with DeploymentPreparer(
-        AuthorityClock(), owner, binding=publication_binding()
+        AuthorityClock(),
+        owner,
+        parameter_binding=parameter_binding(),
+        binding=publication_binding(),
     ) as preparer:
         incumbent = sys.getprofile()
         try:

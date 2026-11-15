@@ -19,6 +19,7 @@ from kora.db.graph_value_json import (
 )
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
 from kora.engine.graph_output_policy import OutputPublicationBinding
+from kora.engine.graph_parameter_evaluation import ParameterPublicationBinding
 from kora.engine.graph_types import read_document
 from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.deployment_checks import (
@@ -99,6 +100,7 @@ async def prepare_graph_deployment(
     evaluator: Evaluator,
     *,
     binding: OutputPublicationBinding,
+    parameter_binding: ParameterPublicationBinding,
 ) -> DeploymentPreparation:
     read = _read(ir)
     if isinstance(read, DeploymentRefusal):
@@ -117,6 +119,7 @@ async def prepare_graph_deployment(
             (),
             evaluator,
             binding=binding,
+            parameter_binding=parameter_binding,
             selectors=selectors,
             storage_identity=None,
             limits=DEPLOYMENT,

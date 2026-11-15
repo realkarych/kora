@@ -14,6 +14,7 @@ from kora.api.graph_preparation_completion import PreparationDelivery, start_pre
 from kora.cel_eval.thread import EvaluationThread, Evaluator
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
 from kora.engine.graph_output_policy import OutputPublicationBinding
+from kora.engine.graph_parameter_evaluation import ParameterPublicationBinding
 from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.deployment_checks import DeploymentSelection
 from kora.ir.json import JsonObject
@@ -90,9 +91,11 @@ class DeploymentPreparer:
         owner: EvaluationThread | None = None,
         *,
         binding: OutputPublicationBinding,
+        parameter_binding: ParameterPublicationBinding,
     ) -> None:
         self._clock = clock
         self._binding = binding
+        self._parameter_binding = parameter_binding
         self._owner = owner
         self._slot = asyncio.Semaphore(1)
         self._worker: PreparationThread | None = None
@@ -171,6 +174,12 @@ class DeploymentPreparer:
                 return DeploymentRefusal.BUSY
             return await reservation.run(
                 lambda evaluator: prepare_graph_deployment(
-                    ir, selectors, selection, policy, evaluator, binding=self._binding
+                    ir,
+                    selectors,
+                    selection,
+                    policy,
+                    evaluator,
+                    binding=self._binding,
+                    parameter_binding=self._parameter_binding,
                 )
             )

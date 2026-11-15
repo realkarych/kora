@@ -54,6 +54,7 @@ from tests.api.deployment_cases import (
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import FakeClock, Seeder, fixed_randomness
 from tests.support.output_bindings import publication_binding
+from tests.support.parameter_bindings import parameter_binding
 
 __all__ = ["evaluator"]
 
@@ -180,6 +181,7 @@ async def test_deployment_preparation_refuses_before_preparing(
             SELECTION,
             DEFAULT_POLICY,
             evaluator,
+            parameter_binding=parameter_binding(),
             binding=publication_binding(),
         )
         for ir in (foreign, renamed, unselected, malformed, oversized, unresolved)
@@ -208,6 +210,7 @@ async def test_deployment_preparation_admits_documents_within_its_budgets(
         SELECTION,
         DEFAULT_POLICY,
         evaluator,
+        parameter_binding=parameter_binding(),
         binding=publication_binding(),
     )
     exhausted = await prepare_graph_deployment(
@@ -216,6 +219,7 @@ async def test_deployment_preparation_admits_documents_within_its_budgets(
         SELECTION,
         DEFAULT_POLICY,
         evaluator,
+        parameter_binding=parameter_binding(),
         binding=publication_binding(),
     )
 

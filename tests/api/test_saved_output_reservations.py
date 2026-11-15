@@ -27,11 +27,12 @@ from kora.protocols.effective_artifact_type import (
 )
 from tests.api.test_graph_execution_preparation import borrowed, source
 from tests.support.output_bindings import publication_binding
+from tests.support.parameter_bindings import parameter_binding
 
 
 def test_saved_output_preparation_reservation_covers_both_policies() -> None:
     ir_text, _ = source(ordered=True)
-    exact = replace(EXECUTION, max_retained_bytes=2_119_616_025)
+    exact = replace(EXECUTION, max_retained_bytes=2_122_338_369)
     short = replace(exact, max_retained_bytes=exact.max_retained_bytes - 1)
     binding = publication_binding()
 
@@ -40,17 +41,25 @@ def test_saved_output_preparation_reservation_covers_both_policies() -> None:
     with borrowed() as (runner, evaluator):
         prepared = runner.run(
             prepare_logical_execution_contract(
-                ir_text, evaluator, binding=binding, limits=exact
+                ir_text,
+                evaluator,
+                parameter_binding=parameter_binding(),
+                binding=binding,
+                limits=exact,
             )
         )
         with pytest.raises(GraphValueRejected) as failure:
             runner.run(
                 prepare_logical_execution_contract(
-                    ir_text, evaluator, binding=binding, limits=short
+                    ir_text,
+                    evaluator,
+                    parameter_binding=parameter_binding(),
+                    binding=binding,
+                    limits=short,
                 )
             )
 
-    assert retained == 783_551_424
+    assert retained == 857_740_832
     assert scratch == 15_988_128
     assert work == 273_588_480
     assert isinstance(prepared, PreparedLogicalExecutionContract)
@@ -91,7 +100,11 @@ def test_schema_source_and_composition_holders_do_not_span_inventory_passes() ->
             sys.setprofile(observe)
             prepared = runner.run(
                 prepare_logical_execution_contract(
-                    ir_text, evaluator, binding=binding, limits=EXECUTION
+                    ir_text,
+                    evaluator,
+                    parameter_binding=parameter_binding(),
+                    binding=binding,
+                    limits=EXECUTION,
                 )
             )
         finally:
@@ -100,7 +113,7 @@ def test_schema_source_and_composition_holders_do_not_span_inventory_passes() ->
     assert isinstance(prepared, PreparedLogicalExecutionContract)
     assert passes == [True, True, True]
     assert len(previous) >= 2
-    assert len(sources) == 6
+    assert len(sources) == 7
     assert all(reference() is None for reference in sources)
     assert not any(
         isinstance(value, holders) and id(value) in previous

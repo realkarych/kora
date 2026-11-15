@@ -162,6 +162,7 @@ async def test_saved_output_whole_history_reads_after_database_release(
 
     assert checked.canonical_ir == original.ir
     assert checked.canonical_contract == original.contract
+    assert checked.parameter_evaluation is None
     assert checked.pin == pin
     assert row.ir_digest == original.ir_digest
     assert row.deployment_digest == original.deployment_digest
