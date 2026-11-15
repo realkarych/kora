@@ -482,7 +482,7 @@ Refused or expired uploads finish their staging ownership under the same physica
 
 ### Durable storage address coordination
 
-The [execution custody authority proposal](execution-custody-authority.md) under #1572 gives a candidate independent journal/commit and issuer-lifetime mechanism for the continuity obligations below. Its placement, persistent owner and bounds await owner acceptance; existing settings and fence primitives do not implement it. It does not change #1320's deletion representation or activate address-fenced effects.
+The [execution custody authority design](execution-custody-authority.md), accepted in #1575, selects the independent journal/commit and issuer-lifetime mechanism for the continuity obligations below. Existing settings and fence primitives do not implement it. Its [native refinement](execution-custody-native.md) under #1580 requires separate review; neither design changes #1320's deletion representation or activates address-fenced effects.
 
 The project owner accepted the stored contract and lock order on 2026-11-06 under [#855](https://github.com/realkarych/kora/issues/855#issuecomment-6685074866). Implementation and qualification remain with #216 and the participating owners. Keep each owner kind in its own typed relation. Those authoritative records and the applicable holds are the sole source of eligibility. All applicable kinds participate in the same serialized physical-address boundary.
 
