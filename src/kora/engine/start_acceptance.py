@@ -227,14 +227,18 @@ async def acquire_manual_start(
     if not candidate.belongs_to(request):
         raise_safe(StartRecordRejected())
     limits.admit()
+    acquired: StartAcceptance | SelectedStartVersion | None = None
     try:
-        async with database.read_snapshot() as connection:
-            acquired = await _acquire(connection, candidate, limits)
-    except SQLAlchemyError:
-        raise_private_metadata_error(StartReadFailed())
-    if isinstance(acquired, StartAcceptance):
-        return _completed(acquired)
-    return acquired
+        try:
+            async with database.read_snapshot() as connection:
+                acquired = await _acquire(connection, candidate, limits)
+        except SQLAlchemyError:
+            raise_private_metadata_error(StartReadFailed())
+        if isinstance(acquired, StartAcceptance):
+            return _completed(acquired)
+        return acquired
+    finally:
+        del acquired
 
 
 @dataclass(frozen=True, slots=True)
