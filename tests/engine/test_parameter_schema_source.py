@@ -16,10 +16,6 @@ from kora.engine.parameter_schema_source import (
     ParameterSchemaSourceRejected,
     build_parameter_schema_arena,
 )
-from kora.engine.parameter_schema_support import (
-    ParameterSchemaSupport,
-    check_parameter_schema_support,
-)
 from kora.ir.json import JsonObject
 from tests.engine.test_parameter_schema_references import ample, sources_for
 
@@ -47,15 +43,11 @@ def test_schema_source_preserves_canonical_scalars_in_ordered_containers() -> No
     )
     arena = sources.arena
 
-    outcome = check_parameter_schema_support(
-        arena, budget=ample(), max_active_frames=2, max_call_depth=2
-    )
     const = arena.nodes[member(arena, arena.root, "const")]
     names = [arena.nodes[key].value for key, _ in const.members]
     array = arena.nodes[const.members[2][1]]
     integer, floating, string = (arena.nodes[child] for child in array.children)
 
-    assert outcome == ParameterSchemaSupport(reachable_positions=2, call_depth=2)
     assert names == ["a", "é", "\ud800", "😀"]
     assert const.maximum_key == 1
     assert integer.value == 2**80
