@@ -20,7 +20,6 @@ from kora.ir.structured_schema_evaluation_policy import PARAMETERS, EvaluationRe
 from kora.ir.structured_schema_evaluation_work import EvaluationMeter
 from kora.ir.structured_schema_input import SchemaArena
 from kora.ir.structured_schema_work import PreparationMeter, PreparationRefused
-from tests.ir.test_structured_schema_equality import frozen_literal
 from tests.ir.test_structured_schema_evaluation_work import counters, remaining_meter
 
 
@@ -31,9 +30,11 @@ def controlled_borrowed_mapping(keys: tuple[str, ...]) -> dict[str, object]:
 
 
 def test_arena_lookup_returns_sorted_member_ordinals() -> None:
-    literal = frozen_literal(
+    arena = SchemaArena(PreparationMeter())
+    root = arena.snapshot(
         {"prefix-z": 0.3, "prefix-a": None, "prefix-x": False, "prefix-c": {}}
     )
+    literal = arena.freeze(root)
     meter = EvaluationMeter()
     lookup = arena_object_lookup(ArenaCursor(literal.nodes, literal.root), meter)
     assert lookup is not None
@@ -325,6 +326,9 @@ class AuthoredObject(dict[str, object]):
         pytest.param(AuthoredArray([None]), id="array-subclass"),
         pytest.param(AuthoredObject({"key": None}), id="object-subclass"),
         pytest.param(math.nan, id="nonfinite"),
+        pytest.param(math.inf, id="positive-infinity"),
+        pytest.param(-math.inf, id="negative-infinity"),
+        pytest.param(1 << 14_000, id="integer-bits"),
         pytest.param("\ud800", id="surrogate-text"),
         pytest.param({"\udfff": None}, id="surrogate-key"),
     ],
@@ -361,7 +365,7 @@ def test_actual_model_and_arena_admission_refuse_cycles() -> None:
 
 @pytest.mark.parametrize(
     "raw",
-    [rb'{"a":0,"\u0061":1}', rb'"\ud800"', rb'{"\udfff":null}'],
+    [b"NaN", rb'{"a":0,"\u0061":1}', rb'"\ud800"', rb'{"\udfff":null}'],
 )
 def test_actual_raw_admission_refuses_duplicate_names_and_surrogate_text(
     raw: bytes,
