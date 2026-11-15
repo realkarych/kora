@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.connection import Database, clear_snapshot_error
+from kora.db.graph_value_json import GraphValueRejected
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import event, graph_version, inbound_event, run, run_inputs
 from kora.db.transactions import raise_private_metadata_error
@@ -234,6 +235,10 @@ async def acquire_manual_start(
                 acquired = await _acquire(connection, candidate, limits)
         except SQLAlchemyError:
             raise_private_metadata_error(StartReadFailed())
+        except GraphValueRejected as rejection:
+            reason = rejection.reason
+            clear_snapshot_error(rejection)
+            raise_safe(GraphValueRejected(reason))
         if isinstance(acquired, StartAcceptance):
             return _completed(acquired)
         return acquired
