@@ -162,6 +162,8 @@ Exception for #1598: after #1585 and #1582, the unused `structured_schema_adapte
 
 The owner [approved this exception](https://github.com/realkarych/kora/issues/1598#issuecomment-6895383674) on 2026-11-15. The [retirement record](../research/schema-retirement-2026-11-15.md) maps removed implementations to retained behavior, tests and historical readers.
 
+After complete parameter publication/composition #1612, #1619 retires the unused engine parameter evaluator and its arena/numeric predicates in the normal delivery order. The [parameter retirement record](../research/parameter-evaluator-retirement-2026-11-15.md) maps every removed test to surviving behavior or explicitly superseded v1 internals. Live source/reference facilities, historical readers, shared IR primitives and accepting consumers are unchanged.
+
 ### Source-only implementation (#1585)
 
 `kora.ir.standard_schema_support.check_standard_schema_source` checks the complete supplied native source under an exact domain binding. The private input has ordered `documents`, `constraints`, `metadata` members. Each document has ordered `name` (an optional saved artifact name) and `schema` members. Nonempty `constraints` selects document indexes in required order, retaining repetitions. Every supplied document is checked; reference-only documents are not extra assertions. Complete wrappers, names and metadata count toward source limits; each original schema and metadata tree retains its own root-depth origin. This internal shape is not a stored format.

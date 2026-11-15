@@ -11,6 +11,8 @@ from kora.ir.structured_output import (
     parse_structured_output_json,
 )
 from kora.ir.structured_schema_cursors import (
+    ArenaCursor,
+    arena_object_lookup,
     build_native_object_index,
     string_equal,
 )
@@ -18,6 +20,7 @@ from kora.ir.structured_schema_evaluation_policy import PARAMETERS, EvaluationRe
 from kora.ir.structured_schema_evaluation_work import EvaluationMeter
 from kora.ir.structured_schema_input import SchemaArena
 from kora.ir.structured_schema_work import PreparationMeter, PreparationRefused
+from tests.ir.test_structured_schema_equality import frozen_literal
 from tests.ir.test_structured_schema_evaluation_work import counters, remaining_meter
 
 
@@ -25,6 +28,19 @@ def controlled_borrowed_mapping(keys: tuple[str, ...]) -> dict[str, object]:
     model = StructuredOutput({key: [position] for position, key in enumerate(keys)})
     admitted = cast("dict[str, object]", checked_value(model))
     return {key: admitted[key] for key in keys}
+
+
+def test_arena_lookup_returns_sorted_member_ordinals() -> None:
+    literal = frozen_literal(
+        {"prefix-z": 0.3, "prefix-a": None, "prefix-x": False, "prefix-c": {}}
+    )
+    meter = EvaluationMeter()
+    lookup = arena_object_lookup(ArenaCursor(literal.nodes, literal.root), meter)
+    assert lookup is not None
+
+    ordinals = [lookup.find(key, meter) for key in ("prefix-z", "prefix-y", "z")]
+
+    assert ordinals == [3, -1, -1]
 
 
 @pytest.mark.parametrize(
