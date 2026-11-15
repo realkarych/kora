@@ -111,6 +111,8 @@ def prepare_graph_parameter_evaluation(
             selection_budget=selection_budget,
         )
         members = arena.nodes[arena.type_roots].members
+        if len(members) >= limits["max_schema_documents"]:
+            return SourceDecision("refused", "evaluation_exhausted")
         selection_budget.reserve(
             len(members) + len(type_contracts), entries=5 * len(members)
         )

@@ -183,6 +183,34 @@ def test_parameter_source_capacity_is_not_schema_mismatch() -> None:
     assert result.reason == "evaluation_exhausted"
 
 
+@pytest.mark.parametrize("named_count", [63, 64])
+def test_parameter_document_capacity_includes_its_original_root(
+    named_count: int,
+) -> None:
+    names = [f"example/Type{index}" for index in range(named_count)]
+    contracts: JsonObject = {name: custom({}) for name in names}
+    schema: JsonObject = {
+        "allOf": [
+            {"$ref": "urn:kora:artifact:" + name.replace("/", ":")} for name in names
+        ]
+    }
+    parameters, records = parameter_inputs(schema, contracts)
+
+    result = prepare_graph_parameter_evaluation(
+        parameters,
+        records,
+        binding(SchemaDomain.PARAMETERS),
+        source_budget=budget(),
+        selection_budget=budget(),
+    )
+
+    if named_count == 63:
+        assert isinstance(result, PreparedStandardParameters)
+        assert result.accounting.schema_documents == 64
+    else:
+        assert result == SourceDecision("refused", "evaluation_exhausted")
+
+
 def test_parameter_profile_freezes_the_explicit_binding() -> None:
     original = binding(SchemaDomain.PARAMETERS)
     selected = ParameterPublicationBinding(original)
