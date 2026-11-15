@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select, update
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
-from kora.api.run_trigger_route import _preparation
+from kora.api.run_trigger_route import manual_start_preparation
 from kora.cel_eval.binding import load_binding
 from kora.cel_eval.thread import EvaluationThread, Evaluator
 from kora.db.connection import Database
@@ -67,7 +67,7 @@ async def test_trigger_preparation_releases_snapshot_with_retained_failure(
             parameter_binding=parameter_binding(),
             binding=publication_binding(),
         ) as preparer:
-            prepare = _preparation(
+            prepare = manual_start_preparation(
                 deployment_services(database, preparer, HARNESS), request, KEY
             )
             caller = asyncio.ensure_future(prepare(candidate))

@@ -111,7 +111,7 @@ async def _prepare_facts(
     )
 
 
-def _preparation(
+def manual_start_preparation(
     services: GraphServices, request: PreparedManualStartRequest, key: str
 ) -> StartPreparation:
     async def prepare(
@@ -217,7 +217,7 @@ async def _trigger(
         principal,
         start,
         key,
-        _preparation(services, start, key),
+        manual_start_preparation(services, start, key),
         identifiers=services.identifiers,
         clock=clock.now,
     )
