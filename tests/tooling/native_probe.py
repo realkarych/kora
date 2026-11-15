@@ -18,6 +18,8 @@ from scripts.ci.mutation_models import Report, ordered
 from scripts.ci.mutation_process import Stop, environment, execute
 
 CACHE_LOCATION = ("UV_CACHE_DIR", "XDG_CACHE_HOME")
+NATIVE_PROBE_TIMEOUT_SECONDS: float = 120.0
+FIXTURE_TEST_TIMEOUT_SECONDS: float = 30.0
 
 
 def probe_native_inventory() -> None:
@@ -32,7 +34,7 @@ def probe_native_inventory() -> None:
             "def test_value() -> None:\n    assert value() == 2\n"
         )
         stop = Stop()
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + NATIVE_PROBE_TIMEOUT_SECONDS
         tool = ROOT / ".venv/bin/cosmic-ray"
         work = inventory(root, tool, deadline, stop)
         target = next(item for item in work if item.module_path.endswith("paths.py"))
@@ -48,7 +50,12 @@ def probe_native_inventory() -> None:
             "test_sample.py",
         ]
 
-        baseline = execute(arguments, root, deadline, stop)
+        baseline = execute(
+            arguments,
+            root,
+            min(deadline, time.monotonic() + FIXTURE_TEST_TIMEOUT_SECONDS),
+            stop,
+        )
         baseline_outcome = classify(baseline, root / "junit.xml")
         command(
             [
@@ -62,7 +69,12 @@ def probe_native_inventory() -> None:
             deadline,
             stop,
         )
-        changed = execute(arguments, root, deadline, stop)
+        changed = execute(
+            arguments,
+            root,
+            min(deadline, time.monotonic() + FIXTURE_TEST_TIMEOUT_SECONDS),
+            stop,
+        )
         changed_outcome = classify(changed, root / "junit.xml")
 
         assert baseline_outcome == "survived"
