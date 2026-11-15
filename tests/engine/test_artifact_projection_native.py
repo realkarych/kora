@@ -29,12 +29,15 @@ from tests.protocols.effective_artifact_cases import installed
         None,
         True,
         9007199254740993,
+        0.0,
         -0.0,
         5e-324,
+        1.7976931348623157e308,
         "nul\0😀",
         [],
         {},
         {"\0😀": [1, 1.0, -0.0]},
+        pytest.param("x" * 4094, id="maximum-record"),
     ],
 )
 async def test_cel_projection_number_kinds_round_trip(
