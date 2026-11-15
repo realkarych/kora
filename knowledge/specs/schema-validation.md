@@ -150,6 +150,10 @@ Executable publication under v2 verifies support, immutable behavior map and com
 
 The accepted design remains the contract for #1361. The source-only implementation #1585 precedes the complete native value decision #1582, effective StructuredOutput composition and distinct parameter composition, followed by removal of retired evaluators under the normal 1,000-line ceiling. The [planning record](https://github.com/realkarych/kora/issues/1577#issuecomment-6886921639) gives component estimates; exact implementation scope is reconciled against this design before edits.
 
+Exception for #1598: after #1585 and #1582, the unused `structured_schema_adapter` and `parameter_schema_support` implementations may be retired before effective StructuredOutput and parameter composition, provided a complete caller inventory confirms that neither has a production caller and distinct accepted behavior retains regression coverage in the replacement. Live source/preparation/reference paths and saved-policy readers remain unchanged. This exception changes no consumer activation condition or acceptance gate; other retirement groups retain the delivery order above.
+
+The owner [approved this exception](https://github.com/realkarych/kora/issues/1598#issuecomment-6895383674) on 2026-11-15. The [retirement record](../research/schema-retirement-2026-11-15.md) maps removed implementations to retained behavior, tests and historical readers.
+
 ### Source-only implementation (#1585)
 
 `kora.ir.standard_schema_support.check_standard_schema_source` checks the complete supplied native source under an exact domain binding. The private input has ordered `documents`, `constraints`, `metadata` members. Each document has ordered `name` (an optional saved artifact name) and `schema` members. Nonempty `constraints` selects document indexes in required order, retaining repetitions. Every supplied document is checked; reference-only documents are not extra assertions. Complete wrappers, names and metadata count toward source limits; each original schema and metadata tree retains its own root-depth origin. This internal shape is not a stored format.
