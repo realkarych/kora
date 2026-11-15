@@ -1,3 +1,4 @@
+import os
 import sys
 import weakref
 from collections.abc import Generator
@@ -27,6 +28,7 @@ from kora.observability.context import bound_scope
 from tests.ir.standard_schema_cases import binding, decide, source
 from tests.ir.structured_schema_cases import HostileHeader
 from tests.observability.conftest import wait_until
+from tests.observability.test_logging_loss_is_visible_without_the_sink import filled
 from tests.support.observability import FakeClock
 
 
@@ -37,22 +39,29 @@ class CachedParser(Protocol):
 @contextmanager
 def diagnostics_pipe(
     level: Level = Level.DEBUG,
+    *,
+    blocked: bool = False,
 ) -> Generator[tuple[ProcessDiagnostics, Pipe]]:
     pipe = Pipe.open()
-    diagnostics = configure_process(
-        "ir",
-        LoggingSettings(level=level, queue_records=64, queue_bytes=65536),
-        "schema-source-test",
-        FakeClock().now,
-        pipe.write_end,
-    )
     try:
-        yield diagnostics, pipe
+        if blocked:
+            filled(pipe.write_end)
+            os.set_blocking(pipe.write_end, False)
+        diagnostics = configure_process(
+            "ir",
+            LoggingSettings(level=level, queue_records=64, queue_bytes=65536),
+            "schema-source-test",
+            FakeClock().now,
+            pipe.write_end,
+        )
+        try:
+            yield diagnostics, pipe
+        finally:
+            diagnostics.shutdown()
+            assert not diagnostics.writer_is_alive()
+            assert current_diagnostics() is None
     finally:
-        diagnostics.shutdown()
         pipe.release()
-        assert not diagnostics.writer_is_alive()
-        assert current_diagnostics() is None
 
 
 @pytest.mark.parametrize("outcome", ["success", "schema", "policy", "capacity"])
@@ -253,9 +262,11 @@ def test_standard_schema_source_survives_unavailable_sink(broken: bool) -> None:
     schema = {"description": "private_schema_source_marker"}
     expected = decide(schema)
 
-    with diagnostics_pipe() as (diagnostics, pipe):
+    with diagnostics_pipe(blocked=not broken) as (diagnostics, pipe):
         if broken:
             pipe.close_read_end()
+        else:
+            wait_until(lambda: diagnostics.snapshot().in_flight_bytes > 0)
         matches = all(decide(schema) == expected for _ in range(256))
         if broken:
             wait_until(lambda: diagnostics.snapshot().sink_failed)
