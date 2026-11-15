@@ -48,6 +48,34 @@ def diagnostic_context(diagnostics: ProcessDiagnostics) -> ProtocolContext:
     )
 
 
+def source_owners(frame: FrameType) -> int:
+    return sys.getrefcount(frame.f_locals["source"]) - int(type(frame.f_locals) is dict)
+
+
+def source_owner_probe(*, retained: bool) -> int:
+    source = {"probe": None}
+    extra = [source] if retained else []
+    return len(extra)
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_source_observer_detects_each_extra_owner(retained: bool) -> None:
+    counts: list[int] = []
+    previous = sys.getprofile()
+
+    def observe(frame: FrameType, event: str, argument: object) -> None:
+        if frame.f_code is source_owner_probe.__code__ and event == "return":
+            counts.append(source_owners(frame))
+
+    sys.setprofile(observe)
+    try:
+        source_owner_probe(retained=retained)
+    finally:
+        sys.setprofile(previous)
+
+    assert counts == [2 + int(retained)]
+
+
 @dataclass
 class CompositionObservation(ReleaseObservation):
     sources: list[weakref.ReferenceType[Sources]] = field(
@@ -66,9 +94,7 @@ class CompositionObservation(ReleaseObservation):
         if frame.f_code is self.decision_code and event == "return":
             self.decision_calls += 1
             if "source" in frame.f_locals:
-                self.source_return_owners.append(
-                    sys.getrefcount(frame.f_locals["source"])
-                )
+                self.source_return_owners.append(source_owners(frame))
 
 
 def retained_failure(
@@ -141,7 +167,7 @@ def test_effective_schema_operation_releases_temporary_state(
     assert provider_reference() is None
     assert observation.sources
     assert observation.source_return_owners
-    assert set(observation.source_return_owners) == {3}
+    assert set(observation.source_return_owners) == {2}
     assert observation.decision_calls == 6
     assert holder_fields == (
         "source_bytes",
@@ -171,7 +197,7 @@ def test_effective_shape_refusal_precedes_numerical_views(
     assert result.outcome == "refused"
     assert observation.view_calls == 0
     assert observation.engines == []
-    assert observation.source_return_owners == [3]
+    assert observation.source_return_owners == [2]
 
 
 @pytest.mark.parametrize("level", [Level.DEBUG, Level.INFO])

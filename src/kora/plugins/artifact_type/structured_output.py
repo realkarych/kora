@@ -1,5 +1,4 @@
 from copy import deepcopy
-from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from kora.ir import ContractViolation
@@ -20,13 +19,6 @@ from kora.protocols.artifact_type import (
     BuiltinArtifactTypeBinding,
 )
 from kora.protocols.common import ProtocolContext
-from kora.protocols.effective_artifact_type import (
-    InstalledBehaviors,
-    SelectionBinding,
-    StandardSchemaBinding,
-    SummaryBinding,
-    ValidationBinding,
-)
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 
@@ -166,25 +158,4 @@ def provider_metadata() -> ProviderMetadata:
         create_provider,
         CONFIG_SCHEMA,
         "1",
-    )
-
-
-def effective_behavior_bindings(
-    provider: StructuredOutputArtifactType,
-) -> InstalledBehaviors:
-    if type(provider) is not StructuredOutputArtifactType:
-        raise binding_error("provider")
-    return MappingProxyType(
-        {
-            ("validation", "kora.structured-output-validation.v1"): ValidationBinding(
-                "kora.structured-output-validation.v1", provider.validate
-            ),
-            ("validation", "kora.json-schema-2020-12.v1"): StandardSchemaBinding(),
-            ("digest_fields", "kora.json-payload.v1"): SelectionBinding(
-                "kora.json-payload.v1", provider.digest_fields
-            ),
-            ("summary", "kora.json-payload.v1"): SummaryBinding(
-                "kora.json-payload.v1", provider.summary
-            ),
-        }
     )

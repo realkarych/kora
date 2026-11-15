@@ -4,8 +4,8 @@ from typing import cast
 from kora.ir import ContractViolation
 from kora.ir.json import JsonValue
 from kora.ir.standard_output_preparation import StandardOutputInput
-from kora.plugins.artifact_type.structured_output import (
-    StructuredOutputArtifactType,
+from kora.plugins.artifact_type.structured_output import StructuredOutputArtifactType
+from kora.plugins.artifact_type.structured_output_bindings import (
     effective_behavior_bindings,
 )
 from kora.protocols.common import ProtocolContext
