@@ -2,7 +2,7 @@
 
 Checked 2026-11-15 against master `156494e4bc1d60f0b9096e1217a6d7377a19facb` for #1572. This is design evidence, not an implemented admission service or native crash qualification. The owner approved preparation of this design; acceptance of its mechanism and wording is a separate decision.
 
-Acceptance addendum, 2026-11-15: the owner subsequently [accepted the design and merge of #1575](https://github.com/realkarych/kora/pull/1575#issuecomment-6886916062). The preparation/acceptance wording below records the earlier review baseline, not a remaining mechanism-approval request. The [native plan and revised inventory](execution-custody-native-plan-2026-11-15.md) under #1580 supersede the responsibility estimate for implementation planning and propose exact formats/methods for separate review. No runtime qualification or production-size exception was granted.
+Acceptance addendum, 2026-11-15: the owner subsequently [accepted the design and merge of #1575](https://github.com/realkarych/kora/pull/1575#issuecomment-6886916062). The preparation/acceptance wording below records the earlier review baseline, not a remaining mechanism-approval request. The [native plan and revised inventory](execution-custody-native-plan-2026-11-15.md) under #1580 supersede the responsibility estimate for implementation planning and specify the exact formats/methods subsequently accepted in #1586. No runtime qualification or production-size exception was granted.
 
 ## Existing producers
 

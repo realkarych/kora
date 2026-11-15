@@ -1,6 +1,6 @@
 # Native custody implementation evidence and delivery plan
 
-Checked 2026-11-15 against `4d246192132cfbe56435841168b31f634f61d42a` for [#1580](https://github.com/realkarych/kora/issues/1580). This is source/design evidence, not executable custody or installation qualification. The owner [approved preparation](https://github.com/realkarych/kora/issues/1580#issuecomment-6893484560) of the [native companion](../specs/execution-custody-native.md). The independent authority mechanism was already [accepted in #1575](https://github.com/realkarych/kora/pull/1575#issuecomment-6886916062); its native refinements still require owner acceptance.
+Checked 2026-11-15 against `4d246192132cfbe56435841168b31f634f61d42a` for [#1580](https://github.com/realkarych/kora/issues/1580). This is source/design evidence, not executable custody or installation qualification. The owner [approved preparation](https://github.com/realkarych/kora/issues/1580#issuecomment-6893484560) of the [native companion](../specs/execution-custody-native.md). The independent authority mechanism was already [accepted in #1575](https://github.com/realkarych/kora/pull/1575#issuecomment-6886916062); its native refinements were subsequently [accepted in #1586](https://github.com/realkarych/kora/pull/1586#issuecomment-6894239462) on 2026-11-15. The proposed-producer wording below records the preparation baseline, not a remaining design-approval request.
 
 Integration update on the same date: the [upload-retirement contract](../specs/upload-retirement.md) landed in #1583 at `0ce6222ba923de7688e4264ba8b404a5ac4e276c`. The native design is based on that revision and preserves its complete address protection, actual pre-entry closure and original settlement consumption. That base change contains documentation only; the production-source inventory above remains pinned to its original revision and unchanged inputs. No upload or native custody producer became implemented.
 
@@ -10,7 +10,7 @@ The companion fixes the journal's row shapes, ownership order, original COMMIT p
 
 The [previous inventory](execution-custody-authority-2026-11-15.md) remains a historical source snapshot. Its 1,900–3,300-line estimate did not identify native fields or every writer route and was not a proof of indivisibility. An [independent delivery-cut assessment](https://github.com/realkarych/kora/issues/1580#issuecomment-6893190586) found no established smaller useful first consumer; that planning result does not replace review of the actual new native design.
 
-The concrete new decisions are rollback-journal DELETE/EXTRA for the independent journal, bounded native rows and page allocation, lifetime/commit/recovery lock ownership, original transaction status preservation, PostgreSQL read-only enforcement and active-profile migration refusal, separate operator checkpoint recovery, coherent image ownership and the system-crash method. They remain proposals, not retroactive claims about #1575's approval. Existing metadata SQLite WAL/FULL remains unchanged.
+The concrete new decisions are rollback-journal DELETE/EXTRA for the independent journal, bounded native rows and page allocation, lifetime/commit/recovery lock ownership, original transaction status preservation, PostgreSQL read-only enforcement and active-profile migration refusal, separate operator checkpoint recovery, coherent image ownership and the system-crash method. Their subsequent acceptance in #1586 does not retroactively extend #1575's approval or establish runtime qualification. Existing metadata SQLite WAL/FULL remains unchanged.
 
 ## Complete metadata writer inventory
 
@@ -65,7 +65,7 @@ The earlier inventory's [native evidence limits](execution-custody-authority-202
 
 ## Complete delivery and size
 
-The first real consumer is still missing. `engine/graph_stage_promotion.py` prepares/checks exact records but does not write a complete intent and orchestrate stage/promote/retire/release. Production storage lifecycle calls currently belong to conformance. #867 remains deferred; it is not reopened as an artificial journal consumer. #216's narrower refused-upload cleanup requires an actual admitted producer and the separately proposed #1581 handoff, not merely a prepared record type.
+The first real consumer is still missing. `engine/graph_stage_promotion.py` prepares/checks exact records but does not write a complete intent and orchestrate stage/promote/retire/release. Production storage lifecycle calls currently belong to conformance. #867 remains deferred; it is not reopened as an artificial journal consumer. #216's narrower refused-upload cleanup requires an actual admitted producer and the #1581 handoff accepted in #1583, not merely a prepared record type.
 
 | Required deliverable responsibility | Concrete proposed source ownership and included work | Revised production changed-line range |
 | --- | --- | --- |

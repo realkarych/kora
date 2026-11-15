@@ -482,7 +482,7 @@ Refused or expired uploads finish their staging ownership under the same physica
 
 ### Durable storage address coordination
 
-The [execution custody authority design](execution-custody-authority.md), accepted in #1575, selects the independent journal/commit and issuer-lifetime mechanism for the continuity obligations below. Existing settings and fence primitives do not implement it. Its [native refinement](execution-custody-native.md) under #1580 requires separate review; neither design changes #1320's deletion representation or activates address-fenced effects.
+The [execution custody authority design](execution-custody-authority.md), accepted in #1575, selects the independent journal/commit and issuer-lifetime mechanism for the continuity obligations below. Existing settings and fence primitives do not implement it. Its [native refinement](execution-custody-native.md) under #1580 was accepted in #1586; neither design changes #1320's deletion representation or activates address-fenced effects.
 
 The project owner accepted the stored contract and lock order on 2026-11-06 under [#855](https://github.com/realkarych/kora/issues/855#issuecomment-6685074866). Implementation and qualification remain with #216 and the participating owners. Keep each owner kind in its own typed relation. Those authoritative records and the applicable holds are the sole source of eligibility. All applicable kinds participate in the same serialized physical-address boundary.
 
@@ -603,7 +603,7 @@ Before activation, additionally qualify saturation refusal before I/O; conflicti
 
 #### Crash-durable metadata profile
 
-The [accepted custody mechanism](execution-custody-authority.md#6-qualification-and-delivery-limits) separates current settings observations from actual native persistence, whole-image restore and prior-issuer exclusion. The [native refinement](execution-custody-native.md) under #1580 proposes its exact journal/frontier records, all-writer protocol and system-crash method. These remain unimplemented and require separate owner acceptance; moving a frontier outside this database is not proof by itself.
+The [accepted custody mechanism](execution-custody-authority.md#6-qualification-and-delivery-limits) separates current settings observations from actual native persistence, whole-image restore and prior-issuer exclusion. The [native refinement](execution-custody-native.md) under #1580 specifies its exact journal/frontier records, all-writer protocol and system-crash method, accepted in #1586. These remain unimplemented; moving a frontier outside this database is not proof by itself.
 
 The project owner accepted an explicit installation-wide profile on 2026-11-07 under [#954](https://github.com/realkarych/kora/issues/954#issuecomment-6712053449). Enable address-fenced custody only in a metadata authority with the verified profile. Include every actual writer and checkpoint path that can change or carry relied-on state, including pooled replacement connections, migrations, recovery and alternate writers. Installations in ordinary mode keep address-fenced effects disabled.
 
