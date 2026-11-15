@@ -166,11 +166,13 @@ async def test_trigger_acquisition_exit_releases_snapshot_with_retained_cancella
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native_error", [False, True])
+@pytest.mark.parametrize("cancel_rollback", [False, True])
 async def test_trigger_owner_failure_releases_native_row_with_retained_failure(
     database: Database,
     evaluator: Evaluator,
     preparer: DeploymentPreparer,
     native_error: bool,
+    cancel_rollback: bool,
 ) -> None:
     case = await deploy(database, evaluator)
     request = request_for(case)
@@ -186,9 +188,11 @@ async def test_trigger_owner_failure_releases_native_row_with_retained_failure(
                 )
             )
     row_ids: list[int] = []
+    cancelled = False
     ledger = ConnectionLedger(database)
 
     def observe(frame: FrameType, event: str, _: object) -> None:
+        nonlocal cancelled
         if (
             not row_ids
             and event == "call"
@@ -200,6 +204,18 @@ async def test_trigger_owner_failure_releases_native_row_with_retained_failure(
             assert isinstance(row, Row)
             assert gc.is_tracked(row)
             row_ids.append(id(cast(object, row)))
+        if (
+            cancel_rollback
+            and row_ids
+            and not cancelled
+            and event == "call"
+            and frame.f_code.co_name == "_rollback_unit"
+            and frame.f_globals.get("__name__") == "kora.db.connection"
+        ):
+            task = asyncio.current_task()
+            assert task is not None
+            cancelled = True
+            task.cancel()
 
     incumbent = sys.getprofile()
     prepare = manual_start_preparation(
@@ -208,7 +224,13 @@ async def test_trigger_owner_failure_releases_native_row_with_retained_failure(
 
     sys.setprofile(observe)
     try:
-        expected = StartReadFailed if native_error else GraphValueRejected
+        expected = (
+            asyncio.CancelledError
+            if cancel_rollback
+            else StartReadFailed
+            if native_error
+            else GraphValueRejected
+        )
         with pytest.raises(expected) as failure:
             await prepare(candidate)
     finally:
@@ -220,6 +242,7 @@ async def test_trigger_owner_failure_releases_native_row_with_retained_failure(
         )
 
     assert row_ids
+    assert cancelled is cancel_rollback
     if isinstance(failure.value, GraphValueRejected):
         assert failure.value.reason is GraphValueFailure.INVALID
     assert failure.value.__traceback__ is not None

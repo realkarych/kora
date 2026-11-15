@@ -192,7 +192,7 @@ async def select_manual_start(
     return StartCandidate(_START_CANDIDATE, request, candidate)
 
 
-async def _acquire(
+async def _read_acquisition(
     connection: AsyncConnection,
     candidate: StartCandidate,
     limits: StartPreparationLimits,
@@ -218,6 +218,22 @@ async def _acquire(
     )
 
 
+async def _acquire(
+    connection: AsyncConnection,
+    candidate: StartCandidate,
+    limits: StartPreparationLimits,
+) -> StartAcceptance | SelectedStartVersion:
+    try:
+        return await _read_acquisition(connection, candidate, limits)
+    except SQLAlchemyError as error:
+        clear_snapshot_error(error)
+        raise_private_metadata_error(StartReadFailed())
+    except GraphValueRejected as rejection:
+        reason = rejection.reason
+        clear_snapshot_error(rejection)
+        raise_safe(GraphValueRejected(reason))
+
+
 async def acquire_manual_start(
     database: Database,
     request: PreparedManualStartRequest,
@@ -236,10 +252,6 @@ async def acquire_manual_start(
         except SQLAlchemyError as error:
             clear_snapshot_error(error)
             raise_private_metadata_error(StartReadFailed())
-        except GraphValueRejected as rejection:
-            reason = rejection.reason
-            clear_snapshot_error(rejection)
-            raise_safe(GraphValueRejected(reason))
         if isinstance(acquired, StartAcceptance):
             return _completed(acquired)
         return acquired
