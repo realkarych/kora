@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from functools import partial
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
@@ -39,6 +40,7 @@ from kora.engine.start_acceptance import (
 )
 from kora.engine.start_facts import (
     InstallationRefusal,
+    SelectedStartVersion,
     StartFactsResult,
     StartRefusal,
     read_manual_start_facts,
@@ -50,6 +52,7 @@ from kora.engine.start_records import (
     StartRecordRejected,
     prepare_manual_start_request,
 )
+from kora.ir.deployment_checks import DeploymentSelection
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import GRAPH_VERSION_PREFIX
 from kora.models.runs import RUN_PREFIX, AcceptedRun, SkippedRun, TriggerRequest
@@ -96,6 +99,18 @@ def public_outcome(outcome: StartOutcome) -> AcceptedRun | SkippedRun:
     return SkippedRun(outcome="skipped", reason="overlap", run_id=None)
 
 
+async def _prepare_facts(
+    selected: SelectedStartVersion,
+    request: PreparedManualStartRequest,
+    selection: DeploymentSelection,
+    key: str,
+    _: Evaluator,
+) -> StartFactsResult:
+    return read_manual_start_facts(
+        selected, request, selection, key=key, limits=START_PREPARATION
+    )
+
+
 def _preparation(
     services: GraphServices, request: PreparedManualStartRequest, key: str
 ) -> StartPreparation:
@@ -111,16 +126,11 @@ def _preparation(
             if isinstance(selected, StartAcceptance):
                 return selected
 
-            async def facts(_: Evaluator) -> StartFactsResult:
-                return read_manual_start_facts(
-                    selected,
-                    request,
-                    services.selection,
-                    key=key,
-                    limits=START_PREPARATION,
-                )
-
-            return await reservation.run(facts)
+            operation = reservation.run(
+                partial(_prepare_facts, selected, request, services.selection, key)
+            )
+            del selected
+            return await operation
 
     return prepare
 
