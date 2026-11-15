@@ -4,7 +4,7 @@ Date: 2026-10-31. Implementing child: [#548](https://github.com/realkarych/kora/
 
 ## Private interfaces and ownership
 
-The existing-layer [`structured_schema_collection_predicates.py`](../../src/kora/ir/structured_schema_collection_predicates.py) has no public package export. Its functions return a completed private boolean or propagate the existing fixed refusal or unexpected programming error.
+The existing-layer [`structured_schema_collection_predicates.py`](https://github.com/realkarych/kora/blob/80dd8bca4ebff5c37f7a985e43b20f41d41d73e1/src/kora/ir/structured_schema_collection_predicates.py) has no public package export. Its functions return a completed private boolean or propagate the existing fixed refusal or unexpected programming error.
 
 | Interface | Caller prerequisite and local responsibility |
 |---|---|

@@ -4,7 +4,7 @@ Date: 2026-10-31. Implementing child: [#536](https://github.com/realkarych/kora/
 
 ## Internal interfaces and integration ownership
 
-The existing-layer private module [`structured_schema_assertions.py`](../../src/kora/ir/structured_schema_assertions.py) exposes no name through `kora.ir`. Each of its eight leaf functions receives `(instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter)` and returns a completed boolean or propagates a fixed refusal or unexpected programming error.
+The existing-layer private module [`structured_schema_assertions.py`](https://github.com/realkarych/kora/blob/80dd8bca4ebff5c37f7a985e43b20f41d41d73e1/src/kora/ir/structured_schema_assertions.py) exposes no name through `kora.ir`. Each of its eight leaf functions receives `(instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter)` and returns a completed boolean or propagates a fixed refusal or unexpected programming error.
 
 | Function | Leaf decision |
 |---|---|
