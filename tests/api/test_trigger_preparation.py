@@ -6,7 +6,7 @@ from types import FrameType
 from typing import cast
 
 import pytest
-from sqlalchemy import Row, insert, select, update
+from sqlalchemy import Row, insert, select, text, update
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.api.run_trigger_route import manual_start_preparation
@@ -18,6 +18,7 @@ from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.db.tables import graph_version, graph_version_resource_owner
 from kora.engine.start_acceptance import StartCandidate, select_manual_start
 from kora.engine.start_facts import SelectedStartVersion, read_manual_start_facts
+from kora.engine.start_replay import StartReadFailed
 from tests.api.deployment_cases import HARNESS, evaluator, preparer
 from tests.api.support import deployment_services
 from tests.api.test_graph_deployment_worker import preparation_threads
@@ -164,19 +165,26 @@ async def test_trigger_acquisition_exit_releases_snapshot_with_retained_cancella
 
 
 @pytest.mark.asyncio
-async def test_trigger_owner_refusal_releases_native_row_with_retained_failure(
-    database: Database, evaluator: Evaluator, preparer: DeploymentPreparer
+@pytest.mark.parametrize("native_error", [False, True])
+async def test_trigger_owner_failure_releases_native_row_with_retained_failure(
+    database: Database,
+    evaluator: Evaluator,
+    preparer: DeploymentPreparer,
+    native_error: bool,
 ) -> None:
     case = await deploy(database, evaluator)
     request = request_for(case)
     candidate = await select_manual_start(database, case.user, request, KEY)
     assert isinstance(candidate, StartCandidate)
     async with database.transaction() as writer:
-        await writer.execute(
-            insert(graph_version_resource_owner).values(
-                owner_values(case.version_id) | {"ordinal": 1}
+        if native_error:
+            await writer.execute(text("DROP TABLE graph_version_resource_owner"))
+        else:
+            await writer.execute(
+                insert(graph_version_resource_owner).values(
+                    owner_values(case.version_id) | {"ordinal": 1}
+                )
             )
-        )
     row_ids: list[int] = []
     ledger = ConnectionLedger(database)
 
@@ -200,7 +208,8 @@ async def test_trigger_owner_refusal_releases_native_row_with_retained_failure(
 
     sys.setprofile(observe)
     try:
-        with pytest.raises(GraphValueRejected) as failure:
+        expected = StartReadFailed if native_error else GraphValueRejected
+        with pytest.raises(expected) as failure:
             await prepare(candidate)
     finally:
         sys.setprofile(incumbent)
@@ -211,7 +220,8 @@ async def test_trigger_owner_refusal_releases_native_row_with_retained_failure(
         )
 
     assert row_ids
-    assert failure.value.reason is GraphValueFailure.INVALID
+    if isinstance(failure.value, GraphValueRejected):
+        assert failure.value.reason is GraphValueFailure.INVALID
     assert failure.value.__traceback__ is not None
     assert failure.value.__cause__ is failure.value.__context__ is None
     assert released

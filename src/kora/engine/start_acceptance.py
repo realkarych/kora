@@ -233,7 +233,8 @@ async def acquire_manual_start(
         try:
             async with database.read_snapshot() as connection:
                 acquired = await _acquire(connection, candidate, limits)
-        except SQLAlchemyError:
+        except SQLAlchemyError as error:
+            clear_snapshot_error(error)
             raise_private_metadata_error(StartReadFailed())
         except GraphValueRejected as rejection:
             reason = rejection.reason
