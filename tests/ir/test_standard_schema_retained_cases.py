@@ -15,8 +15,8 @@ from tests.ir.standard_schema_cases import binding, source
         ({"minLength": 2}, "😀", False),
         ({"maxLength": 1}, "😀", True),
         ({"maxLength": 1}, "e\u0301", False),
-        ({"type": "integer"}, 2**80, True),
-        ({"type": "number"}, 2**80, True),
+        ({"type": "integer"}, 10**400, True),
+        ({"type": "number"}, 10**400, True),
     ],
 )
 def test_standard_schema_retains_exact_primitive_boundaries(
