@@ -35,6 +35,10 @@ from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.util import await_, greenlet_spawn
 
 from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
+from kora.db.completion import complete as complete
+from kora.db.completion import finish_releasing as finish_releasing
+from kora.db.completion import nothing as nothing
+from kora.db.completion import wait_releasing
 from kora.db.maintenance import (
     NATIVE_READ_RETIRE,
     NativeReadExpired,
@@ -494,48 +498,8 @@ def rollback_postgresql_migration_commit(connection: Connection) -> None:
         raise
 
 
-async def wait_through_cancellations(task: asyncio.Future[Result]) -> None:
-    while not task.done():
-        try:
-            await asyncio.shield(asyncio.wait({task}))
-        except asyncio.CancelledError:
-            continue
-    if not task.cancelled():
-        task.exception()
-
-
-async def finish_releasing(
-    pending: Awaitable[Result], release: Callable[[Result], Awaitable[None]]
-) -> Result:
-    task = asyncio.ensure_future(pending)
-    return await wait_releasing(task, asyncio.shield(task), release)
-
-
-async def wait_releasing(
-    task: asyncio.Future[Result],
-    protected: asyncio.Future[Result],
-    release: Callable[[Result], Awaitable[None]],
-) -> Result:
-    try:
-        return await protected
-    except asyncio.CancelledError:
-        await wait_through_cancellations(task)
-        if not task.cancelled() and task.exception() is None:
-            release_task = asyncio.ensure_future(release(task.result()))
-            await wait_through_cancellations(release_task)
-        raise
-
-
 async def close_connection(connection: AsyncConnection) -> None:
     await connection.close()
-
-
-async def nothing(result: object) -> None:
-    return None
-
-
-async def complete(pending: Awaitable[Result]) -> Result:
-    return await finish_releasing(pending, nothing)
 
 
 async def start_snapshot_phase(
