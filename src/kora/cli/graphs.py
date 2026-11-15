@@ -9,6 +9,7 @@ import typer
 from pydantic import ValidationError
 
 from kora.cli.app import CLI_COMPONENT
+from kora.cli.parameters import trigger_parameters
 from kora.client import ApiError, ClientError, KoraClient
 from kora.client.documents import GraphDocumentError, read_graph_deployment
 from kora.client.settings import (
@@ -136,6 +137,7 @@ class TriggerOptions:
     graph_version: str | None
     idempotency_key: str | None
     allow_unenforced_secrets: bool
+    parameters: tuple[str, ...] = ()
 
 
 def _trigger_summary(triggered: TriggeredRun) -> str:
@@ -153,12 +155,12 @@ def trigger_command(
 ) -> None:
     try:
         request = TriggerRequest(
-            params=OpaqueObject(),
+            params=OpaqueObject(trigger_parameters(options.parameters)),
             graph_version=options.graph_version,
             allow_unenforced_secrets=options.allow_unenforced_secrets,
         )
-    except ValidationError:
-        _stderr("kora: invalid --graph-version")
+    except (ValidationError, ValueError, RecursionError):
+        _stderr("kora: invalid trigger arguments")
         raise typer.Exit(EXIT_USAGE) from None
     key = options.idempotency_key
     if key is not None and IDEMPOTENCY_KEY.fullmatch(key) is None:

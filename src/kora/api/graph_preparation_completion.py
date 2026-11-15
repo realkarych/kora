@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -68,6 +69,11 @@ class PreparationDelivery(Generic[T]):
         self._settled = settled
         self._completion: PreparationCompletion[T] | None = None
         self._abandoned = False
+        self._start_lock = threading.Lock()
+
+    def claim(self) -> bool:
+        with self._start_lock:
+            return not self._abandoned
 
     def _consume(self) -> PreparationCompletion[T]:
         completion, self._completion = self._completion, None
@@ -78,7 +84,8 @@ class PreparationDelivery(Generic[T]):
         return completion
 
     def abandon(self) -> None:
-        self._abandoned = True
+        with self._start_lock:
+            self._abandoned = True
         if self._completion is not None:
             self._completion.value = None
             self._consume()
@@ -135,10 +142,15 @@ class PreparationDelivery(Generic[T]):
 
 
 async def invoke_preparation(
-    work: Callable[[Evaluator], Coroutine[None, None, T]], evaluator: Evaluator
+    work: Callable[[Evaluator], Coroutine[None, None, T]],
+    evaluator: Evaluator,
+    delivery: PreparationDelivery[T],
 ) -> T:
+    if not delivery.claim():
+        del work, evaluator, delivery
+        raise asyncio.CancelledError
     operation = work(evaluator)
-    del work, evaluator
+    del work, evaluator, delivery
     return await operation
 
 
@@ -147,5 +159,7 @@ def start_preparation(
     evaluator: Evaluator,
     delivery: PreparationDelivery[T],
 ) -> None:
-    task = asyncio.get_running_loop().create_task(invoke_preparation(work, evaluator))
+    task = asyncio.get_running_loop().create_task(
+        invoke_preparation(work, evaluator, delivery)
+    )
     task.add_done_callback(delivery.finished)

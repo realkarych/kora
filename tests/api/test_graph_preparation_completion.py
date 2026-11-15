@@ -15,6 +15,8 @@ from kora.api.graph_preparation_completion import (
     PreparationDelivery,
     PreparationOutcome,
     clear_preparation_error,
+    invoke_preparation,
+    start_preparation,
 )
 from kora.cel_eval.binding import load_binding
 from kora.cel_eval.errors import EvaluatorUnavailable, UnavailableReason
@@ -132,6 +134,61 @@ async def test_preparation_failure_disposes_sources_before_next_slot(
     if mode == "unavailable":
         assert type(failure.value) is EvaluatorUnavailable
         assert failure.value.reason is UnavailableReason.BUSY
+    assert preparation_threads() == []
+    assert_settled(owner)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", [start_preparation, invoke_preparation])
+async def test_cancelled_queued_preparation_never_invokes_work(
+    boundary: object,
+) -> None:
+    owner = EvaluationThread(load_binding())
+    entered, release, called = threading.Event(), threading.Event(), threading.Event()
+    sources: list[weakref.ReferenceType[PreparedSource]] = []
+    tasks: list[weakref.ReferenceType[asyncio.Task[object]]] = []
+    work = PreparedWork("invocation", release, called, sources, tasks)
+    source = weakref.ref(work)
+    code = (
+        start_preparation.__code__
+        if boundary is start_preparation
+        else invoke_preparation.__code__
+    )
+
+    def observe(frame: FrameType, event: str, _: object) -> None:
+        if event == "call" and frame.f_code is code and not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+
+    incumbent = threading.getprofile()
+    threading.setprofile(observe)
+    try:
+        async with DeploymentPreparer(
+            AuthorityClock(),
+            owner,
+            parameter_binding=parameter_binding(),
+            binding=publication_binding(),
+        ) as preparer:
+            caller = asyncio.create_task(invoke(preparer, work))
+            del work
+            try:
+                await until(entered.is_set)
+                caller.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await caller
+                still_owned = preparer.busy
+            finally:
+                release.set()
+            async with preparer.hold():
+                disposed = source() is None
+    finally:
+        release.set()
+        threading.setprofile(incumbent)
+
+    assert still_owned
+    assert disposed
+    assert sources == tasks == []
+    assert not called.is_set()
     assert preparation_threads() == []
     assert_settled(owner)
 

@@ -8,7 +8,6 @@ from kora.client import ApiError, ClientError, KoraClient
 from kora.client.transport import IDEMPOTENCY_KEY
 from kora.ir.json import JsonObject
 from kora.mcp.results import MCP_COMPONENT, TOOL_FINISHED, tool_result, usage_error
-from kora.models.graphs import OpaqueObject
 from kora.models.runs import TriggerRequest
 from kora.observability import ProcessDiagnostics
 
@@ -27,16 +26,22 @@ TRIGGER_SCHEMA: dict[str, object] = {
             "description": "Key that makes a repeated start return the saved outcome.",
         },
         "allow_unenforced_secrets": {"type": "boolean"},
+        "params": {
+            "type": "object",
+            "description": "Original graph parameters; defaults to an empty object.",
+        },
     },
     "required": ["namespace", "graph"],
     "additionalProperties": False,
 }
 TRIGGER_DESCRIPTION = (
-    "Start a deployed graph without parameters. Returns at once the accepted "
+    "Start a deployed graph with validated parameters. Returns at once the accepted "
     "pending run or a saved overlap skip; a refusal is a tool error with the "
     "API error object."
 )
-OPTIONAL = frozenset({"graph_version", "idempotency_key", "allow_unenforced_secrets"})
+OPTIONAL = frozenset(
+    {"graph_version", "idempotency_key", "allow_unenforced_secrets", "params"}
+)
 
 
 class OperatingTools:
@@ -83,14 +88,14 @@ class OperatingTools:
             return usage_error("The idempotency key must be 1-255 visible ASCII.")
         try:
             request = TriggerRequest(
-                params=OpaqueObject(),
+                params=arguments.get("params", {}),
                 graph_version=arguments.get("graph_version"),
                 allow_unenforced_secrets=arguments.get(
                     "allow_unenforced_secrets", False
                 ),
             )
         except ValidationError:
-            return usage_error("The graph version or the secrets flag is invalid.")
+            return usage_error("The trigger arguments are invalid.")
         try:
             triggered = await self.client.trigger(namespace, graph, request, key)
         except ApiError as error:

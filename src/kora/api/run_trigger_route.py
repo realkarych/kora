@@ -16,7 +16,7 @@ from kora.api.errors import (
     request_rejection,
 )
 from kora.api.exchange import current_exchange
-from kora.api.graph_deployment_limits import IDENTITY, MAX_REQUEST_BYTES
+from kora.api.graph_deployment_limits import MAX_REQUEST_BYTES
 from kora.api.graph_deployment_route import (
     BodyRejected,
     authorized_namespace,
@@ -24,6 +24,7 @@ from kora.api.graph_deployment_route import (
 )
 from kora.api.graph_services import GraphServices
 from kora.api.responses import error_response
+from kora.api.run_trigger_limits import START_PREPARATION
 from kora.cel_eval.thread import Evaluator
 from kora.db.graph_deployment_reads import graph_id_by_name
 from kora.db.types import NAME_LENGTH
@@ -96,7 +97,7 @@ def public_outcome(outcome: StartOutcome) -> AcceptedRun | SkippedRun:
 
 
 def _preparation(
-    services: GraphServices, request: PreparedManualStartRequest
+    services: GraphServices, request: PreparedManualStartRequest, key: str
 ) -> StartPreparation:
     async def prepare(
         candidate: StartCandidate,
@@ -105,14 +106,18 @@ def _preparation(
             if reservation is None:
                 return None
             selected = await acquire_manual_start(
-                services.database, request, candidate, limits=IDENTITY
+                services.database, request, candidate, limits=START_PREPARATION
             )
             if isinstance(selected, StartAcceptance):
                 return selected
 
             async def facts(_: Evaluator) -> StartFactsResult:
                 return read_manual_start_facts(
-                    selected, request, services.selection, limits=IDENTITY
+                    selected,
+                    request,
+                    services.selection,
+                    key=key,
+                    limits=START_PREPARATION,
                 )
 
             return await reservation.run(facts)
@@ -196,12 +201,13 @@ async def _trigger(
         )
     except StartRecordRejected:
         return request_rejection(RequestRejection.PARAMETERS, request_id=request_id)
+    key = services.identifiers.new() if key is None else key
     result = await accept_manual_start(
         services.database,
         principal,
         start,
-        services.identifiers.new() if key is None else key,
-        _preparation(services, start),
+        key,
+        _preparation(services, start, key),
         identifiers=services.identifiers,
         clock=clock.now,
     )

@@ -99,3 +99,5 @@ Later focused design reviews remain in [reviews/](reviews/). Begin implementatio
 `specs/` owns behavior; `design/` owns detailed surface design; `architecture/` owns maps and terminology; `analysis/` and `research/` own dated evidence. `reviews/ai-development-setup.md` remains the explicit active-policy exception within `reviews/`.
 
 For chunked worker upload progress, replay and terminal recovery, use the [API contract](specs/api-and-agent-surface.md#bounded-chunked-uploads-issue-224); the [dated review record](reviews/bounded-upload-progress-2026-10-23.md) contains boundary traces, scope and pending runtime activation.
+
+- [Manual trigger parameter acceptance](research/manual-trigger-parameters-2026-11-15.md): original request and CEL persistence, complete source ownership, cancellation and focused verification under #1635.

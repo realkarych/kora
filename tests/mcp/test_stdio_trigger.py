@@ -12,6 +12,8 @@ from tests.api.deployment_cases import HARNESS, NAMESPACE, preparer, skeleton_ir
 from tests.api.support import api_capture, application, deployment_services
 from tests.cli.test_deploy_command import kora
 from tests.client.support import running_app
+from tests.engine.graph_output_cases import child
+from tests.engine.start_cases import start_rows
 from tests.mcp.test_stdio_deploy import bearer, start, written
 
 __all__ = ["api_capture", "preparer"]
@@ -28,12 +30,18 @@ async def test_mcp_trigger(
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     )
-    graph = written(tmp_path, "skeleton.ir.json", skeleton_ir())
+    ir = skeleton_ir()
+    child(ir, "graph")["params"] = {}
+    graph = written(tmp_path, "skeleton.ir.json", ir)
     arguments: JsonObject = {
         "namespace": NAMESPACE,
         "graph": "skeleton",
         "idempotency_key": "mcp-start",
     }
+
+    parameter_arguments: JsonObject = dict(arguments)
+    parameter_arguments["idempotency_key"] = "mcp-params"
+    parameter_arguments["params"] = {"number": -0.0, "text": "private-params\x00"}
 
     async with running_app(app) as origin:
         deployed = await kora(
@@ -56,7 +64,14 @@ async def test_mcp_trigger(
         )
         unknown = await session.request(
             "tools/call",
-            {"name": "kora_trigger", "arguments": arguments | {"params": {}}},
+            {"name": "kora_trigger", "arguments": arguments | {"unknown": {}}},
+        )
+        parameterized = await session.request(
+            "tools/call",
+            {
+                "name": "kora_trigger",
+                "arguments": parameter_arguments,
+            },
         )
         code, stderr = await session.close()
 
@@ -65,6 +80,14 @@ async def test_mcp_trigger(
     mismatch = cast("JsonObject", changed["result"])
     refused = cast("JsonObject", unknown["result"])
     content = cast("JsonObject", accepted["structuredContent"])
+    parameter_result = cast("JsonObject", parameterized["result"])
+    assert parameter_result.get("isError") is not True
+    rows = await start_rows(database)
+    assert any(
+        row["params"] == b'{"number":-0.0,"text":"private-params\\u0000"}'
+        for row in rows["run_inputs"]
+    )
+    assert b"private-params" not in stderr
     assert deployed.code == 0
     assert [tool["name"] for tool in tools] == ["kora_trigger"]
     assert accepted.get("isError") is not True
@@ -86,6 +109,7 @@ async def test_mcp_trigger(
     assert [(event["tool"], event["outcome"]) for event in finished] == [
         ("kora_trigger", "ok"),
         ("kora_trigger", "api_error"),
+        ("kora_trigger", "ok"),
     ]
     assert token.encode() not in stderr
     assert b"mcp-start" not in stderr

@@ -11,13 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.connection import Database, clear_snapshot_error
-from kora.db.graph_version_reads import acquire_graph_version
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import event, graph_version, inbound_event, run, run_inputs
 from kora.db.transactions import raise_private_metadata_error
 from kora.db.types import normalise_timestamp
 from kora.engine.graph_resource_references import GraphResourceScope
-from kora.engine.graph_version_identity import GraphVersionIdentityLimits
+from kora.engine.graph_snapshot import acquire_graph_snapshot
 from kora.engine.locks import COMPONENT, TransitionLocks
 from kora.engine.promotion_admission import record_manual_promotion_admission
 from kora.engine.run_promotion_read import INPUT_SENTINEL
@@ -28,13 +27,13 @@ from kora.engine.start_capacity import (
     manual_start_scopes,
 )
 from kora.engine.start_facts import (
-    EMPTY_PARAMETERS,
     InstallationRefusal,
     ManualStartFacts,
     SelectedStartVersion,
     StartFactsResult,
     StartRefusal,
 )
+from kora.engine.start_preparation import StartPreparationLimits
 from kora.engine.start_records import (
     AcceptedStart,
     PreparedManualStartRequest,
@@ -45,6 +44,7 @@ from kora.engine.start_records import (
     start_receipt_document,
 )
 from kora.engine.start_replay import (
+    ManualStartCandidate,
     ReplayOutcome,
     StartReadFailed,
     StartReplay,
@@ -119,24 +119,37 @@ _START_CANDIDATE = object()
 
 
 class StartCandidate:
-    __slots__ = ("namespace_id", "graph_id", "version_id", "_request_digest")
+    __slots__ = (
+        "namespace_id",
+        "graph_id",
+        "version_id",
+        "_request_digest",
+        "original",
+    )
     namespace_id: str
     graph_id: str
     version_id: str
     _request_digest: str
+    original: ManualStartCandidate
 
     def __new__(
-        cls, issuer: object, request: PreparedManualStartRequest, version_id: str
+        cls,
+        issuer: object,
+        request: PreparedManualStartRequest,
+        original: ManualStartCandidate,
     ) -> Self:
         if issuer is not _START_CANDIDATE:
-            del issuer, request, version_id
+            del issuer, request, original
             raise TypeError("a manual start candidate requires the selection read")
+        if original.version_id is None:
+            raise StartRecordRejected()
         identity = request.identity
         candidate = super().__new__(cls)
         for name, value in (
             ("namespace_id", identity.namespace_id),
             ("graph_id", identity.graph_id),
-            ("version_id", version_id),
+            ("version_id", original.version_id),
+            ("original", original),
             ("_request_digest", identity.request_digest),
         ):
             object.__setattr__(candidate, name, value)
@@ -175,30 +188,32 @@ async def select_manual_start(
         return _completed(_replayed(replay))
     if candidate.version_id is None:
         return _completed(StartAcceptance(AcceptanceOutcome.MISSING))
-    return StartCandidate(_START_CANDIDATE, request, candidate.version_id)
+    return StartCandidate(_START_CANDIDATE, request, candidate)
 
 
 async def _acquire(
     connection: AsyncConnection,
     candidate: StartCandidate,
-    limits: GraphVersionIdentityLimits,
+    limits: StartPreparationLimits,
 ) -> StartAcceptance | SelectedStartVersion:
     status = await connection.scalar(
         select(graph_version.c.status).where(graph_version.c.id == candidate.version_id)
     )
     if status != "active":
         return StartAcceptance(AcceptanceOutcome.UNAVAILABLE)
-    acquired = await acquire_graph_version(
+    acquired = await acquire_graph_snapshot(
         connection,
+        GraphResourceScope(
+            candidate.namespace_id, candidate.graph_id, candidate.version_id
+        ),
+        limits.snapshot,
+    )
+    return SelectedStartVersion(
         candidate.namespace_id,
         candidate.graph_id,
         candidate.version_id,
-        max_encoded_bytes=limits.max_encoded_bytes,
-    )
-    if acquired is None:
-        return StartAcceptance(AcceptanceOutcome.MISSING)
-    return SelectedStartVersion(
-        candidate.namespace_id, candidate.graph_id, candidate.version_id, acquired
+        acquired,
+        candidate.original,
     )
 
 
@@ -207,10 +222,11 @@ async def acquire_manual_start(
     request: PreparedManualStartRequest,
     candidate: StartCandidate,
     *,
-    limits: GraphVersionIdentityLimits,
+    limits: StartPreparationLimits,
 ) -> StartAcceptance | SelectedStartVersion:
     if not candidate.belongs_to(request):
         raise_safe(StartRecordRejected())
+    limits.admit()
     try:
         async with database.read_snapshot() as connection:
             acquired = await _acquire(connection, candidate, limits)
@@ -356,7 +372,7 @@ async def _accept(
     identifiers: IdentifierGenerator,
 ) -> StartAcceptance:
     facts = acceptance.facts
-    if not facts.belongs_to(acceptance.request):
+    if not facts.belongs_to(acceptance.request, acceptance.key):
         raise StartRecordRejected()
     recheck = await recheck_locked_manual_start_version(
         connection,
@@ -399,8 +415,8 @@ async def _accept(
         await connection.execute(
             insert(run_inputs).values(
                 run_id=acceptance.run_id,
-                cel_projection=EMPTY_PARAMETERS,
-                params=EMPTY_PARAMETERS,
+                cel_projection=facts.projection,
+                params=acceptance.request.parameter_bytes(),
             )
         )
         await connection.execute(insert(inbound_event).values(**receipt_values))
@@ -506,4 +522,5 @@ async def accept_manual_start(
         )
         if committed.outcome is not AcceptanceOutcome.STALE:
             return committed
+        del prepared
     return stale
