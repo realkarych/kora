@@ -2,6 +2,8 @@
 
 Checked 2026-11-15 against `4d246192132cfbe56435841168b31f634f61d42a` for [#1580](https://github.com/realkarych/kora/issues/1580). This is source/design evidence, not executable custody or installation qualification. The owner [approved preparation](https://github.com/realkarych/kora/issues/1580#issuecomment-6893484560) of the [native companion](../specs/execution-custody-native.md). The independent authority mechanism was already [accepted in #1575](https://github.com/realkarych/kora/pull/1575#issuecomment-6886916062); its native refinements still require owner acceptance.
 
+Integration update on the same date: the [upload-retirement contract](../specs/upload-retirement.md) landed in #1583 at `0ce6222ba923de7688e4264ba8b404a5ac4e276c`. The native design is based on that revision and preserves its complete address protection, actual pre-entry closure and original settlement consumption. That base change contains documentation only; the production-source inventory above remains pinned to its original revision and unchanged inputs. No upload or native custody producer became implemented.
+
 ## Delivered design and boundaries
 
 The companion fixes the journal's row shapes, ownership order, original COMMIT phases, read/migration bypass obligations, native recovery procedure, explicit multi-commit schema bootstrap before the first frontier, whole-image producer, invocation closure and concrete qualification method. It preserves #1575's placement, serialization and capacity decisions. No production code, schema migration, public operation, dependency, import allowance, supported-platform change or runtime activation is delivered.
