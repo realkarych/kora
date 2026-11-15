@@ -1,6 +1,6 @@
 # Standard-schema replacement: source analysis and capacity rationale
 
-Checked on 2026-11-15 for [#1577](https://github.com/realkarych/kora/issues/1577), against repository base `934a94153ef524d342fda65b05e125e2d2805bf5`. This is agent-authored analysis, not accepted policy or executable qualification. The [proposed specification](../specs/schema-validation.md) contains the exact decision submitted to the owner.
+Checked on 2026-11-15 for [#1577](https://github.com/realkarych/kora/issues/1577), against repository base `934a94153ef524d342fda65b05e125e2d2805bf5`. This is agent-authored analysis, not accepted policy or executable qualification. The [specification](../specs/schema-validation.md) contains the exact decision [accepted by the project owner](https://github.com/realkarych/kora/pull/1578#issuecomment-6893087004) on 2026-11-15.
 
 ## Pinned implementation inputs
 
@@ -10,7 +10,7 @@ Library source is evidence for this pin only. The implementing PR must verify it
 
 ## Concrete mechanisms
 
-| Source mechanism | Consequence for the proposed design |
+| Source mechanism | Consequence for the selected design |
 |---|---|
 | `anyOf` collects `list(descend(...))` for failed alternatives; `oneOf` collects failures before a first success | Failed branches can retain far more state than the one final mismatch exposed by is_valid |
 | `_Error` stores context and sets each child's parent; args retain original constructor values | Parent/context cycles retain candidate/schema objects; outer iterator closure does not establish release |
@@ -29,7 +29,7 @@ The previously recorded fixed probe under [#1361](https://github.com/realkarych/
 
 Changing only the returned error message leaves internal cycles untouched. Depending on the process's garbage collector would change the existing actual-release obligation and make finite concurrent admission insufficient to bound abandoned trees. Forking jsonschema or patching its module globals would enlarge dependency and isolation risk.
 
-The proposal therefore keeps the standard keyword machinery and replaces anyOf/oneOf error aggregation and the incorrect stock uniqueness sorting, alongside the numeric type view and closed-resource execution view. The two Boolean handlers retain saved alternative order and ordinary truth conditions, but intentionally do not preserve the library's diagnostic error tree. Public kora diagnostics never promised that tree. They propagate capacity/internal failures rather than treating them as false. They do not add a work meter to every keyword. The third handler performs bounded unordered-pair comparisons using the pinned recursive equality, so native ordering cannot merge boolean and numeric equivalence classes. Fixed ordinal resource registrations preserve original targets without sending authored pointer strings into shared URL caches; both reference keyword names remain present.
+The selected design therefore keeps the standard keyword machinery and replaces anyOf/oneOf error aggregation and the incorrect stock uniqueness sorting, alongside the numeric type view and closed-resource execution view. The two Boolean handlers retain saved alternative order and ordinary truth conditions, but intentionally do not preserve the library's diagnostic error tree. Public kora diagnostics never promised that tree. They propagate capacity/internal failures rather than treating them as false. They do not add a work meter to every keyword. The third handler performs bounded unordered-pair comparisons using the pinned recursive equality, so native ordering cannot merge boolean and numeric equivalence classes. Fixed ordinal resource registrations preserve original targets without sending authored pointer strings into shared URL caches; both reference keyword names remain present.
 
 This is a design assertion to verify against the complete adapted call path. It is not evidence that implementation already releases every generator, registry, temporary copy or traceback. The no-hidden-cycle premise and disposal of unexpected exception ownership remain blocking implementation checks.
 
@@ -37,9 +37,9 @@ This is a design assertion to verify against the complete adapted call path. It 
 
 The immutable artifact envelope remains 1 MiB, container depth16/root1 and 14000-bit integer magnitude. Manual request identity remains 4 MiB, container-edge depth32/root0 and signed64 integers. These are separate domains and cannot be merged by sharing a function.
 
-The new policy adds explicit support choices: 262144 value occurrences, 65536 array items, 16384 object members, 1 MiB per value string; schema source 1 MiB/16384 nodes/64 documents/2048 positions/4096 reference edges, depth32 and narrower strings/containers; potential call depth32, 131072 calls, 128 unique items and 67108864 score units. Some schema-input values match existing preparation capacities; their reuse is proposed explicitly, not inherited authorization. V1's depth64 and 16777216 dynamic work units are not represented as equivalent to the new certificate.
+The new policy adds explicit support choices: 262144 value occurrences, 65536 array items, 16384 object members, 1 MiB per value string; schema source 1 MiB/16384 nodes/64 documents/2048 positions/4096 reference edges, depth32 and narrower strings/containers; potential call depth32, 131072 calls, 128 unique items and 67108864 score units. Some schema-input values match existing preparation capacities; their reuse is explicitly accepted, not inherited authorization. V1's depth64 and 16777216 dynamic work units are not represented as equivalent to the new certificate.
 
-These are conservative product-support limits selected for a finite first implementation. They are not tuned to a successful timing or RSS sample. A valid value can be unavailable under this profile even when every independent maximum passes. Large equality literals, nested uniqueness or repeated references make that tradeoff particularly visible. The owner is deciding this support envelope, not accepting an unmeasured latency claim.
+These are conservative product-support limits selected for a finite first implementation. They are not tuned to a successful timing or RSS sample. A valid value can be unavailable under this profile even when every independent maximum passes. Large equality literals, nested uniqueness or repeated references make that tradeoff particularly visible. The owner accepted this support envelope, not an unmeasured latency claim.
 
 The score uses observed dimensions and saturating arithmetic. Conversion charges use each number's bit bound, so ordinary small decimals are not charged as 32768-bit arithmetic. Branch and reference counts are structural: an acyclic chain that doubles its previous suffix doubles E/W instead of being credited once by a visited set. Shared-target memoization saves preparation work without erasing execution multiplicity.
 
@@ -59,7 +59,7 @@ Four currently isolated retirement groups contain 949, 735, 733 and681 productio
 
 ## Verification status
 
-This document records source analysis and proposed arithmetic, not executed tests or an experimental campaign. The design change runs documentation/link/architecture checks and one complete final-head CI, and receives independent correctness/security/performance review. Actual policy acceptance and exact docs wording require the owner.
+This document records source analysis and the accepted arithmetic, not executed tests or an experimental campaign. The design change runs documentation/link/architecture checks and one complete final-head CI, and receives independent correctness/security/performance review. The project owner [accepted the policy and exact docs wording](https://github.com/realkarych/kora/pull/1578#issuecomment-6893087004) on 2026-11-15; implementation qualification remains separate.
 
 Latest available master mutation audit [43584820056](https://github.com/realkarych/kora/actions/runs/43584820056), source `d623a105c17ac682e8017a469fc8c6535990ec28`, attempt1, is partial due to its budget and covers pricing/CEL only. No applicable schema-validator finding was supplied. No new mutation campaign or numerical performance gate follows from it.
 

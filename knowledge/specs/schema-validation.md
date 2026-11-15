@@ -1,6 +1,6 @@
 # Standard schema validation
 
-Design under [#1577](https://github.com/realkarych/kora/issues/1577), prepared 2026-11-15 for explicit owner review. This document defines the proposed replacement of the custom metered evaluators under [#1361](https://github.com/realkarych/kora/issues/1361). It implements no validator, stored binding, deployment or consumer. [ADR-0027](../../docs/decisions/0027-bounded-effective-schema-validation.md) governs adoption. Existing policies and their implementation remain unchanged until the replacement is accepted and implemented.
+Design under [#1577](https://github.com/realkarych/kora/issues/1577), [accepted by the project owner](https://github.com/realkarych/kora/pull/1578#issuecomment-6893087004) on 2026-11-15. This document defines the selected replacement of the custom metered evaluators under [#1361](https://github.com/realkarych/kora/issues/1361). It implements no validator, stored binding, deployment or consumer. [ADR-0027](../../docs/decisions/0027-bounded-effective-schema-validation.md) governs adoption. Existing policies and their implementation remain unchanged until the accepted replacement is implemented.
 
 ## 1. Scope and immutable identity
 
@@ -50,7 +50,7 @@ All bounds are inclusive. A value fails the first applicable admission phase in 
 | `max_variable_bytes` | 268435456 | 268435456 | Admitted simultaneous variable bytes across source, numerical views, representations and temporary text |
 | `max_auxiliary_entries` | 1048576 | 1048576 | Finite owned node/table/list/frame/iterator/error entries, section 5 |
 
-These are deliberately conservative product-support choices, not measured performance thresholds. The [derivation record](../research/standard-schema-validation-2026-11-15.md) distinguishes inherited domain limits, proposed support choices and calculated bounds. Passing individual maxima does not guarantee that their combination passes the score or aggregate reservation. In particular, uniqueness, large literal equality and repeated references may refuse well below a shape ceiling.
+These are deliberately conservative product-support choices, not measured performance thresholds. The [derivation record](../research/standard-schema-validation-2026-11-15.md) distinguishes inherited domain limits, accepted support choices and calculated bounds. Passing individual maxima does not guarantee that their combination passes the score or aggregate reservation. In particular, uniqueness, large literal equality and repeated references may refuse well below a shape ceiling.
 
 The existing 16,777,216-unit v1 evaluation meter, frame depth 64 and private handler charges are not claimed preserved by these values. V2 replaces them by the specified admission certificate and depth 32. V1 never acquires these rules. No time, process-memory or native crash margin is inferred. Pin changes or acceptance-affecting admission/adapter changes require a new identity or explicit immutable compatibility decision.
 
@@ -144,7 +144,7 @@ Only complete valid composition yields an owned value for effective digest/summa
 
 Checking readers dispatch from the admitted saved binding; new constructors select a trusted installed binding explicitly. Apply this distinction throughout graph_outputs, graph_schema_preparation, graph_output_inventory, graph_cel_facts and the whole graph_execution_contract reader. Do not rebuild historical expected data using today's policy constant. Preserve the existing independent execution/deployment/IR digest scopes and old member ordering. API authorization and request envelope precede permanent accepted/skipped receipt replay; changed request identity remains API004; absent executable parameter interpretation remains API010. No owner-approved replay outcome is replaced by validation under a later policy.
 
-Executable publication under v2 verifies support, immutable behavior map and complete normalized schema certificates. Value-dependent admission occurs before each evaluation; publication does not promise every possible domain value fits. Until whole v2 construction/reading is implemented, no current default emits the proposed bindings.
+Executable publication under v2 verifies support, immutable behavior map and complete normalized schema certificates. Value-dependent admission occurs before each evaluation; publication does not promise every possible domain value fits. Until whole v2 construction/reading is implemented, no current default emits these bindings.
 
 ## 7. Verification and delivery
 

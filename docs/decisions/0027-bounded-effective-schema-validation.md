@@ -44,9 +44,9 @@ A core-owned evaluator process can contain non-cooperative schema work and prese
 
 Common MVP schemas can be implemented incrementally without changing provider discovery or adding a matching dependency. Schemas using the explicitly unsupported features require a later approved support policy or evaluator design. Concrete implementation plans retain exact numerical semantics, closed authority, independent correctness/security/performance review, focused regressions and one successful final-head CI per PR. The limits are product support capacities, not measured performance guarantees.
 
-## Standard-validator replacement proposed on 2026-11-15
+## Standard-validator replacement accepted on 2026-11-15
 
-Prepared under [#1577](https://github.com/realkarych/kora/issues/1577), child of the owner-selected replacement #1361. The owner authorized preparation of this design; the exact amendment remains subject to owner review before merge. The preceding sections retain the historical reserved v1 interpretation and its evidence. No runtime or saved record changes in this design PR.
+Accepted under [#1577](https://github.com/realkarych/kora/issues/1577), child of the owner-selected replacement #1361. The project owner [approved the complete contract, capacities and exact wording](https://github.com/realkarych/kora/pull/1578#issuecomment-6893087004) on 2026-11-15. The preceding sections retain the historical reserved v1 interpretation and its evidence. No runtime or saved record changes in this design PR.
 
 The replacement uses the pinned draft-2020-12 library behind the complete [standard-schema validation contract](../../knowledge/specs/schema-validation.md), including its exact capacities, saturating admission calculation and resource ownership. Pure preparation/evaluation stays in `kora.ir`, with trusted behavior composition in `kora.protocols`. No dependency, provider ABI or package permission changes. New output interpretation is `kora.structured-output-schema-policy.v2`; parameter evaluation has its independent `kora.graph-parameter-evaluation.v2` binding. Sharing code supplies no cross-domain authority.
 
@@ -56,7 +56,7 @@ V2 replaces v1's dynamic primitive charging and depth-64 schedule with the speci
 
 Stock leaf errors may contain bounded transient schema/value references and text internally. They never become public violations, logs, audit data or retained operation state. This explicitly replaces the v1 content-free-intermediate requirement for v2 while retaining fixed content-free external results, actual release and all existing authorization/recovery gates. Unexpected exceptions retain their reservation until safe traceback/resource disposal settles.
 
-Check saved bindings explicitly throughout the full graph constructor/inventory/reader chain. V1 records retain original bytes, digests, authorized history and matching receipt replay, but acquire no v2 execution. Missing policies do not inherit defaults. No backfill, new artifact revision or whole-engine semantics version is introduced. Actual accepted results, frozen projections, Worker reports and scheduler settlement remain separate activation work. The [source analysis and capacity rationale](../../knowledge/research/standard-schema-validation-2026-11-15.md) is evidence for the proposal, not implementation qualification.
+Check saved bindings explicitly throughout the full graph constructor/inventory/reader chain. V1 records retain original bytes, digests, authorized history and matching receipt replay, but acquire no v2 execution. Missing policies do not inherit defaults. No backfill, new artifact revision or whole-engine semantics version is introduced. Actual accepted results, frozen projections, Worker reports and scheduler settlement remain separate activation work. The [source analysis and capacity rationale](../../knowledge/research/standard-schema-validation-2026-11-15.md) is evidence for the decision, not implementation qualification.
 
 ## Where it is applied
 

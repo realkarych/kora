@@ -18,7 +18,7 @@ Extension points are eleven provider protocols discovered through one entry-poin
 
 ## 2. What runs today
 
-The [standard-schema validation design](../specs/schema-validation.md) under #1577 proposes the shared evaluator and separate output/parameter policies needed by #1361. It does not replace the current implementation or activate output acceptance, Worker reports or scheduler settlement.
+The [standard-schema validation design](../specs/schema-validation.md) under #1577 specifies the accepted shared evaluator and separate output/parameter policies needed by #1361. It does not replace the current implementation or activate output acceptance, Worker reports or scheduler settlement.
 
 **No graph runs end to end.** The control-plane pieces that would run one exist only partly, and nothing connects them into a process yet. The packages that exist are foundations with their own tests.
 

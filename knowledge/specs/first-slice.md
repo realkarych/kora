@@ -82,7 +82,7 @@ The [same-call trusted validation-facts contract](validation-facts.md) defines t
 
 ### Graph parameter evaluation support
 
-The [shared standard-schema design](schema-validation.md) under #1577 proposes the replacement `kora.graph-parameter-evaluation.v2` profile, its exact by-value limits and its immutable compatibility rules. It replaces the custom-evaluator delivery direction of #1075 through #1361; it does not activate parameter requests or waive the complete producer/reader/locked-handoff requirements below. StructuredOutput and parameter envelopes and policies remain separate even when the implementation is shared.
+The [shared standard-schema design](schema-validation.md) under #1577 selects the replacement `kora.graph-parameter-evaluation.v2` profile, its exact by-value limits and its immutable compatibility rules. It replaces the custom-evaluator delivery direction of #1075 through #1361; it does not activate parameter requests or waive the complete producer/reader/locked-handoff requirements below. StructuredOutput and parameter envelopes and policies remain separate even when the implementation is shared.
 
 On 2026-11-08 the project owner selected a bounded first-slice parameter profile under [#1075](https://github.com/realkarych/kora/issues/1075). The profile preserves draft-2020-12 meaning for admitted assertions, including supported object, array, primitive, numerical, equality and Boolean composition rules. It resolves permitted references from the original parameter root and exact saved type/reference closure. Shared bounded IR machinery may implement these rules. The StructuredOutput policy and its artifact-specific constraints carry no parameter authority.
 
