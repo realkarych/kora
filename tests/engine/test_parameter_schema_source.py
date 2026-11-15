@@ -29,20 +29,19 @@ def member(arena: ParameterSchemaArena, node: int, name: str) -> int:
 
 
 def test_schema_source_preserves_canonical_scalars_in_ordered_containers() -> None:
-    sources = sources_for(
-        {
-            "$ref": "#/$defs/leaf",
-            "const": {
-                "😀": "astral",
-                "\ud800": [2**80, -0.0, "\ud800"],
-                "é": "accent",
-                "a": "first",
-            },
-            "$defs": {"leaf": True},
-        }
-    )
-    arena = sources.arena
+    schema: JsonObject = {
+        "$ref": "#/$defs/leaf",
+        "const": {
+            "😀": "astral",
+            "\ud800": [2**80, -0.0, "\ud800"],
+            "é": "accent",
+            "a": "first",
+        },
+        "$defs": {"leaf": True},
+    }
 
+    sources = sources_for(schema)
+    arena = sources.arena
     const = arena.nodes[member(arena, arena.root, "const")]
     names = [arena.nodes[key].value for key, _ in const.members]
     array = arena.nodes[const.members[2][1]]

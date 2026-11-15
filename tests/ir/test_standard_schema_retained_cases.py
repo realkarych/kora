@@ -11,6 +11,11 @@ from tests.ir.standard_schema_cases import binding, source
     [
         ({"minimum": 1e23}, 10**23, True),
         ({"minimum": 1e23}, int(1e23), False),
+        ({"maximum": 0}, 0.1, False),
+        ({"exclusiveMaximum": 0.3}, 0.2, True),
+        ({"exclusiveMinimum": 0.2}, 0.3, True),
+        ({"minProperties": 2}, {"a": 1, "b": 2}, True),
+        ({"maxProperties": 1}, {"a": 1}, True),
         ({"minLength": 2}, "e\u0301", True),
         ({"minLength": 2}, "😀", False),
         ({"maxLength": 1}, "😀", True),
@@ -67,6 +72,8 @@ def test_standard_schema_retains_inapplicable_assertions(
         ({"dependentRequired": {"a": ["b"]}}, {"a": False}, False),
         ({"dependentRequired": {"a": ["b"]}}, {"a": None}, False),
         ({"dependentRequired": {"a": ["b"]}}, {}, True),
+        ({"required": []}, {"a": False}, True),
+        ({"dependentRequired": {}}, {"a": False}, True),
         (
             {
                 "$defs": {"child": {"required": ["b"]}},
