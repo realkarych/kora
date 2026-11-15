@@ -29,6 +29,8 @@ from tests.protocols.effective_artifact_cases import installed
         None,
         True,
         9007199254740993,
+        9223372036854775807,
+        -9223372036854775808,
         0.0,
         -0.0,
         5e-324,
