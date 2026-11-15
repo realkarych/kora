@@ -120,7 +120,9 @@ async def test_parameter_profile_round_trip_and_handoff(
         == prepared.canonical_contract
     )
     assert checked.canonical_ir == row.ir == prepared.canonical_ir
-    assert tuple(ObjectReader(checked.canonical_contract).object()) == PARAMETER_MEMBERS
+    saved = ObjectReader(checked.canonical_contract).object()
+    assert tuple(saved) == PARAMETER_MEMBERS
+    assert saved["parameter_evaluation"] == parameter_binding().profile()
     assert ledger.checkouts == checkouts
     assert ledger.opened == ledger.closed
     assert ledger.closed_while_checked_out == ledger.outstanding == 0
