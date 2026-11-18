@@ -563,3 +563,59 @@ def test_type_schema_does_not_mutate_schema_or_contract_maps() -> None:
 
     assert result.schemas_valid
     assert document.model_dump_json(by_alias=True) == before
+
+
+@pytest.mark.parametrize("keyword", ["minLength", "maxLength"])
+@pytest.mark.parametrize(
+    ("bound", "accepted"),
+    [
+        pytest.param(0, True, id="zero"),
+        pytest.param(1, True, id="integer"),
+        pytest.param(1.0, True, id="integral-float"),
+        pytest.param(-0.0, True, id="signed-floating-zero"),
+        pytest.param(1e23, True, id="large-integral-float"),
+        pytest.param((1 << 14_000) - 1, True, id="large-integer"),
+        pytest.param(True, False, id="true"),
+        pytest.param(False, False, id="false"),
+        pytest.param(-1, False, id="negative-integer"),
+        pytest.param(-1.0, False, id="negative-integral-float"),
+        pytest.param(1.5, False, id="fractional-float"),
+        pytest.param(-0.1, False, id="negative-fraction"),
+    ],
+)
+def test_string_length_bounds_preserve_structural_count_domain(
+    keyword: str, bound: JsonValue, accepted: bool
+) -> None:
+    schema: JsonObject = {keyword: bound}
+    document = document_for(schema)
+
+    result = validate_type_schemas(document)
+
+    assert result.schemas_valid is accepted
+    assert all(error.code == "IR022" for error in result.diagnostics.errors)
+
+
+@pytest.mark.parametrize(
+    "keyword", ["minItems", "maxItems", "minProperties", "maxProperties"]
+)
+@pytest.mark.parametrize(
+    ("bound", "accepted"),
+    [
+        pytest.param(0, True, id="zero"),
+        pytest.param(1.0, True, id="integral-float"),
+        pytest.param(-0.0, True, id="signed-zero"),
+        pytest.param(True, False, id="boolean"),
+        pytest.param(-1, False, id="negative"),
+        pytest.param(1.5, False, id="fractional"),
+    ],
+)
+def test_container_count_bounds_preserve_structural_domain(
+    keyword: str, bound: JsonValue, accepted: bool
+) -> None:
+    schema: JsonObject = {keyword: bound}
+    document = document_for(schema)
+
+    result = validate_type_schemas(document)
+
+    assert result.schemas_valid is accepted
+    assert all(error.code == "IR022" for error in result.diagnostics.errors)

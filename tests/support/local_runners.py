@@ -24,6 +24,7 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.runtime import Workload
+from kora.runner.filesystem import RELEASE_ENTRIES
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
 from kora.runner.peers import PeerSource
 from kora.runner.registry import (
@@ -65,6 +66,7 @@ async def open_spawning(
     home: Callable[[], Path] = Path.home,
     scanner: NativeIdentityReader | None = None,
     peers: PeerSource | None = None,
+    release_entries: int = RELEASE_ENTRIES,
 ) -> LocalRuntime:
     return await LocalRuntime.open(
         LocalRuntimeConfiguration(state_root=str(root)),
@@ -76,6 +78,7 @@ async def open_spawning(
         home=home,
         scanner=scanner,
         peers=peers,
+        release_entries=release_entries,
     )
 
 
@@ -116,7 +119,10 @@ def kill_runners(marker: Path) -> tuple[int, ...]:
     for pid in runner_pids(marker):
         observation = reader.read(pid)
         if observation.state is IdentityState.PRESENT:
-            os.kill(pid, signal.SIGKILL)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
             killed.append(pid)
     return tuple(killed)
 

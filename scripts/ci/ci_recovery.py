@@ -44,6 +44,7 @@ ROOT_JOBS = frozenset(
 )
 CONTINUE_ON_ERROR = frozenset(
     {
+        "Claude session diagnostics",
         "Local runtime diagnostics (ubuntu-24.04, Python 3.11.17)",
         "Local runtime diagnostics (ubuntu-24.04, Python 3.15.0)",
         "Local runtime diagnostics (macos-15, Python 3.11.17)",

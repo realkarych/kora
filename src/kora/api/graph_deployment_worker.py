@@ -1,7 +1,6 @@
 import asyncio
 import threading
 from collections.abc import AsyncGenerator, Callable, Coroutine
-from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from types import TracebackType
 from typing import Self, TypeVar
@@ -11,8 +10,11 @@ from kora.api.graph_deployment import (
     DeploymentRefusal,
     prepare_graph_deployment,
 )
+from kora.api.graph_preparation_completion import PreparationDelivery, start_preparation
 from kora.cel_eval.thread import EvaluationThread, Evaluator
 from kora.engine.graph_command_manifests import GraphDeploymentSelectors
+from kora.engine.graph_output_policy import OutputPublicationBinding
+from kora.engine.graph_parameter_evaluation import ParameterPublicationBinding
 from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.deployment_checks import DeploymentSelection
 from kora.ir.json import JsonObject
@@ -69,32 +71,31 @@ class PreparationReservation:
     async def run(self, work: Callable[[Evaluator], Coroutine[None, None, T]]) -> T:
         if self._closed:
             raise RuntimeError("The preparation reservation is closed.")
-        worker, evaluator = self._worker, self._evaluator
-        result: Future[T] = Future()
-
-        def finished(task: asyncio.Task[T]) -> None:
-            self._caller.call_soon_threadsafe(self._settled)
-            if task.cancelled():
-                result.cancel()
-                return
-            error = task.exception()
-            if error is not None:
-                result.set_exception(error)
-            else:
-                result.set_result(task.result())
-
-        def start() -> None:
-            task = worker.loop.create_task(work(evaluator))
-            task.add_done_callback(finished)
-
+        delivery = PreparationDelivery[T](self._settled)
         self._running += 1
-        worker.loop.call_soon_threadsafe(start)
-        return await asyncio.shield(asyncio.wrap_future(result))
+        self._worker.loop.call_soon_threadsafe(
+            start_preparation, work, self._evaluator, delivery
+        )
+        del work
+        try:
+            await asyncio.shield(delivery.ready)
+            return delivery.take()
+        finally:
+            delivery.abandon()
 
 
 class DeploymentPreparer:
-    def __init__(self, clock: Clock, owner: EvaluationThread | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock,
+        owner: EvaluationThread | None = None,
+        *,
+        binding: OutputPublicationBinding,
+        parameter_binding: ParameterPublicationBinding,
+    ) -> None:
         self._clock = clock
+        self._binding = binding
+        self._parameter_binding = parameter_binding
         self._owner = owner
         self._slot = asyncio.Semaphore(1)
         self._worker: PreparationThread | None = None
@@ -173,6 +174,12 @@ class DeploymentPreparer:
                 return DeploymentRefusal.BUSY
             return await reservation.run(
                 lambda evaluator: prepare_graph_deployment(
-                    ir, selectors, selection, policy, evaluator
+                    ir,
+                    selectors,
+                    selection,
+                    policy,
+                    evaluator,
+                    binding=self._binding,
+                    parameter_binding=self._parameter_binding,
                 )
             )

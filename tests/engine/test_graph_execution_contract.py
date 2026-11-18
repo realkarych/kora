@@ -364,7 +364,7 @@ def test_complete_reader_rejects_swapped_valid_refs_in_representational_graph() 
 
 @pytest.mark.parametrize(
     ("dimension", "units"),
-    [("max_retained_bytes", 46_493_600), ("max_work", 40_298_819_301_597)],
+    [("max_retained_bytes", 128_184_800), ("max_work", 145_014_947_808_757)],
 )
 def test_complete_reader_admits_exact_aggregate_and_refuses_one_short(
     dimension: Literal["max_retained_bytes", "max_work"],

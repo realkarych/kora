@@ -10,11 +10,13 @@ import pytest
 from scripts.ci.scheduled_report import (
     DAILY,
     LANES,
+    MASTER_DAILY,
     MASTER_PUSH,
     GitHubTracker,
     Lane,
     OpenIssue,
     ReportFailure,
+    Schedule,
     entries,
     report,
     reporter_issue,
@@ -54,12 +56,13 @@ LIFETIME_COMMENT = (
     f"- Revision: `{REVISION}`\n"
     "- Run: https://github.com/example/kora/actions/runs/4321/attempts/2\n"
 )
-GENERAL_TITLE = "Master push lane failed: macOS general test lanes"
+GENERAL_TITLE = "Daily master CI lane failed: macOS general test lanes"
 GENERAL_BODY = (
     "### Impact\n\n"
-    "A job of the `CI` workflow did not pass for a push to master. Part of what it "
-    "checks runs only for pushes to master and not in pull requests. This open "
-    "issue tracks the failure until the lane passes again.\n\n"
+    "A job of the daily `CI` run on master did not pass. The macOS general test "
+    "lanes and the macOS row of `Mutation tooling` run only in this run and not "
+    "for pull requests or pushes. This open issue tracks the failure until the "
+    "lane passes again.\n\n"
     "### Failed lane\n\n"
     "- Lane: `scaffold-tests-macos-general`\n"
     "- Result: `failure`\n"
@@ -198,9 +201,9 @@ def passing() -> dict[str, str]:
     return values
 
 
-def master_passing() -> dict[str, str]:
+def master_passing(schedule: Schedule = MASTER_DAILY) -> dict[str, str]:
     values = dict(RUN)
-    for lane in MASTER_PUSH.lanes:
+    for lane in schedule.lanes:
         values[f"{lane.variable}_RESULT"] = "success"
         if lane.proof:
             values[f"{lane.variable}_VERIFIED"] = "true"
@@ -265,34 +268,35 @@ def test_passing_lanes_list_open_issues_without_writing() -> None:
     assert tracker.comments == []
 
 
-def test_a_failed_master_push_lane_opens_its_own_issue() -> None:
+def test_a_failed_master_daily_lane_opens_its_own_issue() -> None:
     tracker = RecordingTracker((OpenIssue(31, LIFETIME_TITLE),))
     environment = {**master_passing(), "MACOS_GENERAL_LANES_RESULT": "failure"}
 
-    actions = report(environment, tracker, MASTER_PUSH)
+    actions = report(environment, tracker, MASTER_DAILY)
 
     assert actions == ("opened scaffold-tests-macos-general",)
     assert tracker.created == [(GENERAL_TITLE, GENERAL_BODY)]
     assert tracker.comments == []
 
 
-def test_a_repeated_master_push_failure_comments_on_its_issue() -> None:
+def test_a_repeated_master_daily_failure_comments_on_its_issue() -> None:
     tracker = RecordingTracker(
         (OpenIssue(31, LIFETIME_TITLE), OpenIssue(40, GENERAL_TITLE))
     )
     environment = {**master_passing(), "MACOS_GENERAL_LANES_RESULT": "failure"}
 
-    actions = report(environment, tracker, MASTER_PUSH)
+    actions = report(environment, tracker, MASTER_DAILY)
 
     assert actions == ("commented scaffold-tests-macos-general",)
     assert tracker.created == []
     assert tracker.comments == [(40, GENERAL_COMMENT)]
 
 
-def test_a_passing_master_push_lane_writes_nothing() -> None:
+@pytest.mark.parametrize("schedule", [MASTER_PUSH, MASTER_DAILY])
+def test_a_passing_master_lane_writes_nothing(schedule: Schedule) -> None:
     tracker = RecordingTracker((OpenIssue(40, GENERAL_TITLE),))
 
-    actions = report(master_passing(), tracker, MASTER_PUSH)
+    actions = report(master_passing(schedule), tracker, schedule)
 
     assert actions == ()
     assert tracker.created == []
@@ -300,7 +304,12 @@ def test_a_passing_master_push_lane_writes_nothing() -> None:
 
 
 @pytest.mark.parametrize(
-    "lane", MASTER_PUSH.lanes, ids=[lane.job for lane in MASTER_PUSH.lanes]
+    ("schedule", "lane"),
+    [
+        (schedule, lane)
+        for schedule in (MASTER_PUSH, MASTER_DAILY)
+        for lane in schedule.lanes
+    ],
 )
 @pytest.mark.parametrize(
     ("value", "rendered"),
@@ -311,50 +320,68 @@ def test_a_passing_master_push_lane_writes_nothing() -> None:
         ("", "missing"),
     ],
 )
-def test_every_unsuccessful_master_push_lane_opens_its_own_issue(
-    lane: Lane, value: str, rendered: str
+def test_every_unsuccessful_master_lane_opens_its_own_issue(
+    schedule: Schedule, lane: Lane, value: str, rendered: str
 ) -> None:
     tracker = RecordingTracker(())
-    environment = {**master_passing(), f"{lane.variable}_RESULT": value}
+    environment = {**master_passing(schedule), f"{lane.variable}_RESULT": value}
 
-    actions = report(environment, tracker, MASTER_PUSH)
+    actions = report(environment, tracker, schedule)
 
     assert actions == (f"opened {lane.job}",)
     [(title, body)] = tracker.created
-    assert title == f"Master push lane failed: {lane.title}"
+    assert title == f"{schedule.title}: {lane.title}"
     assert f"- Lane: `{lane.job}`\n- Result: `{rendered}`\n" in body
 
 
-def test_scaffold_evidence_without_its_proof_is_reported_on_a_master_push() -> None:
+@pytest.mark.parametrize("schedule", [MASTER_PUSH, MASTER_DAILY])
+def test_scaffold_evidence_without_its_proof_is_reported(
+    schedule: Schedule,
+) -> None:
     tracker = RecordingTracker(())
-    environment = {**master_passing(), "SCAFFOLD_EVIDENCE_VERIFIED": ""}
+    environment = {**master_passing(schedule), "SCAFFOLD_EVIDENCE_VERIFIED": ""}
 
-    actions = report(environment, tracker, MASTER_PUSH)
+    actions = report(environment, tracker, schedule)
 
     assert actions == ("opened scaffold-evidence",)
     [(title, body)] = tracker.created
-    assert title == "Master push lane failed: Scaffold evidence"
+    assert title == f"{schedule.title}: Scaffold evidence"
     assert "- Result: `unproven`\n" in body
 
 
 @pytest.mark.parametrize(
-    ("arguments", "schedule"),
-    [([], DAILY), (["master-push"], MASTER_PUSH)],
+    ("arguments", "environment", "schedule"),
+    [
+        ([], {}, DAILY),
+        (["master"], {"GITHUB_EVENT_NAME": "push"}, MASTER_PUSH),
+        (["master"], {"GITHUB_EVENT_NAME": "schedule"}, MASTER_DAILY),
+        (["master"], {"GITHUB_EVENT_NAME": "workflow_dispatch"}, MASTER_DAILY),
+    ],
 )
-def test_the_report_schedule_is_selected_by_one_known_name(
-    arguments: list[str], schedule: object
+def test_the_report_schedule_is_selected_by_arguments_and_event(
+    arguments: list[str], environment: dict[str, str], schedule: Schedule
 ) -> None:
-    selected = selected_schedule(arguments)
+    selected = selected_schedule(arguments, environment)
 
     assert selected is schedule
 
 
+@pytest.mark.parametrize("event", ["pull_request", "", "unknown", None])
+def test_master_reporting_refuses_an_unknown_or_missing_event(
+    event: str | None,
+) -> None:
+    environment = {} if event is None else {"GITHUB_EVENT_NAME": event}
+
+    with pytest.raises(ReportFailure, match="schedule is unknown"):
+        selected_schedule(["master"], environment)
+
+
 @pytest.mark.parametrize(
-    "arguments", [["daily"], ["weekly"], ["master-push", "master-push"], [""]]
+    "arguments", [["daily"], ["weekly"], ["master-push"], ["master", "master"], [""]]
 )
 def test_an_unknown_report_schedule_is_refused(arguments: list[str]) -> None:
     with pytest.raises(ReportFailure, match="schedule is unknown"):
-        selected_schedule(arguments)
+        selected_schedule(arguments, {"GITHUB_EVENT_NAME": "push"})
 
 
 @pytest.mark.parametrize("lane", LANES, ids=[lane.job for lane in LANES])
@@ -636,21 +663,43 @@ def test_report_job_passes_every_lane_result_and_proof() -> None:
 
 def test_master_report_job_passes_every_lane_result_and_proof() -> None:
     job = job_of(repository_workflows(), "ci.yml", "report-master-lanes")
+    lanes = tuple(dict.fromkeys((*MASTER_DAILY.lanes, *MASTER_PUSH.lanes)))
     expected = {
         "GITHUB_TOKEN": "${{ github.token }}",
         **{
             f"{lane.variable}_RESULT": f"${{{{ needs.{lane.job}.result }}}}"
-            for lane in MASTER_PUSH.lanes
+            for lane in lanes
         },
         **{
             f"{lane.variable}_VERIFIED": f"${{{{ needs.{lane.job}.outputs.verified }}}}"
-            for lane in MASTER_PUSH.lanes
+            for lane in lanes
             if lane.proof
         },
     }
 
     step = step_list(job)[-1]
 
-    assert job["needs"] == [lane.job for lane in MASTER_PUSH.lanes]
+    assert job["needs"] == [lane.job for lane in lanes]
     assert table(step["env"]) == expected
-    assert step["run"] == "python3 -I -B scripts/ci/scheduled_report.py master-push"
+    assert step["run"] == "python3 -I -B scripts/ci/scheduled_report.py master"
+
+
+def test_master_push_reports_only_evidence_and_mutation_tooling() -> None:
+    tracker = RecordingTracker(())
+    environment = {
+        **RUN,
+        "MACOS_GENERAL_LANES_RESULT": "skipped",
+        "SCAFFOLD_EVIDENCE_RESULT": "success",
+        "SCAFFOLD_EVIDENCE_VERIFIED": "true",
+        "MUTATION_TOOLING_RESULT": "success",
+    }
+
+    actions = report(environment, tracker, MASTER_PUSH)
+
+    assert [lane.job for lane in MASTER_PUSH.lanes] == [
+        "scaffold-evidence",
+        "mutation-tooling",
+    ]
+    assert actions == ()
+    assert tracker.created == []
+    assert tracker.comments == []

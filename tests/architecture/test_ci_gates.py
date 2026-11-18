@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.workflows import table, workflow_document
+
 ROOT = Path(__file__).resolve().parents[2]
 GATES = ROOT / "scripts/ci/require_outcomes.sh"
 OUTCOMES = ("success", "failure", "cancelled", "skipped", "true", "false", "")
@@ -286,7 +288,7 @@ def test_scaffold_join_refuses_failed_cancelled_skipped_or_missing_evidence(
         **SCOPE,
         "WORKFLOW_CANCELLED": "false",
         "FULL_SCOPE": "true",
-        "EVENT_NAME": "push",
+        "EVENT_NAME": "schedule",
         field: outcome,
     }
 
@@ -305,15 +307,19 @@ def test_scaffold_join_refuses_failed_cancelled_skipped_or_missing_evidence(
         ("pull_request", "failure", False),
         ("pull_request", "cancelled", False),
         ("pull_request", "", False),
-        ("push", "success", True),
-        ("push", "skipped", False),
+        ("push", "success", False),
+        ("push", "skipped", True),
         ("push", "failure", False),
         ("push", "cancelled", False),
         ("push", "", False),
         ("pull_request_target", "skipped", False),
-        ("schedule", "success", False),
         ("", "success", False),
         (None, "skipped", False),
+    ]
+    + [
+        (event, result, result == "success")
+        for event in ("schedule", "workflow_dispatch")
+        for result in ("success", "skipped", "failure", "cancelled", "")
     ],
 )
 def test_scaffold_join_requires_the_general_macos_lanes_by_event(
@@ -455,3 +461,13 @@ def test_browser_status_requires_its_checks_or_editorial_skip(
     result = run_gate(["browser"], values, tmp_path / "output")
 
     assert (result.returncode == 0) is passes
+
+
+def test_ci_has_a_daily_schedule_and_input_free_manual_dispatch() -> None:
+    workflow = workflow_document("ci.yml")
+
+    triggers = table(workflow["on"])
+
+    assert triggers["schedule"] == [{"cron": "17 2 * * *"}]
+    assert "workflow_dispatch" in triggers
+    assert triggers["workflow_dispatch"] is None

@@ -36,15 +36,17 @@ class CausePredecessor:
 
 
 def attempt_schema_objects(
-    connection: Connection, expiry_indexes: bool = False
+    connection: Connection, later_indexes: bool = False
 ) -> tuple[str, str]:
     inspector = inspect(connection)
     indexes = inspector.get_indexes("attempt")
-    if expiry_indexes:
+    if later_indexes:
         added = {
             "ix_attempt_due_deadline",
             "ix_attempt_due_lease",
             "ix_attempt_cancel_due",
+            "ix_attempt_physical_capacity",
+            "ix_attempt_run_recovery",
             "ix_attempt_worker_open",
             "ix_attempt_worker_unknown",
         }

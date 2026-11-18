@@ -113,8 +113,9 @@ ALLOWED_SECRET_SITES = frozenset(
 )
 ISSUE_WRITER_CONDITIONS = {
     "ci.yml:report-master-lanes": (
-        "${{ always() && github.event_name == 'push' "
-        "&& github.ref == 'refs/heads/master' }}"
+        "${{ always() && github.ref == 'refs/heads/master' "
+        "&& (github.event_name == 'push' || github.event_name == 'schedule' "
+        "|| github.event_name == 'workflow_dispatch') }}"
     ),
     "daily-lanes.yml:report": "${{ always() && github.ref == 'refs/heads/master' }}",
 }
@@ -220,7 +221,7 @@ STATIC_CHECK_COMMANDS = (
     "uv lock --check",
     "uv run --no-sync ruff format --check .",
     "uv run --no-sync ruff check --ignore-noqa .",
-    "uv run --no-sync pyright",
+    "NODE_OPTIONS=--max-old-space-size=4096 uv run --no-sync pyright",
     "pnpm --dir web run typecheck",
     "pnpm --dir web run lint",
     "pnpm --dir web run build",
@@ -244,19 +245,21 @@ MACOS_PARALLEL_LIMIT = 2
 MACOS_PLATFORMS = frozenset({"macos", "macos_general"})
 MACOS_GENERAL_JOB = "ci.yml:scaffold-tests-macos-general"
 MACOS_GENERAL_CONDITION = (
-    "${{ !cancelled() && github.event_name == 'push' "
+    "${{ !cancelled() && (github.event_name == 'schedule' "
+    "|| github.event_name == 'workflow_dispatch') "
     "&& needs.change-scope.outputs.full != 'false' "
     "&& needs.scaffold-plan.result == 'success' }}"
 )
-PUSH_ONLY_CONDITIONS = {
+NON_PULL_REQUEST_CONDITIONS = {
     MACOS_GENERAL_JOB: MACOS_GENERAL_CONDITION,
     "ci.yml:report-master-lanes": ISSUE_WRITER_CONDITIONS["ci.yml:report-master-lanes"],
 }
 EVENT_MATRIX = re.compile(
-    r"\$\{\{ fromJSON\(github\.event_name == 'push' && '([^']*)' "
+    r"\$\{\{ fromJSON\(\(github\.event_name == 'schedule' "
+    r"\|\| github\.event_name == 'workflow_dispatch'\) && '([^']*)' "
     r"\|\| '([^']*)'\) \}\}"
 )
-PUSH_ONLY_MACOS_ROWS = {
+COMPLETE_MACOS_ROWS = {
     "ci.yml:mutation-tooling": "os",
     "ci.yml:local-runtime-diagnostics": "include",
 }
@@ -460,11 +463,11 @@ def event_matrix_rows(value: object) -> tuple[list[object], list[object]] | None
     match = EVENT_MATRIX.fullmatch(value) if isinstance(value, str) else None
     if match is None:
         return None
-    push: object = json.loads(match[1])
+    complete: object = json.loads(match[1])
     pull_request: object = json.loads(match[2])
-    if not isinstance(push, list) or not isinstance(pull_request, list):
+    if not isinstance(complete, list) or not isinstance(pull_request, list):
         return None
-    return cast(list[object], push), cast(list[object], pull_request)
+    return cast(list[object], complete), cast(list[object], pull_request)
 
 
 def static_rows(job: dict[str, object]) -> list[dict[str, object]]:
@@ -486,7 +489,7 @@ def event_matrix_violations(workflows: Workflows) -> list[str]:
     for location, job in jobs_of(workflows):
         matrix = matrix_document(job)
         values = {} if isinstance(matrix, str) else table(matrix)
-        expected = PUSH_ONLY_MACOS_ROWS.get(location)
+        expected = COMPLETE_MACOS_ROWS.get(location)
         if expected is not None and not isinstance(values.get(expected), str):
             violations.append(f"{location}: {expected} is not chosen by event")
         for key, value in values.items():
@@ -496,11 +499,11 @@ def event_matrix_violations(workflows: Workflows) -> list[str]:
             if key != expected or rows is None:
                 violations.append(f"{location}: computed matrix {key}")
                 continue
-            push, pull_request = rows
+            complete, pull_request = rows
             if (
                 any(names_macos(row) for row in pull_request)
-                or not any(names_macos(row) for row in push)
-                or [row for row in push if not names_macos(row)] != pull_request
+                or not any(names_macos(row) for row in complete)
+                or [row for row in complete if not names_macos(row)] != pull_request
             ):
                 violations.append(f"{location}: event rows of {key}")
     return violations
@@ -620,7 +623,7 @@ def passing_value(expression: object) -> str:
     if inner.endswith((".outputs.verified", ".outputs.full")):
         return "true"
     if inner == "github.event_name":
-        return "push"
+        return "schedule"
     return ""
 
 
@@ -1553,8 +1556,8 @@ def choose_the_diagnostic_rows_by_another_expression(workflows: Workflows) -> No
 def keep_macos_in_the_pull_request_diagnostic_rows(workflows: Workflows) -> None:
     job = job_of(workflows, "ci.yml", "local-runtime-diagnostics")
     matrix = table(table(job["strategy"])["matrix"])
-    push, _ = str(matrix["include"]).split(" || ")
-    matrix["include"] = f"{push} || {push.rpartition(' && ')[2]}) }}}}"
+    complete, _ = str(matrix["include"]).rsplit(" || ", 1)
+    matrix["include"] = f"{complete} || {complete.rpartition(' && ')[2]}) }}}}"
 
 
 def list_the_mutation_tooling_runners_statically(workflows: Workflows) -> None:
@@ -1627,10 +1630,10 @@ def uniform_plan(count: int) -> Plan:
     )
 
 
-def runs_only_for_pushes(location: str, job: dict[str, object]) -> bool:
+def excluded_from_pull_requests(location: str, job: dict[str, object]) -> bool:
     return (
-        location in PUSH_ONLY_CONDITIONS
-        and job.get("if") == PUSH_ONLY_CONDITIONS[location]
+        location in NON_PULL_REQUEST_CONDITIONS
+        and job.get("if") == NON_PULL_REQUEST_CONDITIONS[location]
     )
 
 
@@ -1641,7 +1644,7 @@ def required_jobs(jobs: dict[str, dict[str, object]], location: str) -> set[str]
     while pending:
         current = pending.pop()
         job = jobs.get(current, {})
-        if runs_only_for_pushes(current, job):
+        if excluded_from_pull_requests(current, job):
             continue
         for need in needs_of(job):
             needed = f"{workflow}:{need}"
@@ -1766,7 +1769,7 @@ def pull_request_runners(job: dict[str, object]) -> list[object]:
 
 def may_request_macos_for_a_pull_request(location: str, job: dict[str, object]) -> bool:
     runner = str(job.get("runs-on", ""))
-    if runs_only_for_pushes(location, job):
+    if excluded_from_pull_requests(location, job):
         return False
     if runner != "${{ matrix.os }}":
         return MACOS in runner

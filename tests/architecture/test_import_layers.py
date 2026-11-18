@@ -370,6 +370,21 @@ def find_violations(source_root: Path) -> list[Violation]:
     known = known_modules(source_root)
     violations: list[Violation] = []
     for module in modules:
+        if not is_within(module.name, "kora.testing"):
+            tree = parse_module(module)
+            bindings = local_bindings(tree)
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and call_name(node, bindings)
+                    == "kora.plugins.runtime.local.runtime.LocalRuntime.open"
+                    and any(keyword.arg == "runner" for keyword in node.keywords)
+                ):
+                    violations.append(
+                        Violation(
+                            module.path, node.lineno, "injects a runner outside testing"
+                        )
+                    )
         if is_composition_root(module.name):
             violations.extend(composition_root_violations(module, known))
             continue
@@ -733,7 +748,9 @@ def test_fake_import_rule(tmp_path: Path) -> None:
     write_module(
         tmp_path,
         "kora.standalone",
-        "def build() -> None:\n    import kora.testing\n",
+        "def build() -> None:\n    import kora.testing\n"
+        "    from kora.plugins.runtime.local.runtime import LocalRuntime\n"
+        "    LocalRuntime.open(runner=command)\n",
     )
 
     violations = find_violations(tmp_path)
@@ -748,6 +765,7 @@ def test_fake_import_rule(tmp_path: Path) -> None:
         "kora.plugins.harness.fake",
         "kora/plugins/runtime/local.py:1: imports the fake module "
         "kora.plugins.runtime.fake",
+        "kora/standalone.py:4: injects a runner outside testing",
         "kora/standalone.py:2: imports kora.testing outside a testing command function",
         "kora/testing/loader.py:5: makes a dynamic-import call",
         "kora/testing/loader.py:6: makes a dynamic-import call",

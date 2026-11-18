@@ -3,26 +3,50 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from json.encoder import encode_basestring
-from typing import NoReturn, cast
+from enum import StrEnum
+from typing import cast
 
 from pydantic import ValidationError
 
-from kora.ir.agent_session_validation import TRUNCATION_MARKER
+from kora.ir import ErrorClass
 from kora.ir.cost import (
-    MAX_IDENTIFIER_LENGTH,
     MAX_SUM,
-    MAX_TOKEN,
     BillingClass,
-    TokenField,
-    UsageCoverage,
 )
 from kora.ir.json import JsonShapeError, parse_json_object
 from kora.observability.redaction import SecretRegistry, StreamMasker
-from kora.protocols.errors import ERROR_CODE, KoraProtocolError
+from kora.plugins.harness.claude.denials import (
+    UNKNOWN_TOOL,
+    bounded_identifier,
+    harness_denials,
+    pre_execution_rejection,
+)
+from kora.plugins.harness.claude.signals import ProviderSignals
+from kora.plugins.harness.claude.stop import (
+    CONFIG_ERRORS,
+    ClaudeObservation,
+    RecordedResult,
+    result_class,
+)
+from kora.plugins.harness.claude.stop import refused as refused
+from kora.plugins.harness.claude.usage import ClaudeUsage
+from kora.plugins.harness.text import (
+    MASK_CHUNK_BYTES,
+    clipped_text,
+    encoded_text_size,
+    masked_text,
+)
+from kora.protocols.errors import ERROR_CODE
 from kora.protocols.harness import (
+    MAX_SAMPLE_ITEMS,
     MAX_TEXT_BYTES,
+    DenialSample,
+    ErrorData,
     EventSink,
+    OutputCandidate,
+    PermissionDeniedData,
+    ProviderLimitedData,
+    ProviderRetryingData,
     ResultData,
     SessionStartedData,
     ToolCallData,
@@ -30,55 +54,12 @@ from kora.protocols.harness import (
     TurnData,
     UsageData,
 )
-
-MASK_CHUNK_BYTES = 8192
-MARKER = TRUNCATION_MARKER.decode("utf-8")
-
-
-def refused() -> NoReturn:
-    raise KoraProtocolError("harness_error", "the Claude session failed", False, {})
-
-
-def encoded_text_size(text: str) -> int:
-    return len(encode_basestring(text).encode("utf-8"))
-
-
-def clipped_text(text: str) -> str:
-    budget = MAX_TEXT_BYTES - encoded_text_size(MARKER) + 2
-    lower = 0
-    upper = min(len(text), budget - 2)
-    while lower < upper:
-        middle = (lower + upper + 1) // 2
-        if encoded_text_size(text[:middle]) <= budget:
-            lower = middle
-        else:
-            upper = middle - 1
-    return text[:lower] + MARKER
-
-
-def masked_text(
-    text: str, registry: SecretRegistry, check_deadline: Callable[[], None]
-) -> tuple[str, bool]:
-    parts: list[str] = []
-    size = 2
-
-    def collect(part: str) -> None:
-        nonlocal size
-        if size <= MAX_TEXT_BYTES:
-            parts.append(part)
-            size += encoded_text_size(part) - 2
-
-    encoded = text.encode("utf-8")
-    with StreamMasker(registry, collect) as masker:
-        for start in range(0, len(encoded), MASK_CHUNK_BYTES):
-            check_deadline()
-            masker.feed(encoded[start : start + MASK_CHUNK_BYTES])
-            if size > MAX_TEXT_BYTES:
-                break
-    rendered = "".join(parts)
-    if size > MAX_TEXT_BYTES:
-        return clipped_text(rendered), True
-    return rendered, False
+from kora.runner.calls import (
+    LIMITED_KINDS,
+    MAX_DECIDED,
+    TRACKING_CEILING,
+    ToolCallLedger,
+)
 
 
 def billing_class(source: str) -> BillingClass:
@@ -101,76 +82,10 @@ def plugins_digest(names: tuple[str, ...]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-START_COUNTS: tuple[tuple[str, TokenField], ...] = (
-    ("input_tokens", "input_tokens"),
-    ("cache_read_input_tokens", "cached_input_tokens"),
-    ("cache_creation_input_tokens", "cache_creation_tokens"),
-)
-DELTA_COUNTS: tuple[tuple[str, TokenField], ...] = (
-    ("output_tokens", "output_tokens"),
-    ("reasoning_tokens", "reasoning_tokens"),
-)
-OUTPUT_FIELDS: frozenset[TokenField] = frozenset(("output_tokens", "reasoning_tokens"))
-MODEL_COUNTS: tuple[tuple[str, TokenField], ...] = (
-    ("inputTokens", "input_tokens"),
-    ("cacheReadInputTokens", "cached_input_tokens"),
-    ("cacheCreationInputTokens", "cache_creation_tokens"),
-    ("outputTokens", "output_tokens"),
-)
-FINAL_FIELDS: frozenset[TokenField] = frozenset(
-    (
-        "input_tokens",
-        "cached_input_tokens",
-        "cache_creation_tokens",
-        "output_tokens",
-    )
-)
-
-
 def protocol_code(value: object) -> str:
     if not isinstance(value, str) or ERROR_CODE.fullmatch(value) is None:
         refused()
     return value
-
-
-def require_identifier(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > MAX_IDENTIFIER_LENGTH
-        or not value.isprintable()
-    ):
-        refused()
-    return value
-
-
-def optional_identifier(value: object) -> str | None:
-    if value is None:
-        return None
-    return require_identifier(value)
-
-
-def token_count(value: object) -> int:
-    if type(value) is not int or value < 0 or value > MAX_TOKEN:
-        refused()
-    return value
-
-
-def usage_counts(
-    value: object, names: tuple[tuple[str, TokenField], ...]
-) -> tuple[dict[TokenField, int], frozenset[TokenField]]:
-    if not isinstance(value, dict):
-        refused()
-    fields = cast("dict[object, object]", value)
-    counts: dict[TokenField, int] = {}
-    known: set[TokenField] = set()
-    for source, target in names:
-        if source not in fields:
-            counts[target] = 0
-            continue
-        counts[target] = token_count(fields[source])
-        known.add(target)
-    return counts, frozenset(known)
 
 
 def require_list(value: object) -> list[object]:
@@ -216,13 +131,6 @@ class ToolPiece:
     tool_use_id: str
 
 
-@dataclass(frozen=True)
-class RecordedResult:
-    subtype: str
-    is_error: bool
-    terminal_reason: str | None
-
-
 def recorded_result(
     subtype: object, is_error: object, terminal_reason: object
 ) -> RecordedResult:
@@ -232,52 +140,51 @@ def recorded_result(
     return RecordedResult(protocol_code(subtype), is_error, reason)
 
 
-@dataclass
-class OpenUsage:
-    message_id: str
-    model: str | None
-    agent_id: str | None
-    input_tokens: int
-    cached_input_tokens: int
-    cache_creation_tokens: int
-    output_tokens: int
-    reasoning_tokens: int
-    known: frozenset[TokenField]
-    complete: bool = False
+class TurnText:
+    def __init__(self, registry: SecretRegistry) -> None:
+        self.parts: list[str] = []
+        self.size = 2
+        self.seen = False
+        self.pending = bytearray()
+        self.masker = StreamMasker(registry, self.collect)
+
+    def collect(self, part: str) -> None:
+        if self.size <= MAX_TEXT_BYTES:
+            self.parts.append(part)
+            self.size += encoded_text_size(part) - 2
+
+    def feed(self, text: str, check_deadline: Callable[[], None]) -> None:
+        self.seen = True
+        if self.size > MAX_TEXT_BYTES:
+            return
+        encoded = text.encode("utf-8")
+        for start in range(0, len(encoded), MASK_CHUNK_BYTES):
+            check_deadline()
+            self.pending.extend(encoded[start : start + MASK_CHUNK_BYTES])
+            if len(self.pending) >= MASK_CHUNK_BYTES:
+                self.masker.feed(bytes(self.pending[:MASK_CHUNK_BYTES]))
+                del self.pending[:MASK_CHUNK_BYTES]
+            if self.size > MAX_TEXT_BYTES:
+                self.pending.clear()
+                break
+
+    def finish(self) -> tuple[str | None, bool]:
+        if self.pending:
+            self.masker.feed(bytes(self.pending))
+            self.pending.clear()
+        self.masker.close()
+        if not self.seen:
+            return None, False
+        rendered = "".join(self.parts)
+        if self.size > MAX_TEXT_BYTES:
+            return clipped_text(rendered), True
+        return rendered, False
 
 
-def apply_final_usage(call: OpenUsage | None, model_usage: object) -> None:
-    if model_usage is None:
-        return
-    if not isinstance(model_usage, dict):
-        refused()
-    entries = cast("dict[object, object]", model_usage)
-    if not entries:
-        return
-    if call is None or len(entries) != 1:
-        refused()
-    key, entry = next(iter(entries.items()))
-    model = require_identifier(key)
-    if call.model is not None and call.model != model:
-        refused()
-    counts, known = usage_counts(entry, MODEL_COUNTS)
-    if known != FINAL_FIELDS:
-        refused()
-    output = counts["output_tokens"]
-    keep_reasoning = (
-        "reasoning_tokens" in call.known and call.reasoning_tokens <= output
-    )
-    call.model = model
-    call.input_tokens = counts["input_tokens"]
-    call.cached_input_tokens = counts["cached_input_tokens"]
-    call.cache_creation_tokens = counts["cache_creation_tokens"]
-    call.output_tokens = output
-    if not keep_reasoning:
-        call.reasoning_tokens = 0
-    call.known = FINAL_FIELDS | (
-        frozenset(("reasoning_tokens",)) if keep_reasoning else frozenset()
-    )
-    call.complete = True
+class TextOutcome(StrEnum):
+    ABSENT = "absent"
+    INVALID = "invalid"
+    ACCEPTED = "accepted"
 
 
 class ClaudeEvents:
@@ -286,6 +193,8 @@ class ClaudeEvents:
         sink: EventSink,
         registry: SecretRegistry,
         *,
+        binding: str,
+        max_retries: int,
         output_format: bool,
         check_deadline: Callable[[], None],
         observed_at: Callable[[], datetime],
@@ -295,16 +204,38 @@ class ClaudeEvents:
         self._output_format = output_format
         self._check_deadline = check_deadline
         self._observed_at = observed_at
+        self._signals = ProviderSignals(binding, max_retries, observed_at, self.drop)
+        self.facts: SessionStartedData | None = None
+        self.turns = 0
+        self.structured: OutputCandidate | None = None
+        self.output_refused = False
+        self.latest_usage: UsageData | None = None
+        self.result_text: OutputCandidate | None = None
+        self.text_outcome = TextOutcome.ABSENT
+        self._emitted_calls: set[str] = set()
+        self._observed_turns: dict[str, str | None] = {}
         self._started = False
         self._billing: BillingClass | None = None
         self._message_id: str | None = None
         self._agent_id: str | None = None
-        self._parts: list[str] = []
-        self._saw_text = False
+        self._text = TurnText(registry)
         self._tools: list[ToolPiece] = []
-        self._usage: OpenUsage | None = None
+        self._usage = ClaudeUsage(
+            self._emit_usage, self._next_usage_sequence, observed_at
+        )
         self._usage_sequence = 0
         self._result: RecordedResult | None = None
+        self._result_emitted = False
+        self._result_errors: tuple[str, ...] = ()
+        self._calls = ToolCallLedger()
+        self._observed: dict[str, str] = {}
+        self._callback_denied: set[str] = set()
+        self._assistant_errors: set[str] = set()
+        self._provider_limit_seen = False
+        self._api_error_status: int | None = None
+        self._denials = DenialSample(items=(), total=0)
+        self._bypass_denials = self._denials
+        self._unmatched_denials = 0
 
     def observe_init(self, data: object) -> None:
         if self._started or not isinstance(data, dict):
@@ -336,8 +267,11 @@ class ClaudeEvents:
             started = None
         if started is None:
             refused()
+        self._signals.model(fields.get("model"))
         self._emit("session_started", started)
+        self.facts = started
         self._billing = selected
+        self._usage.billing = selected
         self._started = True
 
     def assistant(
@@ -357,9 +291,23 @@ class ClaudeEvents:
             self._agent_id = agent_id
         for piece in pieces:
             if isinstance(piece, TextPiece):
-                self._parts.append(piece.text)
-                self._saw_text = True
+                self._text.feed(piece.text, self._check_deadline)
             else:
+                if not bounded_identifier(piece.tool_use_id):
+                    refused()
+                if (
+                    piece.tool_use_id not in self._observed
+                    and len(self._observed) >= TRACKING_CEILING
+                ):
+                    refused()
+                if (
+                    piece.tool_use_id in self._observed
+                    and self._observed[piece.tool_use_id] != piece.name
+                ):
+                    refused()
+                self._observed[piece.tool_use_id] = (
+                    piece.name if bounded_identifier(piece.name) else UNKNOWN_TOOL
+                )
                 self._tools.append(piece)
 
     def tool_result(
@@ -383,6 +331,11 @@ class ClaudeEvents:
             result = None
         if result is None:
             refused()
+        if tool_use_id in self._callback_denied and not is_error:
+            self._calls.confirmed = True
+        tool = self._observed.get(tool_use_id, UNKNOWN_TOOL)
+        if not pre_execution_rejection(tool, is_error, content):
+            self._calls.result(tool, tool_use_id, is_error)
         self._emit("tool_result", result)
 
     def usage_start(
@@ -390,31 +343,17 @@ class ClaudeEvents:
     ) -> None:
         if not self._started:
             refused()
-        identity = require_identifier(message_id)
-        if self._usage is not None and self._usage.message_id == identity:
-            refused()
-        self._emit_usage()
-        counts, known = usage_counts(usage, START_COUNTS)
-        self._usage = OpenUsage(
-            message_id=identity,
-            model=optional_identifier(model),
-            agent_id=optional_identifier(agent_id),
-            input_tokens=counts["input_tokens"],
-            cached_input_tokens=counts["cached_input_tokens"],
-            cache_creation_tokens=counts["cache_creation_tokens"],
-            output_tokens=0,
-            reasoning_tokens=0,
-            known=known,
-        )
+        self._usage.start(message_id, model, agent_id, usage)
 
-    def usage_delta(self, usage: object) -> None:
-        call = self._usage
-        if not self._started or call is None:
+    def usage_delta(self, usage: object, scope: object = None) -> None:
+        if not self._started:
             refused()
-        counts, known = usage_counts(usage, DELTA_COUNTS)
-        call.output_tokens = counts["output_tokens"]
-        call.reasoning_tokens = counts["reasoning_tokens"]
-        call.known = call.known - OUTPUT_FIELDS | known
+        self._usage.delta(usage, scope)
+
+    def usage_stop(self, scope: object = None) -> None:
+        if not self._started:
+            refused()
+        self._usage.stop(scope)
 
     def observe_result(
         self,
@@ -422,12 +361,178 @@ class ClaudeEvents:
         is_error: object,
         terminal_reason: object,
         model_usage: object,
+        api_error_status: object = None,
+        permission_denials: object = None,
+        query_usage: object = None,
+        *,
+        structured_output: object = None,
+        result: object = None,
+        errors: object = None,
     ) -> None:
         if not self._started or self._result is not None:
             refused()
         recorded = recorded_result(subtype, is_error, terminal_reason)
-        apply_final_usage(self._usage, model_usage)
+        result_errors: list[str] = []
+        if errors is not None:
+            for error in require_list(errors):
+                if not isinstance(error, str):
+                    refused()
+                result_errors.append(error)
+        if api_error_status is not None and (
+            type(api_error_status) is not int or not 100 <= api_error_status <= 599
+        ):
+            refused()
+        denials = harness_denials(
+            permission_denials, self._observed, self._callback_denied
+        )
+        self._flush()
+        self._usage.result(model_usage, query_usage, recorded.terminal_reason)
+        callback_denials = self._denials
+        self._denials = DenialSample(
+            items=(callback_denials.items + denials.sample.items)[:MAX_SAMPLE_ITEMS],
+            total=callback_denials.total + denials.sample.total,
+        )
+        self._unmatched_denials = denials.unmatched
+        held = tuple(
+            PermissionDeniedData(
+                tool=call.tool,
+                tool_use_id=call.tool_use_id,
+                source="harness",
+                code="harness_rule",
+            )
+            for call in self._calls.held.values()
+            if call.tool_use_id in denials.matched
+        )
+        self._bypass_denials = DenialSample(items=held, total=len(held))
+        self._api_error_status = api_error_status
+        self._provider_limit_seen |= api_error_status == 429
+        if api_error_status == 429:
+            self._emit_rate_signal()
+        try:
+            self.structured = (
+                None
+                if structured_output is None
+                else OutputCandidate(
+                    source="structured_output", value=structured_output
+                )
+            )
+        except ValueError:
+            self.structured = None
+            self.output_refused = True
+        self.result_text = text_candidate(result)
+        self.text_outcome = (
+            TextOutcome.ACCEPTED
+            if self.result_text is not None
+            else TextOutcome.INVALID
+            if isinstance(result, str)
+            else TextOutcome.ABSENT
+        )
         self._result = recorded
+        self._result_errors = tuple(result_errors)
+        self._flush()
+        for denial in denials.sample.items:
+            self._emit("permission_denied", denial)
+
+    @property
+    def calls(self) -> ToolCallLedger:
+        return self._calls
+
+    def flush(self) -> None:
+        self._flush()
+
+    def call(self, data: ToolCallData) -> None:
+        if data.tool_use_id in self._emitted_calls:
+            return
+        if len(self._emitted_calls) >= MAX_DECIDED:
+            refused()
+        self._emitted_calls.add(data.tool_use_id)
+        self._emit("tool_call", data)
+
+    def deny(self, data: PermissionDeniedData) -> None:
+        self._denials = DenialSample(
+            items=(*self._denials.items, data)[:MAX_SAMPLE_ITEMS],
+            total=self._denials.total + 1,
+        )
+        self._emit("permission_denied", data)
+
+    def decided(self, tool_use_id: str, allow: bool) -> None:
+        if not bounded_identifier(tool_use_id):
+            refused()
+        if (
+            tool_use_id not in self._calls.decided_ids
+            and len(self._calls.decided_ids) >= MAX_DECIDED
+        ):
+            refused()
+        self._calls.decided(tool_use_id)
+        if not allow:
+            self._callback_denied.add(tool_use_id)
+
+    @property
+    def bypass_confirmed(self) -> bool:
+        return self._calls.bypass(
+            self._bypass_denials, self._result is not None
+        ).confirmed
+
+    def observe_assistant_error(self, error: object) -> None:
+        if error is not None and not isinstance(error, str):
+            refused()
+        if error in CONFIG_ERRORS:
+            self._assistant_errors.add(str(error))
+        self._provider_limit_seen |= error == "rate_limit"
+        if error == "rate_limit":
+            self._emit_rate_signal()
+
+    def observe_model(self, message_id: str | None, model: object) -> None:
+        if not self._started:
+            return
+        new_call = (
+            message_id is not None
+            and message_id != self._message_id
+            and message_id not in self._observed_turns
+        )
+        self._signals.assistant(new_call, model)
+
+    def _emit_rate_signal(self) -> None:
+        data = self._signals.rate()
+        if data is not None:
+            self._emit("provider_limited", data)
+
+    def observe_retry(self, data: object) -> None:
+        signal = self._signals.retry(data)
+        if signal is not None:
+            self._emit("provider_retrying", signal)
+
+    def observe_rate_limit(
+        self, status: object, resets_at: object = None, rate_limit_type: object = None
+    ) -> None:
+        if status not in ("allowed", "allowed_warning", "rejected"):
+            refused()
+        self._provider_limit_seen |= status == "rejected"
+        if status == "rejected":
+            data = self._signals.rejected(resets_at, rate_limit_type)
+            if data is not None:
+                self._emit("provider_limited", data)
+
+    def observation(self) -> ClaudeObservation:
+        recorded = self._result
+        seen = recorded is not None
+        bypass = self._calls.bypass(self._bypass_denials, seen)
+        return ClaudeObservation(
+            result_seen=seen,
+            result_class=result_class(recorded, self._assistant_errors)
+            if recorded
+            else ErrorClass.HARNESS_ERROR,
+            provider_limit_seen=self._provider_limit_seen,
+            terminal_reason=recorded.terminal_reason if recorded else None,
+            api_error_status=self._api_error_status,
+            denials=self._denials,
+            denials_complete=seen
+            and self._denials.total == len(self._denials.items)
+            and bypass.unconfirmed.total == 0,
+            unmatched_denials=self._unmatched_denials,
+            bypass=bypass,
+            usage=self._usage.summary(),
+        )
 
     def drop(self, kind: str) -> None:
         known = {
@@ -440,9 +545,14 @@ class ClaudeEvents:
         }
         self._sink.observe_dropped(kind if kind in known else "message")
 
+    def finish_session(self) -> None:
+        self._flush()
+        self._usage.finish()
+        self._emit_result()
+
     def finish(self) -> None:
         self._flush()
-        self._emit_usage()
+        self._usage.finish()
         self._emit_result()
         if not self._started:
             refused()
@@ -451,12 +561,7 @@ class ClaudeEvents:
         message_id = self._message_id
         if message_id is None:
             return
-        text: str | None = None
-        truncated = False
-        if self._saw_text:
-            text, truncated = masked_text(
-                "".join(self._parts), self._registry, self._check_deadline
-            )
+        text, truncated = self._text.finish()
         try:
             turn = TurnData(
                 message_id=message_id,
@@ -468,19 +573,28 @@ class ClaudeEvents:
             turn = None
         if turn is None:
             refused()
-        self._emit("turn", turn)
+        if message_id not in self._observed_turns:
+            if len(self._observed_turns) >= TRACKING_CEILING:
+                refused()
+            self._observed_turns[message_id] = self._agent_id
+            self._emit("turn", turn)
+        elif self._observed_turns[message_id] != self._agent_id:
+            refused()
+        else:
+            self._sink.observe_dropped("assistant")
         tools = tuple(self._tools)
         agent_id = self._agent_id
         self._message_id = None
         self._agent_id = None
-        self._parts = []
-        self._saw_text = False
+        self._text = TurnText(self._registry)
         self._tools = []
         for tool in tools:
             self._emit_tool(tool, agent_id)
 
     def _emit_tool(self, tool: ToolPiece, agent_id: str | None) -> None:
-        output_channel = self._output_format and tool.name == "StructuredOutput"
+        output_channel = (
+            self._output_format and tool.name == "StructuredOutput" and agent_id is None
+        )
         try:
             call = ToolCallData(
                 tool=tool.name,
@@ -492,56 +606,24 @@ class ClaudeEvents:
             call = None
         if call is None:
             refused()
-        self._emit("tool_call", call)
+        self.call(call)
 
-    def _emit_usage(self) -> None:
-        call = self._usage
-        if call is None:
-            return
-        self._usage = None
-        billing = self._billing
+    def _next_usage_sequence(self) -> int:
         sequence = self._usage_sequence
-        if billing is None or sequence > MAX_SUM:
+        if sequence > MAX_SUM:
             refused()
-        when = self._observed_at()
-        try:
-            usage = UsageData(
-                observation_id=call.message_id,
-                observation_sequence=sequence,
-                observed_at=when,
-                message_id=call.message_id,
-                agent_id=call.agent_id,
-                model=call.model,
-                input_tokens=call.input_tokens,
-                cached_input_tokens=call.cached_input_tokens,
-                cache_creation_tokens=call.cache_creation_tokens,
-                output_tokens=call.output_tokens,
-                reasoning_tokens=call.reasoning_tokens,
-                known_token_fields=call.known,
-                basis="price_table",
-                billing_class=billing,
-                coverage=UsageCoverage(
-                    version=1,
-                    observation_id=call.message_id,
-                    observation_sequence=sequence,
-                    completeness="complete" if call.complete else "partial",
-                    observed_at=when,
-                    attribution_gap=call.model is None,
-                    observation_gap=False,
-                ),
-            )
-        except ValidationError:
-            usage = None
-        if usage is None:
-            refused()
-        self._emit("usage", usage)
-        self._usage_sequence = sequence + 1
+        self._usage_sequence += 1
+        return sequence
+
+    def _emit_usage(self, data: UsageData) -> None:
+        self.latest_usage = data
+        self._emit("usage", data)
 
     def _emit_result(self) -> None:
         recorded = self._result
-        if recorded is None:
+        if recorded is None or self._result_emitted:
             return
-        self._result = None
+        self._result_emitted = True
         try:
             result = ResultData(
                 subtype=recorded.subtype,
@@ -553,6 +635,13 @@ class ClaudeEvents:
         if result is None:
             refused()
         self._emit("result", result)
+        for error in self._result_errors:
+            text, truncated = masked_text(error, self._registry, self._check_deadline)
+            self._emit(
+                "error",
+                ErrorData(code="harness_result_error", text=text, truncated=truncated),
+            )
+        self._result_errors = ()
 
     def _emit(
         self,
@@ -562,7 +651,11 @@ class ClaudeEvents:
         | ToolCallData
         | ToolResultData
         | UsageData
-        | ResultData,
+        | ResultData
+        | ErrorData
+        | PermissionDeniedData
+        | ProviderLimitedData
+        | ProviderRetryingData,
     ) -> None:
         try:
             dumped = model.model_dump(mode="json")
@@ -576,4 +669,34 @@ class ClaudeEvents:
             payload = None
         if payload is None:
             refused()
+        if kind in LIMITED_KINDS and self._sink.enforcement().cause == "max_events":
+            self._sink.observe_dropped(kind)
+            return
         self._sink.emit(kind, payload)
+        if kind == "turn":
+            self.turns += 1
+
+
+def unique_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON member")
+        result[key] = value
+    return result
+
+
+def invalid_constant(_value: str) -> object:
+    raise ValueError("non-finite JSON number")
+
+
+def text_candidate(value: object) -> OutputCandidate | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed: object = json.loads(
+            value, object_pairs_hook=unique_members, parse_constant=invalid_constant
+        )
+        return OutputCandidate(source="result_text", value=parsed)
+    except (ValueError, RecursionError):
+        return None

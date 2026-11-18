@@ -1,7 +1,7 @@
 from asyncio import CancelledError
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Never, Self
+from typing import Never, Self, cast
 
 from kora.api.graph_cel import GraphCelChecks, GraphCelResult, verify_graph_cel
 from kora.cel.limits import MAX_CODE_POINTS
@@ -32,7 +32,14 @@ from kora.engine.graph_execution_contract import (
     structured_output_preparation_reservation,
 )
 from kora.engine.graph_output_inventory import build_graph_output_inventory
+from kora.engine.graph_output_policy import OutputPublicationBinding
 from kora.engine.graph_output_values import saved_array
+from kora.engine.graph_parameter_evaluation import (
+    ParameterPublicationBinding,
+    parameter_preparation_reservation,
+    parameter_source_budgets,
+    prepare_graph_parameter_evaluation,
+)
 from kora.engine.graph_parameters import build_graph_parameter_binding
 from kora.engine.graph_projection_paths import (
     admit_graph_projection_source,
@@ -54,10 +61,26 @@ from kora.engine.graph_version_identity import (
     graph_version_hash_bytes,
     prepare_graph_version_identity,
 )
-from kora.ir.diagnostic_collection import MAX_DIAGNOSTIC_BYTES
+from kora.ir.diagnostic_collection import MAX_DIAGNOSTIC_BYTES, DiagnosticCollection
+from kora.ir.diagnostics import Diagnostic
 from kora.ir.document import GraphDocument
 from kora.ir.json import JsonObject
+from kora.ir.standard_schema_policy import SourceDecision
 from kora.protocols.storage_models import StorageIdentity
+
+
+class UnsupportedParameterSchema(Exception):
+    pass
+
+
+def parameter_schema_findings() -> GraphCelChecks:
+    diagnostic = Diagnostic(
+        code="IR028",
+        message="The parameter schema is unsupported by the saved evaluation profile.",
+        path=("graph", "params"),
+    )
+    return GraphCelChecks(0, DiagnosticCollection((diagnostic,), (), 0, 0))
+
 
 SOURCE_COPIES = 4
 SECTION_COPIES = 6
@@ -233,6 +256,10 @@ def _admit(limits: ExecutionPreparationLimits) -> None:
     output_preparation, output_work = structured_output_preparation_reservation(
         cel.output_context_bytes
     )
+    parameter_preparation, _ = parameter_preparation_reservation(
+        cel.output_context_bytes
+    )
+    preparation = max(output_preparation, parameter_preparation)
     source_views = SOURCE_COPIES * (cel.ir_bytes + cel.output_context_bytes)
     sections = (
         cel.ir_bytes
@@ -246,6 +273,12 @@ def _admit(limits: ExecutionPreparationLimits) -> None:
     native_requests = (
         4 * limits.rendering_characters + 4 * MAX_PATTERN_PROBE + FIXED_REPLY_BYTES
     )
+    persistent_native = (
+        NATIVE_FACT_COPIES * limits.facts_bytes
+        + 2 * MAX_DIAGNOSTIC_BYTES
+        + max(cel.typed_bytes + cel.typed_work, 4 * MAX_PATTERN_PROBE)
+        + FIXED_REPLY_BYTES
+    )
     native_retained = (
         NATIVE_TYPED_COPIES * cel.typed_bytes
         + cel.typed_work
@@ -257,12 +290,12 @@ def _admit(limits: ExecutionPreparationLimits) -> None:
     )
     construction_copies = SECTION_COPIES * sections + 2 * HASH_CHUNK_BYTES
     retained = (
-        2 * read_retained
+        2 * (read_retained - preparation)
         + logical.ir_bytes
         + logical.scratch
-        + output_preparation
         + construction_copies
-        + native_retained
+        + persistent_native
+        + max(preparation, native_retained - persistent_native)
         + PREPARED_OWNER_SLOT
     )
     scalar_work = 4 * (sections * sections + pair * pair)
@@ -286,8 +319,14 @@ def _admit(limits: ExecutionPreparationLimits) -> None:
 
 
 def _contract(
-    ir_text: str, facts: GraphCelFacts, limits: ExecutionPreparationLimits
+    ir_text: str,
+    facts: GraphCelFacts,
+    limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
+    parameter_binding: ParameterPublicationBinding,
 ) -> JsonObject:
+    if type(parameter_binding) is not ParameterPublicationBinding:
+        raise GraphValueRejected(GraphValueFailure.VERSION)
     reader = limits.reader
     projection = reader.projection
     cel = projection.cel
@@ -295,12 +334,12 @@ def _contract(
         build_graph_type_contracts(ir_text, max_encoded_bytes=cel.output_context_bytes)
     )
     outputs = build_graph_output_inventory(
-        ir_text, types, max_encoded_bytes=cel.output_context_bytes
+        ir_text, types, binding=binding, max_encoded_bytes=cel.output_context_bytes
     )
     if not isinstance(outputs, str):
         reason = (
             GraphValueFailure.BUDGET
-            if outputs.reason == "preparation_exhausted"
+            if outputs.reason in {"preparation_exhausted", "evaluation_exhausted"}
             else GraphValueFailure.VERSION
         )
         raise GraphValueRejected(reason)
@@ -308,13 +347,29 @@ def _contract(
         read_document(ir_text, TextBudget(cel.ir_bytes)),
         max_encoded_bytes=cel.parameter_context_bytes,
     )
+    parameter_value = ObjectReader(parameters).object()
+    profile = parameter_binding.profile()
+    source, selection = parameter_source_budgets(cel.output_context_bytes)
+    prepared = prepare_graph_parameter_evaluation(
+        parameter_value,
+        cast(list[JsonObject], types),
+        profile,
+        source_budget=source,
+        selection_budget=selection,
+    )
+    if isinstance(prepared, SourceDecision):
+        if prepared.reason == "unsupported_schema":
+            raise UnsupportedParameterSchema
+        raise GraphValueRejected(GraphValueFailure.BUDGET)
+    del prepared
     retry = build_graph_retry_policies(
         ir_text, max_encoded_bytes=projection.retry_bytes
     )
     contract: JsonObject = {
         "semantics": EXECUTION_SEMANTICS,
         "type_contracts": types,
-        "parameters": ObjectReader(parameters).object(),
+        "parameters": parameter_value,
+        "parameter_evaluation": profile,
         "outputs": saved_array(outputs),
         "retry_policies": ObjectReader(retry).object(),
         "cel_expressions": ObjectReader(facts.text).object(),
@@ -327,12 +382,16 @@ def _contract(
 
 
 def _checked_pair(
-    ir_text: str, facts: GraphCelFacts, limits: ExecutionPreparationLimits
+    ir_text: str,
+    facts: GraphCelFacts,
+    limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
+    parameter_binding: ParameterPublicationBinding,
 ) -> tuple[PreparedGraphVersionIdentity, DecodedGraphValues]:
     reader = limits.reader
     prepared = prepare_graph_version_identity(
         ObjectReader(ir_text).object(),
-        _contract(ir_text, facts, limits),
+        _contract(ir_text, facts, limits, binding, parameter_binding),
         limits=reader.identity,
     )
     values = prepared.values
@@ -356,8 +415,10 @@ def _draft(
     scope: GraphResourceScope,
     owners: tuple[GraphResourceOwner, ...],
     limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
+    parameter_binding: ParameterPublicationBinding,
 ) -> PreparedExecutionContract:
-    prepared, saved = _checked_pair(ir_text, facts, limits)
+    prepared, saved = _checked_pair(ir_text, facts, limits, binding, parameter_binding)
     values = prepared.values
     resources, _ = check_execution_contract_members(
         values.ir,
@@ -430,6 +491,8 @@ async def _prepare(
     owners: tuple[GraphResourceOwner, ...],
     evaluator: Evaluator,
     limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
+    parameter_binding: ParameterPublicationBinding,
 ) -> PreparedExecutionContract | GraphCelResult:
     document = _prepare_document(ir_text, limits)
     reader = limits.reader
@@ -444,17 +507,23 @@ async def _prepare(
     facts = _complete_facts(result)
     if facts is None:
         return result
-    return _draft(ir_text, facts, physical, scope, owners, limits)
+    return _draft(
+        ir_text, facts, physical, scope, owners, limits, binding, parameter_binding
+    )
 
 
 async def _prepare_logical(
-    ir_text: str, evaluator: Evaluator, limits: ExecutionPreparationLimits
+    ir_text: str,
+    evaluator: Evaluator,
+    limits: ExecutionPreparationLimits,
+    binding: OutputPublicationBinding,
+    parameter_binding: ParameterPublicationBinding,
 ) -> PreparedLogicalExecutionContract | GraphCelResult:
     result = await _verification(_prepare_document(ir_text, limits), evaluator, limits)
     facts = _complete_facts(result)
     if facts is None:
         return result
-    prepared, saved = _checked_pair(ir_text, facts, limits)
+    prepared, saved = _checked_pair(ir_text, facts, limits, binding, parameter_binding)
     values = prepared.values
     reader = limits.reader
     check_execution_contract_projection_members(
@@ -474,18 +543,25 @@ async def prepare_logical_execution_contract(
     ir_text: str,
     evaluator: Evaluator,
     *,
+    binding: OutputPublicationBinding,
+    parameter_binding: ParameterPublicationBinding,
     limits: ExecutionPreparationLimits,
 ) -> PreparedLogicalExecutionContract | GraphCelResult:
     error: BaseException
     try:
-        return await _prepare_logical(ir_text, evaluator, limits)
+        return await _prepare_logical(
+            ir_text, evaluator, limits, binding, parameter_binding
+        )
+    except UnsupportedParameterSchema as unsupported:
+        unsupported.__traceback__ = None
+        return parameter_schema_findings()
     except GraphValueRejected as rejected:
         error = GraphValueRejected(rejected.reason)
     except EvaluatorUnavailable as unavailable:
         error = EvaluatorUnavailable(unavailable.reason)
     except CancelledError:
         error = CancelledError()
-    del ir_text, evaluator
+    del ir_text, evaluator, binding, parameter_binding
     raise_safe(error)
 
 
@@ -494,6 +570,8 @@ async def prepare_graph_deployment_inputs(
     contents: tuple[CommandResourceContent, ...],
     evaluator: Evaluator,
     *,
+    binding: OutputPublicationBinding,
+    parameter_binding: ParameterPublicationBinding,
     selectors: GraphDeploymentSelectors,
     storage_identity: StorageIdentity | None,
     limits: GraphDeploymentPreparationLimits,
@@ -516,17 +594,23 @@ async def prepare_graph_deployment_inputs(
             del selectors
         contents = ()
         storage_identity = None
-        result = await _prepare_logical(ir_text, evaluator, limits.execution)
+        result = await _prepare_logical(
+            ir_text, evaluator, limits.execution, binding, parameter_binding
+        )
         if isinstance(result, PreparedLogicalExecutionContract):
             return PreparedGraphDeploymentInputs(result, groups)
         return GraphDeploymentCelRefusal(result)
+    except UnsupportedParameterSchema as unsupported:
+        unsupported.__traceback__ = None
+        return GraphDeploymentCelRefusal(parameter_schema_findings())
     except GraphValueRejected as rejected:
         error = GraphValueRejected(rejected.reason)
     except EvaluatorUnavailable as unavailable:
         error = EvaluatorUnavailable(unavailable.reason)
     except CancelledError:
         error = CancelledError()
-    del ir_text, contents, storage_identity, evaluator, groups, limits
+    del ir_text, contents, storage_identity, evaluator, groups, limits, binding
+    del parameter_binding
     raise_safe(error)
 
 
@@ -536,16 +620,23 @@ async def prepare_execution_contract(
     owners: tuple[GraphResourceOwner, ...],
     evaluator: Evaluator,
     *,
+    binding: OutputPublicationBinding,
+    parameter_binding: ParameterPublicationBinding,
     limits: ExecutionPreparationLimits,
 ) -> PreparedExecutionContract | GraphCelResult:
     error: BaseException
     try:
-        return await _prepare(ir_text, scope, owners, evaluator, limits)
+        return await _prepare(
+            ir_text, scope, owners, evaluator, limits, binding, parameter_binding
+        )
+    except UnsupportedParameterSchema as unsupported:
+        unsupported.__traceback__ = None
+        return parameter_schema_findings()
     except GraphValueRejected as rejected:
         error = GraphValueRejected(rejected.reason)
     except EvaluatorUnavailable as unavailable:
         error = EvaluatorUnavailable(unavailable.reason)
     except CancelledError:
         error = CancelledError()
-    del ir_text, scope, owners, evaluator
+    del ir_text, scope, owners, evaluator, binding, parameter_binding
     raise_safe(error)

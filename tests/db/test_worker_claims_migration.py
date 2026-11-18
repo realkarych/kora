@@ -29,7 +29,7 @@ async def test_worker_claim_migration_preserves_legacy_grants_and_recovers(
     try:
         async with database.migration_connection() as migrator:
             await migrator.run_sync(
-                lambda sync: command.upgrade(alembic_config(sync), "0027")
+                lambda sync: command.upgrade(alembic_config(sync), "0030")
             )
         scope = await seed(database)
         await legacy(database, scope, range(1, 3))
@@ -49,7 +49,7 @@ async def test_worker_claim_migration_preserves_legacy_grants_and_recovers(
         ):
             await upgrade_database(empty_database_settings)
         async with database.transaction() as writer:
-            assert await writer.run_sync(current_revision) == "0027"
+            assert await writer.run_sync(current_revision) == "0030"
             await writer.exec_driver_sql("DROP INDEX ix_attempt_worker_open")
 
         report = await upgrade_database(empty_database_settings)
@@ -74,8 +74,8 @@ async def test_worker_claim_migration_preserves_legacy_grants_and_recovers(
             differences = await reader.run_sync(differences_ignoring_expression_indexes)
 
         assert (report.from_revision, report.to_revision, report.steps) == (
-            "0027",
-            "0028",
+            "0030",
+            "0031",
             1,
         )
         assert repeated.steps == 0

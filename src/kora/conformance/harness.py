@@ -1,11 +1,12 @@
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final, Protocol, runtime_checkable
 
 import pytest
 
@@ -21,6 +22,8 @@ from kora.conformance.common import (
     test_provider_logs_through_its_context,
 )
 from kora.ir import ErrorClass
+from kora.ir.config import NodeLimits
+from kora.ir.cost import PriceRevision
 from kora.ir.json import JsonObject
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
@@ -29,11 +32,14 @@ from kora.protocols.harness import (
     Enforcement,
     HarnessAdapter,
     Launch,
+    LaunchContext,
     LaunchInputs,
     NormalisedEvent,
     Placement,
     RunnerCause,
+    SessionInputs,
     SessionResult,
+    prompt_digest,
 )
 from kora.protocols.policy import (
     PolicyDecision,
@@ -76,6 +82,15 @@ EVENT_KINDS: Final[frozenset[str]] = frozenset(
 EVENT_TIME: Final[datetime] = datetime(2026, 1, 1, tzinfo=UTC)
 CONFORMANCE_WORKSPACE: Final[str] = "/kora-conformance-workspace"
 MAX_EVENTS: Final[int] = 3
+CONFORMANCE_PROMPT: Final[str] = "run the conformance case"
+CONFORMANCE_PRICE_TABLE: Final[PriceRevision] = PriceRevision(
+    id="conformance-prices",
+    namespace_id=None,
+    effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+    version=1,
+    normalization_version=1,
+    prices={},
+)
 
 
 class HarnessCase(StrEnum):
@@ -85,6 +100,17 @@ class HarnessCase(StrEnum):
     NO_USAGE = "no_usage"
     STRUCTURED_OUTPUT = "structured_output"
     RESULT_TEXT = "result_text"
+
+
+@dataclass(frozen=True)
+class HarnessCaseContext:
+    workspace: WorkspaceTarget
+    launches: LaunchContext
+
+
+HarnessContextFactory = Callable[
+    [HarnessCase, ProtocolContext], AbstractAsyncContextManager[HarnessCaseContext]
+]
 
 
 @dataclass(frozen=True)
@@ -99,6 +125,7 @@ class HarnessConformanceInputs:
     configuration_effect: Callable[
         [HarnessAdapter, JsonObject, ProtocolContext], Awaitable[None]
     ]
+    context_factory: HarnessContextFactory | None = None
 
 
 class HarnessExercise(Protocol):
@@ -107,6 +134,24 @@ class HarnessExercise(Protocol):
     def failure(self, ctx: ProtocolContext, marker: str) -> Awaitable[object]: ...
 
     def adapter(self, case: HarnessCase, ctx: ProtocolContext) -> HarnessAdapter: ...
+
+
+@runtime_checkable
+class ContextualHarnessExercise(HarnessExercise, Protocol):
+    context_factory: HarnessContextFactory
+
+
+@asynccontextmanager
+async def case_context(
+    factory: HarnessContextFactory | None,
+    case: HarnessCase,
+    context: ProtocolContext,
+) -> AsyncGenerator[HarnessCaseContext | None]:
+    if factory is None:
+        yield None
+    else:
+        async with factory(case, context) as supplied:
+            yield supplied
 
 
 @dataclass
@@ -189,6 +234,9 @@ class HostedRun:
 
 
 class HarnessHost:
+    def __init__(self, context: HarnessCaseContext | None = None) -> None:
+        self.context = context
+
     async def hosted(
         self,
         adapter: HarnessAdapter,
@@ -201,10 +249,26 @@ class HarnessHost:
         policy = ConformancePolicy(denied_tool, trace)
         spec = adapter.build_session_spec(
             {} if configuration is None else configuration,
-            WorkspaceTarget(root=CONFORMANCE_WORKSPACE, host_path=None),
+            WorkspaceTarget(root=CONFORMANCE_WORKSPACE, host_path=None)
+            if self.context is None
+            else self.context.workspace,
             None,
+            inputs=SessionInputs(
+                prompt=CONFORMANCE_PROMPT,
+                prompt_digest=prompt_digest(CONFORMANCE_PROMPT),
+                price_table_id=CONFORMANCE_PRICE_TABLE.id,
+                price_table=CONFORMANCE_PRICE_TABLE,
+                limits=NodeLimits(max_events=max_events)
+                if max_events is not None
+                else NodeLimits(),
+            ),
         )
-        result = await adapter.run(spec, policy, sink, NoLaunches())
+        result = await adapter.run(
+            spec,
+            policy,
+            sink,
+            NoLaunches() if self.context is None else self.context.launches,
+        )
         return HostedRun(result, tuple(sink.events), tuple(trace.entries))
 
     def run(
@@ -223,8 +287,12 @@ async def run_harness_case(
     max_events: int | None = None,
 ) -> HostedRun:
     retained = deepcopy(configuration)
-    await inputs.prepare_case(provider, deepcopy(retained), case, context)
-    return await host.hosted(provider, inputs.denied_tool, max_events, retained)
+    async with case_context(inputs.context_factory, case, context) as supplied:
+        await inputs.prepare_case(provider, deepcopy(retained), case, context)
+        selected_host = host if supplied is None else HarnessHost(supplied)
+        return await selected_host.hosted(
+            provider, inputs.denied_tool, max_events, retained
+        )
 
 
 @pytest.fixture
@@ -249,8 +317,19 @@ def hosted(
     case: HarnessCase,
     max_events: int | None = None,
 ) -> HostedRun:
-    adapter = exercise.adapter(case, context_for(capture))
-    return host.run(adapter, exercise.denied_tool, max_events)
+    async def run() -> HostedRun:
+        context = context_for(capture)
+        factory = (
+            exercise.context_factory
+            if isinstance(exercise, ContextualHarnessExercise)
+            else None
+        )
+        async with case_context(factory, case, context) as supplied:
+            adapter = exercise.adapter(case, context)
+            selected_host = host if supplied is None else HarnessHost(supplied)
+            return await selected_host.hosted(adapter, exercise.denied_tool, max_events)
+
+    return asyncio.run(run())
 
 
 @pytest.mark.kora_conformance
@@ -310,10 +389,12 @@ def check_harness_policy_precedes_every_tool_call(run: HostedRun) -> None:
     refused = {tool_use_id_of(event) for event in denied}
     check(
         not any(
-            event.kind == "tool_result" and tool_use_id_of(event) in refused
+            event.kind == "tool_result"
+            and tool_use_id_of(event) in refused
+            and not event.data.is_error
             for event in run.events
         ),
-        "a denied call has no result",
+        "a policy-denied call has no successful result",
     )
     check(not run.result.policy_bypass, "no call bypasses the policy")
 

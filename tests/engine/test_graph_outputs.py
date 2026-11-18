@@ -20,7 +20,7 @@ from kora.engine.graph_outputs import (
 from kora.engine.graph_type_references import root_reference_text
 from kora.ir.approval_form import default_approval_form
 from kora.ir.json import JsonObject, JsonValue
-from kora.ir.structured_schema_input import StructuredSchemaPreparationRefusal
+from kora.protocols.effective_artifact_type import EffectiveRefusal
 from tests.engine.graph_output_cases import (
     LIMIT,
     built,
@@ -31,6 +31,7 @@ from tests.engine.graph_output_cases import (
     output_preparation_capacity_document,
 )
 from tests.engine.graph_schema_cases import declaration
+from tests.support.output_bindings import publication_binding
 
 
 @pytest.mark.parametrize("config_present", [False, True])
@@ -271,7 +272,9 @@ def test_graph_output_refuses_inconsistent_source(mode: str) -> None:
     arguments = (render_object(raw, TextBudget(LIMIT)), original[1], path)
 
     with pytest.raises(GraphValueRejected) as failure:
-        build_graph_output_contract(*arguments, max_encoded_bytes=LIMIT)
+        build_graph_output_contract(
+            *arguments, max_encoded_bytes=LIMIT, binding=publication_binding()
+        )
 
     assert failure.value.reason is GraphValueFailure.INVALID
     assert str(failure.value) == "invalid graph value representation"
@@ -292,7 +295,9 @@ def test_graph_output_refuses_wrong_selection(path: list[JsonValue]) -> None:
     ir, types, _ = output_arguments(output_document())
 
     with pytest.raises(GraphValueRejected) as failure:
-        build_graph_output_contract(ir, types, path, max_encoded_bytes=LIMIT)
+        build_graph_output_contract(
+            ir, types, path, max_encoded_bytes=LIMIT, binding=publication_binding()
+        )
 
     assert failure.value.reason is GraphValueFailure.INVALID
 
@@ -342,7 +347,7 @@ def test_graph_output_reader_rejects_rehashed_substitution(field: str) -> None:
     elif field == "constraints":
         saved["constraints"] = []
     elif field == "policy":
-        child(saved, "schema_validation", "parameters")["max_input_bytes"] = 1
+        child(saved, "schema_validation", "parameters")["max_schema_source_bytes"] = 1
     elif field == "type":
         cast(JsonObject, cast(list[JsonValue], saved["type_contracts"])[0])[
             "schema"
@@ -359,7 +364,11 @@ def test_graph_output_reader_rejects_rehashed_substitution(field: str) -> None:
     with pytest.raises(GraphValueRejected) as failure:
         read_graph_output_contract(*arguments, saved, digest, max_encoded_bytes=LIMIT)
 
-    assert failure.value.reason is GraphValueFailure.INVALID
+    assert failure.value.reason is (
+        GraphValueFailure.VERSION
+        if field in {"policy", "missing"}
+        else GraphValueFailure.INVALID
+    )
     assert saved != ObjectReader(result.text).object() or field == "order"
 
 
@@ -383,9 +392,11 @@ def test_graph_output_retains_actual_preparation_refusal(schema: JsonObject) -> 
     child(raw, "graph", "nodes", "producer", "config")["output_schema"] = schema
     arguments = output_arguments(raw)
 
-    result = build_graph_output_contract(*arguments, max_encoded_bytes=LIMIT)
+    result = build_graph_output_contract(
+        *arguments, max_encoded_bytes=LIMIT, binding=publication_binding()
+    )
 
-    assert isinstance(result, StructuredSchemaPreparationRefusal)
+    assert isinstance(result, EffectiveRefusal)
     assert result.reason == "unsupported_schema"
 
 
@@ -406,7 +417,9 @@ def test_graph_output_exact_aggregate_admission_and_detachment() -> None:
         *arguments, saved, expected.digest, max_encoded_bytes=exact
     )
     with pytest.raises(GraphValueRejected) as too_small:
-        build_graph_output_contract(*arguments, max_encoded_bytes=exact - 1)
+        build_graph_output_contract(
+            *arguments, max_encoded_bytes=exact - 1, binding=publication_binding()
+        )
     with pytest.raises(GraphValueRejected) as read_small:
         reader_profile.runcall(
             read_graph_output_contract,
@@ -447,6 +460,7 @@ def test_graph_output_input_refuses_before_dependent_work() -> None:
             build_graph_output_contract,
             *arguments,
             max_encoded_bytes=input_bytes(arguments) - 1,
+            binding=publication_binding(),
         )
 
     names = {
@@ -504,10 +518,12 @@ def test_graph_output_generated_reference_refuses_before_path_materialization() 
 def test_graph_output_retains_actual_preparation_capacity() -> None:
     arguments = output_arguments(output_preparation_capacity_document())
 
-    result = build_graph_output_contract(*arguments, max_encoded_bytes=LIMIT)
+    result = build_graph_output_contract(
+        *arguments, max_encoded_bytes=LIMIT, binding=publication_binding()
+    )
 
-    assert isinstance(result, StructuredSchemaPreparationRefusal)
-    assert result.reason == "preparation_exhausted"
+    assert isinstance(result, EffectiveRefusal)
+    assert result.reason == "evaluation_exhausted"
 
 
 @pytest.mark.parametrize("kind", ["wait_event", "command"])

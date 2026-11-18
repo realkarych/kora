@@ -20,7 +20,9 @@ from kora.protocols.deadlines import (
     thresholds,
 )
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
+from kora.protocols.evidence import NormalCompletionQuiescence
 from kora.protocols.identity import Count, Identifier, Sha256
+from kora.protocols.lifetime import EnvironmentVariable, Executable
 from kora.protocols.runtime import (
     MAX_TRANSFER_BYTES,
     CommandObservation,
@@ -31,7 +33,7 @@ from kora.protocols.runtime import (
 )
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
-from kora.runner.registry import TransitionExecutor
+from kora.runner.registry import ControlFileRef, TransitionExecutor
 
 PRE_ATTACH_BYTES: Final[int] = 8192
 MAX_LOG_BYTES: Final[int] = 67_108_864
@@ -70,6 +72,7 @@ class EnvelopeEntry(NamedTuple):
 
 
 ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
+    "launch_rejected": EnvelopeEntry("the harness launch could not be prepared", False),
     "operation_unknown": EnvelopeEntry("the control operation is not known", False),
     "workload_conflict": EnvelopeEntry(
         "the request conflicts with the attempt's recorded binding", False
@@ -97,9 +100,13 @@ ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
     "integrity_error": EnvelopeEntry(
         "the transferred bytes do not match the digest", False
     ),
+    "requires_virtual_time": EnvelopeEntry("the script requires virtual time", False),
     "transfer_refused": EnvelopeEntry("the input cannot be transferred", False),
     "command_unobserved": EnvelopeEntry(
         "no command observation was recorded for the attempt", False
+    ),
+    "session_unobserved": EnvelopeEntry(
+        "no session observation was sealed for the attempt", False
     ),
 }
 REFUSED_MESSAGE: Final[str] = "the control message was refused"
@@ -683,6 +690,62 @@ def read_observation(payload: bytes, request_id: str) -> CommandObservation:
     return envelope.value
 
 
+class SessionResultEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["session_result"]
+    value: ControlFileRef
+
+
+def session_result_envelope(request_id: str, value: ControlFileRef) -> bytes:
+    envelope = SessionResultEnvelope(
+        request_id=request_id, result="session_result", value=value
+    )
+    return canonical_bytes(envelope.model_dump(mode="json"))
+
+
+def read_session_result(payload: bytes, request_id: str) -> ControlFileRef:
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    envelope = json_model(SessionResultEnvelope, payload)
+    if envelope is None or envelope.request_id != request_id:
+        raise message_refused(MessageRefusal.MALFORMED)
+    return envelope.value
+
+
+class QuiescenceEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["quiescence"]
+    value: NormalCompletionQuiescence
+
+
+def quiescence_envelope(request_id: str, value: NormalCompletionQuiescence) -> bytes:
+    envelope = QuiescenceEnvelope(
+        request_id=request_id, result="quiescence", value=value
+    )
+    return canonical_bytes(envelope.model_dump(mode="json"))
+
+
+def read_quiescence(payload: bytes, request_id: str) -> NormalCompletionQuiescence:
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    envelope = json_model(QuiescenceEnvelope, payload)
+    if envelope is None or envelope.request_id != request_id:
+        raise message_refused(MessageRefusal.MALFORMED)
+    return envelope.value
+
+
 def status_envelope(request_id: str, value: StatusValue) -> bytes:
     envelope = StatusEnvelope(request_id=request_id, result="status", value=value)
     return canonical_bytes(envelope.model_dump(mode="json"))
@@ -701,3 +764,47 @@ def read_status(payload: bytes, request_id: str) -> StatusValue:
     if envelope is None or envelope.request_id != request_id:
         raise message_refused(MessageRefusal.MALFORMED)
     return envelope.value
+
+
+class LaunchSpecRequest(BoundaryModel):
+    op: Literal["launch_spec"]
+    request_id: Identifier
+    launch_id: Identifier
+    capability: Annotated[
+        str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{64}$")
+    ]
+
+
+class LaunchCapability(BoundaryModel):
+    launch_id: Identifier
+    capability: Annotated[
+        str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{64}$")
+    ]
+    socket_path: Executable
+
+
+class LaunchSpecEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["launch_spec"]
+    executable: Executable
+    cwd: Executable
+    environment: Annotated[tuple[EnvironmentVariable, ...], Field(max_length=4096)]
+
+
+class LaunchFailure(BoundaryModel):
+    op: Literal["launch_failed"]
+
+
+class LaunchStarted(BoundaryModel):
+    op: Literal["started"]
+    pgid: Annotated[int, Field(strict=True, gt=0)]
+
+
+class LaunchExit(BoundaryModel):
+    op: Literal["exit"]
+    exit_code: Annotated[int, Field(strict=True, ge=0, le=255)]
+
+
+class LaunchSignal(BoundaryModel):
+    op: Literal["signal"]
+    signal: Annotated[int, Field(strict=True, gt=0, le=64)]

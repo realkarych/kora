@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -146,6 +147,7 @@ async def installed_run(
     stop_on_feedback: bool = False,
     entrypoint: str = "kora.conformance.child",
     files: InputFiles | None = None,
+    cleanup_on_system_time: bool = True,
 ) -> Outcome:
     with TemporaryDirectory(prefix="kora-invoke-", dir="/tmp") as temporary:
         base = Path(temporary).resolve()
@@ -357,8 +359,9 @@ async def installed_run(
                 serving = asyncio.create_task(lifetime())
                 reading = asyncio.create_task(events())
                 observing = asyncio.create_task(feedback())
-                progressing = asyncio.create_task(cleanup_time())
-                tasks.extend((serving, reading, observing, progressing))
+                tasks.extend((serving, reading, observing))
+                if cleanup_on_system_time:
+                    tasks.append(asyncio.create_task(cleanup_time()))
                 endpoint, _ = await asyncio.wait_for(loop.sock_accept(listeners[0]), 30)
                 channel = BoundedChannel(endpoint, SystemClock())
                 try:
@@ -696,6 +699,7 @@ async def test_installed_storage_refuses_unowned_roots(
         protocol=ProtocolName.ARTIFACT_STORAGE,
         plugin="fixtures_storage",
         configuration=configuration,
+        cleanup_on_system_time=False,
     )
 
     assert outcome.result.phase == "storage"
@@ -725,6 +729,7 @@ async def test_installed_storage_retains_failure_until_parent_stop(
         protocol=ProtocolName.ARTIFACT_STORAGE,
         plugin=plugin,
         configuration=configuration,
+        cleanup_on_system_time=False,
     )
 
     assert outcome.result.phase == "storage"
@@ -749,6 +754,7 @@ async def test_installed_storage_stops_blocked_native_work_before_tree_release(
             configuration=configuration,
             feedback_phases=b"b",
             stop_on_feedback=True,
+            cleanup_on_system_time=False,
         )
 
 
@@ -823,6 +829,7 @@ async def test_installed_storage_preserves_parent_stop_after_report_channel_fail
             feedback_phases=b"r",
             stop_on_feedback=True,
             entrypoint="kora_tooling_fixture.broken_report",
+            cleanup_on_system_time=False,
         )
 
 
@@ -864,3 +871,229 @@ async def test_installed_conformance_reads_only_bounded_regular_input_files(
     assert outcome.returncode == (0 if content == "valid" else 1)
     assert b"file-authoritative-value" not in outcome.events
     assert str(path) not in outcome.result.model_dump_json()
+
+
+async def drain_launching_output(
+    communication: asyncio.Task[tuple[bytes, bytes]],
+    transport: asyncio.SubprocessTransport,
+    original_failure: BaseException | None,
+) -> None:
+    try:
+        _, pending = await asyncio.wait((communication,), timeout=10)
+    finally:
+        if not communication.done():
+            transport.close()
+            communication.cancel()
+            _, unfinished = await asyncio.wait((communication,), timeout=10)
+            if unfinished:
+                raise AssertionError(
+                    "Installed conformance output reader outlived its closed pipes"
+                )
+    if pending:
+        message = "Installed conformance output pipes remained open 10 s past teardown"
+        if original_failure is not None:
+            original_failure.add_note(message)
+        else:
+            raise AssertionError(message)
+    else:
+        await asyncio.shield(communication)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ending", ["timeout", "timeout_after_failure", "cancelled_during_drain"]
+)
+async def test_launching_drain_closes_inherited_pipes(
+    ending: str,
+) -> None:
+    loop = asyncio.get_running_loop()
+    exited = asyncio.Event()
+    original_failure = ValueError("original failure")
+
+    class ExitProtocol(asyncio.subprocess.SubprocessStreamProtocol):
+        def process_exited(self) -> None:
+            super().process_exited()
+            exited.set()
+
+    release_reader, release_writer = os.pipe()
+    with (
+        os.fdopen(release_reader, "rb") as release_input,
+        os.fdopen(release_writer, "wb"),
+    ):
+        transport, protocol = await loop.subprocess_exec(
+            lambda: ExitProtocol(limit=65536, loop=loop),
+            sys.executable,
+            "-c",
+            "import os, sys; "
+            "pid = os.fork(); "
+            "os.read(int(sys.argv[1]), 1) if pid == 0 else None; "
+            "os._exit(0)",
+            str(release_input.fileno()),
+            pass_fds=(release_input.fileno(),),
+            stdin=None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        process = asyncio.subprocess.Process(transport, protocol, loop)
+        communication = asyncio.create_task(process.communicate())
+        readers = tuple(transport.get_pipe_transport(fd) for fd in (1, 2))
+
+        async def failed_run(failure: ValueError) -> None:
+            try:
+                raise failure
+            finally:
+                await drain_launching_output(communication, transport, sys.exception())
+
+        try:
+            await asyncio.wait_for(exited.wait(), 5)
+            assert process.returncode == 0
+            assert not communication.done()
+
+            if ending == "cancelled_during_drain":
+                draining = asyncio.create_task(
+                    drain_launching_output(communication, transport, None)
+                )
+                await asyncio.wait((draining,), timeout=0)
+                assert not draining.done()
+                draining.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await draining
+            elif ending == "timeout":
+                with pytest.raises(AssertionError, match="pipes remained open 10 s"):
+                    await drain_launching_output(communication, transport, None)
+            else:
+                with pytest.raises(ValueError, match="original failure") as failure:
+                    await failed_run(original_failure)
+                assert failure.value is original_failure
+                assert "pipes remained open 10 s" in original_failure.__notes__[0]
+
+            assert communication.cancelled()
+            assert transport.is_closing()
+            assert all(reader is not None and reader.is_closing() for reader in readers)
+        finally:
+            transport.close()
+            communication.cancel()
+            await asyncio.gather(communication, return_exceptions=True)
+
+
+async def installed_launching_run(
+    installed: InstalledTooling, tmp_path: Path, mode: str
+) -> tuple[CommandResult, int, Path, int, bytes]:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    config = tmp_path / "launching.json"
+    config.write_text('{"prefix":"installed-"}')
+    data = tmp_path / "exercise.json"
+    with TemporaryDirectory(prefix="kora-launch-", dir="/tmp") as temporary:
+        endpoint_path = Path(temporary) / "feedback"
+        data.write_text(json.dumps({"mode": mode, "feedback": str(endpoint_path)}))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(endpoint_path))
+            listener.listen(1)
+            listener.setblocking(False)
+            loop = asyncio.get_running_loop()
+            transport, protocol = await loop.subprocess_exec(
+                lambda: asyncio.subprocess.SubprocessStreamProtocol(
+                    limit=65536, loop=loop
+                ),
+                *installed.command(
+                    "conformance",
+                    "harness",
+                    "launching",
+                    "--config",
+                    str(config),
+                    "--fixtures",
+                    "kora_tooling_fixture.fixtures_launching",
+                    "--fixture-data",
+                    str(data),
+                ),
+                cwd=installed.outside,
+                env=installed.environment({"HOME": str(home)}),
+                stdin=None,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            process = asyncio.subprocess.Process(transport, protocol, loop)
+            communication = asyncio.create_task(process.communicate())
+            try:
+                async with asyncio.timeout(40):
+                    connection, _ = await loop.sock_accept(listener)
+                    with connection:
+                        connection.setblocking(False)
+                        payload = bytearray()
+                        while not payload.endswith(b"\n"):
+                            chunk = await loop.sock_recv(connection, 4096)
+                            assert chunk
+                            payload.extend(chunk)
+                            assert len(payload) <= 8192
+                        evidence = json.loads(payload)
+                        pid = evidence["pid"]
+                        root = Path(evidence["root"])
+                        assert isinstance(pid, int)
+                        assert root.is_dir()
+                        os.kill(pid, 0)
+                        await loop.sock_sendall(connection, b"a")
+                    if mode == "installed_cancel":
+                        process.send_signal(signal.SIGINT)
+                    stdout, stderr = await asyncio.shield(communication)
+                    assert process.returncode is not None
+                    report = CommandResult.model_validate_json(stdout)
+                    return report, pid, root, process.returncode, stdout + stderr
+            finally:
+                try:
+                    if process.returncode is None:
+                        process.send_signal(signal.SIGTERM)
+                        try:
+                            await asyncio.wait_for(process.wait(), 10)
+                        except TimeoutError:
+                            process.kill()
+                            await asyncio.wait_for(process.wait(), 10)
+                finally:
+                    await drain_launching_output(
+                        communication, transport, sys.exception()
+                    )
+
+
+@pytest.mark.asyncio
+async def test_installed_harness_uses_case_context(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    mode = "success"
+
+    report, pid, root, code, output = await installed_launching_run(
+        installed_conformance, tmp_path, mode
+    )
+
+    assert code == 0
+    assert report.completed == report.expected == 10
+    assert report.cleanup is not None
+    assert report.cleanup.state is CleanupOutcome.CLOSED
+    assert not root.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert str(root).encode() not in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["failure", "installed_cancel", "pytest_exit"])
+async def test_installed_harness_releases_every_ending(
+    installed_conformance: InstalledTooling, tmp_path: Path, mode: str
+) -> None:
+    expected = (
+        OriginalOutcome.CANCELLED
+        if mode == "installed_cancel"
+        else OriginalOutcome.FAILED
+    )
+
+    report, pid, root, code, output = await installed_launching_run(
+        installed_conformance, tmp_path, mode
+    )
+
+    assert code != 0
+    assert report.outcome is expected
+    assert report.cleanup is not None
+    assert report.cleanup.state is CleanupOutcome.CLOSED
+    assert not root.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert str(root).encode() not in output

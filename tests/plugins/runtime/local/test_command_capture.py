@@ -17,6 +17,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import ComponentLogger
 from kora.plugins.runtime.local.capture import (
@@ -80,6 +81,10 @@ from tests.plugins.runtime.local.test_transfer import (
     unlinked_spool,
 )
 from tests.protocols.runtime_documents import workload
+from tests.support.command_diagnostics import (
+    attach_event_diagnostics,
+    diagnostic_number,
+)
 from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
 from tests.support.local_runners import (
     exited_within,
@@ -263,12 +268,62 @@ class CaptureProbe(CommandSession):
     def leader(self) -> int | None:
         return None if self._owner is None else self._owner.pid
 
+    def diagnostic_owner(self) -> JsonObject:
+        owner = self._owner
+        if owner is None:
+            return {"state": "absent"}
+        if not owner.lock.acquire(blocking=False):
+            return {"state": "unavailable"}
+        try:
+            return {
+                "state": "observed",
+                "exit_observed": owner.status is not None,
+                "reaped": owner.reaped,
+                "error_recorded": owner.error is not None,
+            }
+        finally:
+            owner.lock.release()
+
+    def diagnostic_snapshot(self) -> JsonObject:
+        domain = task_state(self._domain_stop)
+        if domain == "finished" and self._domain_stop is not None:
+            domain = (
+                "confirmed"
+                if self._domain_stop.result() is StopOutcome.CONFIRMED
+                else "unresolved"
+            )
+        capture = self._capture
+        return {
+            "owner": self.diagnostic_owner(),
+            "domain_stop": domain,
+            "capture_seal": task_state(self._capture_seal),
+            "capture": {"state": "absent"}
+            if capture is None
+            else {
+                "state": "attached",
+                "ended": capture.ended,
+                "writer_alive": capture.writer.is_alive(),
+                "stdout_observed_bytes": diagnostic_number(capture.observed("stdout")),
+                "stderr_observed_bytes": diagnostic_number(capture.observed("stderr")),
+            },
+        }
+
     async def settle_capture(self) -> None:
         await until(self.sealing)
         task = self._capture_seal
         assert task is not None
         async with asyncio.timeout(CONDITION_SECONDS * 3):
             await asyncio.shield(task)
+
+
+def task_state(task: asyncio.Task[object] | None) -> str:
+    if task is None:
+        return "absent"
+    if not task.done():
+        return "pending"
+    if task.cancelled():
+        return "cancelled"
+    return "finished" if task.exception() is None else "failed"
 
 
 def identity_at(descriptor: int) -> tuple[int, int]:
@@ -398,6 +453,39 @@ async def advance_past_seal(
 
 def capture_threads() -> int:
     return sum(thread.name == "kora-capture" for thread in threading.enumerate())
+
+
+@pytest.mark.asyncio
+async def test_capture_diagnostics_preserve_failure_without_private_content(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    private_content = "capture-private-marker"
+    io = HeldIO("write")
+    failure = AssertionError("capture wait did not finish")
+    async with capture_session(
+        tmp_path, kora_capture, f"print({private_content!r})", io=io
+    ) as (session, _attempt):
+        await until(io.entered.is_set)
+        await until(session.sealing)
+
+        snapshot = session.diagnostic_snapshot()
+        failure.add_note(json.dumps({"pre_teardown": snapshot}, sort_keys=True))
+        io.release.set()
+        await session.settle_capture()
+    attach_event_diagnostics(failure, kora_capture)
+
+    assert str(failure) == "capture wait did not finish"
+    assert snapshot["owner"] == {
+        "state": "observed",
+        "exit_observed": True,
+        "reaped": True,
+        "error_recorded": False,
+    }
+    assert snapshot["domain_stop"] == "confirmed"
+    assert snapshot["capture_seal"] == "pending"
+    assert private_content not in "".join(failure.__notes__)
+    assert len(failure.__notes__) == 2
+    assert "post_teardown_events" in failure.__notes__[1]
 
 
 @pytest.mark.asyncio
@@ -947,6 +1035,7 @@ async def test_command_capture_on_full_disk(kora_capture: Capture) -> None:
             "    os.write(1, block)",
         )
     )
+    observed_failure: AssertionError | TimeoutError | None = None
     try:
         async with capture_session(parent, kora_capture, script, gate=True) as (
             session,
@@ -958,7 +1047,16 @@ async def test_command_capture_on_full_disk(kora_capture: Capture) -> None:
                 opened.truncate(filler.stat().st_size - 262144)
             go = attempt / "candidate" / "go"
             await asyncio.to_thread(lambda: os.close(os.open(go, os.O_WRONLY)))
-            await session.settle_capture()
+            try:
+                await session.settle_capture()
+            except (AssertionError, TimeoutError) as error:
+                observed_failure = error
+                error.add_note(
+                    json.dumps(
+                        {"pre_teardown": session.diagnostic_snapshot()}, sort_keys=True
+                    )
+                )
+                raise
             facts = facts_of(session, "stdout")
             on_disk = (attempt / "stdout.log").read_bytes()
             opened_log = await asyncio.to_thread(
@@ -982,8 +1080,22 @@ async def test_command_capture_on_full_disk(kora_capture: Capture) -> None:
         async with capture_session(
             sync_parent, kora_capture, "print('synced')", io=io
         ) as (sync_session, _sync_attempt):
-            await sync_session.settle_capture()
+            try:
+                await sync_session.settle_capture()
+            except (AssertionError, TimeoutError) as error:
+                observed_failure = error
+                error.add_note(
+                    json.dumps(
+                        {"pre_teardown": sync_session.diagnostic_snapshot()},
+                        sort_keys=True,
+                    )
+                )
+                raise
             unsealed = sync_session.capture().facts("stdout")
+    except (AssertionError, TimeoutError) as error:
+        if error is observed_failure:
+            attach_event_diagnostics(error, kora_capture)
+        raise
     finally:
         shutil.rmtree(parent)
     records = capture_records(kora_capture)

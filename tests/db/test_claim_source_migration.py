@@ -10,6 +10,7 @@ from kora.db.grant_history_v1 import ACK_FIELDS, TIP_FIELDS
 from kora.db.migrations import current_revision, upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt, attempt_claim_read_admission
+from tests.db.cancel_cause_support import attempt_schema_objects
 from tests.db.seed import Seeder
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 
@@ -32,12 +33,12 @@ def assert_attempt_schema_extension(
     assert {str(index["name"]): index for index in current} == expected
 
 
-def install_predecessor(connection: Connection) -> None:
-    command.upgrade(alembic_config(connection), "0024")
+def install_predecessor(connection: Connection, revision: str) -> None:
+    command.upgrade(alembic_config(connection), revision)
 
 
 def downgrade(connection: Connection) -> None:
-    command.downgrade(alembic_config(connection), "0024")
+    command.downgrade(alembic_config(connection), "0026")
 
 
 @pytest.mark.asyncio
@@ -48,7 +49,7 @@ async def test_claim_source_revision_refuses_downgrade(
     try:
         async with database.migration_connection() as writer:
             await writer.run_sync(
-                lambda sync: command.upgrade(alembic_config(sync), "0025")
+                lambda sync: command.upgrade(alembic_config(sync), "0027")
             )
 
         async with database.migration_connection() as writer:
@@ -58,7 +59,7 @@ async def test_claim_source_revision_refuses_downgrade(
                 await writer.run_sync(downgrade)
 
         async with database.read_transaction() as reader:
-            assert await reader.run_sync(current_revision) == "0025"
+            assert await reader.run_sync(current_revision) == "0027"
             assert (
                 await reader.execute(select(attempt_claim_read_admission))
             ).all() == []
@@ -67,8 +68,9 @@ async def test_claim_source_revision_refuses_downgrade(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("predecessor", "steps"), [("0025", 6), ("0026", 5)])
 async def test_claim_source_migration_preserves_legacy_without_admission(
-    empty_database_settings: DatabaseSettings,
+    empty_database_settings: DatabaseSettings, predecessor: str, steps: int
 ) -> None:
     database = Database(empty_database_settings)
     selected = tuple(
@@ -84,7 +86,7 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
     )
     try:
         async with database.migration_connection() as writer:
-            await writer.run_sync(install_predecessor)
+            await writer.run_sync(install_predecessor, predecessor)
         async with database.transaction() as writer:
             seeder = Seeder(writer)
             namespace_id = await seeder.namespace()
@@ -94,6 +96,7 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
             node_id = await seeder.node(run_id, "legacy")
             await seeder.attempt(node_id)
             before = (await writer.execute(select(*selected))).one()
+            schema_before = await writer.run_sync(attempt_schema_objects)
 
         await database.close()
         report = await upgrade_database(empty_database_settings)
@@ -105,6 +108,7 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
                 await reader.execute(select(attempt_claim_read_admission))
             ).all()
             differences = await reader.run_sync(differences_ignoring_expression_indexes)
+            schema_after = await reader.run_sync(attempt_schema_objects)
         async with database.migration_connection() as writer:
             with pytest.raises(
                 RuntimeError, match="worker Claims cannot be downgraded"
@@ -116,12 +120,14 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
         await database.close()
 
     assert (report.from_revision, report.to_revision, report.steps) == (
-        "0024",
-        "0028",
-        4,
+        predecessor,
+        "0031",
+        steps,
     )
     assert after == before
     assert offset is None
     assert admitted == []
     assert differences == []
-    assert version == "0028"
+    assert version == "0031"
+    if predecessor == "0026":
+        assert_attempt_schema_extension(schema_before, schema_after, database.dialect)

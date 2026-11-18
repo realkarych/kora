@@ -267,7 +267,7 @@ async def migration_cycles(
         no_op_steps.append(second.steps)
         leftovers.extend(factory.temporary_files(settings))
         await factory.discard(settings)
-        assert first.steps == 28
+        assert first.steps == 31
     gate(report, "migration_rerun_is_a_no_op", kind, all(s == 0 for s in no_op_steps))
     gate(report, "migration_leaves_no_temporary_files", kind, leftovers == [])
     record(
@@ -822,9 +822,9 @@ async def read_workloads(
             visited=visited,
         )
 
-        counter.statements = 0
         started = time.perf_counter()
         async with database.read_transaction() as connection:
+            counter.statements = 0
             for _ in range(READ_CALLS):
                 unfinished = await has_unfinished_top_level_instance(
                     connection, finish_run

@@ -5,7 +5,7 @@ import os
 import threading
 from collections.abc import AsyncGenerator, Coroutine, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final, Literal, TypeVar
 
@@ -18,7 +18,7 @@ from kora.plugins.harness.fake import CallScope, FakeHarness, ScriptHeader
 from kora.plugins.harness.fake.script import PauseStep, Step
 from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.protocols.common import ProtocolContext
-from kora.protocols.deadlines import ClockSample
+from kora.protocols.deadlines import ClockSample, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import AgentExecution
 from kora.protocols.policy import (
@@ -29,7 +29,7 @@ from kora.protocols.policy import (
     ToolCallRequest,
 )
 from kora.protocols.runtime import Workload
-from kora.protocols.time import SystemClock
+from kora.protocols.time import Clock, SystemClock
 from kora.protocols.vcs import WorkspaceRef
 from kora.runner.agent import (
     AgentHost,
@@ -86,19 +86,61 @@ class GatedClock:
             self.changed.notify_all()
 
 
+class SteppedClock:
+    def __init__(self) -> None:
+        self.current = 0
+        self.deadlines: list[int] = []
+        self.changed = asyncio.Condition()
+
+    def now(self) -> datetime:
+        return FIXED_NOW + timedelta(microseconds=self.current // 1000)
+
+    def monotonic_ns(self) -> int:
+        return self.current
+
+    def sample(self) -> ClockSample:
+        return ClockSample(wall=self.now(), monotonic_ns=self.current)
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        async with self.changed:
+            self.deadlines.append(deadline_ns)
+            self.changed.notify_all()
+            await self.changed.wait_for(lambda: self.current >= deadline_ns)
+
+    async def requested(self, deadline_ns: int, count: int = 1) -> None:
+        async with self.changed:
+            await self.changed.wait_for(
+                lambda: self.deadlines.count(deadline_ns) >= count
+            )
+
+    async def advance_to(self, instant_ns: int) -> None:
+        async with self.changed:
+            if instant_ns < self.current:
+                raise ValueError("time cannot move backwards")
+            self.current = instant_ns
+            self.changed.notify_all()
+
+
 class HeldWriter:
     def __init__(
-        self, outcome: JournalAppendOutcome = JournalAppendOutcome.DURABLE
+        self,
+        outcome: JournalAppendOutcome = JournalAppendOutcome.DURABLE,
+        journal: RunningJournal | None = None,
     ) -> None:
+        self.journal = journal
         self.entered = threading.Event()
         self.gate = threading.Event()
         self.outcome = outcome
         self.appended: list[tuple[str, JsonObject]] = []
 
     def append_outcome(self, kind: str, data: JsonObject) -> JournalAppendOutcome:
+        if self.journal is not None and kind.startswith("runner."):
+            return self.journal.append_outcome(kind, data)
         self.entered.set()
         self.gate.wait()
         self.appended.append((kind, data))
+        if self.journal is not None:
+            return self.journal.append_outcome(kind, data)
         return self.outcome
 
 
@@ -194,7 +236,7 @@ class FakeResolver:
         harness = DeafHarness if self.deaf else FakeHarness
         adapter = harness(self.source, scope, self.ctx)
         self.adapters.append(adapter)
-        return HostedHarness(adapter, adapter.kill, RefusingLaunches())
+        return HostedHarness(adapter, adapter.kill)
 
 
 def execution(deny: tuple[str, ...] = (), **changes: JsonValue) -> JsonObject:
@@ -240,26 +282,31 @@ class World:
             branch=None,
         )
 
-    def workload(self, **changes: object) -> Workload:
+    def workload(
+        self, *, deadline: ExecutionDeadline | None = None, **changes: object
+    ) -> Workload:
         document = workload(
             execution_request=execution(),
-            limits={},
+            limits={"stall_after_us": "900000000"},
             session_spec=FAKE_SPEC,
         )
-        return Workload.model_validate_json(json.dumps({**document, **changes}))
+        parsed = Workload.model_validate_json(json.dumps({**document, **changes}))
+        return parsed.model_copy(update={"deadline": deadline})
 
     def host(
         self,
         resolver: FakeResolver,
         policy: Policy | None = None,
         journal: JournalWriter | None = None,
+        clock: Clock | None = None,
     ) -> AgentHost:
         services = HostServices(
+            launches=RefusingLaunches(),
             resolver=resolver,
             policy=AllowDenyPolicy() if policy is None else policy,
             ctx=context_for(self.capture),
             registry=self.capture.diagnostics.registry,
-            clock=self.clock,
+            clock=self.clock if clock is None else clock,
             log=self.capture.diagnostics.logger("runner.agent"),
         )
         writer = self.journal if journal is None else journal
@@ -322,6 +369,7 @@ def sink_for(
         SecretRegistry() if registry is None else registry,
         SystemClock(),
         max_events,
+        900_000_000_000,
     )
 
 
@@ -344,9 +392,10 @@ async def hosted(
     source: SignalledScript,
     journal: JournalWriter | None = None,
     policy: Policy | None = None,
+    deadline: ExecutionDeadline | None = None,
     **changes: object,
 ) -> tuple[AgentHost, Released]:
     host = world.host(world.resolver(source), policy=policy, journal=journal)
-    host.start(world.workload(**changes), world.workspace())
+    host.start(world.workload(deadline=deadline, **changes), world.workspace())
     await host.finished()
     return host, await host.stop()

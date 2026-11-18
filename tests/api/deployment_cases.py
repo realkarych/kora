@@ -28,6 +28,8 @@ from kora.protocols.authentication import NamespaceGrant, Principal
 from tests.cel_eval.pattern_validation_scenarios import assert_settled
 from tests.db.seed import FakeClock, Seeder
 from tests.plugins.authentication.support import AuthorityClock
+from tests.support.output_bindings import publication_binding
+from tests.support.parameter_bindings import parameter_binding
 
 HARNESS = "fake"
 NAMESPACE = "example"
@@ -189,6 +191,8 @@ async def prepared(
         SELECTION,
         policy,
         evaluator,
+        parameter_binding=parameter_binding(),
+        binding=publication_binding(),
     )
     assert isinstance(result, PreparedDeployment)
     return result
@@ -213,6 +217,11 @@ async def publish(
 @pytest_asyncio.fixture
 async def preparer() -> AsyncGenerator[DeploymentPreparer]:
     owner = EvaluationThread(load_binding())
-    async with DeploymentPreparer(AuthorityClock(), owner) as opened:
+    async with DeploymentPreparer(
+        AuthorityClock(),
+        owner,
+        parameter_binding=parameter_binding(),
+        binding=publication_binding(),
+    ) as opened:
         yield opened
     assert_settled(owner)

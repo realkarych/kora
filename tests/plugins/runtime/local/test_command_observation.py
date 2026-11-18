@@ -26,7 +26,14 @@ from kora.plugins.runtime.local.channel import (
     observation_envelope,
     read_observation,
 )
-from kora.plugins.runtime.local.command import COMPONENT
+from kora.plugins.runtime.local.command import COMMAND, COMMAND_STOP, COMPONENT
+from kora.plugins.runtime.local.command_stop import (
+    STOP_DETAIL_FIELDS,
+    STOP_STATUS_FIELDS,
+    CommandDomainStop,
+    DomainStopFactory,
+    StopOutcome,
+)
 from kora.plugins.runtime.local.control import observe_command
 from kora.plugins.runtime.local.reaper import adopted_pids
 from kora.plugins.runtime.local.runtime import LocalRuntime
@@ -58,6 +65,7 @@ from tests.plugins.runtime.local.test_command import (
 from tests.plugins.runtime.local.test_command_capture import (
     HeldIO,
     OffsetClock,
+    UnresolvedStop,
     log_bytes,
     observational_refusal,
 )
@@ -68,6 +76,7 @@ from tests.plugins.runtime.local.test_command_workspace import (
     settled,
     step_plan,
 )
+from tests.support.command_diagnostics import observation_diagnostics
 from tests.support.local_delivery import ReapedSession
 from tests.support.local_peers import (
     CONDITION_SECONDS,
@@ -95,6 +104,77 @@ ENDINGS = {
     "nonzero": ("import sys; sys.exit(3)", 3),
     "signal": ("import os, signal; os.kill(os.getpid(), signal.SIGTERM)", -15),
 }
+
+
+class ObservationProbe(ReapedSession):
+    def diagnostic_completion(self) -> Completion:
+        domain_stop = self._domain_stop
+        if domain_stop is None or not domain_stop.done():
+            return Completion.PENDING
+        if (
+            domain_stop.cancelled()
+            or domain_stop.exception() is not None
+            or domain_stop.result() is not StopOutcome.CONFIRMED
+        ):
+            return Completion.UNRESOLVED
+        with self._lock:
+            unattached = self._observing and self._capture_seal is None
+        if unattached or any(
+            task is not None and not task.done()
+            for task in (self._output_seal, self._capture_seal)
+        ):
+            return Completion.PENDING
+        return Completion.COMPLETE
+
+    def retry_state(self) -> tuple[asyncio.Task[StopOutcome] | None, bool, bool]:
+        with self._lock:
+            return self._domain_stop, self._retried, self._unobserved
+
+
+def test_observation_diagnostic_tail_preserves_late_stop_and_observation(
+    kora_capture: Capture,
+) -> None:
+    logger = kora_capture.diagnostics.logger(COMPONENT)
+    for index in range(20):
+        logger.emit(COMMAND, outcome="refused", waited_ms=index)
+    logger.emit(COMMAND_STOP, outcome="confirmed", waited_ms=21)
+    logger.emit(COMMAND, outcome="observed", waited_ms=22)
+
+    evidence = observation_diagnostics(kora_capture, Completion.COMPLETE, 1024)
+
+    assert evidence["omitted_records"] == 6
+    assert evidence["post_teardown_events"] == [
+        *(
+            {"event": "runtime.local.command", "outcome": "refused", "waited_ms": index}
+            for index in range(6, 20)
+        ),
+        {
+            "event": "runtime.local.command_stop",
+            "outcome": "confirmed",
+            "waited_ms": 21,
+        },
+        {"event": "runtime.local.command", "outcome": "observed", "waited_ms": 22},
+    ]
+
+
+def test_observation_stop_projection_retains_only_fixed_boolean_evidence(
+    kora_capture: Capture,
+) -> None:
+    logger = kora_capture.diagnostics.logger(COMPONENT)
+    fields = {name: True for name in (*STOP_DETAIL_FIELDS, *STOP_STATUS_FIELDS)}
+    logger.emit(COMMAND_STOP, outcome="private-outcome", waited_ms=1, **fields)
+
+    evidence = observation_diagnostics(kora_capture, Completion.UNRESOLVED, 421)
+
+    assert evidence["post_teardown_events"] == [
+        {
+            "event": "runtime.local.command_stop",
+            "outcome": "invalid",
+            "waited_ms": 1,
+            **fields,
+        }
+    ]
+    assert "private-outcome" not in json.dumps(evidence)
 
 
 def checked_out(
@@ -193,6 +273,21 @@ def observed_records(attempt: Path) -> list[JsonObject]:
     return found
 
 
+def stop_outcomes(capture: Capture) -> list[object]:
+    return [
+        record.get("outcome")
+        for record in capture.reader.records()
+        if record.get("event") == "runtime.local.command_stop"
+    ]
+
+
+def recorded_events(capture: Capture) -> list[tuple[object, object]]:
+    return [
+        (record.get("event"), record.get("outcome"))
+        for record in capture.reader.records()
+    ]
+
+
 def workspace_prepared(capture: Capture) -> bool:
     return any(
         record.get("event") == "runtime.local.workspace"
@@ -225,6 +320,15 @@ def stray_children() -> tuple[str, ...]:
     return tuple(described_child(pid) for pid in sorted(listed))
 
 
+async def confirmed_stop(capture: Capture) -> None:
+    await until(lambda: bool(stop_outcomes(capture)))
+    outcomes = stop_outcomes(capture)
+    assert outcomes == ["confirmed"], (
+        f"the command stop was {outcomes}: {recorded_events(capture)}, "
+        f"children: {stray_children()}"
+    )
+
+
 async def without_stray_children() -> None:
     deadline = time.monotonic() + CONDITION_SECONDS
     while found := stray_children():
@@ -240,19 +344,21 @@ async def observed_session(
     clock: Clock | None = None,
     io: HeldIO | None = None,
     seed: bytes = b"",
-) -> AsyncGenerator[tuple[ReapedSession, Path]]:
+    stopper: DomainStopFactory = CommandDomainStop,
+) -> AsyncGenerator[tuple[ObservationProbe, Path]]:
     attempt = private_directory(tmp_path.resolve(), "attempt")
     if seed:
         (attempt / "journal.jsonl").write_bytes(seed)
         (attempt / "journal.jsonl").chmod(0o600)
     directory = open_local_directory(attempt)
-    session = ReapedSession(
+    session = ObservationProbe(
         directory,
         str(attempt / "candidate"),
         SecretScope(capture.diagnostics),
         clock or SystemClock(),
         capture.diagnostics.logger(COMPONENT),
         capture_io=io,
+        stopper=stopper,
     )
     try:
         await without_stray_children()
@@ -501,6 +607,35 @@ async def test_command_observation_refuses_other_kinds(
 
 
 @pytest.mark.asyncio
+async def test_observation_diagnostics_do_not_retry_unresolved_stop(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
+        workload = checked_out(runtime, "pass")
+        async with observed_session(tmp_path, kora_capture, stopper=UnresolvedStop) as (
+            session,
+            attempt,
+        ):
+            await accepted(session, workload)
+            await supervised(session, workload)
+            session.attach_drains()
+            answer = await settled_answer(session)
+            before = session.retry_state()
+
+            completion = session.diagnostic_completion()
+            after = session.retry_state()
+            journal_bytes = (attempt / "journal.jsonl").stat().st_size
+    evidence = observation_diagnostics(kora_capture, completion, journal_bytes)
+
+    assert answer == "command_unobserved"
+    assert completion is Completion.UNRESOLVED
+    assert before[0] is not None
+    assert not before[1]
+    assert after == before
+    assert evidence["pre_teardown_completion"] == "unresolved"
+
+
+@pytest.mark.asyncio
 async def test_command_observation_duration_uses_execution_acknowledgement(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
@@ -523,9 +658,14 @@ async def test_command_observation_duration_uses_execution_acknowledgement(
 
             observed = await settled_answer(session)
             elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
+            completion = session.diagnostic_completion()
+            journal_bytes = (attempt / "journal.jsonl").stat().st_size
+    diagnostics = json.dumps(
+        observation_diagnostics(kora_capture, completion, journal_bytes), sort_keys=True
+    )
 
-    assert isinstance(observed, CommandObservation)
-    assert 7000 <= observed.duration_ms <= 7000 + elapsed_ms
+    assert isinstance(observed, CommandObservation), diagnostics
+    assert 7000 <= observed.duration_ms <= 7000 + elapsed_ms, diagnostics
 
 
 @pytest.mark.asyncio
@@ -545,16 +685,25 @@ async def test_command_observation_record_fits_the_reader_bound(
             session.attach_drains()
 
             answer = await settled_answer(session)
+            if room != 4096:
+                await until(
+                    lambda: session.diagnostic_completion() is not Completion.PENDING
+                )
+            completion = session.diagnostic_completion()
             size = (attempt / "journal.jsonl").stat().st_size
             records = observed_records(attempt)
+    diagnostics = json.dumps(
+        observation_diagnostics(kora_capture, completion, size), sort_keys=True
+    )
 
     if room == 4096:
-        assert isinstance(answer, CommandObservation)
-        assert len(records) == 1
-        assert RECORD_LIMIT - room < size <= RECORD_LIMIT
+        assert isinstance(answer, CommandObservation), diagnostics
+        assert len(records) == 1, diagnostics
+        assert RECORD_LIMIT - room < size <= RECORD_LIMIT, diagnostics
     else:
-        assert answer == "command_unobserved"
-        assert records == []
+        assert completion is Completion.COMPLETE, diagnostics
+        assert answer == "command_unobserved", diagnostics
+        assert records == [], diagnostics
 
 
 @pytest.mark.asyncio
@@ -639,15 +788,19 @@ async def test_command_observation_survives_late_drain_attachment(
         workload = checked_out(runtime, "import os; os.write(1, b'out')")
         async with observed_session(tmp_path, kora_capture) as (session, attempt):
             await accepted(session, workload)
+            await until(lambda: workspace_prepared(kora_capture))
             await supervised(session, workload)
-            await until(lambda: session.completion() is not Completion.PENDING)
+            await confirmed_stop(kora_capture)
             stopped = session.completion()
 
             session.attach_drains()
             answer = await settled_answer(session)
+            await until(lambda: session.completion() is Completion.COMPLETE)
+            reference = session.result_reference()
             records = observed_records(attempt)
 
-    assert stopped is Completion.COMPLETE
+    assert stopped is Completion.PENDING
     assert isinstance(answer, CommandObservation)
     assert answer.stdout.size == 3
     assert len(records) == 1
+    assert reference is not None

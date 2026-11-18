@@ -13,6 +13,7 @@ def main(arguments: list[str]) -> None:
     from kora.observability import LoggingSettings
     from kora.protocols.vcs import WorkspaceTarget
     from tests.plugins.harness.fake.fake_support import (
+        FAKE_INPUTS,
         AllowingPolicy,
         ScriptedSink,
         harness,
@@ -30,7 +31,7 @@ def main(arguments: list[str]) -> None:
         adapter = harness(scripted([turn("m1"), result()]), context_for(capture), root)
         sink = ScriptedSink()
         spec = adapter.build_session_spec(
-            {}, WorkspaceTarget(root=root, host_path=None), None
+            {}, WorkspaceTarget(root=root, host_path=None), None, inputs=FAKE_INPUTS
         )
         outcome = asyncio.run(adapter.run(spec, AllowingPolicy(), sink, NoLaunches()))
     sys.stdout.write(

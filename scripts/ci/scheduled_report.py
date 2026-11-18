@@ -77,8 +77,17 @@ DAILY = Schedule(
 )
 MASTER_PUSH = Schedule(
     "Master push lane failed",
-    "A job of the `CI` workflow did not pass for a push to master. Part of what "
-    "it checks runs only for pushes to master and not in pull requests.",
+    "A job of the `CI` workflow did not pass for a push to master.",
+    (
+        Lane("scaffold-evidence", "SCAFFOLD_EVIDENCE", "Scaffold evidence", True),
+        Lane("mutation-tooling", "MUTATION_TOOLING", "Mutation tooling", False),
+    ),
+)
+MASTER_DAILY = Schedule(
+    "Daily master CI lane failed",
+    "A job of the daily `CI` run on master did not pass. The macOS general test "
+    "lanes and the macOS row of `Mutation tooling` run only in this run and not "
+    "for pull requests or pushes.",
     (
         Lane(
             "scaffold-tests-macos-general",
@@ -90,7 +99,11 @@ MASTER_PUSH = Schedule(
         Lane("mutation-tooling", "MUTATION_TOOLING", "Mutation tooling", False),
     ),
 )
-SCHEDULES = {"master-push": MASTER_PUSH}
+SCHEDULES = {
+    "push": MASTER_PUSH,
+    "schedule": MASTER_DAILY,
+    "workflow_dispatch": MASTER_DAILY,
+}
 
 
 @dataclass(frozen=True)
@@ -336,19 +349,19 @@ class GitHubTracker:
         self.request("POST", f"issues/{number}/comments", {"body": body})
 
 
-def selected_schedule(arguments: list[str]) -> Schedule:
+def selected_schedule(arguments: list[str], environment: Mapping[str, str]) -> Schedule:
     match arguments:
         case []:
             return DAILY
-        case [name] if name in SCHEDULES:
-            return SCHEDULES[name]
+        case ["master"] if environment.get("GITHUB_EVENT_NAME") in SCHEDULES:
+            return SCHEDULES[environment["GITHUB_EVENT_NAME"]]
         case _:
             raise ReportFailure("the report schedule is unknown")
 
 
 def main(arguments: list[str]) -> int:
-    schedule = selected_schedule(arguments)
     environment = dict(os.environ)
+    schedule = selected_schedule(arguments, environment)
     run = current_run(environment)
     token = environment.get("GITHUB_TOKEN", "")
     if not token:

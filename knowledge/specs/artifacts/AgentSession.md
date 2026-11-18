@@ -4,6 +4,8 @@ Status: published under issue #433 on 2026-10-29. The project owner [approved th
 
 ## Representation and authority
 
+The [execution-content proposal](../execution-content.md#53-agentsession) under #1557 maps the logical validation value to a separate output transfer, with atomic transcript adoption, permanent metadata and an expiring denial owner. Its [typed relations](../execution-content.md#23-accepted-owners) distinguish unavailable capture from an empty captured transcript. This proposed mapping requires owner review and the named producer/transport/custody implementations before activation; it changes no published revision-1 bytes or existing limits.
+
 The primary payload is the opaque harness transcript. The artifact version's `storage_ref`, `size` and full `payload_digest`, when recorded, identify its actual retained transcript bytes. No transcript table, caller-selected storage address, executable schema or new endpoint is introduced.
 
 The schema `urn:kora:artifact:AgentSession` describes a closed logical validation value with `metadata`, `denials` and `transcript` members. It is a materialized view used to define validation, canonicalization and complete result identity. It does not declare a multipart layout, make this JSON the primary stored payload, or authorize a filesystem/network read. The implementing model and API plans must supply the concrete owned representation and transfer mapping before activation. In particular, the existing 16 KiB multipart `meta` cap cannot carry this potentially larger logical value and is not raised here.

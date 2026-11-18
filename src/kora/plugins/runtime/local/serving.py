@@ -2,6 +2,7 @@ import asyncio
 import errno
 import hashlib
 import os
+import secrets
 import socket
 import stat
 import sys
@@ -11,8 +12,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Final, TypeVar
+from typing import Final, Generic, TypeVar
 
+from pydantic import ValidationError
+
+from kora.ir.vcs_ref_json import JsonRefusal, decode_strict_json
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.accepted_socket import accept_socket
 from kora.plugins.runtime.local.capture import OpenedLog, read_log_frame
@@ -25,6 +29,7 @@ from kora.plugins.runtime.local.channel import (
     SECTION_FRAME_BYTES,
     AttachRequest,
     FrameType,
+    LaunchSpecRequest,
     LogRequest,
     OutputRequest,
     StatusValue,
@@ -38,24 +43,29 @@ from kora.plugins.runtime.local.channel import (
     output_envelope,
     output_trailer,
     parse_header,
+    quiescence_envelope,
     read_log_request,
     read_output,
     read_request,
     read_transfer,
     read_transfer_bytes,
     receive_section,
+    session_result_envelope,
     status_envelope,
     transfer_cutoff,
     workload_digest,
     write_transfer_bytes,
 )
+from kora.plugins.runtime.local.launch import LocalLaunches
 from kora.plugins.runtime.local.spawn import open_socket_directory
 from kora.plugins.runtime.local.workload_session import (
+    Completion,
     Incoming,
     OpenedOutput,
     WorkloadSession,
 )
 from kora.protocols.errors import KoraProtocolError
+from kora.protocols.evidence import EvidenceScope, NormalCompletionQuiescence
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.runtime import (
     CommandObservation,
@@ -79,14 +89,19 @@ from kora.runner.native_io import (
     NativeIOUnresolved,
     observed,
 )
-from kora.runner.peers import PeerRefused, PeerSource, unchanged
+from kora.runner.peers import PeerRefused, PeerSource, same_process, unchanged
 from kora.runner.registry import (
     AttemptKey,
+    Completed,
+    CompletedResult,
+    ControlFileRef,
+    JournalRecordRef,
     LockOutcome,
     Registry,
     Running,
     Submitter,
     TransitionExecutor,
+    completed_cell,
     refusal,
     takeover_cell,
 )
@@ -100,7 +115,22 @@ REVERIFY_NS: Final[int] = 60_000_000_000
 LISTEN_BACKLOG: Final[int] = 16
 EXECUTOR_WORKERS: Final[int] = 2
 EXECUTOR_JOBS: Final[int] = 18
+LINGER_NS: Final[int] = 60_000_000_000
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
+QUIESCENCE: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.quiescence",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner handled normal completion",
+        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+    )
+)
+COMPLETION_SCOPE: Final[EvidenceScope] = (
+    EvidenceScope.SUBREAPER_LEADER_GROUP_ENV_SWEEP
+    if sys.platform == "linux"
+    else EvidenceScope.LEADER_GROUP_ENV_SWEEP
+)
 AUTH_REFUSED: Final[EventSpec] = CATALOG.register(
     EventSpec(
         "runtime.local.runner.auth_refused",
@@ -167,6 +197,16 @@ def socket_entry(directory: DirectoryAnchor, name: str) -> os.stat_result | None
         return None
 
 
+def unlink_bound(bound: BoundSocket, name: str) -> None:
+    entry = socket_entry(bound.directory, name)
+    if entry is None or (entry.st_dev, entry.st_ino) != bound.entry:
+        return
+    try:
+        os.unlink(name, dir_fd=bound.directory.descriptor)
+    except FileNotFoundError:
+        return
+
+
 def bound_socket(
     listener: socket.socket, directory: DirectoryAnchor, name: str
 ) -> BoundSocket:
@@ -212,6 +252,38 @@ def rebound(path: Path, name: str) -> BoundSocket:
     except BaseException:
         directory.close()
         raise
+
+
+@dataclass(frozen=True)
+class Answer(Generic[Result]):
+    missing: str
+    read: Callable[[WorkloadSession, Submitter], Result]
+    envelope: Callable[[str, Result], bytes]
+
+
+def command_read(session: WorkloadSession, submitter: Submitter) -> CommandObservation:
+    return session.command_observation(submitter)
+
+
+def session_read(session: WorkloadSession, submitter: Submitter) -> ControlFileRef:
+    return session.session_observation(submitter)
+
+
+command_answer: Final[Answer[CommandObservation]] = Answer(
+    "command_unobserved", command_read, observation_envelope
+)
+session_answer: Final[Answer[ControlFileRef]] = Answer(
+    "session_unobserved", session_read, session_result_envelope
+)
+
+
+async def stopped(sessions: tuple[WorkloadSession, ...]) -> None:
+    if not sessions:
+        return
+    try:
+        await sessions[0].stop()
+    finally:
+        await stopped(sessions[1:])
 
 
 def decoded_workload(section: bytearray) -> Workload:
@@ -261,6 +333,8 @@ class ControlServer:
         binder: Callable[[Path, str], BoundSocket] = rebound,
         decoder: Callable[[bytearray], Workload] = decoded_workload,
         session: WorkloadSession | None = None,
+        agent: WorkloadSession | None = None,
+        launches: Callable[[], LocalLaunches | None] | None = None,
     ) -> None:
         bound.listener.setblocking(False)
         self._bound = bound
@@ -272,6 +346,9 @@ class ControlServer:
         self._binder = binder
         self._decoder = decoder
         self._session = session
+        self._launches = launches
+        self._agent = agent
+        self._sessions = tuple(item for item in (session, agent) if item is not None)
         self._deadline_closed = False
         self._registry = registry
         self._key = key
@@ -290,6 +367,10 @@ class ControlServer:
         self._accepting: asyncio.Task[None] | None = None
         self._ticking: asyncio.Task[None] | None = None
         self._closing: asyncio.Task[None] | None = None
+        self._completed = asyncio.Event()
+        self._completing = asyncio.Lock()
+        self._record: NormalCompletionQuiescence | None = None
+        self._completed_at = 0
 
     @property
     def connections(self) -> int:
@@ -357,6 +438,28 @@ class ControlServer:
             channel = BoundedChannel(endpoint, self._clock)
             reservations = {FrameType.JSON.value: PRE_ATTACH_BYTES}
             _, payload = await channel.read_typed_frame(deadline, reservations)
+            decoded = decode_strict_json(payload, PRE_ATTACH_BYTES, 1)
+            if isinstance(decoded, JsonRefusal):
+                self._refused(Refusal.MALFORMED)
+                return
+            try:
+                launch_request = LaunchSpecRequest.model_validate(decoded)
+            except ValidationError:
+                launch_request = None
+            if launch_request is not None:
+                launches = None if self._launches is None else self._launches()
+                if launches is None:
+                    self._refused("capability_refused")
+                    return
+                await cancel_task(expiration)
+                if observer:
+                    self._observers -= 1
+                    observer = False
+                try:
+                    await launches.serve(launch_request, peer, channel)
+                except KoraProtocolError:
+                    self._refused("capability_refused")
+                return
             request = read_request(payload)
             if request is None:
                 self._refused(Refusal.MALFORMED)
@@ -473,9 +576,30 @@ class ControlServer:
                     answer = await self._start(
                         submitter, request.request_id, observational
                     )
+                elif request.op == "quiescence":
+                    await self._answer(
+                        channel,
+                        await self._quiesce(
+                            submitter, observational, request.request_id
+                        ),
+                    )
+                    return
                 elif request.op == "observe":
-                    await self._send_observation(
-                        channel, submitter, observational, request.request_id
+                    await self._send_answer(
+                        channel,
+                        submitter,
+                        observational,
+                        request.request_id,
+                        command_answer,
+                    )
+                    return
+                elif request.op == "session_observation":
+                    await self._send_answer(
+                        channel,
+                        submitter,
+                        observational,
+                        request.request_id,
+                        session_answer,
                     )
                     return
                 else:
@@ -549,6 +673,8 @@ class ControlServer:
                         ):
                             raise delivery_error("workload_conflict")
                         if self._workload is None:
+                            if decoded.kind == "agent" and self._agent is not None:
+                                self._session = self._agent
                             command = self._session
                             if (
                                 sys.platform == "darwin"
@@ -787,27 +913,28 @@ class ControlServer:
             if command is not None and outcome is not None:
                 command.note_output(outcome, started_ns)
 
-    async def _send_observation(
+    async def _send_answer(
         self,
         channel: BoundedChannel,
         submitter: Submitter,
         observational: bool,
         request_id: str,
+        answer: Answer[Result],
     ) -> None:
         session = self._session
 
-        def observe() -> CommandObservation:
+        def observe() -> Result:
             if self._closing is not None:
                 raise delivery_error("transfer_refused")
             if session is None:
-                raise delivery_error("command_unobserved")
+                raise delivery_error(answer.missing)
             self._current_submitter(submitter)
-            return session.command_observation(submitter)
+            return answer.read(session, submitter)
 
         try:
             if observational:
                 raise delivery_error("execution_unauthorized")
-            observation = await self._transfer_native(observe)
+            value = await self._transfer_native(observe)
         except KoraProtocolError as error:
             if error.code == "registry_busy":
                 error = delivery_error("workload_busy")
@@ -815,12 +942,129 @@ class ControlServer:
         except (NativeIOSubmissionUncertain, NativeIOUnresolved):
             channel.close()
         else:
-            await self._answer(channel, observation_envelope(request_id, observation))
+            await self._answer(channel, answer.envelope(request_id, value))
 
     def _current_submitter(self, submitter: Submitter) -> None:
         if self._running().submitter != submitter:
             raise delivery_error("submitter_superseded")
-        unchanged(self._identities, submitter.process)
+        same_process(self._identities, submitter.process)
+
+    async def _quiesce(
+        self, submitter: Submitter, observational: bool, request_id: str
+    ) -> bytes:
+        started = self._clock.monotonic_ns()
+        session = self._session
+        try:
+            if observational:
+                raise delivery_error("execution_unauthorized")
+            try:
+                await self._executor.run(lambda: self._current_submitter(submitter))
+            except PeerRefused:
+                raise delivery_error("submitter_superseded") from None
+            if session is None or self._closing is not None:
+                raise delivery_error("workload_busy")
+            async with self._completing:
+                record = self._record
+                if record is None:
+                    if session.completion() is not Completion.COMPLETE:
+                        raise delivery_error("workload_busy")
+                    record = await self._complete(session, submitter)
+                    self._record = record
+        except KoraProtocolError as error:
+            if error.code == "registry_busy":
+                error = delivery_error("workload_busy")
+            if error.code != "workload_busy":
+                self._emit_quiescence("refused", started)
+            return self._transfer_answer(request_id, error)
+        if not self._completed.is_set():
+            self._completed_at = self._clock.monotonic_ns()
+            self._completed.set()
+        self._emit_quiescence("completed", started)
+        return quiescence_envelope(request_id, record)
+
+    async def _complete(
+        self, session: WorkloadSession, submitter: Submitter
+    ) -> NormalCompletionQuiescence:
+        exit_code = session.status()[2]
+        reference = session.result_reference()
+        result = (
+            None
+            if reference is None
+            else CompletedResult(kind="agent", ref=reference)
+            if isinstance(reference, ControlFileRef)
+            else CompletedResult(
+                kind="command",
+                ref=JournalRecordRef(
+                    offset=reference.offset,
+                    length=reference.length,
+                    digest=reference.digest,
+                ),
+            )
+        )
+        record = NormalCompletionQuiescence(
+            kind="normal_completion",
+            attempt_id=self._key.attempt_id,
+            execution_domain_id=self._key.execution_domain_id,
+            record_ref=f"registry:{self._key.name}",
+            observed_at=self._clock.now(),
+            scope=COMPLETION_SCOPE,
+        )
+        data = record.model_dump(mode="json")
+        if not await self._executor.run(lambda: session.record_completion(data)):
+            raise delivery_error("journal_unavailable")
+        retirement = secrets.token_hex(16)
+        applied = await self._executor.run(
+            lambda: self._registry.try_transition(
+                self._key,
+                lambda entry: completed_cell(
+                    entry,
+                    self._identity,
+                    submitter,
+                    record,
+                    result,
+                    exit_code,
+                    retirement,
+                ),
+            )
+        )
+        if isinstance(applied, LockOutcome):
+            raise delivery_error("workload_busy")
+        if applied.transition.refusal is not None or applied.head is None:
+            raise delivery_error("submitter_superseded")
+        entry = applied.head.entry
+        if not isinstance(entry, Completed):
+            raise delivery_error("submitter_superseded")
+        return entry.quiescence
+
+    def _emit_quiescence(self, outcome: str, started: int) -> None:
+        waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
+        level = Level.INFO if outcome == "completed" else Level.WARNING
+        self._log.emit_at(level, QUIESCENCE, outcome=outcome, waited_ms=waited)
+
+    async def completed(self) -> None:
+        await self._completed.wait()
+        if self._accepting is not None:
+            await cancel_task(self._accepting)
+        self._bound.listener.close()
+        try:
+            await self._linger()
+        finally:
+            unlink_bound(self._bound, self._name)
+
+    async def _linger(self) -> None:
+        deadline = self._completed_at + LINGER_NS
+        while True:
+            current = asyncio.current_task()
+            others = {task for task in self._connections if task is not current}
+            if not others or self._clock.monotonic_ns() >= deadline:
+                return
+            sleeper = asyncio.ensure_future(self._clock.sleep_until(deadline))
+            try:
+                await asyncio.wait(
+                    {*others, sleeper}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                await cancel_task(sleeper)
 
     async def _send_log(
         self,
@@ -1066,6 +1310,8 @@ class ControlServer:
             await self._reverify()
 
     async def _reverify(self) -> None:
+        if self._completed.is_set():
+            return
         bound = self._bound
         name = self._name
         path = self._path
@@ -1078,8 +1324,11 @@ class ControlServer:
         except (OSError, FilesystemError):
             self._log.emit(SOCKET_RECHECKED, outcome=Rebind.REFUSED.value)
             return
-        if self._closing is not None:
-            fresh.close()
+        if self._closing is not None or self._completed.is_set():
+            try:
+                unlink_bound(fresh, name)
+            finally:
+                fresh.close()
             return
         await self._swap(fresh)
         self._log.emit(SOCKET_RECHECKED, outcome=Rebind.REBOUND.value)
@@ -1112,23 +1361,28 @@ class ControlServer:
 
     async def _release(self) -> None:
         self._bound.listener.close()
-        if self._session is not None:
-            self._session.fence()
-            self._session.close_journal()
+        for session in self._sessions:
+            session.fence()
+            session.close_journal()
+        launches = None if self._launches is None else self._launches()
         tasks = [*self._connections]
         if self._accepting is not None:
             tasks.append(self._accepting)
         if self._ticking is not None:
             tasks.append(self._ticking)
         try:
-            for task in tasks:
-                task.cancel()
-            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-            for outcome in outcomes:
-                if isinstance(outcome, BaseException) and not isinstance(
-                    outcome, asyncio.CancelledError
-                ):
-                    raise outcome
+            try:
+                if launches is not None:
+                    await launches.close()
+            finally:
+                for task in tasks:
+                    task.cancel()
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+                for outcome in outcomes:
+                    if isinstance(outcome, BaseException) and not isinstance(
+                        outcome, asyncio.CancelledError
+                    ):
+                        raise outcome
         finally:
             settled = False
             workers_joined = False
@@ -1142,10 +1396,8 @@ class ControlServer:
                 workers_joined = True
             finally:
                 try:
-                    if self._session is not None and (
-                        workers_joined or self._transfer_native_settled
-                    ):
-                        await self._session.stop()
+                    if workers_joined or self._transfer_native_settled:
+                        await stopped(self._sessions)
                 finally:
                     if (
                         settled or self._transfer_native_settled

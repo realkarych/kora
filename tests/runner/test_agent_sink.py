@@ -8,15 +8,23 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.ir.json import CanonicalBudget, JsonObject, spend_string
 from kora.ir.vcs_ref_json import canonical_bytes
-from kora.observability.redaction import MASK
+from kora.observability.redaction import MASK, SecretRegistry
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import MAX_TEXT_BYTES
 from kora.protocols.time import SystemClock
+from kora.runner.calls import TRACKING_CEILING
 from kora.runner.journal import JournalAppendOutcome, RunningJournal
-from kora.runner.sink import MAX_ERROR_EVENTS, MAX_RECORD_BYTES, QUEUE_RECORDS
+from kora.runner.liveness import watch_liveness
+from kora.runner.sink import (
+    MAX_ERROR_EVENTS,
+    MAX_RECORD_BYTES,
+    QUEUE_RECORDS,
+    RunnerSink,
+)
 from tests.runner.agent_support import (
     FailingWriter,
     HeldWriter,
+    SteppedClock,
     drained,
     private_directory,
     run,
@@ -421,3 +429,137 @@ def test_event_content_is_bounded_and_classified_dense_secret(
     assert "tail-content-xyz" not in str(record["data"]["text"])
     assert dense not in str(record["data"]["text"])
     assert complete == (True, True)
+
+
+@pytest.mark.asyncio
+async def test_liveness_advances_before_error_cap_and_ignores_invalid_events() -> None:
+    writer = HeldWriter()
+    writer.gate.set()
+    clock = SteppedClock()
+    sink = RunnerSink(writer, SecretRegistry(), clock, None, 60_000_000_000)
+
+    try:
+        for _ in range(MAX_ERROR_EVENTS):
+            sink.emit("error", {"code": "harness_failed", "truncated": False})
+        await clock.advance_to(10)
+        sink.emit("error", {"code": "harness_failed", "truncated": False})
+        capped = sink.liveness()
+        await clock.advance_to(20)
+        with pytest.raises(KoraProtocolError):
+            sink.emit("turn", {"message_id": 1})
+        invalid = sink.liveness()
+        sink.observe_dropped("sdk_message")
+        dropped = sink.liveness()
+    finally:
+        await drained(sink)
+
+    assert capped.last_event_ns == 10
+    assert invalid == capped
+    assert dropped.last_event_ns == 20
+    assert not dropped.calls_open
+
+
+@pytest.mark.parametrize("closed_by", ["tool_result", "permission_denied"])
+@pytest.mark.asyncio
+async def test_last_open_call_closure_wakes_liveness(closed_by: str) -> None:
+    writer = HeldWriter()
+    writer.gate.set()
+    clock = SteppedClock()
+    sink = RunnerSink(writer, SecretRegistry(), clock, None, 60_000_000_000)
+    call: JsonObject = {"tool": "Bash", "tool_use_id": "c1", "output_channel": False}
+    sink.emit("tool_call", call)
+    sink.emit("tool_call", {**call, "tool_use_id": "c2"})
+    timer = asyncio.create_task(
+        watch_liveness(sink, clock, 60_000_000_000, None, lambda: False)
+    )
+
+    try:
+        await clock.advance_to(70_000_000_000)
+        sink.emit(
+            "tool_result", {"tool_use_id": "c1", "is_error": False, "truncated": False}
+        )
+        one_open = sink.liveness().calls_open
+        closing: JsonObject = (
+            {"tool_use_id": "c2", "is_error": False, "truncated": False}
+            if closed_by == "tool_result"
+            else {
+                "tool": "Bash",
+                "tool_use_id": "c2",
+                "source": "harness",
+                "code": "harness_rule",
+            }
+        )
+        sink.emit(closed_by, closing)
+        await clock.requested(130_000_000_000)
+        await clock.advance_to(130_000_000_000)
+        cause = await sink.termination()
+        await timer
+    finally:
+        timer.cancel()
+        await asyncio.gather(timer, return_exceptions=True)
+        await drained(sink)
+
+    assert one_open
+    assert not sink.liveness().calls_open
+    assert cause == "stall"
+
+
+@pytest.mark.asyncio
+async def test_writer_progress_closes_full_episode() -> None:
+    writer = HeldWriter()
+    clock = SteppedClock()
+    sink = RunnerSink(writer, SecretRegistry(), clock, None, 90_000_000_000)
+
+    try:
+        sink.emit("turn", turn())
+        assert await asyncio.to_thread(writer.entered.wait, 10)
+        for _ in range(QUEUE_RECORDS + 1):
+            sink.emit("turn", turn())
+        full = sink.liveness()
+        await sink.changed()
+        timer = asyncio.create_task(
+            watch_liveness(sink, clock, 90_000_000_000, None, lambda: False)
+        )
+        await clock.requested(30_000_000_000)
+        await clock.advance_to(29_000_000_000)
+        writer.gate.set()
+        await sink.settle(89_000_000_000)
+        recovered = sink.liveness()
+        await clock.advance_to(30_000_000_000)
+        await clock.requested(90_000_000_000)
+        cause = sink.cause()
+        sink.terminate("cancel")
+        await timer
+    finally:
+        writer.gate.set()
+        await drained(sink)
+
+    assert full.full_since_ns == 0
+    assert recovered.full_since_ns is None
+    assert cause is None
+
+
+@pytest.mark.asyncio
+async def test_open_call_tracking_stays_bounded_during_termination() -> None:
+    writer = HeldWriter()
+    sink = RunnerSink(writer, SecretRegistry(), SystemClock(), None, 900_000_000_000)
+
+    try:
+        for index in range(TRACKING_CEILING + 1):
+            sink.emit(
+                "tool_call",
+                {"tool": "Bash", "tool_use_id": f"c{index}", "output_channel": False},
+            )
+        cause = sink.cause()
+        for index in range(TRACKING_CEILING):
+            sink.emit(
+                "tool_result",
+                {"tool_use_id": f"c{index}", "is_error": False, "truncated": False},
+            )
+        calls_open = sink.liveness().calls_open
+    finally:
+        writer.gate.set()
+        await drained(sink)
+
+    assert cause == "max_events"
+    assert not calls_open

@@ -74,6 +74,7 @@ def raise_safe(error: BaseException) -> NoReturn:
     finally:
         error.__cause__ = None
         error.__context__ = None
+        del error
 
 
 def refuse(reason: UnavailableReason) -> NoReturn:

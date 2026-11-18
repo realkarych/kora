@@ -11,6 +11,7 @@ from tests.observability.conftest import (
     configured_with_reader,
     finished_output,
 )
+from tests.support.output_bindings import publication_binding
 
 
 @pytest.mark.parametrize("mode", ["saved", "refused"])
@@ -31,10 +32,14 @@ def test_inventory_diagnostics_exclude_retained_content(
 
     if mode == "refused":
         with pytest.raises(GraphValueRejected) as failure:
-            build_graph_output_inventory(*arguments, max_encoded_bytes=LIMIT)
+            build_graph_output_inventory(
+                *arguments, max_encoded_bytes=LIMIT, binding=publication_binding()
+            )
         assert str(failure.value) == "unsupported graph value encoding"
     else:
-        result = build_graph_output_inventory(*arguments, max_encoded_bytes=LIMIT)
+        result = build_graph_output_inventory(
+            *arguments, max_encoded_bytes=LIMIT, binding=publication_binding()
+        )
         assert isinstance(result, str)
     output = finished_output(diagnostics, pipe)
 

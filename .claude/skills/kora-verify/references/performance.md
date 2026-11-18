@@ -10,7 +10,7 @@ Exact resource ownership, product quotas and deterministic algorithmic/work/spac
 
 A blocking numerical performance assertion states its requirement, input sizes/concurrency, environment, warm-up/cache model, observer effects, metric, minimum material regression and decision rule before execution. Use representative measured baselines or an explicit implementation/product bound. A percentage above one adverse observation is an engineering allowance, not a false-positive model or proof of leak freedom. Do not introduce such a gate merely because a counter can be collected.
 
-Existing approved gates remain blocking until the owner explicitly approves their named replacement or removal. Preserve failures as failures. New or unsupported numerical assertions remain diagnostics with stated limits; they cannot be called passing performance guarantees. NFR-3 scheduling/scale requirements and previously approved component-specific gates are not removed by this classification.
+Existing approved gates remain blocking until an owner explicitly approves their named replacement or removal. Preserve failures as failures. New or unsupported numerical assertions remain diagnostics with stated limits; they cannot be called passing performance guarantees. NFR-3 scheduling/scale requirements and previously approved component-specific gates are not removed by this classification.
 
 ## Resource lifetime evidence
 

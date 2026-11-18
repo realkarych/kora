@@ -16,7 +16,14 @@ from pydantic import MISSING, ValidationError
 
 from kora.ir.config import CommandConfig
 from kora.ir.json import JsonObject, JsonShapeError, JsonValue
-from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
+from kora.observability import (
+    CATALOG,
+    ComponentLogger,
+    EventSpec,
+    FieldKind,
+    Level,
+    SecretAdmissionError,
+)
 from kora.plugins.runtime.local.capture import (
     CaptureIO,
     CommandCapture,
@@ -29,6 +36,8 @@ from kora.plugins.runtime.local.capture import (
 from kora.plugins.runtime.local.channel import LogName, delivery_error
 from kora.plugins.runtime.local.child_owner import ChildOwner
 from kora.plugins.runtime.local.command_stop import (
+    STOP_DETAIL_FIELDS,
+    STOP_STATUS_FIELDS,
     CommandDomainStop,
     DomainStopFactory,
     StopOutcome,
@@ -84,11 +93,12 @@ from kora.runner.journal import (
     SYNC_DEADLINE_NS,
     JournalAppendOutcome,
     JournalCapacityError,
+    JournalLocation,
     RunningJournal,
     space_error,
 )
 from kora.runner.native_io import NativeExecutor, NativeIOUnresolved, observed
-from kora.runner.registry import Submitter, synchronize
+from kora.runner.registry import ControlFileRef, Submitter, synchronize
 
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
 COMMAND: Final[EventSpec] = CATALOG.register(
@@ -116,7 +126,14 @@ COMMAND_STOP: Final[EventSpec] = CATALOG.register(
         COMPONENT,
         Level.INFO,
         "the attempt runner settled command-domain stop",
-        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+        {
+            "outcome": FieldKind.STRING,
+            "waited_ms": FieldKind.INTEGER,
+            **{
+                name: FieldKind.BOOLEAN
+                for name in (*STOP_DETAIL_FIELDS, *STOP_STATUS_FIELDS)
+            },
+        },
     )
 )
 SEAL: Final[EventSpec] = CATALOG.register(
@@ -155,6 +172,7 @@ OPTIONAL: Final[tuple[str, ...]] = (
 )
 TOKEN_BYTES: Final[int] = 32
 SNAPSHOT_NAME: Final[str] = "output-snapshot"
+QUIESCENCE: Final[str] = "runner.quiescence"
 
 
 class _Stage(StrEnum):
@@ -217,6 +235,48 @@ class OutputAuthority:
     files: tuple[SealedFile, ...]
 
 
+def attempt_token(
+    attempt: DirectoryAnchor, scope: SecretScope, refusal_code: str
+) -> SecretValue:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open("attempt.token", flags, 0o600, dir_fd=attempt.descriptor)
+    except FileExistsError:
+        descriptor = os.open(
+            "attempt.token",
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=attempt.descriptor,
+        )
+        try:
+            verify_private(descriptor, directory=False)
+            raw = os.read(descriptor, TOKEN_BYTES + 1)
+        finally:
+            os.close(descriptor)
+        try:
+            text = raw.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise delivery_error(refusal_code) from error
+        if len(text) != TOKEN_BYTES:
+            raise delivery_error(refusal_code) from None
+        return scope.admit(text)
+    try:
+        token = scope.admit(secrets.token_hex(16))
+        os.fchmod(descriptor, 0o600)
+        verify_private(descriptor, directory=False)
+        os.write(descriptor, token.reveal().encode())
+        synchronize(descriptor)
+    except (OSError, FilesystemError, SecretAdmissionError):
+        os.close(descriptor)
+        try:
+            os.unlink("attempt.token", dir_fd=attempt.descriptor)
+        except FileNotFoundError:
+            pass
+        raise
+    os.close(descriptor)
+    synchronize(attempt.descriptor)
+    return token
+
+
 class CommandSession:
     def __init__(
         self,
@@ -264,6 +324,9 @@ class CommandSession:
         self._unobserved = False
         self._observing = False
         self._tails: tuple[bytes, bytes] | None = None
+        self._observed_at: JournalReference | None = None
+        self._retried = False
+        self._retained_prelaunch: dict[int, int] | None = None
         self._domain_stop: asyncio.Task[StopOutcome] | None = None
         self._prelaunch: dict[int, int] | None = None
         self._closing: asyncio.Task[None] | None = None
@@ -443,8 +506,21 @@ class CommandSession:
             self._log,
             self._capture_io,
         )
-        if self.completion() is Completion.COMPLETE:
+        if self._domain_confirmed():
             self._start_capture_seal()
+
+    def _domain_confirmed(self) -> bool:
+        domain_stop = self._domain_stop
+        with self._lock:
+            retried = self._retried
+        return (
+            not retried
+            and domain_stop is not None
+            and domain_stop.done()
+            and not domain_stop.cancelled()
+            and domain_stop.exception() is None
+            and domain_stop.result() is StopOutcome.CONFIRMED
+        )
 
     def _start_capture_seal(self) -> None:
         if self._capture is not None and self._capture_seal is None:
@@ -672,6 +748,8 @@ class CommandSession:
             return
         with self._lock:
             prelaunch, self._prelaunch = self._prelaunch, None
+            if prelaunch is not None:
+                self._retained_prelaunch = prelaunch
         self._domain_stop = self._loop.create_task(
             self._stop_domain(pid, token, started_ns, prelaunch)
         )
@@ -685,22 +763,47 @@ class CommandSession:
     ) -> StopOutcome:
         marker = b"KORA_ATTEMPT_TOKEN=" + token.reveal().encode("ascii")
         executor = NativeExecutor(1, 1)
-        try:
-            outcome = await executor.run(
-                lambda: self._stopper(
-                    pid, marker, self._clock, self._reaper.wake, prelaunch
-                ).stop(started_ns)
+        details: tuple[tuple[str, bool], ...] = ()
+        run_unresolved = close_unresolved = False
+
+        def stop() -> tuple[StopOutcome, tuple[tuple[str, bool], ...]]:
+            stopper = self._stopper(
+                pid, marker, self._clock, self._reaper.wake, prelaunch
             )
+            outcome = stopper.stop(started_ns)
+            evidence = (
+                stopper.diagnostic_snapshot()
+                if isinstance(stopper, CommandDomainStop)
+                else ()
+            )
+            return outcome, evidence
+
+        try:
+            outcome, details = await executor.run(stop)
         except NativeIOUnresolved:
             outcome = StopOutcome.UNRESOLVED
+            run_unresolved = True
         finally:
             try:
                 await executor.close()
             except NativeIOUnresolved:
                 outcome = StopOutcome.UNRESOLVED
+                close_unresolved = True
+                details = ()
         waited = max(0, (self._clock.monotonic_ns() - started_ns) // 1_000_000)
         level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
-        self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
+        self._log.emit_at(
+            level,
+            COMMAND_STOP,
+            outcome=outcome,
+            waited_ms=waited,
+            stop_details_available=bool(details),
+            native_run_unresolved=run_unresolved,
+            native_close_unresolved=close_unresolved,
+            **dict(details),
+        )
+        if outcome is StopOutcome.CONFIRMED and self._retried:
+            return outcome
         if outcome is StopOutcome.CONFIRMED:
             with self._lock:
                 self._observing = True
@@ -764,22 +867,24 @@ class CommandSession:
             return
         observation = self._assembled()
         outcome = "refused"
+        location: JournalLocation | None = None
         if observation is not None:
             try:
-                appended = self._journal.append_outcome(
-                    COMMAND_OBSERVED,
-                    observation_record(observation),
-                    reader_bounded=True,
+                appended, location = self._journal.append_located(
+                    COMMAND_OBSERVED, observation_record(observation)
                 )
             except (JournalCapacityError, JsonShapeError, UnicodeEncodeError):
                 appended = None
-            if appended is JournalAppendOutcome.DURABLE:
+            if appended is JournalAppendOutcome.DURABLE and location is not None:
                 outcome = "observed"
             elif appended is not None:
                 outcome = "journal_unavailable"
         with self._lock:
-            if outcome == "observed":
+            if outcome == "observed" and location is not None:
                 self._observation = observation
+                self._observed_at = JournalReference(
+                    location.offset, location.length, location.digest
+                )
             else:
                 self._unobserved = True
             self._emit(outcome, started)
@@ -803,14 +908,38 @@ class CommandSession:
         domain_stop = self._domain_stop
         if domain_stop is None or not domain_stop.done():
             return Completion.PENDING
-        if domain_stop.cancelled() or domain_stop.exception() is not None:
+        if (
+            domain_stop.cancelled()
+            or domain_stop.exception() is not None
+            or domain_stop.result() is not StopOutcome.CONFIRMED
+        ):
+            self._retry_domain_stop()
             return Completion.UNRESOLVED
-        if domain_stop.result() is StopOutcome.CONFIRMED:
-            return Completion.COMPLETE
-        return Completion.UNRESOLVED
+        with self._lock:
+            unattached = self._observing and self._capture_seal is None
+        if unattached or any(
+            task is not None and not task.done()
+            for task in (self._output_seal, self._capture_seal)
+        ):
+            return Completion.PENDING
+        return Completion.COMPLETE
+
+    def _retry_domain_stop(self) -> None:
+        if self._halted():
+            return
+        self._domain_stop = None
+        with self._lock:
+            self._retried = True
+            self._unobserved = True
+            self._prelaunch = self._retained_prelaunch
+        self._begin_domain_stop(self._clock.monotonic_ns())
 
     def result_reference(self) -> JournalReference | None:
-        return None
+        with self._lock:
+            return self._observed_at
+
+    def record_completion(self, data: JsonObject) -> bool:
+        return self._journal.append(QUIESCENCE, data)
 
     async def stop(self) -> None:
         if self._closing is None:
@@ -826,6 +955,7 @@ class CommandSession:
         self._begin_domain_stop(self._clock.monotonic_ns())
         with self._lock:
             self._prelaunch = None
+            self._retained_prelaunch = None
             self._stop.set()
             self._lock.notify_all()
         try:
@@ -988,59 +1118,14 @@ class CommandSession:
             synchronize(self._attempt.descriptor)
             self._candidate_ready = True
         if self._token is None:
-            self._token = self._token_file()
+            self._token = attempt_token(
+                self._attempt, self._scope, "command_not_started"
+            )
         if self._logs is None:
             self._logs = (
                 create_log(self._attempt, "stdout"),
                 create_log(self._attempt, "stderr"),
             )
-
-    def _token_file(self) -> SecretValue:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-        try:
-            descriptor = os.open(
-                "attempt.token", flags, 0o600, dir_fd=self._attempt.descriptor
-            )
-        except FileExistsError:
-            return self._scope.admit(self._existing_token())
-        token = self._scope.admit(secrets.token_hex(16))
-        try:
-            os.fchmod(descriptor, 0o600)
-            verify_private(descriptor, directory=False)
-            os.write(descriptor, token.reveal().encode())
-            synchronize(descriptor)
-        except (OSError, FilesystemError):
-            os.close(descriptor)
-            self._unlink_token()
-            raise
-        os.close(descriptor)
-        synchronize(self._attempt.descriptor)
-        return token
-
-    def _existing_token(self) -> str:
-        descriptor = os.open(
-            "attempt.token",
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=self._attempt.descriptor,
-        )
-        try:
-            verify_private(descriptor, directory=False)
-            raw = os.read(descriptor, TOKEN_BYTES + 1)
-        finally:
-            os.close(descriptor)
-        try:
-            text = raw.decode("ascii")
-        except UnicodeDecodeError as error:
-            raise delivery_error("command_not_started") from error
-        if len(text) != TOKEN_BYTES:
-            raise delivery_error("command_not_started")
-        return text
-
-    def _unlink_token(self) -> None:
-        try:
-            os.unlink("attempt.token", dir_fd=self._attempt.descriptor)
-        except FileNotFoundError:
-            return
 
     def _spawn(self, owner: ChildOwner, argv: tuple[str, ...]) -> None:
         reads: list[int] = []
@@ -1295,6 +1380,12 @@ class CommandSession:
             with self._lock:
                 self._tails = tails
         return with_tails(observation, *tails)
+
+    def session_observation(self, submitter: Submitter) -> ControlFileRef:
+        with self._lock:
+            if self._execution != submitter:
+                raise delivery_error("execution_unauthorized")
+        raise delivery_error("workload_kind_unavailable")
 
     def note_output(self, outcome: str, started: int) -> None:
         waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)

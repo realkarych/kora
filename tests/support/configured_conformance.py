@@ -67,6 +67,9 @@ def installed_conformance(core_wheel: Path) -> Generator[InstalledTooling]:
                 "runtime.configured": (
                     "kora_tooling_fixture.configured_runtime:configured"
                 ),
+                "harness.launching": (
+                    "kora_tooling_fixture.launching_harness:launching"
+                ),
                 "harness.configured": (
                     "kora_tooling_fixture.configured_harness:configured"
                 ),

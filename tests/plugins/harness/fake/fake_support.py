@@ -10,6 +10,8 @@ from kora.conformance.harness import (
     Trace,
 )
 from kora.ir import ToolPolicy
+from kora.ir.config import NodeLimits
+from kora.ir.cost import PriceRevision
 from kora.ir.json import JsonObject, JsonValue
 from kora.plugins.harness.fake import CallScope, FakeHarness, ListedScript, ScriptHeader
 from kora.plugins.harness.fake.script import STEP_ADAPTER, Step
@@ -18,8 +20,10 @@ from kora.protocols.harness import (
     Enforcement,
     NormalisedEvent,
     RunnerCause,
+    SessionInputs,
     SessionResult,
     UsageData,
+    prompt_digest,
 )
 from kora.protocols.policy import (
     PolicyClient,
@@ -31,6 +35,22 @@ from kora.protocols.vcs import WorkspaceRef, WorkspaceTarget
 
 DENIED_TOOL: Final[str] = "Forbidden"
 OBSERVED_AT: Final[datetime] = datetime(2026, 1, 1, tzinfo=UTC)
+FAKE_PROMPT: Final[str] = "run the fake script"
+FAKE_PRICE_TABLE: Final[PriceRevision] = PriceRevision(
+    id="fake-prices",
+    namespace_id=None,
+    effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+    version=1,
+    normalization_version=1,
+    prices={},
+)
+FAKE_INPUTS: Final[SessionInputs] = SessionInputs(
+    prompt=FAKE_PROMPT,
+    prompt_digest=prompt_digest(FAKE_PROMPT),
+    price_table_id=FAKE_PRICE_TABLE.id,
+    price_table=FAKE_PRICE_TABLE,
+    limits=NodeLimits(),
+)
 
 
 def step(document: JsonObject) -> Step:
@@ -204,7 +224,10 @@ async def played(
     adapter: FakeHarness, sink: ScriptedSink, policy: PolicyClient | None = None
 ) -> SessionResult:
     spec = adapter.build_session_spec(
-        {}, WorkspaceTarget(root=adapter.scope.workspace.root, host_path=None), None
+        {},
+        WorkspaceTarget(root=adapter.scope.workspace.root, host_path=None),
+        None,
+        inputs=FAKE_INPUTS,
     )
     return await adapter.run(spec, policy or AllowingPolicy(), sink, NoLaunches())
 

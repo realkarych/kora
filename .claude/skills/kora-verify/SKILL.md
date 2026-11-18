@@ -7,7 +7,7 @@ description: Use when planning or reviewing kora changes to code, contracts, doc
 
 Use proposed scope at task entry and the actual diff before readiness. This is the single review router: map review steps from other planning, implementation or shipping skills to its assignments instead of automatically adding another review stage. [AGENTS.md](../../../AGENTS.md) owns the change lifecycle, [the knowledge index](../../../knowledge/README.md) owns contract lookup, and [the coverage checklist](../../../knowledge/reviews/ai-development-setup.md) maps component families, workloads and activation conditions. Load only selected profiles. An assigned reviewer runs that profile directly without restarting the router.
 
-Apply the [Development verification](../../../AGENTS.md#development-verification) rules of AGENTS.md, including the bounded MVP merge requirements and the owner decision after two unsuccessful repairs.
+Apply the [Development verification](../../../AGENTS.md#development-verification) rules of AGENTS.md, including the bounded MVP merge requirements and a decision by an owner after two unsuccessful repairs.
 
 ## GitHub reviewer mode
 
@@ -30,7 +30,7 @@ Identify the requested behavior, acceptance criteria and approved base. Include 
 3. Assign an owner for each affected integration boundary. For example, an API error change reaches the shared client and affected CLI/MCP/console consumers; a metadata lifecycle change can reach scheduler, API and worker recovery. Identify the affected behavior on each side rather than assigning one giant cross-repository context.
 4. Keep one concise coverage table: affected contract/component, risk, integration owner, blocking checks, diagnostic measurements and selected independent review. Add profiles only for their concrete triggers below. Reconcile changed scope before readiness; do not create a second coverage graph or restart unchanged assignments after each commit.
 
-Use the stricter coverage of the approved/base policy and the proposed policy until the owner explicitly approves a reduction. Deleting a manifest, test or routing instruction does not deactivate a requirement. Verification policy, CI gates, budgets and agent configuration changes require correctness and security review plus explicit owner review.
+Use the stricter coverage of the approved/base policy and the proposed policy until an owner explicitly approves a reduction. Deleting a manifest, test or routing instruction does not deactivate a requirement. Verification policy, CI gates, budgets and agent configuration changes require correctness and security review plus explicit owner review.
 
 ## Select independent reviews
 
@@ -56,7 +56,7 @@ Apply the [observability contract](../../../knowledge/specs/observability.md) to
 
 ## Blocking checks and diagnostics
 
-[Development verification](../../../AGENTS.md#development-verification) in AGENTS.md defines the blocking safety and recovery gates, the classification of numerical checks, the owner approval an existing gate needs before it changes and the bounds on investigation; AGENTS.md's [Testing](../../../AGENTS.md#testing) section makes CI's ten-minute total a feedback target. This router also applies:
+[Development verification](../../../AGENTS.md#development-verification) in AGENTS.md defines the blocking safety and recovery gates, the classification of numerical checks, the approval from an owner that an existing gate needs before it changes and the bounds on investigation; AGENTS.md's [Testing](../../../AGENTS.md#testing) section makes CI's ten-minute total a feedback target. This router also applies:
 
 1. Keep contract, integrity, authorization, crash/replay, exact resource closure, capacity admission and deterministic work/space bounds blocking. A deadline protecting cleanup, stop escalation or bounded child execution is a safety check, not an optional performance statistic.
 2. A numerical performance gate needs an approved requirement and method: workload and scale, environment, warm-up and intentional caches, observation overhead, metric, meaningful regression size and failure decision. Known bounded runtime state must be described separately from abandoned component resources.

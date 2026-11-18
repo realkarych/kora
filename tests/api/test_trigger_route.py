@@ -335,7 +335,7 @@ async def test_trigger_route_refuses_invalid_starts(
     ("change", "status", "code"),
     [
         ("secrets", 422, "API003"),
-        ("parameters", 500, "API010"),
+        ("parameters", 422, "API003"),
         ("inactive", 500, "API010"),
     ],
 )
@@ -352,7 +352,7 @@ async def test_trigger_route_refuses_unsupported_versions(
     await save_secret_policy(database, namespace_id, ALLOW_AGENT_SECRETS)
     ir = with_agent_secret() if change == "secrets" else skeleton_ir()
     if change == "parameters":
-        child(ir, "graph")["params"] = {"type": "object"}
+        child(ir, "graph")["params"] = {"type": "object", "required": ["required"]}
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     )

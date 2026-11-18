@@ -10,15 +10,20 @@ from pydantic import ValidationError
 from kora.ir.json import CanonicalBudget, JsonObject, JsonShapeError, spend_string
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability.redaction import SecretRegistry
+from kora.protocols.deadlines import duration_ns
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
     EVENT_ADAPTER,
     MAX_TEXT_BYTES,
     Enforcement,
+    PermissionDeniedEvent,
+    ProviderLimitedEvent,
     RunnerCause,
+    ToolCallEvent,
+    ToolResultEvent,
 )
 from kora.protocols.time import Clock
-from kora.runner.calls import EventCount
+from kora.runner.calls import TRACKING_CEILING, EventCount
 from kora.runner.journal import JournalAppendOutcome
 
 ADAPTER_KINDS: Final[frozenset[str]] = frozenset(
@@ -49,6 +54,13 @@ T = TypeVar("T")
 
 class JournalWriter(Protocol):
     def append_outcome(self, kind: str, data: JsonObject) -> JournalAppendOutcome: ...
+
+
+@dataclass(frozen=True)
+class Liveness:
+    last_event_ns: int
+    calls_open: bool
+    full_since_ns: int | None
 
 
 @dataclass(frozen=True)
@@ -110,10 +122,16 @@ class RunnerSink:
         registry: SecretRegistry,
         clock: Clock,
         max_events: int | None,
+        stall_after_ns: int,
     ) -> None:
         self._journal = journal
         self._registry = registry
         self._clock = clock
+        self._stall_after_ns = stall_after_ns
+        self._last_event_ns = clock.monotonic_ns()
+        self._open_calls: set[str] = set()
+        self._full_since_ns: int | None = None
+        self._changed = asyncio.Event()
         self._count = EventCount(max_events)
         self._loop = asyncio.get_running_loop()
         self._stopped: asyncio.Future[RunnerCause] = self._loop.create_future()
@@ -148,6 +166,22 @@ class RunnerSink:
             )
         except ValidationError:
             raise refused("event_refused") from None
+        with self._state:
+            self._last_event_ns = self._clock.monotonic_ns()
+            if isinstance(event, ToolCallEvent):
+                if len(self._open_calls) < TRACKING_CEILING:
+                    self._open_calls.add(event.data.tool_use_id)
+            elif isinstance(event, (ToolResultEvent, PermissionDeniedEvent)):
+                had_calls = bool(self._open_calls)
+                self._open_calls.discard(event.data.tool_use_id)
+                if had_calls and not self._open_calls:
+                    self._changed.set()
+        if (
+            isinstance(event, ProviderLimitedEvent)
+            and event.data.retry_after is not None
+            and duration_ns(event.data.retry_after - at) > self._stall_after_ns
+        ):
+            self.terminate("provider_limit")
         if self._count.count(kind).cause is not None:
             self.terminate("max_events")
         if kind == "error":
@@ -186,6 +220,9 @@ class RunnerSink:
             last = self._queue[-1] if self._queue else None
             if self._halted:
                 return
+            if record.size <= MAX_RECORD_BYTES and self._full_since_ns is None:
+                self._full_since_ns = self._clock.monotonic_ns()
+                self._changed.set()
             if isinstance(last, Gap):
                 last.omitted += 1
             else:
@@ -193,7 +230,18 @@ class RunnerSink:
                 self._state.notify_all()
 
     def observe_dropped(self, kind: str) -> None:
-        return None
+        with self._state:
+            self._last_event_ns = self._clock.monotonic_ns()
+
+    def liveness(self) -> Liveness:
+        with self._state:
+            return Liveness(
+                self._last_event_ns, bool(self._open_calls), self._full_since_ns
+            )
+
+    async def changed(self) -> None:
+        await self._changed.wait()
+        self._changed.clear()
 
     def enforcement(self) -> Enforcement:
         with self._state:
@@ -280,6 +328,8 @@ class RunnerSink:
                 if not self._queue:
                     return
                 item = self._queue.popleft()
+                if self._full_since_ns is not None:
+                    self._full_since_ns = None
                 if isinstance(item, Record):
                     self._queued_bytes -= item.size
             if isinstance(item, asyncio.Event):

@@ -25,7 +25,10 @@ def placements(root: Path) -> dict[Placement, Path]:
 
 def configuration(telemetry: bool) -> ClaudeEnvironmentConfiguration:
     return ClaudeEnvironmentConfiguration(
-        bash_path="/bin/bash", max_retries=2, cli_telemetry=telemetry
+        binding="claude-test",
+        bash_path="/bin/bash",
+        max_retries=2,
+        cli_telemetry=telemetry,
     )
 
 

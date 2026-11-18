@@ -39,6 +39,7 @@ from tests.db.test_graph_stage_promotion_snapshot import (
     read,
     seed_documents,
 )
+from tests.db.test_read_snapshot import physical_handle
 from tests.support.databases import encoded_sqlite_settings, sqlite_settings
 
 SCALAR_QUERY: str = "SELECT store_id, payload_digest, fence_incarnation"
@@ -51,10 +52,6 @@ PRIVATE_MARKER: str = "PRIVATE-SCALAR-FIXTURE"
 class SQLiteTraceDriver(Protocol):
     async def set_trace_callback(
         self, handler: Callable[[str], None] | None
-    ) -> None: ...
-
-    async def set_progress_handler(
-        self, handler: Callable[[], int] | None, n: int
     ) -> None: ...
 
 
@@ -437,23 +434,23 @@ async def test_raw_sqlite_metadata_failure_refuses_privately_and_reuses_worker(
     database = Database(settings)
     selected = threading.Event()
     interrupted = threading.Event()
+    native: sqlite3.Connection | None = None
 
     def trace(statement: str) -> None:
         if SQLITE_METADATA_QUERY in statement:
             selected.set()
-
-    def interrupt_once() -> int:
-        if selected.is_set() and not interrupted.is_set():
-            interrupted.set()
-            return 1
-        return 0
+            if native is not None and not interrupted.is_set():
+                native.interrupt()
+                interrupted.set()
 
     try:
         binding, stage_ids = await seed_documents(database)
         driver = await sqlite_worker(database)
+        native_handle = physical_handle(database, driver)
+        assert isinstance(native_handle, sqlite3.Connection)
+        native = native_handle
         trace_driver = cast(SQLiteTraceDriver, driver)
         await trace_driver.set_trace_callback(trace)
-        await trace_driver.set_progress_handler(interrupt_once, 1)
         logging_settings = LoggingSettings(
             level=Level.DEBUG, third_party={"aiosqlite": Level.DEBUG}
         )
@@ -470,7 +467,6 @@ async def test_raw_sqlite_metadata_failure_refuses_privately_and_reuses_worker(
                         await read(database, binding)
                 records = capture.finish()
         finally:
-            await trace_driver.set_progress_handler(None, 0)
             await trace_driver.set_trace_callback(None)
         assert await sqlite_worker(database) is driver
         recovered = await read(database, binding)

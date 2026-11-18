@@ -85,6 +85,17 @@ class CommandCensus:
     members: tuple[CommandMember, ...]
     complete: bool
     ambiguous_group: bool = False
+    observed: frozenset["CensusCondition"] = frozenset()
+
+
+class CensusCondition(StrEnum):
+    IDENTITY_UNAVAILABLE = "saw_identity_unavailable"
+    INVENTORY_UNAVAILABLE = "saw_inventory_unavailable"
+    INVENTORY_INCOMPLETE = "saw_inventory_incomplete"
+    OPAQUE = "saw_opaque"
+    UNSTABLE = "saw_unstable"
+    CONFIRMATION_CHANGED = "saw_confirmation_changed"
+    CUTOFF = "saw_census_cutoff"
 
 
 @dataclass(frozen=True)
@@ -94,12 +105,22 @@ class CommandPIDInventory:
     complete: bool = True
 
     def confirm_empty(self, follow_up: "CommandPIDInventory | None") -> CommandCensus:
+        observed: set[CensusCondition] = set()
+        if not self.complete:
+            observed.add(CensusCondition.INVENTORY_INCOMPLETE)
         if follow_up is None:
-            return CommandCensus((), False)
+            observed.add(CensusCondition.INVENTORY_UNAVAILABLE)
+            return CommandCensus((), False, observed=frozenset(observed))
+        same = self.complete and self == follow_up
+        if self.complete and not same:
+            observed.add(CensusCondition.CONFIRMATION_CHANGED)
+        if not follow_up.complete:
+            observed.add(CensusCondition.INVENTORY_INCOMPLETE)
         return CommandCensus(
             (),
-            self.complete and self == follow_up and not self.original_group,
+            same and not self.original_group,
             bool(follow_up.original_group - self.original_group),
+            frozenset(observed),
         )
 
 
@@ -626,20 +647,31 @@ class NativeIdentityReader:
             self._boot,
             self._namespace,
         ):
-            return CommandCensus((), False)
+            return CommandCensus(
+                (), False, observed=frozenset({CensusCondition.IDENTITY_UNAVAILABLE})
+            )
         census = self._command_pids(group, scan_deadline)
         if census is None:
-            return CommandCensus((), False)
+            return CommandCensus(
+                (), False, observed=frozenset({CensusCondition.INVENTORY_UNAVAILABLE})
+            )
         original = census.original_group
         members: list[CommandMember] = []
         complete = census.complete
+        observed: set[CensusCondition] = set()
+        if not complete:
+            observed.add(CensusCondition.INVENTORY_INCOMPLETE)
         ambiguous_group = False
         pending_group = set(original)
         opaque: dict[int, int] = {}
         for pid in (*original, *(census.listed - original)):
             if self._clock.monotonic_ns() >= scan_deadline:
+                observed.add(CensusCondition.CUTOFF)
                 return CommandCensus(
-                    tuple(members), False, ambiguous_group or bool(pending_group)
+                    tuple(members),
+                    False,
+                    ambiguous_group or bool(pending_group),
+                    frozenset(observed),
                 )
             pending_group.discard(pid)
             if pid == self._owner:
@@ -647,6 +679,10 @@ class NativeIdentityReader:
             member, observation = self.command_member(
                 pid, group, marker, listed_in_group=pid in original
             )
+            if observation is CommandRead.OPAQUE:
+                observed.add(CensusCondition.OPAQUE)
+            elif observation is CommandRead.UNSTABLE:
+                observed.add(CensusCondition.UNSTABLE)
             verified = observation is CommandRead.VERIFIED
             if member is not None:
                 members.append(member)
@@ -675,16 +711,22 @@ class NativeIdentityReader:
                 confirmation = census.confirm_empty(
                     self._command_pids(group, scan_deadline)
                 )
+                observed.update(confirmation.observed)
                 complete = confirmation.complete and all(
                     self._clock.monotonic_ns() < scan_deadline
                     and self._darwin_unique_id(pid) == unique
                     for pid, unique in opaque.items()
                 )
                 ambiguous_group = ambiguous_group or confirmation.ambiguous_group
+        if complete:
+            complete = self._clock.monotonic_ns() < scan_deadline
+            if not complete:
+                observed.add(CensusCondition.CUTOFF)
         return CommandCensus(
             tuple(members),
-            complete and self._clock.monotonic_ns() < scan_deadline,
+            complete,
             ambiguous_group,
+            frozenset(observed),
         )
 
     def _command_pids(self, group: int, deadline_ns: int) -> CommandPIDInventory | None:
@@ -944,3 +986,71 @@ class NativeIdentityReader:
                 raise OSError(failure, os.strerror(failure))
             self._arguments = ctypes.create_string_buffer(maximum.value + 1)
         return self._arguments
+
+    def launcher_children(self, cli_path: str) -> tuple[ProcessIdentity, ...]:
+        deadline = self._clock.monotonic_ns() + SCAN_NS
+        if sys.platform == "linux":
+            found: set[int] = set()
+            for index, task in enumerate(Path("/proc/self/task").iterdir()):
+                if (
+                    index >= PROCESS_SCAN_ENTRIES
+                    or self._clock.monotonic_ns() >= deadline
+                ):
+                    raise OSError("launcher child inventory incomplete")
+                try:
+                    with (task / "children").open("rb") as stream:
+                        content = stream.read(PROCESS_SCAN_ENTRIES * 11 + 1)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if len(content) > PROCESS_SCAN_ENTRIES * 11:
+                    raise OSError("launcher child inventory incomplete")
+                found.update(int(item) for item in content.split())
+            listed = tuple(found)
+        else:
+            owned = self._listed_pids(6, self._owner, deadline)
+            if owned is None:
+                raise OSError("launcher child inventory incomplete")
+            listed = owned
+        if len(listed) > PROCESS_SCAN_ENTRIES:
+            raise OSError("launcher child inventory incomplete")
+        matches: list[ProcessIdentity] = []
+        for pid in listed:
+            if self._clock.monotonic_ns() >= deadline:
+                raise OSError("launcher child inventory incomplete")
+            before = self.read(pid).process
+            if before is None or before.dead or before.parent_pid != self._owner:
+                continue
+            try:
+                arguments = self.arguments(pid)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            direct = arguments[:1] == (os.fsencode(cli_path),)
+            script = arguments[:3] == (
+                os.fsencode(sys.executable),
+                b"-I",
+                os.fsencode(cli_path),
+            )
+            if (direct or script) and self.read(pid).process == before:
+                matches.append(before.identity)
+        return tuple(matches)
+
+    def arguments(self, pid: int) -> tuple[bytes, ...]:
+        if sys.platform == "linux":
+            with open(f"/proc/{pid}/cmdline", "rb") as stream:
+                return tuple(stream.read(os.sysconf("SC_ARG_MAX")).split(b"\0")[:3])
+        library = self._library
+        if library is None:
+            raise OSError("process arguments unavailable")
+        buffer = self._argument_buffer(library)
+        length = ctypes.c_size_t(len(buffer) - 1)
+        name = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+        call = cast(Sysctl, library.sysctl)
+        try:
+            if call(name, 3, buffer, ctypes.byref(length), None, 0) != 0:
+                raise OSError(ctypes.get_errno(), "process arguments unavailable")
+            data = ctypes.string_at(buffer, length.value)
+            count = int.from_bytes(data[:4], sys.byteorder)
+            start = data.index(b"\0", 4)
+            return tuple(data[start:].lstrip(b"\0").split(b"\0")[: min(count, 3)])
+        finally:
+            ctypes.memset(buffer, 0, len(buffer))

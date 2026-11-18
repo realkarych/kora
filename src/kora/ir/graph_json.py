@@ -14,6 +14,7 @@ from kora.ir.json import JsonObject, JsonValue
 NUMBER: re.Pattern[str] = re.compile(
     r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
 )
+PLAIN_ASCII: re.Pattern[str] = re.compile(r"""[\x00-\x1f\x7f"\\]""")
 
 
 class GraphValueFailure(StrEnum):
@@ -70,10 +71,17 @@ def quoted_character_width(character: str, ascii_only: bool = True) -> int:
     )
 
 
+def plain_ascii_text(value: str) -> bool:
+    return value.isascii() and PLAIN_ASCII.search(value) is None
+
+
 def quoted(value: str, budget: TextBudget) -> str:
-    budget.reserve(2)
-    for character in value:
-        budget.reserve(quoted_character_width(character, budget.ascii_only))
+    if type(budget) is TextBudget and plain_ascii_text(value):
+        budget.reserve(len(value) + 2)
+    else:
+        budget.reserve(2)
+        for character in value:
+            budget.reserve(quoted_character_width(character, budget.ascii_only))
     return (
         encode_basestring_ascii(value)
         if budget.ascii_only

@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Final
 
 from kora.ir.cost import (
+    MAX_SUM,
     MAX_TOKEN,
     Completeness,
     TokenField,
@@ -18,6 +19,7 @@ from kora.protocols.harness import UsageData
 MAX_OPEN_MESSAGES: Final[int] = 1_024
 MAX_CLOSED_MESSAGES: Final[int] = 1_024
 MAX_MODELS: Final[int] = 64
+MAX_COVERAGE_SEQUENCE: Final[int] = MAX_SUM
 ORDER: Final[Mapping[Completeness, int]] = {
     "unavailable": 0,
     "partial": 1,
@@ -91,7 +93,10 @@ class Totals:
 
 
 class UsageLedger:
-    def __init__(self) -> None:
+    def __init__(self, *, sequence_limit: int = MAX_COVERAGE_SEQUENCE) -> None:
+        self.sequence_limit: int = sequence_limit
+        self.revision: UsageCoverage | None = None
+        self.result_seen: bool = False
         self.high_water: int | None = None
         self.open: OrderedDict[str, UsageData] = OrderedDict()
         self.closed_ids: OrderedDict[str, None] = OrderedDict()
@@ -197,6 +202,7 @@ class UsageLedger:
         )
 
     def coverage(self, result_seen: bool) -> UsageCoverage:
+        self.result_seen |= result_seen
         rows = self.rows()
         latest = self.latest
         if latest is None:
@@ -209,15 +215,36 @@ class UsageLedger:
                 attribution_gap=False,
                 observation_gap=False,
             )
-        return UsageCoverage(
+        completeness = self.completeness(rows, self.result_seen)
+        previous = self.revision
+        if previous is not None and (
+            (
+                previous.completeness == completeness
+                and previous.observed_at == latest.observed_at
+                and previous.attribution_gap == self.attribution_gap
+                and previous.observation_gap == self.observation_gap
+            )
+            or previous.observation_sequence == self.sequence_limit
+        ):
+            return previous
+        sequence = (
+            0
+            if previous is None or previous.observation_sequence is None
+            else previous.observation_sequence + 1
+        )
+        observation_gap = self.observation_gap or sequence == self.sequence_limit
+        if observation_gap and completeness == "complete":
+            completeness = "partial"
+        self.revision = UsageCoverage(
             version=1,
-            observation_id=latest.observation_id,
-            observation_sequence=latest.observation_sequence,
-            completeness=self.completeness(rows, result_seen),
+            observation_id=f"usage-coverage-{sequence}",
+            observation_sequence=sequence,
+            completeness=completeness,
             observed_at=latest.observed_at,
             attribution_gap=self.attribution_gap,
-            observation_gap=self.observation_gap,
+            observation_gap=observation_gap,
         )
+        return self.revision
 
     def completeness(
         self, rows: tuple[UsageRow, ...], result_seen: bool

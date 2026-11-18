@@ -18,6 +18,7 @@ from kora.runner.usage import (
     UsageLedger,
 )
 from tests.plugins.harness.fake.fake_support import (
+    FAKE_INPUTS,
     AllowingPolicy,
     ScriptedSink,
     harness,
@@ -132,7 +133,10 @@ def test_finalise_memory_is_bounded_denials(kora_capture: Capture) -> None:
     documents = [turn("m1"), *(denial(index) for index in range(1_500)), result()]
     adapter = harness(scripted(documents), context_for(kora_capture))
     spec = adapter.build_session_spec(
-        {}, WorkspaceTarget(root="/kora-fake-workspace", host_path=None), None
+        {},
+        WorkspaceTarget(root="/kora-fake-workspace", host_path=None),
+        None,
+        inputs=FAKE_INPUTS,
     )
 
     outcome = asyncio.run(

@@ -22,7 +22,8 @@ from kora.plugins.harness.codex.app_server_session import (
     SessionRefused,
 )
 from kora.plugins.harness.codex.app_server_turn import MAX_FINAL_MESSAGE_BYTES
-from kora.plugins.harness.codex.turn_events import MASK_CHUNK_BYTES, CodexTurnEvents
+from kora.plugins.harness.codex.turn_events import CodexTurnEvents
+from kora.plugins.harness.text import MASK_CHUNK_BYTES
 from kora.protocols.harness import MAX_TEXT_BYTES, TurnData, TurnEvent
 from tests.plugins.harness.codex.test_app_server_messages import encoded, message
 from tests.plugins.harness.codex.test_app_server_output import (

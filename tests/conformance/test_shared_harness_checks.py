@@ -18,6 +18,7 @@ from kora.conformance.common import (
     context_for,
     utc_now,
 )
+from kora.conformance.harness import kora_capture as kora_capture
 from kora.ir.json import JsonObject
 from kora.observability import LoggingSettings
 from kora.plugins.harness.fake import FakeHarness, ListedScript
@@ -28,6 +29,7 @@ from kora.protocols.harness import (
     EventSink,
     HarnessAdapter,
     LaunchContext,
+    SessionInputs,
     SessionResult,
     SessionSpec,
 )
@@ -109,12 +111,17 @@ class ConfiguredHarness(FakeHarness):
         self.configurations: list[JsonObject] = []
 
     def build_session_spec(
-        self, config: JsonObject, workspace: WorkspaceTarget, feedback: None
+        self,
+        config: JsonObject,
+        workspace: WorkspaceTarget,
+        feedback: None,
+        *,
+        inputs: SessionInputs,
     ) -> SessionSpec:
         self.configurations.append(deepcopy(config))
         return (
             super()
-            .build_session_spec(config, workspace, feedback)
+            .build_session_spec(config, workspace, feedback, inputs=inputs)
             .model_copy(update={"options": deepcopy(config)})
         )
 
@@ -340,3 +347,41 @@ def test_shared_harness_checks_release_every_ending(phase: str, ending: str) -> 
     if phase == "prepare":
         assert source.started == 0
     assert_capture_released(captures[0])
+
+
+def denied_result(is_error: bool, capture: Capture) -> checks.HostedRun:
+    provider = FakeHarness(
+        CASES[checks.HarnessCase.TOOL_CALLS], scope(), context_for(capture)
+    )
+    run = checks.HarnessHost().run(provider, DENIED_TOOL, None)
+    sink = checks.ConformanceSink(None, checks.Trace())
+    sink.emit(
+        "tool_result", {"tool_use_id": "two", "is_error": is_error, "truncated": False}
+    )
+    denied = next(event for event in run.events if event.kind == "permission_denied")
+    identifier = checks.tool_use_id_of(denied)
+    event = sink.events[0]
+    assert event.kind == "tool_result"
+    event = event.model_copy(
+        update={"data": event.data.model_copy(update={"tool_use_id": identifier})}
+    )
+    return replace(
+        run,
+        events=(*run.events, event),
+        trace=(*run.trace, ("tool_result", identifier)),
+    )
+
+
+def test_harness_policy_accepts_denied_error_result(kora_capture: Capture) -> None:
+    run = denied_result(True, kora_capture)
+
+    checks.check_harness_policy_precedes_every_tool_call(run)
+
+    assert run.events[-1].kind == "tool_result"
+
+
+def test_harness_policy_rejects_denied_success_result(kora_capture: Capture) -> None:
+    run = denied_result(False, kora_capture)
+
+    with pytest.raises(pytest.fail.Exception, match="no successful result"):
+        checks.check_harness_policy_precedes_every_tool_call(run)

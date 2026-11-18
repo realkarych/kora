@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from functools import partial
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
@@ -16,7 +17,7 @@ from kora.api.errors import (
     request_rejection,
 )
 from kora.api.exchange import current_exchange
-from kora.api.graph_deployment_limits import IDENTITY, MAX_REQUEST_BYTES
+from kora.api.graph_deployment_limits import MAX_REQUEST_BYTES
 from kora.api.graph_deployment_route import (
     BodyRejected,
     authorized_namespace,
@@ -24,6 +25,7 @@ from kora.api.graph_deployment_route import (
 )
 from kora.api.graph_services import GraphServices
 from kora.api.responses import error_response
+from kora.api.run_trigger_limits import START_PREPARATION
 from kora.cel_eval.thread import Evaluator
 from kora.db.graph_deployment_reads import graph_id_by_name
 from kora.db.types import NAME_LENGTH
@@ -38,6 +40,7 @@ from kora.engine.start_acceptance import (
 )
 from kora.engine.start_facts import (
     InstallationRefusal,
+    SelectedStartVersion,
     StartFactsResult,
     StartRefusal,
     read_manual_start_facts,
@@ -49,6 +52,7 @@ from kora.engine.start_records import (
     StartRecordRejected,
     prepare_manual_start_request,
 )
+from kora.ir.deployment_checks import DeploymentSelection
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import GRAPH_VERSION_PREFIX
 from kora.models.runs import RUN_PREFIX, AcceptedRun, SkippedRun, TriggerRequest
@@ -95,8 +99,20 @@ def public_outcome(outcome: StartOutcome) -> AcceptedRun | SkippedRun:
     return SkippedRun(outcome="skipped", reason="overlap", run_id=None)
 
 
-def _preparation(
-    services: GraphServices, request: PreparedManualStartRequest
+async def _prepare_facts(
+    selected: SelectedStartVersion,
+    request: PreparedManualStartRequest,
+    selection: DeploymentSelection,
+    key: str,
+    _: Evaluator,
+) -> StartFactsResult:
+    return read_manual_start_facts(
+        selected, request, selection, key=key, limits=START_PREPARATION
+    )
+
+
+def manual_start_preparation(
+    services: GraphServices, request: PreparedManualStartRequest, key: str
 ) -> StartPreparation:
     async def prepare(
         candidate: StartCandidate,
@@ -105,17 +121,16 @@ def _preparation(
             if reservation is None:
                 return None
             selected = await acquire_manual_start(
-                services.database, request, candidate, limits=IDENTITY
+                services.database, request, candidate, limits=START_PREPARATION
             )
             if isinstance(selected, StartAcceptance):
                 return selected
 
-            async def facts(_: Evaluator) -> StartFactsResult:
-                return read_manual_start_facts(
-                    selected, request, services.selection, limits=IDENTITY
-                )
-
-            return await reservation.run(facts)
+            operation = reservation.run(
+                partial(_prepare_facts, selected, request, services.selection, key)
+            )
+            del selected
+            return await operation
 
     return prepare
 
@@ -196,12 +211,13 @@ async def _trigger(
         )
     except StartRecordRejected:
         return request_rejection(RequestRejection.PARAMETERS, request_id=request_id)
+    key = services.identifiers.new() if key is None else key
     result = await accept_manual_start(
         services.database,
         principal,
         start,
-        services.identifiers.new() if key is None else key,
-        _preparation(services, start),
+        key,
+        manual_start_preparation(services, start, key),
         identifiers=services.identifiers,
         clock=clock.now,
     )

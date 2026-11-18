@@ -14,7 +14,7 @@ from kora.ir.json import JsonObject
 from kora.plugins.harness.fake import CallScope, FakeHarness, ListedScript, ScriptHeader
 from kora.plugins.harness.fake.script import STEP_ADAPTER, EventStep, Step
 from kora.protocols.common import ProtocolContext
-from kora.protocols.harness import HarnessAdapter, SessionSpec
+from kora.protocols.harness import HarnessAdapter, SessionInputs, SessionSpec
 from kora.protocols.lifetime import ConformanceLifetime
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 from kora.protocols.policy import PolicyLayers
@@ -166,14 +166,19 @@ class ConfiguredHarness(FakeHarness):
         super().__init__(self.script_source, self.scope_value, context)
 
     def build_session_spec(
-        self, config: JsonObject, workspace: WorkspaceTarget, feedback: None
+        self,
+        config: JsonObject,
+        workspace: WorkspaceTarget,
+        feedback: None,
+        *,
+        inputs: SessionInputs,
     ) -> SessionSpec:
         prefix = config["prefix"]
         assert isinstance(prefix, str)
         self.script_source.prefix = prefix
         return (
             super()
-            .build_session_spec(config, workspace, feedback)
+            .build_session_spec(config, workspace, feedback, inputs=inputs)
             .model_copy(update={"options": deepcopy(config)})
         )
 

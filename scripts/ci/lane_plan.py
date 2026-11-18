@@ -20,7 +20,7 @@ ARTIFACT = re.compile(
 )
 REVISION = re.compile(r"[0-9a-f]{40}")
 IDENTIFIER = re.compile(r"[1-9][0-9]*")
-PUSH_RUN_ONLY = "lane durations come only from one green master push run"
+COMPLETE_RUN_ONLY = "lane durations come only from one green complete master run"
 
 
 class PlanFailure(ValueError):
@@ -219,7 +219,7 @@ def receipt_source(path: Path) -> tuple[str, str, str]:
     fields = cast(dict[str, object], document)
     checkout = receipt_field(fields, "checkout_revision", REVISION)
     if receipt_field(fields, "requested_revision", REVISION) != checkout:
-        raise PlanFailure(PUSH_RUN_ONLY)
+        raise PlanFailure(COMPLETE_RUN_ONLY)
     return (
         receipt_field(fields, "run_id", IDENTIFIER),
         receipt_field(fields, "run_attempt", IDENTIFIER),
@@ -229,7 +229,7 @@ def receipt_source(path: Path) -> tuple[str, str, str]:
 
 def require_success(directory: Path) -> None:
     if any(bounded_bytes(path) != b"0\n" for path in directory.glob("*.exit")):
-        raise PlanFailure(PUSH_RUN_ONLY)
+        raise PlanFailure(COMPLETE_RUN_ONLY)
 
 
 def general_lane_directories(root: Path) -> dict[str, list[Path]]:
@@ -265,7 +265,9 @@ def environment_durations(
     return {module: Record(*total) for module, total in sorted(totals.items())}
 
 
-def recorded_table(root: Path, collection: Collection) -> Table:
+def recorded_table(
+    root: Path, collection: Collection, expected_environments: frozenset[str]
+) -> Table:
     environments = general_lane_directories(root)
     sources = {
         receipt_source(directory / "receipt.json")
@@ -274,7 +276,9 @@ def recorded_table(root: Path, collection: Collection) -> Table:
     for directory in sorted(root.iterdir()):
         require_success(directory)
     if len(sources) != 1 or not environments:
-        raise PlanFailure(PUSH_RUN_ONLY)
+        raise PlanFailure(COMPLETE_RUN_ONLY)
+    if not expected_environments <= environments.keys():
+        raise PlanFailure("lane durations need the general lanes of every environment")
     run, _, revision = sources.pop()
     return Table(
         run,

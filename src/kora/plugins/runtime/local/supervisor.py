@@ -8,7 +8,7 @@ import secrets
 import socket
 import sys
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,6 +24,11 @@ from kora.observability import (
     LoggingSettings,
     ProcessDiagnostics,
     configure_process,
+)
+from kora.plugins.runtime.local.agent import (
+    AgentSession,
+    AgentSources,
+    production_sources,
 )
 from kora.plugins.runtime.local.command import CommandSession
 from kora.plugins.runtime.local.reaper import AdoptedReaper
@@ -69,6 +74,7 @@ from kora.runner.registry import (
 PR_SET_DUMPABLE: Final[int] = 4
 PR_SET_CHILD_SUBREAPER: Final[int] = 36
 LISTEN_BACKLOG: Final[int] = 16
+EXIT_COMPLETED: Final[int] = 0
 EXIT_REFUSED: Final[int] = 3
 EXIT_FAILED: Final[int] = 1
 TOKEN: Final[re.Pattern[str]] = re.compile(r"[\x21-\x7e]{1,256}")
@@ -88,6 +94,15 @@ REGISTERED: Final[EventSpec] = CATALOG.register(
         COMPONENT,
         Level.INFO,
         "the attempt runner registered and is listening",
+        {},
+    )
+)
+COMPLETED: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.runner.completed",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner exits after normal completion",
         {},
     )
 )
@@ -250,10 +265,13 @@ class PreparedRegistration:
         identity: ProcessIdentity,
         log: ComponentLogger,
         session: WorkloadSession | None = None,
+        agent: AgentSession | None = None,
     ) -> ControlServer:
         bound = self.bound
         if bound is None:
             raise RunnerRefused("ownership")
+        if agent is not None:
+            agent.bind_launch_socket(Path(self.entry.socket_directory) / self.name)
         server = ControlServer(
             bound,
             Path(self.entry.socket_directory),
@@ -266,6 +284,8 @@ class PreparedRegistration:
             identity,
             reader,
             session=session,
+            agent=agent,
+            launches=None if agent is None else agent.launches,
         )
         self.bound = None
         return server
@@ -323,7 +343,10 @@ def prepare_registration(arguments: RunnerArguments) -> PreparedRegistration:
 
 
 async def supervise(
-    arguments: RunnerArguments, log: ComponentLogger, diagnostics: ProcessDiagnostics
+    arguments: RunnerArguments,
+    log: ComponentLogger,
+    diagnostics: ProcessDiagnostics,
+    sources: AgentSources,
 ) -> None:
     clock = SystemClock()
     reader = NativeIdentityReader()
@@ -347,10 +370,13 @@ async def supervise(
                 diagnostics.logger(COMPONENT),
                 reaper,
             )
-            server = prepared.server(clock, reader, identity, log, command)
+            agent = AgentSession(
+                attempt, candidate, diagnostics, clock, reaper, sources, reader
+            )
+            server = prepared.server(clock, reader, identity, log, command, agent)
             try:
                 server.start()
-                await asyncio.Event().wait()
+                await server.completed()
             finally:
                 try:
                     await server.close()
@@ -378,7 +404,9 @@ def attempt_directory(arguments: RunnerArguments) -> DirectoryAnchor:
         root.close()
 
 
-def run(argv: Sequence[str]) -> int:
+def run(
+    argv: Sequence[str], compose: Callable[[ProcessDiagnostics], AgentSources]
+) -> int:
     harden()
     try:
         arguments = parsed_arguments(argv)
@@ -400,7 +428,8 @@ def run(argv: Sequence[str]) -> int:
     log = diagnostics.logger(COMPONENT).bind(attempt_id=arguments.attempt_id)
     log.emit(STARTED)
     try:
-        asyncio.run(supervise(arguments, log, diagnostics))
+        asyncio.run(supervise(arguments, log, diagnostics, compose(diagnostics)))
+        log.emit(COMPLETED)
     except RunnerRefused as refusal:
         log.emit(REFUSED, reason=str(refusal.args[0]))
         return EXIT_REFUSED
@@ -410,11 +439,11 @@ def run(argv: Sequence[str]) -> int:
         return EXIT_FAILED
     finally:
         diagnostics.shutdown()
-    return EXIT_FAILED
+    return EXIT_COMPLETED
 
 
 def main() -> None:
-    sys.exit(run(sys.argv[1:]))
+    sys.exit(run(sys.argv[1:], production_sources))
 
 
 if __name__ == "__main__":

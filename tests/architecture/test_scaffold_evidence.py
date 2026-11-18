@@ -38,6 +38,7 @@ from tests.scaffold_evidence import (
     plan_outputs,
     planned_counts,
     record_lane,
+    refresh_durations,
     required_host_fixtures,
     timing_lines,
     verify_scaffold,
@@ -165,7 +166,7 @@ def recollect(root: Path, operating_system: str, python: str, *extra: str) -> No
 
 
 def verify(
-    root: Path, counts: dict[str, int] = COUNTS, event: str = "push"
+    root: Path, counts: dict[str, int] = COUNTS, event: str = "schedule"
 ) -> Verification:
     return verify_scaffold(root, "123", "1", REVISION, REQUESTED, counts, TABLE, event)
 
@@ -180,10 +181,13 @@ def local_total() -> int:
     return sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
 
 
-def test_scaffold_receipts_prove_complete_planned_execution(tmp_path: Path) -> None:
+@pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
+def test_scaffold_receipts_prove_complete_planned_execution(
+    tmp_path: Path, event: str
+) -> None:
     complete_evidence(tmp_path)
 
-    result = verify(tmp_path)
+    result = verify(tmp_path, event=event)
 
     assert (result.environments, result.lanes, result.tests) == (
         3,
@@ -192,12 +196,14 @@ def test_scaffold_receipts_prove_complete_planned_execution(tmp_path: Path) -> N
     )
 
 
-def test_pull_request_receipts_prove_the_platform_lanes_of_macos(
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_platform_event_receipts_prove_the_platform_lanes_of_macos(
     tmp_path: Path,
+    event: str,
 ) -> None:
     pull_request_evidence(tmp_path)
 
-    result = verify(tmp_path, event="pull_request")
+    result = verify(tmp_path, event=event)
 
     assert (result.environments, result.lanes, result.tests) == (
         3,
@@ -206,36 +212,44 @@ def test_pull_request_receipts_prove_the_platform_lanes_of_macos(
     )
 
 
-def test_pull_request_evidence_refuses_a_general_macos_lane(tmp_path: Path) -> None:
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_platform_event_evidence_refuses_a_general_macos_lane(
+    tmp_path: Path, event: str
+) -> None:
     complete_evidence(tmp_path)
 
     with pytest.raises(EvidenceFailure, match="exactly the planned lanes"):
-        verify(tmp_path, event="pull_request")
+        verify(tmp_path, event=event)
 
 
 @pytest.mark.parametrize("lane", ["storage", "local-runtime"])
-def test_pull_request_evidence_requires_each_platform_lane_of_macos(
-    tmp_path: Path, lane: str
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_platform_event_evidence_requires_each_platform_lane_of_macos(
+    tmp_path: Path, event: str, lane: str
 ) -> None:
     pull_request_evidence(tmp_path)
     shutil.rmtree(lane_directory(tmp_path, "macos-15", "3.11.17", lane))
 
     with pytest.raises(EvidenceFailure, match="exactly the planned lanes"):
-        verify(tmp_path, event="pull_request")
+        verify(tmp_path, event=event)
 
 
-def test_pull_request_evidence_requires_the_general_lanes_of_linux(
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_platform_event_evidence_requires_the_general_lanes_of_linux(
     tmp_path: Path,
+    event: str,
 ) -> None:
     pull_request_evidence(tmp_path)
     shutil.rmtree(lane_directory(tmp_path, "ubuntu-24.04", "3.15.0", "general-2"))
 
     with pytest.raises(EvidenceFailure, match="exactly the planned lanes"):
-        verify(tmp_path, event="pull_request")
+        verify(tmp_path, event=event)
 
 
-def test_pull_request_evidence_keeps_the_general_lane_checks_of_linux(
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_platform_event_evidence_keeps_the_general_lane_checks_of_linux(
     tmp_path: Path,
+    event: str,
 ) -> None:
     pull_request_evidence(tmp_path)
     recollect(
@@ -243,10 +257,13 @@ def test_pull_request_evidence_keeps_the_general_lane_checks_of_linux(
     )
 
     with pytest.raises(EvidenceFailure, match="differs from its assignment"):
-        verify(tmp_path, event="pull_request")
+        verify(tmp_path, event=event)
 
 
-def test_pull_request_evidence_refuses_a_repeated_macos_test(tmp_path: Path) -> None:
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_platform_event_evidence_refuses_a_repeated_macos_test(
+    tmp_path: Path, event: str
+) -> None:
     pull_request_evidence(tmp_path)
     storage = lane_directory(tmp_path, "macos-15", "3.11.17", "storage")
     repeated = identities((*STORAGE_NODES, *local_nodes("macos-15")[:1]))
@@ -254,19 +271,21 @@ def test_pull_request_evidence_refuses_a_repeated_macos_test(tmp_path: Path) -> 
     rehash(storage, ["junit.xml"])
 
     with pytest.raises(EvidenceFailure, match="duplicate tests"):
-        verify(tmp_path, event="pull_request")
+        verify(tmp_path, event=event)
 
 
-def test_master_push_evidence_requires_the_general_lanes_of_macos(
+@pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
+def test_complete_event_evidence_requires_the_general_lanes_of_macos(
     tmp_path: Path,
+    event: str,
 ) -> None:
     pull_request_evidence(tmp_path)
 
     with pytest.raises(EvidenceFailure, match="exactly the planned lanes"):
-        verify(tmp_path, event="push")
+        verify(tmp_path, event=event)
 
 
-@pytest.mark.parametrize("event", ["", "pull_request_target", "schedule", "PUSH"])
+@pytest.mark.parametrize("event", ["", "pull_request_target", "unknown", "PUSH"])
 def test_scaffold_evidence_refuses_an_unknown_event(tmp_path: Path, event: str) -> None:
     complete_evidence(tmp_path)
 
@@ -274,12 +293,14 @@ def test_scaffold_evidence_refuses_an_unknown_event(tmp_path: Path, event: str) 
         verify(tmp_path, event=event)
 
 
-def test_pull_request_timings_leave_out_the_general_lanes_of_macos(
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_platform_event_timings_leave_out_the_general_lanes_of_macos(
     tmp_path: Path,
+    event: str,
 ) -> None:
     pull_request_evidence(tmp_path)
 
-    lanes = list(observed_timings(tmp_path, COUNTS, TABLE, "pull_request"))
+    lanes = list(observed_timings(tmp_path, COUNTS, TABLE, event))
 
     assert len(lanes) == 2 * LANES
     assert {timing.environment for lane in lanes for timing in lane} == {
@@ -307,7 +328,7 @@ def test_general_lanes_may_collect_the_same_tests_in_another_order(
 def test_observed_timings_cover_every_general_child(tmp_path: Path) -> None:
     complete_evidence(tmp_path)
 
-    lanes = list(observed_timings(tmp_path, COUNTS, TABLE, "push"))
+    lanes = list(observed_timings(tmp_path, COUNTS, TABLE, "schedule"))
 
     timings = [timing for lane in lanes for timing in lane]
     assert len(lanes) == 3 * LANES
@@ -327,7 +348,7 @@ def test_timings_print_readable_lanes_before_failing_on_a_missing_one(
     command = [sys.executable, "-m", "tests.scaffold_evidence", "timings"]
 
     result = subprocess.run(
-        [*command, str(tmp_path), json.dumps(COUNTS), "push"],
+        [*command, str(tmp_path), json.dumps(COUNTS), "schedule"],
         cwd=ROOT,
         capture_output=True,
         check=False,
@@ -386,7 +407,7 @@ def test_timings_refuse_evidence_that_verification_also_refuses(
     rehash(directory, [changed])
 
     with pytest.raises(failure):
-        list(observed_timings(tmp_path, COUNTS, TABLE, "push"))
+        list(observed_timings(tmp_path, COUNTS, TABLE, "schedule"))
 
     with pytest.raises(failure):
         verify(tmp_path)
@@ -873,3 +894,24 @@ def test_scheduled_lane_evidence_refuses_incomplete_or_foreign_execution(
 
     with pytest.raises(EvidenceFailure, match=match):
         verify_scheduled(report, "ubuntu-24.04", lane)
+
+
+@pytest.mark.parametrize("environment", list(COUNTS))
+def test_refresh_refuses_missing_general_lanes_before_replacing_the_table(
+    tmp_path: Path, environment: str
+) -> None:
+    complete_evidence(tmp_path)
+    for receipt in tmp_path.glob("*/receipt.json"):
+        fields = parse_json_object(json.loads(receipt.read_text()))
+        fields["requested_revision"] = REVISION
+        receipt.write_text(json.dumps(fields))
+    system, _, python = environment.rpartition("-")
+    for lane in general_lanes(LANES):
+        shutil.rmtree(lane_directory(tmp_path, system, python, lane))
+    table_path = ROOT / "scripts/ci/lane_durations.json"
+    before = table_path.read_bytes()
+
+    with pytest.raises(PlanFailure, match="general lanes of every environment"):
+        refresh_durations(tmp_path)
+
+    assert table_path.read_bytes() == before

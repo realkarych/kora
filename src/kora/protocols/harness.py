@@ -1,3 +1,4 @@
+import hashlib
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from typing import (
     Literal,
     Protocol,
     Self,
+    cast,
     get_args,
     runtime_checkable,
 )
@@ -22,17 +24,20 @@ from pydantic import (
     StringConstraints,
     Tag,
     TypeAdapter,
+    ValidationError,
     WithJsonSchema,
     model_validator,
 )
 from pydantic_core import PydanticCustomError
 
 from kora.ir import ConfigWarning, ErrorClass, ToolPolicy
+from kora.ir.config import NodeLimits
 from kora.ir.cost import (
     Basis,
     BillingClass,
     KnownFields,
     Money,
+    PriceRevision,
     Sum,
     Timestamp,
     Token,
@@ -165,6 +170,72 @@ CallKind = Literal[
 class HarnessValueRefused(ValueError):
     def __init__(self, field_name: str) -> None:
         super().__init__(f"the harness value {field_name} is invalid")
+
+
+def prompt_digest(prompt: str) -> Digest:
+    return "sha256:" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def digest_matches(prompt: str, digest: str) -> bool:
+    return digest == prompt_digest(prompt)
+
+
+def sealed_text(adapter: TypeAdapter[str], value: str, field_name: str) -> str:
+    try:
+        return adapter.validate_python(value)
+    except ValidationError:
+        raise HarnessValueRefused(field_name) from None
+
+
+def sealed_limits_snapshot(limits: NodeLimits) -> str:
+    if not isinstance(cast("object", limits), NodeLimits) or limits.extensions:
+        raise HarnessValueRefused("limits")
+    snapshot = limits.model_dump_json()
+    try:
+        NodeLimits.model_validate_json(snapshot)
+    except ValidationError:
+        raise HarnessValueRefused("limits") from None
+    return snapshot
+
+
+PROMPT_ADAPTER: Final[TypeAdapter[str]] = TypeAdapter(Prompt)
+DIGEST_ADAPTER: Final[TypeAdapter[str]] = TypeAdapter(Digest)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class SessionInputs:
+    prompt: Prompt
+    prompt_digest: Digest
+    price_table_id: CostIdentifier
+    price_table: PriceRevision
+    sealed_limits: str
+
+    def __init__(
+        self,
+        prompt: str,
+        prompt_digest: str,
+        price_table_id: str,
+        price_table: PriceRevision,
+        limits: NodeLimits,
+    ) -> None:
+        sealed_text(PROMPT_ADAPTER, prompt, "prompt")
+        sealed_text(DIGEST_ADAPTER, prompt_digest, "prompt_digest")
+        if not isinstance(cast("object", price_table), PriceRevision):
+            raise HarnessValueRefused("price_table")
+        snapshot = sealed_limits_snapshot(limits)
+        if not digest_matches(prompt, prompt_digest):
+            raise HarnessValueRefused("prompt_digest")
+        if price_table_id != price_table.id:
+            raise HarnessValueRefused("price_table_id")
+        object.__setattr__(self, "prompt", prompt)
+        object.__setattr__(self, "prompt_digest", prompt_digest)
+        object.__setattr__(self, "price_table_id", price_table_id)
+        object.__setattr__(self, "price_table", price_table)
+        object.__setattr__(self, "sealed_limits", snapshot)
+
+    @property
+    def limits(self) -> NodeLimits:
+        return NodeLimits.model_validate_json(self.sealed_limits)
 
 
 @dataclass(frozen=True)
@@ -578,7 +649,12 @@ class HarnessAdapter(Protocol):
     def check_config(self, config: JsonObject) -> list[ConfigWarning]: ...
 
     def build_session_spec(
-        self, config: JsonObject, workspace: WorkspaceTarget, feedback: None
+        self,
+        config: JsonObject,
+        workspace: WorkspaceTarget,
+        feedback: None,
+        *,
+        inputs: SessionInputs,
     ) -> SessionSpec: ...
 
     async def run(

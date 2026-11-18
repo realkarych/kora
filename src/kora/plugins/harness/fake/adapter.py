@@ -40,6 +40,7 @@ from kora.protocols.harness import (
     ResultData,
     RunnerCause,
     RunnerOutcome,
+    SessionInputs,
     SessionResult,
     SessionSpec,
     ToolCallData,
@@ -47,18 +48,18 @@ from kora.protocols.harness import (
     TurnData,
 )
 from kora.protocols.policy import (
-    RULE_ID,
     PolicyClient,
     PolicyDecision,
-    PolicyLayers,
     PolicyValueRefused,
     ToolCallRequest,
 )
-from kora.protocols.vcs import WorkspaceRef, WorkspaceTarget
+from kora.protocols.vcs import WorkspaceTarget
 from kora.runner.calls import (
+    CallScope,
     ToolCallLedger,
     closed_exception,
     decide_call,
+    denial_fields,
     refused_call,
 )
 from kora.runner.outcome import final_class, select_output
@@ -108,16 +109,6 @@ Termination = Literal["none", "interrupted", "killed_after_grace"]
 
 
 @dataclass(frozen=True)
-class CallScope:
-    harness: str
-    workspace: WorkspaceRef
-    node_path: str
-    layers: PolicyLayers
-    protected_paths: tuple[str, ...]
-    output_format: bool
-
-
-@dataclass(frozen=True)
 class Stop:
     cause: RunnerCause
     interrupt: bool
@@ -144,12 +135,6 @@ class FakeSummary(EventSummary):
 
     def denial_sample(self) -> DenialSample:
         return DenialSample(items=tuple(self.denials), total=self.denial_total)
-
-
-def denial_fields(decision: PolicyDecision) -> tuple[str | None, str]:
-    if RULE_ID.fullmatch(decision.reason) is not None:
-        return decision.reason, "denied"
-    return None, decision.reason
 
 
 def path_refused() -> ScriptRefused:
@@ -222,7 +207,12 @@ class FakeHarness:
         return []
 
     def build_session_spec(
-        self, config: JsonObject, workspace: WorkspaceTarget, feedback: None
+        self,
+        config: JsonObject,
+        workspace: WorkspaceTarget,
+        feedback: None,
+        *,
+        inputs: SessionInputs,
     ) -> SessionSpec:
         return SessionSpec.model_validate(
             {
@@ -230,10 +220,10 @@ class FakeHarness:
                 "adapter_version": VERSION,
                 "options": {},
                 "files": (),
-                "prompt": "",
+                "prompt": inputs.prompt,
                 "resume_handle": None,
-                "price_table_id": NAME,
-                "price_table": {},
+                "price_table_id": inputs.price_table_id,
+                "price_table": inputs.price_table.model_dump(mode="json"),
             }
         )
 
@@ -464,7 +454,7 @@ def emit_event(step: EventStep, summary: FakeSummary, sink: EventSink) -> None:
         summary.turns += 1
     if step.event == "provider_limited":
         summary.provider_limited = True
-    sink.emit(step.event, data.model_dump(mode="json", exclude_none=True))
+    sink.emit(step.event, data.model_dump(mode="json", exclude_unset=True))
 
 
 def emit_tool_result(

@@ -92,8 +92,9 @@ LOCAL_RUNTIME_CONTRACTS = (
 LOCAL_CAPTURE_FIXTURE = "test_command_capture.test_command_capture_on_full_disk"
 COUNT = re.compile(r"[1-9][0-9]*")
 MACOS = "macos-15"
-PULL_REQUEST = "pull_request"
-EVENTS = frozenset({PULL_REQUEST, "push"})
+PLATFORM_MACOS_EVENTS = frozenset({"pull_request", "push"})
+COMPLETE_MACOS_EVENTS = frozenset({"schedule", "workflow_dispatch"})
+EVENTS = PLATFORM_MACOS_EVENTS | COMPLETE_MACOS_EVENTS
 MatrixRow = dict[str, str | int]
 
 
@@ -127,7 +128,7 @@ def evidenced_general_lanes(
 ) -> tuple[str, ...]:
     if event not in EVENTS:
         raise EvidenceFailure("scaffold evidence has an unknown event")
-    if operating_system == MACOS and event == PULL_REQUEST:
+    if operating_system == MACOS and event in PLATFORM_MACOS_EVENTS:
         return ()
     return general_lanes(count)
 
@@ -709,7 +710,13 @@ def timing_lines(timing: ChildTiming) -> str:
 
 
 def refresh_durations(artifacts: Path) -> Table:
-    table = recorded_table(artifacts, validated_collection)
+    table = recorded_table(
+        artifacts,
+        validated_collection,
+        frozenset(
+            environment_key(system, python) for system, python, _ in ENVIRONMENTS
+        ),
+    )
     TABLE.write_text(table_text(table))
     return table
 

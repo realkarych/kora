@@ -68,8 +68,8 @@ require_scaffold_evidence() {
   test "$LANES_RESULT" = success
   test "$MACOS_LANES_RESULT" = success
   case "$EVENT_NAME" in
-    pull_request) test "$MACOS_GENERAL_LANES_RESULT" = skipped ;;
-    push) test "$MACOS_GENERAL_LANES_RESULT" = success ;;
+    pull_request|push) test "$MACOS_GENERAL_LANES_RESULT" = skipped ;;
+    schedule|workflow_dispatch) test "$MACOS_GENERAL_LANES_RESULT" = success ;;
     *) exit 1 ;;
   esac
   test "$DEPENDENCIES_OUTCOME" = success

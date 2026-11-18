@@ -11,11 +11,13 @@ from kora.protocols.harness import (
     UnconfirmedSample,
 )
 from kora.protocols.policy import (
+    RULE_ID,
     PolicyClient,
     PolicyDecision,
     PolicyLayers,
     ToolCallRequest,
 )
+from kora.protocols.vcs import WorkspaceRef
 from kora.runner.outcome import Bypass
 
 LIMITED_KINDS: Final[frozenset[str]] = frozenset({"turn", "tool_call", "tool_result"})
@@ -24,6 +26,22 @@ GRACE_DENIALS: Final[int] = 1_000
 MAX_DECIDED: Final[int] = TRACKING_CEILING + GRACE_DENIALS
 OUTPUT_CHANNEL_TOOL: Final[str] = "StructuredOutput"
 PolicyFailure = Literal["policy_error", "policy_timeout"]
+
+
+@dataclass(frozen=True)
+class CallScope:
+    harness: str
+    workspace: WorkspaceRef
+    node_path: str
+    layers: PolicyLayers
+    protected_paths: tuple[str, ...]
+    output_format: bool
+
+
+def denial_fields(decision: PolicyDecision) -> tuple[str | None, str]:
+    if RULE_ID.fullmatch(decision.reason) is not None:
+        return decision.reason, "denied"
+    return None, decision.reason
 
 
 class PolicyCallFailed(Exception):

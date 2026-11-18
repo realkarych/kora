@@ -16,6 +16,7 @@ from kora.protocols.harness import (
     LaunchContext,
     RunnerCause,
     RunnerOutcome,
+    SessionInputs,
     SessionResult,
     SessionSpec,
 )
@@ -74,9 +75,14 @@ class BrokenHarness:
         return self.inner.check_config(config)
 
     def build_session_spec(
-        self, config: JsonObject, workspace: WorkspaceTarget, feedback: None
+        self,
+        config: JsonObject,
+        workspace: WorkspaceTarget,
+        feedback: None,
+        *,
+        inputs: SessionInputs,
     ) -> SessionSpec:
-        return self.inner.build_session_spec(config, workspace, feedback)
+        return self.inner.build_session_spec(config, workspace, feedback, inputs=inputs)
 
     async def run(
         self,

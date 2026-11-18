@@ -162,6 +162,8 @@ INVENTORY: dict[object, tuple[str, ...]] = {
         "SessionFile",
         "Placement",
         "SessionSpec",
+        "SessionInputs",
+        "prompt_digest",
         "AgentExecution",
         "LaunchInputs",
         "LaunchEnd",

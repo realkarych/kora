@@ -133,6 +133,8 @@ def started_entries(domain: str) -> dict[str, Entry]:
         ),
         "completed": Completed(
             state="completed",
+            result=None,
+            exit_code=None,
             deadline=None,
             gate_closed=False,
             request_digest=DIGEST,

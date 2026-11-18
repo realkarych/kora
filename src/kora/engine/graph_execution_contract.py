@@ -6,6 +6,12 @@ from kora.db.graph_resource_owner_reads import AcquiredGraphResourceOwners
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.db.graph_version_reads import AcquiredGraphVersion, transport_limit
 from kora.db.types import DIGEST_LENGTH
+from kora.engine.graph_parameter_evaluation import (
+    parameter_preparation_reservation,
+    parameter_source_budgets,
+    prepare_graph_parameter_evaluation,
+    read_parameter_profile,
+)
 from kora.engine.graph_projection_paths import (
     GraphProjectionReadLimits,
     ParameterProjectionPaths,
@@ -36,6 +42,9 @@ from kora.engine.parameter_schema_source import (
     build_parameter_schema_arena,
 )
 from kora.ir.json import JsonObject
+from kora.ir.standard_parameter_preparation import PreparedStandardParameters
+from kora.ir.standard_schema_policy import LIMITS as STANDARD_SCHEMA_LIMITS
+from kora.ir.standard_schema_policy import SourceDecision
 from kora.ir.structured_schema_work import PARAMETERS as SCHEMA_PREPARATION_LIMITS
 
 MEMBERS = (
@@ -48,6 +57,7 @@ MEMBERS = (
     "cel_projection_paths",
     "command_resources",
 )
+PARAMETER_MEMBERS = MEMBERS[:3] + ("parameter_evaluation",) + MEMBERS[3:]
 NATIVE_TRANSPORT_COPIES = 4
 CANONICAL_PAIR_COPIES = 4
 DECIMAL_READ_WRITE_PASSES = 2
@@ -87,6 +97,7 @@ class CheckedExecutionContract:
         "resources",
         "parameter_paths",
         "parameter_schema",
+        "parameter_evaluation",
     )
     _namespace_id: str
     _graph_id: str
@@ -97,6 +108,7 @@ class CheckedExecutionContract:
     resources: GraphResourceReferences
     parameter_paths: ParameterProjectionPaths
     parameter_schema: ParameterSchemaArena | None
+    parameter_evaluation: PreparedStandardParameters | None
 
     def __init__(
         self,
@@ -108,15 +120,16 @@ class CheckedExecutionContract:
         parameter_paths: ParameterProjectionPaths,
         parameter_schema: ParameterSchemaArena | None = None,
         *,
+        parameter_evaluation: PreparedStandardParameters | None = None,
         issuer: object = None,
     ) -> None:
         if hasattr(self, "_namespace_id"):
             del self, scope, pin, canonical_ir, canonical_contract, resources
-            del parameter_paths, parameter_schema, issuer
+            del parameter_paths, parameter_schema, parameter_evaluation, issuer
             raise AttributeError("checked execution contract is immutable")
         if issuer is not _CHECKED_EXECUTION_CONTRACT:
             del self, scope, pin, canonical_ir, canonical_contract, resources
-            del parameter_paths, parameter_schema, issuer
+            del parameter_paths, parameter_schema, parameter_evaluation, issuer
             raise TypeError("execution contract requires the complete checking reader")
         object.__setattr__(self, "_namespace_id", scope.namespace_id)
         object.__setattr__(self, "_graph_id", scope.graph_id)
@@ -129,6 +142,7 @@ class CheckedExecutionContract:
         object.__setattr__(self, "resources", resources)
         object.__setattr__(self, "parameter_paths", parameter_paths)
         object.__setattr__(self, "parameter_schema", parameter_schema)
+        object.__setattr__(self, "parameter_evaluation", parameter_evaluation)
 
     @property
     def scope(self) -> GraphResourceScope:
@@ -161,8 +175,36 @@ def structured_output_preparation_reservation(output_bytes: int) -> tuple[int, i
         + SCHEMA_PREPARATION_LIMITS["max_auxiliary_bytes"]
         + SCHEMA_PREPARATION_LIMITS["max_auxiliary_entries"]
     )
-    return scratch, preparations * (
-        source + SCHEMA_PREPARATION_LIMITS["max_preparation_work"]
+    limits = STANDARD_SCHEMA_LIMITS
+    nodes, positions, edges, documents = (
+        limits["max_schema_nodes"],
+        limits["max_schema_positions"],
+        limits["max_reference_edges"],
+        limits["max_schema_documents"],
+    )
+    entries = (
+        8 * nodes
+        + 12 * positions
+        + 12 * edges
+        + 28 * documents
+        + 256 * (limits["max_schema_depth"] + 1)
+        + 2 * limits["max_schema_array_items"]
+        + 64
+    )
+    variable = (
+        13 * limits["max_schema_source_bytes"]
+        + 32 * limits["max_schema_string_bytes"]
+        + 128 * documents
+        + 2 * limits["max_schema_integer_bits"]
+    )
+    work = 4 * (
+        limits["max_validation_score"]
+        + limits["max_schema_source_bytes"]
+        + nodes
+        + entries
+    )
+    return max(scratch, variable + entries), preparations * max(
+        source + SCHEMA_PREPARATION_LIMITS["max_preparation_work"], work
     )
 
 
@@ -194,6 +236,9 @@ def execution_contract_read_reservation(
     preparation_scratch, preparation_work = structured_output_preparation_reservation(
         cel.output_context_bytes
     )
+    parameter_scratch, parameter_work = parameter_preparation_reservation(
+        cel.output_context_bytes
+    )
     retained = (
         pair_copies
         + limits.physical_input_bytes
@@ -205,7 +250,7 @@ def execution_contract_read_reservation(
         + logical.scratch
         + resources.source_bytes
         + resources.scratch
-        + preparation_scratch
+        + max(preparation_scratch, parameter_scratch)
     )
     max_token = max(
         pair,
@@ -230,6 +275,7 @@ def execution_contract_read_reservation(
         + resources.work
         + limits.physical_input_bytes
         + preparation_work
+        + parameter_work
     )
     if retained > limits.max_retained_bytes or work > limits.max_work:
         raise GraphValueRejected(GraphValueFailure.BUDGET)
@@ -239,8 +285,10 @@ def execution_contract_read_reservation(
 def check_execution_contract_projection_members(
     canonical_ir: str, saved: JsonObject, limits: ExecutionContractReadLimits
 ) -> ParameterProjectionPaths:
-    if len(saved) != len(MEMBERS) or tuple(saved) != MEMBERS:
+    if tuple(saved) not in (MEMBERS, PARAMETER_MEMBERS):
         raise GraphValueRejected(GraphValueFailure.INVALID)
+    if tuple(saved) == PARAMETER_MEMBERS:
+        read_parameter_profile(saved["parameter_evaluation"])
     return read_graph_cel_projection_paths(
         canonical_ir, saved, limits=limits.projection
     ).parameters
@@ -289,6 +337,30 @@ def _prepare_parameter_schema(
             limits.selection_entries,
         ),
     )
+
+
+def _prepare_parameter_evaluation(
+    saved: JsonObject, limits: ExecutionContractReadLimits
+) -> PreparedStandardParameters | None:
+    if tuple(saved) == MEMBERS:
+        return None
+    source, selection = parameter_source_budgets(
+        limits.projection.cel.output_context_bytes
+    )
+    prepared = prepare_graph_parameter_evaluation(
+        cast(JsonObject, saved["parameters"]),
+        cast(list[JsonObject], saved["type_contracts"]),
+        saved["parameter_evaluation"],
+        source_budget=source,
+        selection_budget=selection,
+    )
+    if isinstance(prepared, SourceDecision):
+        raise GraphValueRejected(
+            GraphValueFailure.BUDGET
+            if prepared.reason == "evaluation_exhausted"
+            else GraphValueFailure.VERSION
+        )
+    return prepared
 
 
 def _checked_result(
@@ -361,6 +433,7 @@ def _checked_result(
             resources,
             paths,
             parameter_schema,
+            parameter_evaluation=_prepare_parameter_evaluation(saved, limits),
             issuer=_CHECKED_EXECUTION_CONTRACT,
         )
     except GraphValueRejected as rejected:

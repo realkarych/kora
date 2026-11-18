@@ -5,7 +5,7 @@ import pytest
 from pydantic import MISSING
 from sqlalchemy import insert, select, update
 
-from kora.api.graph_deployment_limits import IDENTITY
+from kora.api.run_trigger_limits import START_PREPARATION
 from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database, Dialect
 from kora.db.graph_value_json import GraphValueRejected
@@ -123,9 +123,14 @@ async def limit_backlog(database: Database, namespace_id: str, limit: int) -> No
         )
 
 
-async def promote(database: Database, case: DeployedGraph, run_id: str) -> str:
+async def promote(
+    database: Database,
+    case: DeployedGraph,
+    run_id: str,
+    params: JsonObject | None = None,
+) -> str:
     scope = GraphResourceScope(case.namespace_id, case.graph_id, case.version_id)
-    request = request_for(case)
+    request = request_for(case, params)
     facts = await facts_for(database, case, request, "promotion-facts")
     assert isinstance(facts, ManualStartFacts)
     async with database.read_transaction() as reader:
@@ -250,15 +255,19 @@ async def test_manual_start_accepts_a_pending_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("params", [{}, {"enabled": -0.0, "count": 9007199254740993}])
 async def test_accepted_manual_start_is_promoted(
-    database: Database, evaluator: Evaluator
+    database: Database, evaluator: Evaluator, params: JsonObject
 ) -> None:
-    case = await deploy(database, evaluator)
-    response = accepted(await start(database, case))
+    case = await deploy(database, evaluator, with_graph(params={}))
+    response = accepted(await start(database, case, params))
+    before = await start_rows(database)
 
-    status = await promote(database, case, response.run_id)
+    status = await promote(database, case, response.run_id, params)
+    after = await start_rows(database)
 
     assert status == "running"
+    assert after["run_inputs"] == before["run_inputs"]
 
 
 @pytest.mark.asyncio
@@ -335,14 +344,16 @@ async def test_manual_start_refuses_a_full_backlog(
     [
         (None, {"extra": 1}, StartRefusal.PARAMETERS),
         (
-            with_graph(params={"type": "object"}),
+            with_graph(params={"type": "object", "required": ["required"]}),
             None,
-            StartRefusal.PARAMETERS_UNAVAILABLE,
+            StartRefusal.PARAMETERS,
         ),
         (
-            with_graph(params={"type": "object"}),
+            with_graph(
+                params={"type": "object", "properties": {"extra": {"type": "string"}}}
+            ),
             {"extra": 1},
-            StartRefusal.PARAMETERS_UNAVAILABLE,
+            StartRefusal.PARAMETERS,
         ),
         (with_agent_secret(), None, StartRefusal.SECRETS),
     ],
@@ -491,31 +502,36 @@ async def test_manual_start_facts_bind_their_request(
     candidate = await select_manual_start(database, case.user, explicit, KEY)
     assert isinstance(candidate, StartCandidate)
     selected = await acquire_manual_start(
-        database, explicit, candidate, limits=IDENTITY
+        database, explicit, candidate, limits=START_PREPARATION
     )
     assert isinstance(selected, SelectedStartVersion)
 
     with pytest.raises(StartAcceptanceFailed):
         await commit(database, case, request_for(case, {"extra": 1}), facts)
+    with pytest.raises(StartAcceptanceFailed):
+        await commit(database, case, request_for(case), facts, key="another-key")
     with pytest.raises(StartRecordRejected):
         await acquire_manual_start(
-            database, request_for(case), candidate, limits=IDENTITY
+            database, request_for(case), candidate, limits=START_PREPARATION
         )
     with pytest.raises(TypeError):
-        StartCandidate(object(), explicit, newer)
+        StartCandidate(object(), explicit, candidate.original)
     with pytest.raises(GraphValueRejected):
         read_manual_start_facts(
             selected,
             request_for(case, version=case.version_id),
             SELECTION,
-            limits=IDENTITY,
+            key=KEY,
+            limits=START_PREPARATION,
         )
     with pytest.raises(TypeError):
         ManualStartFacts(
             object(),
             request_for(case),
             facts.pin,
-            GraphDocument.model_validate(skeleton_ir()),
+            (facts.overlap, facts.timeout, facts.retention),
+            candidate.original,
+            b"{}",
         )
     rows = await start_rows(database)
 
@@ -539,13 +555,11 @@ async def test_corrupted_stored_graph_never_executes(
             .values(ir=stored.replace("repository", "repositorx"))
         )
 
-    response = accepted(await start(database, case))
     with pytest.raises(GraphValueRejected):
-        await promote(database, case, response.run_id)
+        await start(database, case)
     rows = await start_rows(database)
 
-    [saved] = rows["run"]
-    assert (saved["status"], saved["started_at"]) == ("pending", None)
+    assert all(not table for table in rows.values())
 
 
 @pytest.mark.parametrize(
@@ -719,9 +733,9 @@ async def test_manual_start_refuses_an_unavailable_saved_binding(
             )
         )
 
-    result = await start(database, case)
+    with pytest.raises(GraphValueRejected):
+        await start(database, case)
 
-    assert result is StartRefusal.PARAMETERS_UNAVAILABLE
     assert all(not table for table in (await start_rows(database)).values())
 
 
@@ -738,10 +752,12 @@ async def test_accept_manual_start_prepares_again_once(
         candidate: StartCandidate,
     ) -> StartAcceptance | StartFactsResult | None:
         selected = await acquire_manual_start(
-            database, request, candidate, limits=IDENTITY
+            database, request, candidate, limits=START_PREPARATION
         )
         assert isinstance(selected, SelectedStartVersion)
-        facts = read_manual_start_facts(selected, request, SELECTION, limits=IDENTITY)
+        facts = read_manual_start_facts(
+            selected, request, SELECTION, key=KEY, limits=START_PREPARATION
+        )
         if len(published) < changes:
             published.append(
                 await redeploy(database, evaluator, case, f"Change {len(published)}.")

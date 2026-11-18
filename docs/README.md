@@ -10,6 +10,8 @@ Threat-model navigation amendment: scope and implementation plan approved under 
 
 Implementation-plan navigation amendment dated 2026-10-19: a reading-order entry for the implementation plan; scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127); wording pending line-by-line owner review.
 
+Owner-wording amendment dated 2026-11-15: approvals and reviews name either owner, `realkarych` or `klukashka`; substance approved by the owners under [issue #1363](https://github.com/realkarych/kora/issues/1363) (decision 10 of [issue #1356](https://github.com/realkarych/kora/issues/1356)); wording pending line-by-line owner review.
+
 ## Reading order
 
 1. [positioning.md](positioning.md): the one-liner, the problem, who kora is for, the primary contrast (Archon), the canonical use case, non-goals, evidence and hypotheses.
@@ -32,8 +34,8 @@ For contributions and local checks, use [development.md](development.md): tool s
 ## Conventions
 
 - Everything in the repository is in English and must be understandable without the conversation that produced it; identifiers that resolve inside the repository (`FR-6.3`, `NFR-5.5`, `ADR-0007`, `DD-12`) are fine, labels that exist only in a session are not.
-- Decisions are made by the project owner and recorded here; the specifications in `knowledge/specs/` apply them and never contradict them. When the two disagree, the decision record wins and the specification is fixed.
-- Every statement in this folder has been reviewed and accepted by the project owner; each file says when. A change lands only through a pull request the owner reviews line by line. Material produced by agents without that review (research, analyses, review records, drafts) belongs in [`knowledge/`](../knowledge/README.md).
+- Decisions are made by the owners and recorded here; the specifications in `knowledge/specs/` apply them and never contradict them. When the two disagree, the decision record wins and the specification is fixed.
+- Every statement in this folder has been reviewed and accepted by an owner; each file says when. A change lands only through a pull request an owner reviews line by line. Material produced by agents without that review (research, analyses, review records, drafts) belongs in [`knowledge/`](../knowledge/README.md).
 - Volatile external facts (versions, popularity, prices, release dates) live in `knowledge/research/` with the date they were checked; this folder states them qualitatively and links there.
 - Research and analyses are evidence, not decisions. They are cited from a decision record or from positioning, never the other way round.
 

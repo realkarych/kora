@@ -4,7 +4,7 @@ Date: 2026-10-31. Implementing issue: [#519](https://github.com/realkarych/kora/
 
 ## Internal interfaces and owners
 
-The helpers live in existing-layer `kora.ir` modules and have no public package export. [`structured_schema_cursors.py`](../../src/kora/ir/structured_schema_cursors.py) owns the borrowed handles, exact visited-kind/indexed accessors, string primitive and native-object index. [`structured_schema_equality.py`](../../src/kora/ir/structured_schema_equality.py) owns iterative comparison.
+The helpers live in existing-layer `kora.ir` modules and have no public package export. [`structured_schema_cursors.py`](https://github.com/realkarych/kora/blob/090c2af0806671342abf375ccaa82979ca190f9b/src/kora/ir/structured_schema_cursors.py) owns the borrowed handles, exact visited-kind/indexed accessors, string primitive and native-object index. [`structured_schema_equality.py`](https://github.com/realkarych/kora/blob/80dd8bca4ebff5c37f7a985e43b20f41d41d73e1/src/kora/ir/structured_schema_equality.py) owns iterative comparison.
 
 | Internal interface | Input, result and ownership |
 |---|---|

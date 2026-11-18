@@ -17,6 +17,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.admission_discovery_v1 import CANDIDATE_ROWS
+from kora.db.admission_discovery_v1 import INDEX_NAME as ADMISSION_DISCOVERY_INDEX
+from kora.db.admission_wait_v1 import INDEXES as WAIT_INDEXES
+from kora.db.admission_wait_v1 import wait_index_dialect
+from kora.db.attempt_capacity_v1 import INDEXES as CAPACITY_INDEXES
+from kora.db.attempt_capacity_v1 import capacity_index_dialect
 from kora.db.bootstrap_initialization_v1 import (
     TABLE_NAME as BOOTSTRAP_INITIALIZATION_TABLE,
 )
@@ -533,6 +539,12 @@ node_instance: Table = Table(
     *audit_columns(),
     UniqueConstraint("run_id", "node_path"),
     Index("ix_node_instance_run_top_level", "run_id", "top_level"),
+    Index(
+        ADMISSION_DISCOVERY_INDEX,
+        "id",
+        sqlite_where=literal_column(CANDIDATE_ROWS),
+        postgresql_where=literal_column(CANDIDATE_ROWS),
+    ),
 )
 
 attempt: Table = Table(
@@ -698,6 +710,23 @@ for index_name, owner_table, index_columns, predicate, _ in DEADLINE_INDEXES:
         *(metadata.tables[owner_table].c[column] for column in index_columns),
         postgresql_where=None if predicate is None else literal_column(predicate),
         sqlite_where=None if predicate is None else literal_column(predicate),
+    )
+
+for (
+    index_name,
+    owner_table,
+    index_columns,
+    sqlite_filter,
+    pg_filter,
+    _,
+) in (*CAPACITY_INDEXES, *WAIT_INDEXES):
+    Index(
+        index_name,
+        *(metadata.tables[owner_table].c[column] for column in index_columns),
+        postgresql_where=None if pg_filter is None else literal_column(pg_filter),
+        sqlite_where=None if sqlite_filter is None else literal_column(sqlite_filter),
+    ).ddl_if(
+        dialect=capacity_index_dialect(index_name) or wait_index_dialect(index_name)
     )
 
 artifact_version: Table = Table(

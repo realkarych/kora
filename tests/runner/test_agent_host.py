@@ -9,6 +9,7 @@ from kora.conformance.capture import Capture
 from kora.ir import ErrorClass
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
+from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import LaunchInputs
 from kora.protocols.runtime import (
@@ -82,18 +83,19 @@ async def stopped(
     releases: tuple[int, ...] = (),
     deaf: bool = False,
     journal: JournalProxy | None = None,
+    deadline: ExecutionDeadline | None = None,
     **changes: object,
 ) -> tuple[AgentHost, Released]:
     host = world.host(world.resolver(source, deaf), journal=journal)
-    host.start(world.workload(**changes), world.workspace())
+    host.start(world.workload(deadline=deadline, **changes), world.workspace())
     await source.paused.wait()
     abandoned = asyncio.ensure_future(host.finished())
     asyncio.get_running_loop().call_soon(abandoned.cancel)
     await asyncio.wait({abandoned})
     cancelled = asyncio.ensure_future(host.cancel() if cancel else host.finished())
-    for deadline in releases:
-        await world.clock.requested(deadline)
-        await world.clock.release(deadline)
+    for due_ns in releases:
+        await world.clock.requested(due_ns)
+        await world.clock.release(due_ns)
     await cancelled
     await host.finished()
     return host, await host.stop()
@@ -138,7 +140,9 @@ def test_agent_host_returns_session_result_max_events(
     world = make_world(tmp_path, kora_capture)
     source = script([turn("m1"), turn("m2"), turn("m3"), result()])
 
-    host, _ = run(hosted(world, source, limits={"max_events": 2}))
+    host, _ = run(
+        hosted(world, source, limits={"max_events": 2, "stall_after_us": "900000000"})
+    )
     observation = observed(world, host)
     world.close()
 
@@ -197,7 +201,7 @@ def test_agent_host_returns_session_result_max_events_ignored(
             source,
             cancel=cancel,
             releases=(INTERRUPT_GRACE_NS,),
-            limits={"max_events": 1},
+            limits={"max_events": 1, "stall_after_us": "900000000"},
         )
     )
     observation = observed(world, host)

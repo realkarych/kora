@@ -1,19 +1,24 @@
 import asyncio
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Final, Protocol
 
-from pydantic import Field, StrictInt, ValidationError
+from pydantic import Field, StrictInt, StrictStr, StringConstraints, ValidationError
 
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.observability.redaction import SecretRegistry
 from kora.protocols.common import BoundaryModel, ProtocolContext
-from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
+from kora.protocols.deadlines import (
+    NANOSECONDS_PER_SECOND,
+    ExecutionDeadline,
+    LocalThresholds,
+    thresholds,
+)
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
     AgentExecution,
@@ -37,6 +42,7 @@ from kora.protocols.vcs import WorkspaceRef
 from kora.runner.calls import TRACKING_CEILING
 from kora.runner.filesystem import DirectoryAnchor, FilesystemError
 from kora.runner.journal import SYNC_DEADLINE_NS, JournalAppendOutcome
+from kora.runner.liveness import watch_liveness
 from kora.runner.session_result import (
     ResultFile,
     ResultTooLarge,
@@ -107,14 +113,25 @@ def refused(code: str) -> KoraProtocolError:
 
 
 class SessionLimits(BoundaryModel):
+    stall_after_us: Annotated[
+        StrictStr, StringConstraints(pattern=r"^(0|[1-9][0-9]{0,18})$")
+    ]
     max_events: Annotated[StrictInt, Field(ge=1, le=TRACKING_CEILING)] | None = None
+
+
+@dataclass(frozen=True)
+class AdmittedSession:
+    execution: AgentExecution
+    spec: SessionSpec
+    max_events: int | None
+    stall_after_ns: int
+    deadline: ExecutionDeadline | None
 
 
 @dataclass(frozen=True)
 class HostedHarness:
     adapter: HarnessAdapter
     kill: Callable[[], None]
-    launches: LaunchContext
 
 
 class HarnessResolver(Protocol):
@@ -154,6 +171,7 @@ class HostServices:
     registry: SecretRegistry
     clock: Clock
     log: ComponentLogger
+    launches: LaunchContext = field(default_factory=RefusingLaunches)
 
 
 @dataclass(frozen=True)
@@ -162,6 +180,8 @@ class Session:
     hosted: HostedHarness
     run: "asyncio.Task[SessionResult]"
     supervised: "asyncio.Task[None]"
+    timer: "asyncio.Task[None]"
+    deadline: LocalThresholds | None
 
 
 @dataclass(frozen=True)
@@ -186,11 +206,24 @@ class AgentHost:
         self._session: Session | None = None
         self._fenced = asyncio.Event()
         self._sealed: ResultFile | None = None
+        self._observation: SessionObservation | None = None
 
     def start(self, workload: Workload, workspace: WorkspaceRef) -> None:
         if self._session is not None or self._fenced.is_set():
             raise refused("workload_busy")
-        execution, spec, limits = self.admitted(workload, workspace)
+        admitted = self.admitted(workload, workspace)
+        services = self._services
+        deadline = (
+            thresholds(admitted.deadline, services.clock.sample())
+            if admitted.deadline is not None
+            else None
+        )
+        if (
+            deadline is not None
+            and deadline.interrupt_at_ns <= services.clock.monotonic_ns()
+        ):
+            raise refused("deadline_expired")
+        spec = admitted.spec
         digest = digest_of(canonical_bytes(spec.model_dump(mode="json")))
         recorded = self._journal.append_outcome(
             "runner.session_spec", {"digest": digest}
@@ -199,20 +232,28 @@ class AgentHost:
             raise KoraProtocolError(
                 "journal_unavailable", "the session spec was not recorded", True, {}
             )
-        services = self._services
-        hosted = services.resolver.resolve(execution, workspace)
-        sink = RunnerSink(self._journal, services.registry, services.clock, limits)
+        hosted = services.resolver.resolve(admitted.execution, workspace)
+        sink = RunnerSink(
+            self._journal,
+            services.registry,
+            services.clock,
+            admitted.max_events,
+            admitted.stall_after_ns,
+        )
         policy = BoundPolicy(services.policy, services.ctx)
         run = asyncio.create_task(
-            hosted.adapter.run(spec, policy, sink, hosted.launches)
+            hosted.adapter.run(spec, policy, sink, services.launches)
         )
-        supervised = asyncio.create_task(self._supervise(sink, hosted, run))
-        self._session = Session(sink, hosted, run, supervised)
+        timer = asyncio.create_task(
+            watch_liveness(
+                sink, services.clock, admitted.stall_after_ns, deadline, run.done
+            )
+        )
+        supervised = asyncio.create_task(self._supervise(sink, hosted, run, timer))
+        self._session = Session(sink, hosted, run, supervised, timer, deadline)
         services.log.emit(SESSION_STARTED)
 
-    def admitted(
-        self, workload: Workload, workspace: WorkspaceRef
-    ) -> tuple[AgentExecution, SessionSpec, int | None]:
+    def admitted(self, workload: Workload, workspace: WorkspaceRef) -> AdmittedSession:
         if workload.kind != "agent":
             raise refused("workload_kind_unavailable")
         try:
@@ -228,19 +269,29 @@ class AgentHost:
             or workspace.attempt_id != workload.attempt_id
         ):
             raise refused("workspace_untrusted")
-        return execution, spec, limits.max_events
+        return AdmittedSession(
+            execution,
+            spec,
+            limits.max_events,
+            int(limits.stall_after_us) * 1000,
+            workload.deadline,
+        )
 
     async def _supervise(
         self,
         sink: RunnerSink,
         hosted: HostedHarness,
         run: "asyncio.Task[SessionResult]",
+        timer: "asyncio.Task[None]",
     ) -> None:
         stopping = asyncio.ensure_future(sink.termination())
         try:
-            await asyncio.wait({run, stopping}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait(
+                {run, stopping, timer}, return_when=asyncio.FIRST_COMPLETED
+            )
         finally:
             stopping.cancel()
+            await self._cancel_timer(timer)
         ended = await self._ended(hosted, run)
         clock = self._services.clock
         complete = await sink.settle(clock.monotonic_ns() + SYNC_DEADLINE_NS)
@@ -265,6 +316,16 @@ class AgentHost:
             )
         )
 
+    async def _cancel_timer(self, timer: "asyncio.Task[None]") -> None:
+        if not timer.cancelling():
+            timer.cancel()
+        try:
+            await timer
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if not timer.cancelled() or (current is not None and current.cancelling()):
+                raise
+
     async def _ended(
         self, hosted: HostedHarness, run: "asyncio.Task[SessionResult]"
     ) -> bool:
@@ -282,8 +343,14 @@ class AgentHost:
 
     async def _graced(self, run: "asyncio.Task[SessionResult]") -> None:
         clock = self._services.clock
+        now = clock.monotonic_ns()
+        deadline = now + INTERRUPT_GRACE_NS
+        thresholds = self._started().deadline
+        if thresholds is not None:
+            deadline = min(deadline, thresholds.escalate_at_ns)
+        if deadline <= now:
+            return
         fenced = asyncio.ensure_future(self._fenced.wait())
-        deadline = clock.monotonic_ns() + INTERRUPT_GRACE_NS
         grace = asyncio.ensure_future(clock.sleep_until(deadline))
         try:
             await asyncio.wait(
@@ -310,6 +377,7 @@ class AgentHost:
                 log.emit(SESSION_FAILED, code="result_unsealed")
                 return
             self._sealed = written
+            self._observation = sealed
         if isinstance(sealed, SessionFailedObservation):
             log.emit(SESSION_FAILED, code=sealed.code)
             return
@@ -357,6 +425,7 @@ class AgentHost:
         session = self._session
         if session is None:
             return Released(True, True)
+        await self._cancel_timer(session.timer)
         clock = self._services.clock
         supervised = await settled_by(
             session.supervised, clock, clock.monotonic_ns() + STOP_DEADLINE_NS
@@ -377,6 +446,10 @@ class AgentHost:
     def result_reference(self) -> ResultFile | None:
         with self._lock:
             return self._sealed
+
+    def observation(self) -> SessionObservation | None:
+        with self._lock:
+            return self._observation
 
     def _started(self) -> Session:
         if self._session is None:

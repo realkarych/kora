@@ -15,10 +15,6 @@ from kora.engine.parameter_schema_source import (
     ParameterSchemaSourceFailure,
     ParameterSchemaSourceRejected,
 )
-from kora.engine.parameter_schema_support import (
-    ParameterSchemaSupport,
-    check_parameter_schema_support,
-)
 from kora.ir.json import JsonObject
 from tests.engine.test_graph_types import custom
 from tests.engine.test_parameter_schema_references import ample, sources_for
@@ -85,9 +81,6 @@ def test_selection_closes_typed_inert_references_without_executing_them() -> Non
         position=ParameterSchemaPosition(arena.root, compat),
     )
     target = sources.resolve(ParameterReferenceKeyword.REF, ample(), position=selected)
-    support = check_parameter_schema_support(
-        arena, budget=ample(), max_active_frames=2, max_call_depth=2
-    )
 
     assert named_roots(arena) == [
         "example/First",
@@ -100,7 +93,6 @@ def test_selection_closes_typed_inert_references_without_executing_them() -> Non
     )
     assert target.document_root == selected.document_root != arena.root
     assert arena.nodes[target.node].value is False
-    assert support == ParameterSchemaSupport(reachable_positions=2, call_depth=2)
 
 
 def test_unselected_body_growth_consumes_neither_parameter_budget() -> None:

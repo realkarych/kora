@@ -766,12 +766,20 @@ def compose_application(
 
         deploy_command(environment, diagnostics, path, as_json)
 
-    @app.command(name="trigger", help="Start a deployed graph without parameters.")
+    @app.command(
+        name="trigger", help="Start a deployed graph with validated parameters."
+    )
     def trigger(
         graph: str,
         namespace: str | None = typer.Option(None, "--namespace"),
         graph_version: str | None = typer.Option(None, "--graph-version"),
         idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
+        param: Annotated[
+            list[str] | None,
+            typer.Option(
+                "--param", help="A literal KEY=JSON value; repeat for each key."
+            ),
+        ] = None,
         allow_unenforced_secrets: bool = typer.Option(
             False, "--allow-unenforced-secrets"
         ),
@@ -788,6 +796,7 @@ def compose_application(
                 graph_version,
                 idempotency_key,
                 allow_unenforced_secrets,
+                tuple(param or ()),
             ),
             as_json,
         )

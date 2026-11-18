@@ -1,8 +1,10 @@
 import errno
+import hashlib
 import os
 import sys
 import threading
 from collections import deque
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Final
 
@@ -35,10 +37,18 @@ class JournalAppendOutcome(Enum):
     UNCERTAIN = auto()
 
 
+@dataclass(frozen=True)
+class JournalLocation:
+    offset: int
+    length: int
+    digest: str
+
+
 class _Write:
-    def __init__(self, line: bytes, deadline: int) -> None:
+    def __init__(self, line: bytes, deadline: int, position: int) -> None:
         self.line = line
         self.deadline = deadline
+        self.position = position
         self.write_admitted = False
         self.done = False
         self.synced = False
@@ -80,13 +90,29 @@ class RunningJournal:
     def append_outcome(
         self, kind: str, data: JsonObject, *, reader_bounded: bool = False
     ) -> JournalAppendOutcome:
+        return self._append(kind, data, reader_bounded)[0]
+
+    def append_located(
+        self, kind: str, data: JsonObject
+    ) -> tuple[JournalAppendOutcome, JournalLocation | None]:
+        outcome, job = self._append(kind, data, True)
+        with self._state:
+            prefix = self._prefix_bytes
+        if outcome is not JournalAppendOutcome.DURABLE or job is None or prefix is None:
+            return outcome, None
+        digest = "sha256:" + hashlib.sha256(job.line).hexdigest()
+        return outcome, JournalLocation(prefix + job.position, len(job.line), digest)
+
+    def _append(
+        self, kind: str, data: JsonObject, reader_bounded: bool
+    ) -> tuple[JournalAppendOutcome, _Write | None]:
         deadline = self._clock.monotonic_ns() + SYNC_DEADLINE_NS
         launch: tuple[threading.Thread, DirectoryAnchor, BorrowedInvocation] | None = (
             None
         )
         with self._state:
             if self._closed:
-                return JournalAppendOutcome.ABSENT
+                return JournalAppendOutcome.ABSENT, None
             try:
                 line = (
                     canonical_bytes(
@@ -106,7 +132,7 @@ class RunningJournal:
                     or self._prefix_bytes + admitted_bytes > RECORD_LIMIT
                 ):
                     raise JournalCapacityError
-                job = _Write(line, deadline)
+                job = _Write(line, deadline, self._admitted_bytes)
                 self._jobs.append(job)
             except MemoryError:
                 if reader_bounded:
@@ -119,7 +145,7 @@ class RunningJournal:
                     launch = self._prepare_writer()
                 except (OSError, RuntimeError, MemoryError):
                     self._close_locked()
-                    return JournalAppendOutcome.ABSENT
+                    return JournalAppendOutcome.ABSENT, None
                 self._thread = launch[0]
             self._state.notify_all()
         if launch is not None:
@@ -130,11 +156,11 @@ class RunningJournal:
                 self.close()
                 if ownership.seal() is None:
                     directory.close()
-                return JournalAppendOutcome.ABSENT
+                return JournalAppendOutcome.ABSENT, None
             with self._state:
                 self._writer_ready = True
                 self._state.notify_all()
-        return self._wait(job)
+        return self._wait(job), job
 
     def _prepare_writer(
         self,

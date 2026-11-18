@@ -345,7 +345,9 @@ def test_refresh_records_milliseconds_and_tests_per_module(tmp_path: Path) -> No
     write_receipt(storage)
     (storage / "junit.xml").write_text(junit_text({"tests.plugins.storage.x": 9.0}))
 
-    table = recorded_table(tmp_path, validated_collection)
+    table = recorded_table(
+        tmp_path, validated_collection, frozenset({"ubuntu-24.04-3.11.17"})
+    )
 
     assert table == Table(
         "77",
@@ -359,16 +361,16 @@ def test_refresh_records_milliseconds_and_tests_per_module(tmp_path: Path) -> No
     )
 
 
-GREEN_PUSH_RUN = "one green master push run"
+GREEN_COMPLETE_RUN = "one green complete master run"
 
 
 @pytest.mark.parametrize(
     ("corruption", "failure", "match"),
     [
         ("foreign test", PlanFailure, "not in the collection"),
-        ("two runs", PlanFailure, GREEN_PUSH_RUN),
-        ("pull request merge", PlanFailure, GREEN_PUSH_RUN),
-        ("failed child", PlanFailure, GREEN_PUSH_RUN),
+        ("two runs", PlanFailure, GREEN_COMPLETE_RUN),
+        ("pull request merge", PlanFailure, GREEN_COMPLETE_RUN),
+        ("failed child", PlanFailure, GREEN_COMPLETE_RUN),
         ("missing receipt", PlanFailure, "not a regular file"),
         ("document type", PlanFailure, "document type"),
         ("missing duration", PlanFailure, "finite duration"),
@@ -376,7 +378,7 @@ GREEN_PUSH_RUN = "one green master push run"
         ("incomplete collection", EvidenceFailure, "collection is incomplete"),
     ],
 )
-def test_refresh_refuses_artifacts_outside_one_green_push_run(
+def test_refresh_refuses_artifacts_outside_one_green_complete_run(
     tmp_path: Path, corruption: str, failure: type[Exception], match: str
 ) -> None:
     recorded_lane(tmp_path, "general-1", module_nodes("tests/test_a.py", 2), 0.25)
@@ -402,4 +404,6 @@ def test_refresh_refuses_artifacts_outside_one_green_push_run(
         (directory / "complete.txt").write_text("\n".join(COLLECTED) + "\n")
 
     with pytest.raises(failure, match=match):
-        recorded_table(tmp_path, validated_collection)
+        recorded_table(
+            tmp_path, validated_collection, frozenset({"ubuntu-24.04-3.11.17"})
+        )

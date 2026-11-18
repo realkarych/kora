@@ -12,6 +12,8 @@ from tests.api.deployment_cases import HARNESS, NAMESPACE, preparer, skeleton_ir
 from tests.api.support import api_capture, application, deployment_services
 from tests.cli.test_deploy_command import bearer, kora, written
 from tests.client.support import running_app
+from tests.engine.graph_output_cases import child
+from tests.engine.start_cases import start_rows
 
 __all__ = ["api_capture", "preparer"]
 
@@ -27,7 +29,9 @@ async def test_cli_trigger(
     app = application(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     )
-    graph = written(tmp_path, "skeleton.ir.json", skeleton_ir())
+    ir = skeleton_ir()
+    child(ir, "graph")["params"] = {}
+    graph = written(tmp_path, "skeleton.ir.json", ir)
 
     async with running_app(app) as origin:
         environment = {"KORA_URL": origin, "KORA_TOKEN": token}
@@ -36,6 +40,23 @@ async def test_cli_trigger(
             ["trigger", "skeleton", "--namespace", NAMESPACE, "--json"]
             + ["--idempotency-key", "cli-start"],
             environment,
+        )
+        parameterized = await kora(
+            [
+                "trigger",
+                "skeleton",
+                "--namespace",
+                NAMESPACE,
+                "--json",
+                "--param",
+                'text="private-params\\u0000"',
+                "--param",
+                "number=-0.0",
+            ],
+            environment,
+        )
+        malformed = await kora(
+            ["trigger", "skeleton", "--param", "x=unquoted"], environment
         )
         human = await kora(
             ["trigger", "skeleton", "--idempotency-key", "cli-start"],
@@ -63,6 +84,18 @@ async def test_cli_trigger(
             environment,
         )
 
+    assert parameterized.code == 0
+    assert (malformed.code, malformed.stdout) == (2, b"")
+    parameter_run = AcceptedRun.model_validate_json(
+        parameterized.stdout
+    ).run_id.removeprefix("run_")
+    saved = next(
+        row
+        for row in (await start_rows(database))["run_inputs"]
+        if row["run_id"] == parameter_run
+    )
+    assert saved["params"] == b'{"number":-0.0,"text":"private-params\\u0000"}'
+    assert b"private-params" not in parameterized.stderr
     accepted = AcceptedRun.model_validate_json(machine.stdout)
     assert (deployed.code, machine.code, human.code) == (0, 0, 0)
     assert human.stdout.decode().strip() == (

@@ -1,17 +1,13 @@
-import asyncio
 import sys
-from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import cast
 
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ClaudeSDKError,
-    HookMatcher,
     Message,
+    RateLimitEvent,
     ResultMessage,
     StreamEvent,
     SystemMessage,
@@ -22,13 +18,6 @@ from claude_agent_sdk import (
     __version__,
 )
 from claude_agent_sdk._cli_version import __cli_version__
-from claude_agent_sdk.types import (
-    HookContext,
-    HookInput,
-    SettingSource,
-    SyncHookJSONOutput,
-    SystemPromptPreset,
-)
 
 from kora.plugins.harness.claude.configuration import CLI_VERSION, SDK_VERSION
 from kora.plugins.harness.claude.events import (
@@ -39,13 +28,6 @@ from kora.plugins.harness.claude.events import (
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import LaunchInputs
-from kora.protocols.time import Clock
-
-LAUNCH_DIRECTORY: Final[str] = "KORA_CLAUDE_LAUNCH_DIR"
-MODEL: Final[str] = "claude-sonnet-4-5"
-TURN_LIMIT: Final[int] = 4
-Decision = Literal["allow", "deny"]
-Outcome = Literal["completed", "cancelled"]
 
 
 def require_native_versions(sdk_version: str, cli_version: str) -> None:
@@ -79,164 +61,6 @@ def bundled_binary() -> Path:
     return binary
 
 
-def discard_stderr(_line: str) -> None:
-    return None
-
-
-async def drop(task: asyncio.Task[object]) -> None:
-    if not task.done():
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        return
-    if not task.cancelled():
-        task.exception()
-
-
-async def wait_task(task: asyncio.Task[object], clock: Clock, deadline_ns: int) -> None:
-    if task.done():
-        task.result()
-        return
-    timeout = asyncio.create_task(clock.sleep_until(deadline_ns))
-    try:
-        done, _pending = await asyncio.wait(
-            {task, timeout}, return_when=asyncio.FIRST_COMPLETED
-        )
-    finally:
-        await drop(timeout)
-    if task not in done:
-        raise KoraProtocolError("harness_error", "the Claude session failed", False, {})
-    task.result()
-
-
-async def read_result(client: ClaudeSDKClient) -> None:
-    async for message in client.receive_response():
-        if isinstance(message, ResultMessage):
-            return
-    raise KoraProtocolError("harness_error", "the Claude session failed", False, {})
-
-
-async def finish_turn(
-    client: ClaudeSDKClient,
-    stop: asyncio.Event | None,
-    clock: Clock,
-    deadline_ns: int,
-) -> Outcome:
-    read = asyncio.create_task(read_result(client))
-    timeout = asyncio.create_task(clock.sleep_until(deadline_ns))
-    stopped = asyncio.create_task(stop.wait()) if stop is not None else None
-    waiting: set[asyncio.Task[object]] = {read, timeout}
-    if stopped is not None:
-        waiting.add(stopped)
-    try:
-        await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
-        if stop is not None and stop.is_set():
-            if not read.done():
-                grace = min(deadline_ns, clock.monotonic_ns() + 5_000_000_000)
-                interrupt = asyncio.create_task(client.interrupt())
-                try:
-                    await wait_task(interrupt, clock, grace)
-                finally:
-                    await drop(interrupt)
-                await wait_task(read, clock, grace)
-            return "cancelled"
-        if read.done() and not read.cancelled():
-            read.result()
-            return "completed"
-        raise KoraProtocolError("harness_error", "the Claude session failed", False, {})
-    finally:
-        await drop(timeout)
-        if stopped is not None:
-            await drop(stopped)
-        await drop(read)
-
-
-async def run_scripted_client(
-    *,
-    cwd: Path,
-    launcher: Path,
-    launch_dir: Path,
-    prompt: str,
-    tools: tuple[str, ...],
-    decide: Callable[[str], Decision],
-    stop: asyncio.Event | None,
-    clock: Clock,
-    deadline_ns: int,
-) -> Outcome:
-    failures: list[str] = []
-
-    async def hook(
-        hook_input: HookInput, _tool_use_id: str | None, _context: HookContext
-    ) -> SyncHookJSONOutput:
-        decision: Decision = "deny"
-        if hook_input["hook_event_name"] != "PreToolUse":
-            failures.append("unnamed")
-        else:
-            name = hook_input["tool_name"]
-            if name == "":
-                failures.append("unnamed")
-            else:
-                try:
-                    selected: object = decide(name)
-                except Exception:
-                    failures.append("decision")
-                    selected = "deny"
-                if selected == "allow":
-                    decision = "allow"
-                elif selected == "deny":
-                    decision = "deny"
-                else:
-                    failures.append("decision")
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": decision,
-                "permissionDecisionReason": "kora",
-            }
-        }
-
-    sources: list[SettingSource] = []
-    prompt_preset: SystemPromptPreset = {"type": "preset", "preset": "claude_code"}
-    options = ClaudeAgentOptions(
-        cwd=cwd,
-        cli_path=launcher,
-        env={LAUNCH_DIRECTORY: str(launch_dir)},
-        setting_sources=sources,
-        strict_mcp_config=True,
-        permission_mode="bypassPermissions",
-        tools=list(tools),
-        max_turns=TURN_LIMIT,
-        model=MODEL,
-        extra_args={"no-session-persistence": None},
-        system_prompt=prompt_preset,
-        stderr=discard_stderr,
-        hooks={"PreToolUse": [HookMatcher(hooks=[hook])]},
-    )
-    client = ClaudeSDKClient(options=options)
-    try:
-        connect = asyncio.create_task(client.connect(prompt))
-        try:
-            await wait_task(connect, clock, deadline_ns)
-        finally:
-            await drop(connect)
-        outcome = await finish_turn(client, stop, clock, deadline_ns)
-    except KoraProtocolError:
-        raise
-    except (ClaudeSDKError, OSError):
-        raise KoraProtocolError(
-            "harness_error", "the Claude session failed", False, {}
-        ) from None
-    finally:
-        try:
-            await client.disconnect()
-        except (ClaudeSDKError, OSError):
-            raise KoraProtocolError(
-                "harness_error", "the Claude session failed", False, {}
-            ) from None
-    if failures:
-        raise KoraProtocolError("harness_error", "the Claude session failed", False, {})
-    return outcome
-
-
 def text_item(item: object) -> str:
     if isinstance(item, str):
         return item
@@ -260,7 +84,16 @@ def result_text(content: object) -> str | None:
     return "".join(text_item(item) for item in items)
 
 
+SYNTHETIC_MODEL = "<synthetic>"
+
+
 def feed_assistant(events: ClaudeEvents, message: AssistantMessage) -> None:
+    if message.model != SYNTHETIC_MODEL:
+        events.observe_model(message.message_id, message.model)
+    events.observe_assistant_error(message.error)
+    if message.model == SYNTHETIC_MODEL:
+        events.drop("assistant")
+        return
     message_id = message.message_id
     if not isinstance(message_id, str):
         events.drop("assistant")
@@ -295,6 +128,9 @@ def feed(events: ClaudeEvents, message: Message) -> None:
         if message.subtype == "init":
             events.observe_init(message.data)
             return
+        if message.subtype == "api_retry":
+            events.observe_retry(message.data)
+            return
         events.drop("system")
         return
     if isinstance(message, AssistantMessage):
@@ -309,6 +145,19 @@ def feed(events: ClaudeEvents, message: Message) -> None:
             message.is_error,
             message.terminal_reason,
             cast("object", message.model_usage),
+            message.api_error_status,
+            cast("object", message.permission_denials),
+            cast("object", message.usage),
+            structured_output=cast("object", message.structured_output),
+            result=message.result,
+            errors=message.errors,
+        )
+        return
+    if isinstance(message, RateLimitEvent):
+        events.observe_rate_limit(
+            message.rate_limit_info.status,
+            message.rate_limit_info.resets_at,
+            message.rate_limit_info.rate_limit_type,
         )
         return
     if isinstance(message, StreamEvent):
@@ -339,67 +188,9 @@ def feed_stream(events: ClaudeEvents, message: StreamEvent) -> None:
         )
         return
     if kind == "message_delta":
-        events.usage_delta(payload.get("usage"))
+        events.usage_delta(payload.get("usage"), message.parent_tool_use_id)
+        return
+    if kind == "message_stop":
+        events.usage_stop(message.parent_tool_use_id)
         return
     events.drop("stream_event")
-
-
-async def read_replay(client: ClaudeSDKClient, events: ClaudeEvents) -> None:
-    async for message in client.receive_messages():
-        feed(events, message)
-    events.finish()
-
-
-async def run_replayed_client(
-    events: ClaudeEvents,
-    *,
-    cwd: Path,
-    launcher: Path,
-    launch_dir: Path,
-    prompt: str,
-    tools: tuple[str, ...],
-    clock: Clock,
-    deadline_ns: int,
-) -> None:
-    sources: list[SettingSource] = []
-    prompt_preset: SystemPromptPreset = {"type": "preset", "preset": "claude_code"}
-    options = ClaudeAgentOptions(
-        cwd=cwd,
-        cli_path=launcher,
-        env={LAUNCH_DIRECTORY: str(launch_dir)},
-        setting_sources=sources,
-        strict_mcp_config=True,
-        permission_mode="bypassPermissions",
-        tools=list(tools),
-        max_turns=TURN_LIMIT,
-        model=MODEL,
-        extra_args={"no-session-persistence": None},
-        system_prompt=prompt_preset,
-        stderr=discard_stderr,
-        include_partial_messages=True,
-    )
-    client = ClaudeSDKClient(options=options)
-    try:
-        connect = asyncio.create_task(client.connect(prompt))
-        try:
-            await wait_task(connect, clock, deadline_ns)
-        finally:
-            await drop(connect)
-        read = asyncio.create_task(read_replay(client, events))
-        try:
-            await wait_task(read, clock, deadline_ns)
-        finally:
-            await drop(read)
-    except KoraProtocolError:
-        raise
-    except (ClaudeSDKError, OSError):
-        raise KoraProtocolError(
-            "harness_error", "the Claude session failed", False, {}
-        ) from None
-    finally:
-        try:
-            await client.disconnect()
-        except (ClaudeSDKError, OSError):
-            raise KoraProtocolError(
-                "harness_error", "the Claude session failed", False, {}
-            ) from None

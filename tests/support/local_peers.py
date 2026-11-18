@@ -19,6 +19,7 @@ from kora.plugins.runtime.local.channel import (
     read_status,
 )
 from kora.plugins.runtime.local.control import connected
+from kora.plugins.runtime.local.launch import LocalLaunches
 from kora.plugins.runtime.local.serving import (
     COMPONENT,
     BoundSocket,
@@ -137,7 +138,11 @@ async def until(condition: Callable[[], bool]) -> None:
 
 @asynccontextmanager
 async def served(
-    directory: Path, clock: Clock, source: PeerSource, capture: Capture
+    directory: Path,
+    clock: Clock,
+    source: PeerSource,
+    capture: Capture,
+    launches: LocalLaunches | None = None,
 ) -> AsyncGenerator[tuple[ControlServer, str]]:
     bound = rebound(directory, SOCKET_NAME)
     log = capture.diagnostics.logger(COMPONENT)
@@ -153,6 +158,7 @@ async def served(
         registry.key("attempt-1"),
         identity_of(os.getpid()),
         NativeIdentityReader(),
+        launches=lambda: launches,
     )
     server.start()
     try:

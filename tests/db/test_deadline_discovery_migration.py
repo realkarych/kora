@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 from alembic import command
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
@@ -12,6 +12,7 @@ from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
+from tests.db.seed import predecessor_snapshot
 from tests.db.test_graph_publication_digest_migration import wait_for_invalid_index
 from tests.engine.expiry_support import execution_case
 
@@ -26,14 +27,21 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
     try:
         async with database.migration_connection() as migrator:
             await migrator.run_sync(
-                lambda sync: command.upgrade(alembic_config(sync), "0026")
+                lambda sync: command.upgrade(alembic_config(sync), "0024")
             )
         case = await execution_case(database)
-        old_fields = tuple(
-            field for field in attempt.c if field.name != "current_dispatcher_open"
-        )
         async with database.read_transaction() as reader:
-            before = (await reader.execute(select(*old_fields))).all()
+            before = await reader.run_sync(
+                lambda sync: predecessor_snapshot(
+                    sync,
+                    {
+                        "attempt": tuple(
+                            str(field["name"])
+                            for field in inspect(sync).get_columns("attempt")
+                        )
+                    },
+                )
+            )
         async with database.transaction() as writer:
             await writer.exec_driver_sql(
                 "CREATE INDEX ix_attempt_due_deadline ON attempt (id)"
@@ -43,7 +51,7 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
         ):
             await upgrade_database(empty_database_settings)
         async with database.transaction() as writer:
-            assert await writer.run_sync(current_revision) == "0026"
+            assert await writer.run_sync(current_revision) == "0024"
             await writer.exec_driver_sql("DROP INDEX ix_attempt_due_deadline")
         if database.dialect is Dialect.POSTGRESQL:
             if retained_index == "invalid":
@@ -67,18 +75,25 @@ async def test_deadline_discovery_migration_preserves_attempts_and_recovers_inde
                         "ON attempt (deadline, id) WHERE " + DEADLINE_ROWS
                     )
 
+        assert database.units_in_flight() == ledger.outstanding == 0
+        await database.close()
+        assert ledger.opened == ledger.closed
+
         report = await upgrade_database(empty_database_settings)
         repeated = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
+        ledger = ConnectionLedger(database)
         async with database.read_transaction() as reader:
-            after = (await reader.execute(select(*old_fields))).all()
-        async with database.read_transaction() as reader:
+            after = await reader.run_sync(
+                lambda sync: predecessor_snapshot(sync, before.columns)
+            )
             with await reader.execute(select(attempt.c.id)) as result:
                 ids = list(result.scalars())
 
         assert (report.from_revision, report.to_revision, report.steps) == (
-            "0026",
-            "0028",
-            2,
+            "0024",
+            "0031",
+            7,
         )
         assert repeated.steps == 0
         assert after == before

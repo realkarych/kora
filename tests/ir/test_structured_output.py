@@ -191,13 +191,16 @@ def test_structured_output_depth_and_aliases() -> None:
     depth = parse_structured_output(accepted_depth)
     with pytest.raises(StructuredOutputValidationError, match="JSON domain"):
         parse_structured_output(cycle)
-    with pytest.raises(StructuredOutputValidationError, match="JSON domain"):
+    with pytest.raises(
+        StructuredOutputValidationError, match="JSON domain"
+    ) as rejected:
         parse_structured_output(rejected_depth)
 
     assert (
         canonical_structured_output(value) == b'[{"value":[1,-0.0]},{"value":[1,-0.0]}]'
     )
     assert canonical_structured_output(depth) == b"[" * 16 + b"0" + b"]" * 16
+    assert rejected.value.violation.code == "SO003"
 
 
 def test_structured_output_detached_ownership() -> None:

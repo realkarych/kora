@@ -31,3 +31,8 @@ def start_capture(clock: FakeClock) -> Iterator[StartCapture]:
             )
 
         yield start
+
+
+@pytest.fixture
+def effective_capture(start_capture: StartCapture) -> Capture:
+    return start_capture(LoggingSettings())

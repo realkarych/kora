@@ -49,6 +49,13 @@ def test_final_class_precedence_table(cause: RunnerCause, expected: ErrorClass) 
     assert error_class is expected
 
 
+@pytest.mark.parametrize("cause", STOPS)
+def test_final_class_precedence_provider_limit_after_cause(cause: RunnerCause) -> None:
+    error_class = final_class(cause, ErrorClass.HARNESS_ERROR, NO_BYPASS, True)
+
+    assert error_class is CAUSE_CLASSES[cause]
+
+
 @pytest.mark.parametrize("cause", get_args(RunnerCause))
 def test_final_class_precedence_bypass_wins_over_every_stop(
     cause: RunnerCause,

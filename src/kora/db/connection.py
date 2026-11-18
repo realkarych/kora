@@ -35,8 +35,15 @@ from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.util import await_, greenlet_spawn
 
 from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
+from kora.db.maintenance import (
+    NATIVE_READ_RETIRE,
+    NativeReadExpired,
+    NativeReadGuard,
+    NativeReadUnavailable,
+    handle_native_read_error,
+    postgresql_transaction_active,
+)
 from kora.db.maintenance import PostgreSQLDurabilityError as PostgreSQLDurabilityError
-from kora.db.maintenance import postgresql_transaction_active
 from kora.db.transactions import (
     WriterTransactionError,
     managed_writer,
@@ -125,6 +132,11 @@ class DatabaseWriterRejected(RuntimeError):
 class _WriterAdmission:
     deadline: float
     handed_off: bool = False
+
+
+@dataclass
+class _SnapshotOutcome:
+    failure: DatabaseSnapshotFailure | None = None
 
 
 class DatabaseConfigurationError(ValueError):
@@ -418,6 +430,8 @@ def sqlite_engine(
         event.listen(
             engine.sync_engine, "handle_error", keep_connection_on_cancellation
         )
+    else:
+        event.listen(engine.sync_engine, "handle_error", handle_native_read_error)
     return engine
 
 
@@ -438,6 +452,7 @@ def postgresql_engine(settings: DatabaseSettings) -> AsyncEngine:
     event.listen(
         engine.sync_engine, "handle_error", keep_migration_connection_on_cancellation
     )
+    event.listen(engine.sync_engine, "handle_error", handle_native_read_error)
     return engine
 
 
@@ -995,6 +1010,11 @@ class Database:
             async with self._unit(
                 self._reader, deadline=deadline, snapshot=snapshot
             ) as connection:
+                if self.dialect is Dialect.POSTGRESQL and not snapshot:
+                    await complete(
+                        connection.execute(text("SET TRANSACTION READ ONLY"))
+                    )
+                    self._refuse_when_closed()
                 yield connection
         except asyncio.CancelledError:
             cancelled = True
@@ -1021,13 +1041,14 @@ class Database:
                 raise
             return
         timer = asyncio.timeout_at(deadline)
+        outcome = _SnapshotOutcome()
         try:
             if type(deadline) is not float or not math.isfinite(deadline):
                 raise DatabaseSnapshotRejected(DatabaseSnapshotFailure.UNAVAILABLE)
             require_snapshot_time(deadline)
             async with timer:
                 try:
-                    async with self._read_snapshot(deadline) as connection:
+                    async with self._read_snapshot(deadline, outcome) as connection:
                         yield connection
                 except TimeoutError as error:
                     clear_snapshot_error(error)
@@ -1038,24 +1059,24 @@ class Database:
             return
         except asyncio.CancelledError as error:
             clear_snapshot_error(error)
-            del self, deadline, timer, connection
+            del self, deadline, timer, connection, outcome
             raise
         except DatabaseSnapshotRejected as error:
             reason = error.reason
             clear_snapshot_error(error)
         except SNAPSHOT_NATIVE_ERRORS as error:
-            reason = (
+            reason = outcome.failure or (
                 DatabaseSnapshotFailure.DEADLINE
                 if isinstance(error, TimeoutError) and timer.expired()
                 else DatabaseSnapshotFailure.UNAVAILABLE
             )
             clear_snapshot_error(error)
-        del self, deadline, timer, connection
+        del self, deadline, timer, connection, outcome
         raise_private_metadata_error(DatabaseSnapshotRejected(reason))
 
     @asynccontextmanager
     async def _read_snapshot(
-        self, deadline: float | None
+        self, deadline: float | None, outcome: _SnapshotOutcome | None = None
     ) -> AsyncGenerator[AsyncConnection, None]:
         if self.dialect is Dialect.SQLITE:
             setup = text("BEGIN DEFERRED")
@@ -1064,7 +1085,77 @@ class Database:
         async with self._read_transaction(deadline, snapshot=True) as connection:
             await self._run_snapshot_phase(deadline, lambda: connection.execute(setup))
             self._require_snapshot_current(deadline)
-            yield connection
+            if deadline is None:
+                yield connection
+            else:
+                async with self._native_snapshot(connection, deadline, outcome):
+                    yield connection
+
+    @asynccontextmanager
+    async def _native_snapshot(
+        self,
+        connection: AsyncConnection,
+        deadline: float,
+        outcome: _SnapshotOutcome | None,
+    ) -> AsyncGenerator[None, None]:
+        guard = NativeReadGuard(connection, deadline)
+        cancelled = False
+        try:
+            try:
+                await self._run_snapshot_phase(deadline, guard.install)
+                yield
+            except asyncio.CancelledError:
+                cancelled = True
+                try:
+                    await complete(self._interrupt_native_snapshot(guard))
+                except (asyncio.CancelledError, DatabaseSnapshotRejected):
+                    pass
+                raise
+            except NativeReadExpired:
+                if outcome is not None:
+                    outcome.failure = DatabaseSnapshotFailure.DEADLINE
+                raise DatabaseSnapshotRejected(
+                    DatabaseSnapshotFailure.DEADLINE
+                ) from None
+            except (NativeReadUnavailable, *SNAPSHOT_NATIVE_ERRORS) as error:
+                reason = (
+                    DatabaseSnapshotFailure.DEADLINE
+                    if guard.expired_error(error)
+                    else DatabaseSnapshotFailure.UNAVAILABLE
+                )
+                if outcome is not None:
+                    outcome.failure = reason
+                raise DatabaseSnapshotRejected(reason) from None
+        finally:
+            try:
+                await complete(self._close_native_snapshot(guard))
+            except (asyncio.CancelledError, DatabaseSnapshotRejected):
+                if not cancelled:
+                    raise
+
+    async def _interrupt_native_snapshot(self, guard: NativeReadGuard) -> None:
+        try:
+            await guard.interrupt()
+        except guard.native_errors:
+            self._snapshot_admission.fence()
+            raise DatabaseSnapshotRejected(
+                DatabaseSnapshotFailure.UNAVAILABLE
+            ) from None
+
+    async def _close_native_snapshot(self, guard: NativeReadGuard) -> None:
+        try:
+            await guard.close()
+        except (NativeReadUnavailable, *guard.native_errors):
+            self._snapshot_admission.fence()
+            try:
+                await guard.retire()
+            except guard.native_errors:
+                raise DatabaseSnapshotRejected(
+                    DatabaseSnapshotFailure.UNAVAILABLE
+                ) from None
+            raise DatabaseSnapshotRejected(
+                DatabaseSnapshotFailure.UNAVAILABLE
+            ) from None
 
     def _require_snapshot_current(self, deadline: float | None) -> None:
         self._refuse_when_closed()
@@ -1340,6 +1431,12 @@ class Database:
         preserve_cancellation: bool,
     ) -> None:
         try:
+            if (
+                not connection.closed
+                and not connection.invalidated
+                and connection.info.pop(NATIVE_READ_RETIRE, False)
+            ):
+                await complete(connection.invalidate())
             if verify_generation:
                 await complete(self._snapshot_admission.release_snapshot(connection))
             elif engine is self._reader:

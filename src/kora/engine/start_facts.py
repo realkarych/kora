@@ -1,31 +1,41 @@
-import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Never, Self, cast
+from typing import Never, Self
 
 from pydantic import MISSING, ValidationError
 
 from kora.cel_eval.errors import raise_safe
-from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
-from kora.db.graph_version_reads import AcquiredGraphVersion
-from kora.engine.graph_parameters import read_graph_parameter_binding
-from kora.engine.graph_version_identity import (
-    GraphVersionIdentityLimits,
-    GraphVersionPin,
-    read_acquired_graph_version_texts,
+from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected, TextBudget
+from kora.engine.graph_execution_contract import check_detached_execution_contract
+from kora.engine.graph_parameter_evaluation import (
+    parameter_request_reservation,
+    validate_graph_parameter_value,
 )
+from kora.engine.graph_resource_references import GraphResourceScope
+from kora.engine.graph_snapshot import AcquiredGraphSnapshot
+from kora.engine.graph_types import read_document
+from kora.engine.graph_version_identity import GraphVersionPin
 from kora.engine.start_capacity import Overlap, resolve_manual_overlap
+from kora.engine.start_parameter_cel import (
+    ParameterCelFailure,
+    ParameterCelRejected,
+    check_manual_start_parameter_cel,
+)
+from kora.engine.start_parameter_cut import (
+    ParameterCutFailure,
+    ParameterCutRejected,
+    prepare_manual_start_parameter_cut,
+)
+from kora.engine.start_preparation import StartPreparationLimits
 from kora.engine.start_records import PreparedManualStartRequest
+from kora.engine.start_replay import ManualStartCandidate
 from kora.ir.config import AgentConfig
 from kora.ir.deployment_checks import DeploymentSelection, installation_findings
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
 from kora.ir.runtime import Retention
 from kora.ir.topology import Node
-from kora.ir.vcs_ref_json import finite_float, refuse_constant, unique_object
-
-EMPTY_PARAMETERS = b"{}"
 
 
 class StartRefusal(StrEnum):
@@ -44,7 +54,8 @@ class SelectedStartVersion:
     namespace_id: str
     graph_id: str
     version_id: str
-    acquired: AcquiredGraphVersion
+    acquired: AcquiredGraphSnapshot
+    candidate: ManualStartCandidate
 
 
 _MANUAL_START_FACTS = object()
@@ -58,6 +69,8 @@ class ManualStartFacts:
         "timeout",
         "retention",
         "_request_digest",
+        "_candidate",
+        "projection",
     )
     namespace_id: str
     pin: GraphVersionPin
@@ -65,38 +78,42 @@ class ManualStartFacts:
     timeout: str | None
     retention: Retention | MISSING
     _request_digest: str
+    _candidate: ManualStartCandidate
+    projection: bytes
 
     def __new__(
         cls,
         issuer: object,
         request: PreparedManualStartRequest,
         pin: GraphVersionPin,
-        document: GraphDocument,
+        settings: tuple[Overlap, str | None, Retention | MISSING],
+        candidate: ManualStartCandidate,
+        projection: bytes,
     ) -> Self:
         if issuer is not _MANUAL_START_FACTS:
-            del issuer, request, pin, document
+            del issuer, request, pin, settings, candidate, projection
             raise TypeError("manual start facts require the facts step")
-        limits = document.runtime.limits
         facts = super().__new__(cls)
         for name, value in (
             ("namespace_id", request.identity.namespace_id),
             ("pin", pin),
-            ("overlap", resolve_manual_overlap(document.graph.overlap)),
-            (
-                "timeout",
-                None
-                if limits is MISSING or limits.timeout is MISSING
-                else limits.timeout,
-            ),
-            ("retention", document.runtime.retention),
+            ("overlap", settings[0]),
+            ("timeout", settings[1]),
+            ("retention", settings[2]),
+            ("_candidate", candidate),
+            ("projection", projection),
             ("_request_digest", request.identity.request_digest),
         ):
             object.__setattr__(facts, name, value)
         return facts
 
-    def belongs_to(self, request: PreparedManualStartRequest) -> bool:
+    def belongs_to(self, request: PreparedManualStartRequest, key: str) -> bool:
         identity = request.identity
-        return (identity.namespace_id, identity.graph_id, identity.request_digest) == (
+        return self._candidate.is_new_for(identity.request_digest, key) and (
+            identity.namespace_id,
+            identity.graph_id,
+            identity.request_digest,
+        ) == (
             self.namespace_id,
             self.pin.graph_id,
             self._request_digest,
@@ -113,18 +130,6 @@ class ManualStartFacts:
 
 
 StartFactsResult = ManualStartFacts | StartRefusal | InstallationRefusal
-
-
-def _strict_object(text: str) -> dict[str, object]:
-    decoded: object = json.loads(
-        text,
-        object_pairs_hook=unique_object,
-        parse_constant=refuse_constant,
-        parse_float=finite_float,
-    )
-    if type(decoded) is not dict:
-        raise GraphValueRejected(GraphValueFailure.INVALID)
-    return cast("dict[str, object]", decoded)
 
 
 def _nodes(document: GraphDocument) -> Iterator[Node]:
@@ -156,33 +161,82 @@ def _facts(
     selected: SelectedStartVersion,
     request: PreparedManualStartRequest,
     selection: DeploymentSelection,
-    limits: GraphVersionIdentityLimits,
+    key: str,
+    limits: StartPreparationLimits,
 ) -> StartFactsResult:
+    limits.admit()
     identity = request.identity
-    if (identity.namespace_id, identity.graph_id) != (
-        selected.namespace_id,
-        selected.graph_id,
-    ) or request.graph_version_id not in (None, selected.version_id):
+    if (
+        (identity.namespace_id, identity.graph_id)
+        != (selected.namespace_id, selected.graph_id)
+        or request.graph_version_id not in (None, selected.version_id)
+        or not selected.candidate.is_new_for(identity.request_digest, key)
+        or selected.candidate.version_id != selected.version_id
+    ):
         raise GraphValueRejected(GraphValueFailure.INVALID)
-    pin, texts = read_acquired_graph_version_texts(selected.acquired, limits=limits)
-    document = GraphDocument.model_validate(_strict_object(texts.ir))
-    if document.graph.params is not MISSING:
+    acquired = selected.acquired
+    graph = acquired.graph
+    pin = GraphVersionPin(
+        selected.graph_id, selected.version_id, graph.digests[1].decode(graph.encoding)
+    )
+    checked = check_detached_execution_contract(
+        graph,
+        pin,
+        GraphResourceScope(
+            selected.namespace_id, selected.graph_id, selected.version_id
+        ),
+        acquired.physical,
+        acquired.owners,
+        limits=limits.snapshot.graph,
+    )
+    prepared = checked.parameter_evaluation
+    if prepared is None:
         return StartRefusal.PARAMETERS_UNAVAILABLE
-    saved = _strict_object(texts.execution_contract).get("parameters")
-    try:
-        read_graph_parameter_binding(
-            document, saved, max_encoded_bytes=limits.max_encoded_bytes
-        )
-    except GraphValueRejected:
-        return StartRefusal.PARAMETERS_UNAVAILABLE
-    if request.parameter_bytes() != EMPTY_PARAMETERS:
-        return StartRefusal.PARAMETERS
+    maximum = limits.snapshot.graph.resources.logical.ir_bytes
+    document = read_document(checked.canonical_ir, TextBudget(maximum))
     if declares_agent_secrets(document):
         return StartRefusal.SECRETS
     findings = installation_findings(document, selection)
     if not findings.valid:
         return InstallationRefusal(findings)
-    return ManualStartFacts(_MANUAL_START_FACTS, request, pin, document)
+    runtime_limits = document.runtime.limits
+    settings = (
+        resolve_manual_overlap(document.graph.overlap),
+        None
+        if runtime_limits is MISSING or runtime_limits.timeout is MISSING
+        else runtime_limits.timeout,
+        document.runtime.retention,
+    )
+    del document, runtime_limits, findings
+    retained, work = parameter_request_reservation(request, prepared)
+    decision = validate_graph_parameter_value(
+        request, prepared, max_retained_bytes=retained, max_work=work
+    )
+    if decision.outcome != "valid":
+        return (
+            StartRefusal.PARAMETERS
+            if decision.outcome == "invalid"
+            else StartRefusal.PARAMETERS_UNAVAILABLE
+        )
+    cut = prepare_manual_start_parameter_cut(
+        request,
+        key,
+        selected.candidate,
+        checked,
+        max_work=limits.cut_work,
+        max_scratch_bytes=limits.cut_scratch,
+    )
+    check_manual_start_parameter_cel(
+        cut, checked, max_ir_bytes=maximum, max_schema_work=limits.schema_work
+    )
+    return ManualStartFacts(
+        _MANUAL_START_FACTS,
+        request,
+        pin,
+        settings,
+        selected.candidate,
+        cut.projection_bytes(),
+    )
 
 
 def read_manual_start_facts(
@@ -190,10 +244,24 @@ def read_manual_start_facts(
     request: PreparedManualStartRequest,
     selection: DeploymentSelection,
     *,
-    limits: GraphVersionIdentityLimits,
+    key: str,
+    limits: StartPreparationLimits,
 ) -> StartFactsResult:
     try:
-        return _facts(selected, request, selection, limits)
+        return _facts(selected, request, selection, key, limits)
+    except ParameterCutRejected as rejected:
+        return (
+            StartRefusal.PARAMETERS_UNAVAILABLE
+            if rejected.reason
+            in (ParameterCutFailure.CAPACITY, ParameterCutFailure.BINDING)
+            else StartRefusal.PARAMETERS
+        )
+    except ParameterCelRejected as rejected:
+        return (
+            StartRefusal.PARAMETERS
+            if rejected.reason is ParameterCelFailure.VALUES
+            else StartRefusal.PARAMETERS_UNAVAILABLE
+        )
     except GraphValueRejected as rejection:
         reason = rejection.reason
     except (ValidationError, ValueError, RecursionError):

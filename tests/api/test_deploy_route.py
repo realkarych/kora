@@ -13,9 +13,11 @@ from kora.cel_eval.thread import EvaluationThread, Settings
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.db.tables import graph, graph_version, namespace
+from kora.engine.graph_output_policy import OutputPublicationBinding
 from kora.ir.json import JsonObject
 from kora.models.errors import ApiErrorEnvelope
 from kora.models.graphs import DeployResponse
+from kora.protocols.effective_artifact_type import BehaviorBinding, Role
 from tests.api.deployment_cases import (
     ALLOW_AGENT_SECRETS,
     GRAPH,
@@ -33,7 +35,10 @@ from tests.api.support import (
     client_for,
     deployment_services,
 )
+from tests.engine.test_saved_output_publication import ObservedInstallation
 from tests.plugins.authentication.support import AuthorityClock, seed_case
+from tests.support.output_bindings import publication_binding
+from tests.support.parameter_bindings import parameter_binding
 
 __all__ = ["api_capture", "preparer"]
 
@@ -282,7 +287,12 @@ async def test_deploy_route_reports_an_unavailable_evaluator(
     headers = await authorized(database)
     owner = EvaluationThread(load_binding(), Settings(outstanding_bytes=1))
 
-    async with DeploymentPreparer(AuthorityClock(), owner) as constrained:
+    async with DeploymentPreparer(
+        AuthorityClock(),
+        owner,
+        parameter_binding=parameter_binding(),
+        binding=publication_binding(),
+    ) as constrained:
         app = application(
             database, api_capture, deployment_services(database, constrained, HARNESS)
         )
@@ -337,6 +347,15 @@ def with_command_secret() -> JsonObject:
     return ir
 
 
+def with_network_policy(ir: JsonObject, node: str, policy: JsonObject) -> JsonObject:
+    nodes = cast(
+        "dict[str, dict[str, dict[str, object]]]",
+        cast("JsonObject", ir["graph"])["nodes"],
+    )
+    nodes[node]["config"]["network_policy"] = policy
+    return ir
+
+
 async def namespace_with_policy(
     database: Database, policy: JsonObject | None = None
 ) -> dict[str, str]:
@@ -376,8 +395,21 @@ async def test_deploy_route_refuses_unenforced_agent_secrets(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ir",
+    [
+        pytest.param(with_agent_secret(), id="secret"),
+        pytest.param(
+            with_network_policy(with_agent_secret(), "agent", {"egress": []}),
+            id="secret-with-policy",
+        ),
+    ],
+)
 async def test_deploy_route_deploys_agent_secrets_the_namespace_allows(
-    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    ir: JsonObject,
 ) -> None:
     headers = await namespace_with_policy(database, asdict(ALLOW_AGENT_SECRETS))
     app = application(
@@ -385,9 +417,7 @@ async def test_deploy_route_deploys_agent_secrets_the_namespace_allows(
     )
 
     async with client_for(app) as client:
-        allowed = await client.post(
-            PATH, json=body(with_agent_secret()), headers=headers
-        )
+        allowed = await client.post(PATH, json=body(ir), headers=headers)
 
     assert allowed.status_code == 201
     assert await rows(database) == (1, 1)
@@ -438,3 +468,134 @@ async def test_deploy_route_refuses_against_the_saved_namespace_policy(
     assert (refused.status_code, envelope.error.code) == (status, code)
     assert [error["path"] for error in details.get("errors", [])] == paths
     assert await rows(database) == (0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ir", "node"),
+    [
+        pytest.param(
+            with_network_policy(skeleton_ir(), "agent", {"egress": ["example.com"]}),
+            "agent",
+            id="agent",
+        ),
+        pytest.param(
+            with_network_policy(skeleton_ir(), "gate", {"egress": []}),
+            "gate",
+            id="command",
+        ),
+    ],
+)
+async def test_deploy_route_refuses_unenforced_network_policies(
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    ir: JsonObject,
+    node: str,
+) -> None:
+    headers = await namespace_with_policy(database, asdict(ALLOW_AGENT_SECRETS))
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+
+    async with client_for(app) as client:
+        refused = await client.post(PATH, json=body(ir), headers=headers)
+
+    envelope = error_of(refused)
+    errors = envelope.model_dump(mode="json")["error"]["details"]["errors"]
+    assert (refused.status_code, envelope.error.code) == (422, "API003")
+    assert [(error["code"], error["path"]) for error in errors] == [
+        ("IR028", ["graph", "nodes", node, "config", "network_policy"])
+    ]
+    assert await rows(database) == (0, 0)
+
+
+class FailingInstallation(ObservedInstallation):
+    def __getitem__(self, key: tuple[Role, str]) -> BehaviorBinding:
+        super().__getitem__(key)
+        raise ValueError("private installed schema source")
+
+
+@pytest.mark.asyncio
+async def test_deploy_unexpected_preparation_failure_keeps_safe_api010(
+    database: Database,
+    api_capture: Capture,
+) -> None:
+    headers = await authorized(database)
+    owner = EvaluationThread(load_binding())
+    installed = publication_binding()
+    broken = OutputPublicationBinding(
+        installed.policy(),
+        FailingInstallation(dict(installed.behaviors)),
+    )
+
+    async with DeploymentPreparer(
+        AuthorityClock(), owner, parameter_binding=parameter_binding(), binding=broken
+    ) as preparer:
+        app = application(
+            database,
+            api_capture,
+            deployment_services(database, preparer, HARNESS),
+        )
+        async with client_for(app) as client:
+            response = await client.post(PATH, json=body(), headers=headers)
+        async with preparer.reserve() as reservation:
+            released = reservation is not None
+    counts = await rows(database)
+    records = api_capture.finish()
+
+    assert (response.status_code, error_of(response).error.code) == (500, "API010")
+    assert error_of(response).error.retryable is False
+    assert released
+    assert counts == (0, 0)
+    assert "private installed" not in response.text
+    assert "private installed" not in json.dumps(records)
+    errors = [record for record in records if record["level"] == "ERROR"]
+    assert len(errors) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schema", "code", "diagnostic"),
+    [
+        (
+            {"anyOf": [True, {"pattern": "private-parameter-pattern"}]},
+            "API003",
+            "IR028",
+        ),
+        ({"description": "p" * 65537}, "API010", None),
+        ({"$schema": "https://private.invalid/dialect"}, "API003", "IR022"),
+    ],
+)
+async def test_parameter_publication_refusals_preserve_deploy_disposition(
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    schema: JsonObject,
+    code: str,
+    diagnostic: str | None,
+) -> None:
+    headers = await authorized(database)
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+    ir = skeleton_ir()
+    cast(JsonObject, ir["graph"])["params"] = schema
+
+    async with client_for(app) as client:
+        refused = await client.post(PATH, json=body(ir), headers=headers)
+        reused = await client.post(PATH, json=body(), headers=headers)
+
+    assert error_of(refused).error.code == code
+    if diagnostic is not None:
+        details = error_of(refused).error.details
+        assert details is not None
+        assert diagnostic in details.model_dump_json()
+    assert "private-parameter-pattern" not in refused.text
+    assert "https://private.invalid" not in refused.text
+    assert reused.status_code == 201
+    assert not preparer.busy
+    assert await rows(database) == (1, 1)
+    records = json.dumps(api_capture.finish())
+    assert "private-parameter-pattern" not in records
+    assert "https://private.invalid" not in records

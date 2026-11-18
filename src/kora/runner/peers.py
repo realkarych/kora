@@ -96,6 +96,22 @@ def live_identity(reader: IdentityReader, pid: int) -> ProcessIdentity:
     return process.identity
 
 
+def same_process(reader: IdentityReader, identity: ProcessIdentity) -> None:
+    observation = reader.read(identity.pid)
+    process = observation.process
+    if observation.state is IdentityState.ABSENT:
+        raise PeerRefused(PeerRefusal.EXITED)
+    if observation.state is not IdentityState.PRESENT or process is None:
+        raise PeerRefused(PeerRefusal.UNREADABLE)
+    current = process.identity
+    if (
+        process.dead
+        or current.start_time != identity.start_time
+        or current.leads_group != identity.leads_group
+    ):
+        raise PeerRefused(PeerRefusal.EXITED)
+
+
 def unchanged(reader: IdentityReader, identity: ProcessIdentity) -> ProcessIdentity:
     if live_identity(reader, identity.pid) != identity:
         raise PeerRefused(PeerRefusal.EXITED)

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.api.graph_deployment import PreparedDeployment
-from kora.api.graph_deployment_limits import IDENTITY
+from kora.api.run_trigger_limits import START_PREPARATION
 from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database
 from kora.db.graph_deployment_reads import graph_id_by_name
@@ -164,10 +164,14 @@ async def facts_for(
     candidate = await select_manual_start(database, case.user, request, key)
     if isinstance(candidate, StartAcceptance):
         return candidate
-    selected = await acquire_manual_start(database, request, candidate, limits=IDENTITY)
+    selected = await acquire_manual_start(
+        database, request, candidate, limits=START_PREPARATION
+    )
     if isinstance(selected, StartAcceptance):
         return selected
-    return read_manual_start_facts(selected, request, selection, limits=IDENTITY)
+    return read_manual_start_facts(
+        selected, request, selection, key=key, limits=START_PREPARATION
+    )
 
 
 async def commit(

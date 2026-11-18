@@ -56,4 +56,4 @@ Use passed, failed, blocked, pending implementation, unverified or not applicabl
 For native GitHub Codex Review, link actual scoped results when available. For review-workflow changes, record repository-wide all-contributor/new-head automatic-review settings and required merge-status activation, or the precise configuration gap. Native review follows the [Code Review Rules](https://github.com/realkarych/kora/blob/master/AGENTS.md#code-review-rules) of AGENTS.md and the [GitHub reviewer mode](https://github.com/realkarych/kora/blob/master/.claude/skills/kora-verify/SKILL.md#github-reviewer-mode) of kora-verify.
 
 - [ ] Scope was recomputed after fixes; affected checks and reviews cover the final change, and all mandatory CI jobs pass on the final PR revision.
-- [ ] Changes to verification policy, gates or budgets preserve the stricter approved/base obligations unless the owner explicitly approved a reduction.
+- [ ] Changes to verification policy, gates or budgets preserve the stricter approved/base obligations unless an owner explicitly approved a reduction.
