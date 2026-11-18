@@ -307,9 +307,10 @@ async def test_capacity_refusal_observes_deadline_before_ready(
         )
 
     assert outcome is AttemptAdmissionState.EXPIRED
+    assert reads == 2
     assert status == "pending"
     assert saved_wait is None
-    assert latched is not None
+    assert latched == expired
 
 
 @pytest.mark.asyncio

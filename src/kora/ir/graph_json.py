@@ -76,12 +76,12 @@ def plain_ascii_text(value: str) -> bool:
 
 
 def quoted(value: str, budget: TextBudget) -> str:
-    if plain_ascii_text(value):
+    if type(budget) is TextBudget and plain_ascii_text(value):
         budget.reserve(len(value) + 2)
-        return f'"{value}"'
-    budget.reserve(2)
-    for character in value:
-        budget.reserve(quoted_character_width(character, budget.ascii_only))
+    else:
+        budget.reserve(2)
+        for character in value:
+            budget.reserve(quoted_character_width(character, budget.ascii_only))
     return (
         encode_basestring_ascii(value)
         if budget.ascii_only

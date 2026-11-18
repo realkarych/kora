@@ -30,12 +30,7 @@ from tests.engine.large_admission_support import READ, large_admission_case
 from tests.engine.test_run_input_reads import LIMITS as INPUT_LIMITS
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("padding", ["immutable", "node_policy"])
-@pytest.mark.parametrize("extra", [0, 1])
-async def test_full_claim_preparation_precedes_physical_reservation(
-    database: Database, padding: str, extra: int
-) -> None:
+async def exercise_full_claim(database: Database, padding: str, extra: int) -> None:
     workload = await large_admission_case(database, padding, extra)
     case = workload.case
     before = await case.promotion.snapshot(database)
