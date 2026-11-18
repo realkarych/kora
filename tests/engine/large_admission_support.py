@@ -70,6 +70,7 @@ from tests.engine.graph_output_cases import child
 from tests.engine.promotion_support import INPUT_SENTINEL, PromotionCase
 from tests.engine.test_graph_execution_contract import complete_inputs, insert_case
 from tests.engine.test_run_input_reads import LIMITS as INPUT_LIMITS
+from tests.support.output_bindings import publication_binding
 
 IR_BYTES = 2 * MAX_IMMUTABLE_BYTES
 STAGE_BYTES = 16 * IR_BYTES
@@ -108,7 +109,12 @@ def graph_sources(
 ) -> tuple[PreparedGraphVersionIdentity, GraphVersionPin, JsonObject]:
     text = render_object(raw, TextBudget(IR_BYTES))
     types = saved_array(build_graph_type_contracts(text, max_encoded_bytes=STAGE_BYTES))
-    outputs = build_graph_output_inventory(text, types, max_encoded_bytes=STAGE_BYTES)
+    outputs = build_graph_output_inventory(
+        text,
+        types,
+        binding=publication_binding(),
+        max_encoded_bytes=STAGE_BYTES,
+    )
     assert isinstance(outputs, str)
     document = GraphDocument.model_validate(raw)
     sites = checked_graph_sites(
