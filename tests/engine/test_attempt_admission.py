@@ -1,12 +1,12 @@
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
 from kora.db.claim_sources import acquire_claim_sources
 from kora.db.connection import Database
-from kora.db.tables import attempt, wait
+from kora.db.tables import attempt, node_instance, run, wait
 from kora.engine.attempt_admission import AttemptAdmissionState, admit_attempt
 from kora.engine.attempt_capacity import PreparedGraphCaps
 from kora.engine.attempt_preparation_budget import attempt_preparation_reservation
@@ -261,6 +261,55 @@ async def test_attempt_admission_expiry_before_creation_keeps_attempt_absent(
 
     assert outcome is AttemptAdmissionState.EXPIRED
     assert found is None
+
+
+@pytest.mark.asyncio
+async def test_capacity_refusal_observes_deadline_before_ready(
+    database: Database,
+) -> None:
+    case = await attempt_admission_case(database)
+    prepared = case.prepare()
+    caps = PreparedGraphCaps(case.promotion.scope, None, None)
+    async with database.transaction() as writer:
+        seed = Seeder(writer)
+        await seed.attempt(
+            await seed.node(case.promotion.run_id, "historical"), "created"
+        )
+    active = case.promotion.clock.now()
+    expired = active + timedelta(hours=1)
+    reads = 0
+
+    def clock() -> datetime:
+        nonlocal reads
+        reads += 1
+        return active if reads == 1 else expired
+
+    async with database.transaction() as writer:
+        context = replace(await expiry_context(writer, case.promotion), clock=clock)
+        outcome = await admit_attempt(
+            context,
+            prepared,
+            LIMITS,
+            caps,
+            global_limit=1,
+            runtime_limit=None,
+            interval=INTERVAL,
+        )
+    async with database.read_transaction() as reader:
+        status = await reader.scalar(
+            select(node_instance.c.status).where(
+                node_instance.c.id == case.binding.node_id
+            )
+        )
+        saved_wait = await reader.scalar(select(wait.c.id))
+        latched = await reader.scalar(
+            select(run.c.deadline_expired_at).where(run.c.id == case.promotion.run_id)
+        )
+
+    assert outcome is AttemptAdmissionState.EXPIRED
+    assert status == "pending"
+    assert saved_wait is None
+    assert latched is not None
 
 
 @pytest.mark.asyncio

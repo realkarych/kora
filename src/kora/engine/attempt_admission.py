@@ -240,6 +240,10 @@ async def _admit(
         return AttemptAdmissionState(expiry.value)
     binding, connection = prepared.binding, context.connection
     if observation is not None:
+        now = normalise_timestamp(context.clock())
+        expiry = await observe_run_expiry(context, observed_at=now)
+        if expiry is not ExpiryState.ACTIVE:
+            return AttemptAdmissionState(expiry.value)
         if state == "pending":
             await connection.execute(
                 update(node_instance)
@@ -260,6 +264,7 @@ async def _admit(
             observation,
             interval=interval,
             expected_wait_id=expected_wait_id,
+            observed_at=now,
         )
         if waiting is AdmissionWaitState.REFUSED:
             raise AdmissionWaitFailed()

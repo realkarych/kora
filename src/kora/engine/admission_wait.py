@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import insert, select, update
@@ -56,6 +56,7 @@ async def _save(
     observation: CapacityLimit | RunRecovery,
     interval: timedelta,
     expected_wait_id: str | None,
+    observed_at: datetime | None = None,
 ) -> AdmissionWaitState:
     connection = context.connection
     context.locks.require_connection(connection)
@@ -94,7 +95,7 @@ async def _save(
         connection, binding.node_id, expected_wait_id
     ):
         return AdmissionWaitState.REFUSED
-    now = normalise_timestamp(context.clock())
+    now = normalise_timestamp(context.clock() if observed_at is None else observed_at)
     reason = admission_wait_reason(observation, context.scope, runtime, now)
     wake_at = now + interval
     state = await observe_run_expiry(context, observed_at=now)
@@ -152,10 +153,18 @@ async def save_admission_wait(
     *,
     interval: timedelta,
     expected_wait_id: str | None = None,
+    observed_at: datetime | None = None,
 ) -> AdmissionWaitState:
     try:
         result = await _save(
-            context, binding, limits, runtime, observation, interval, expected_wait_id
+            context,
+            binding,
+            limits,
+            runtime,
+            observation,
+            interval,
+            expected_wait_id,
+            observed_at,
         )
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)
