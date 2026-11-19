@@ -44,6 +44,8 @@ PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
         RouteName.USAGE,
     }
 )
+
+
 @dataclass(frozen=True)
 class ActiveRoute:
     route: APIRoute
