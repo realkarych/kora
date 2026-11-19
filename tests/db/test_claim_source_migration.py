@@ -10,13 +10,37 @@ from kora.db.grant_history_v1 import ACK_FIELDS, TIP_FIELDS
 from kora.db.migrations import current_revision, upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt, attempt_claim_read_admission
+from kora.db.worker_claims_v1 import OPEN_ROWS, UNKNOWN_ROWS
 from tests.db.cancel_cause_support import attempt_schema_objects
 from tests.db.seed import Seeder
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 
 
+def worker_slot_index(name: str, predicate: str, dialect: Dialect) -> dict[str, object]:
+    if dialect is Dialect.SQLITE:
+        return {
+            "name": name,
+            "column_names": ["worker_id", "lease_until", "id"],
+            "unique": 0,
+            "dialect_options": {"sqlite_where": predicate},
+        }
+    return {
+        "name": name,
+        "column_names": ["worker_id", "lease_until", "id"],
+        "unique": False,
+        "dialect_options": {
+            "postgresql_include": [],
+            "postgresql_where": f"({predicate})",
+        },
+    }
+
+
 def assert_attempt_schema_extension(
-    before: tuple[str, str], after: tuple[str, str], dialect: Dialect
+    before: tuple[str, str],
+    after: tuple[str, str],
+    dialect: Dialect,
+    *,
+    worker_slots: bool = False,
 ) -> None:
     original: list[dict[str, object]] = json.loads(before[1])
     current: list[dict[str, object]] = json.loads(after[1])
@@ -28,6 +52,13 @@ def assert_attempt_schema_extension(
             "unique": 0,
             "dialect_options": {"sqlite_where": SQLITE_KEY},
         }
+    if worker_slots:
+        expected["ix_attempt_worker_open"] = worker_slot_index(
+            "ix_attempt_worker_open", OPEN_ROWS, dialect
+        )
+        expected["ix_attempt_worker_unknown"] = worker_slot_index(
+            "ix_attempt_worker_unknown", UNKNOWN_ROWS, dialect
+        )
 
     assert after[0] == before[0]
     assert {str(index["name"]): index for index in current} == expected
@@ -130,4 +161,6 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
     assert differences == []
     assert version == "0031"
     if predecessor == "0026":
-        assert_attempt_schema_extension(schema_before, schema_after, database.dialect)
+        assert_attempt_schema_extension(
+            schema_before, schema_after, database.dialect, worker_slots=True
+        )

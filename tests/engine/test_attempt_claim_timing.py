@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import select, update
 
 from kora.cel_eval.thread import Evaluator
+from kora.conformance.capture import captured
 from kora.db.connection import Database
 from kora.db.tables import (
     attempt,
@@ -15,7 +16,9 @@ from kora.db.tables import (
     worker,
 )
 from kora.engine.attempt_claims import ClaimOutcome
+from kora.engine.locks import COMPONENT
 from kora.ir.json import JsonObject
+from kora.observability import Level, LoggingSettings
 from tests.api.deployment_cases import evaluator, skeleton_ir
 from tests.db.seed import START
 from tests.engine.claim_support import (
@@ -39,7 +42,14 @@ async def test_zero_timeout_returns_learnable_expired_first_grant(
     node["limits"] = {"timeout": "0ms"}
     case = await claim_case(database, evaluator, ir)
 
-    first = await case.claim(database)
+    with captured(
+        COMPONENT,
+        LoggingSettings(level=Level.DEBUG),
+        "zero-timeout-grant",
+        case.clock.now,
+    ) as capture:
+        first = await case.claim(database)
+        records = capture.finish()
     saved = await state(database)
     replay = await case.claim(database)
 
@@ -59,6 +69,10 @@ async def test_zero_timeout_returns_learnable_expired_first_grant(
     assert saved["attempt"][0]["desired_state"] == "cancel"
     assert saved["run"][0]["needs_scheduling"] is True
     assert saved["run"][0]["deadline_expired_at"] is None
+    assert [
+        row["action"] for row in records if row["event"] == "engine.expiry.prepared"
+    ] == ["attempt_expiry_intent"]
+    assert case.binding.attempt_id not in repr(records)
 
 
 @pytest.mark.parametrize(
