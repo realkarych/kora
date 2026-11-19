@@ -61,18 +61,19 @@ This page uses three statuses:
 
 ### Registered providers
 
-`kora plugins list` prints nine providers, all from this repository:
+`kora plugins list` prints ten providers, all from this repository:
 
 | Entry point | Provider |
 |---|---|
 | `authentication.static_token` | bearer tokens of users and of worker services, checked against the `api_token` table |
 | `artifact_storage.local` | content-addressed local filesystem storage |
 | `artifact_type.agent_session`, `artifact_type.command_result`, `artifact_type.structured_output`, `artifact_type.vcs_ref` | the four built-in artifact types, revision 1 |
+| `harness.claude` | the Claude harness adapter; registered only, no production process hosts it yet (#199) |
 | `policy.allow_deny` | the reference tool-call policy |
 | `secrets.env` | secrets from environment variables |
 | `vcs.git` | Git checkout and local bare-repository publication |
 
-No runtime, harness, approval-channel, sensor or observability-exporter provider is registered. Outside tests, `kora plugins list` reads their metadata and only `kora conformance` constructs them.
+No runtime, approval-channel, sensor or observability-exporter provider is registered, and neither the `codex` harness nor the fake harness is. Outside tests, `kora plugins list` reads their metadata and only `kora conformance` constructs them.
 
 ### Absent packages
 
@@ -84,7 +85,7 @@ The [package layer table](detailed.md#package-layers) lists packages that do not
 
 ### Size
 
-`src/kora` holds 559 Python modules and about 118,920 lines. The metadata schema has 42 tables and 32 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel`, `kora.cel_eval` or the harness packages; `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
+`src/kora` holds 559 Python modules and about 118,920 lines. The metadata schema has 42 tables and 32 migrations. Loading the commands above at run time reaches none of `kora.api`, `kora.engine`, `kora.cel` or `kora.cel_eval`, and of the harness packages only `kora plugins list` and `kora conformance harness claude` reach the `claude` adapter module, without the Claude SDK; `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
 
 ## 3. How the existing pieces connect
 
@@ -93,7 +94,7 @@ Solid arrows outside the dashed box are calls made by installed commands. The da
 ```mermaid
 flowchart LR
     accTitle: Callers of the existing packages
-    accDescr: The kora CLI reaches the database migrations, provider listing and the conformance command, and starts gated child processes with the runner primitives. Conformance constructs the registered providers and the plan executor. The API, engine, CEL, client, models, the local runtime with its runner processes, and the harness adapters are reached only from tests.
+    accDescr: The kora CLI reaches the database migrations, provider listing and the conformance command, and starts gated child processes with the runner primitives. Conformance constructs the registered providers and the plan executor. Provider listing loads the claude harness metadata. The API, engine, CEL, client, models, the local runtime with its runner processes, and harness sessions are reached only from tests.
     CLI["kora CLI"] -->|db upgrade| DB[("db: schema and migrations")]
     CLI -->|plugins list| LOAD["protocols: provider loading"]
     CLI -->|conformance| CONF["conformance"]
@@ -101,13 +102,14 @@ flowchart LR
     PROV -->|vcs.git| EXEC["executor"]
     PROV -->|static_token| DB
     CLI -->|gated children| PRIM["runner primitives"]
+    LOAD -->|harness.claude| CLAUDE["claude harness metadata"]
     subgraph unused ["Built, not called"]
         API["api"]
         ENGINE["engine"]
         CEL["cel and cel_eval"]
         CLIENT["client and models"]
         LOCAL["LocalRuntime"] -->|starts| RUNNER["kora-runner process"]
-        HARNESS["claude and codex harness code"]
+        HARNESS["claude sessions and codex harness code"]
     end
     RUNNER -.-> PRIM
     style unused stroke-dasharray: 5 5
@@ -152,7 +154,7 @@ The engine also has a read-only calculator that builds exact whole-run approval-
 | `plugins.vcs.git` | Checkout and publish plans, head reads through `git ls-remote`, inspection sources and credential-free local credentials. Remotes are local bare repositories given as absolute paths or `file://` URLs. Needs Git 2.43.0 or newer, and `prlimit` on Linux. There is no code-host client. | Used by `kora conformance`. | [VCS](../specs/protocols.md#4-vcs-fr-52), [local publication](../specs/first-slice.md#local-publication), [ADR-0023](../../docs/decisions/0023-code-host-identity-and-purpose-scoped-credentials.md) |
 | `plugins.policy.allow_deny` | Decides one tool call against two layers of allow and deny patterns and the protected paths. Shell commands are parsed, with indirection detection; file edits are checked lexically and after resolving links; other tools by name. Evaluation has a fixed work budget. | Constructed only by `kora conformance`; `kora plugins list` reads its metadata. Nothing in `src` connects it to a session yet. | [policy](../specs/protocols.md#12-policy-dd-29), [the `allow_deny` policy](../specs/protocols.md#the-allow_deny-policy-issue-233), [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md) |
 | `plugins.secrets` | The `env` provider resolves `secret://env/NAME` from the process environment when the name matches a namespace prefix and is not in a reserved family such as `KORA_`. Resolution requires a sealed request digest. | Constructed only by `kora conformance`; `kora plugins list` reads its metadata. | [secrets](../specs/protocols.md#6-secrets-fr-101) |
-| `plugins.harness.claude` | A Claude Agent SDK session driver: it builds the SDK options with the runtime launcher as the CLI path and a `PreToolUse` hook that returns the caller's allow or deny decision, runs scripted sessions, normalizes events and replays recorded streams. It is not a `HarnessAdapter` yet. Needs the `kora[claude]` extra. | Built, not called. | [harness adapter](../specs/protocols.md#3-harness-adapter-fr-21-fr-33-fr-66-fr-91-dd-27), [Claude adapter contracts](../specs/protocols.md#claude-adapter-contracts-issue-125), [ADR-0004](../../docs/decisions/0004-harness-adapters-over-vendor-sdks.md), [ADR-0028](../../docs/decisions/0028-optional-claude-sdk-stack.md) |
+| `plugins.harness.claude` | A Claude Agent SDK session driver: it builds the SDK options with the runtime launcher as the CLI path and a `PreToolUse` hook that returns the caller's allow or deny decision, runs scripted sessions, normalizes events and replays recorded streams. `ClaudeHarness` implements the `HarnessAdapter` protocol and is registered as `harness.claude`; no production process hosts it yet (#199). Running a session needs the `kora[claude]` extra; loading its metadata does not. | Used: `kora plugins list` loads its provider metadata; sessions are built, not called. | [harness adapter](../specs/protocols.md#3-harness-adapter-fr-21-fr-33-fr-66-fr-91-dd-27), [Claude adapter contracts](../specs/protocols.md#claude-adapter-contracts-issue-125), [ADR-0004](../../docs/decisions/0004-harness-adapters-over-vendor-sdks.md), [ADR-0028](../../docs/decisions/0028-optional-claude-sdk-stack.md) |
 | `plugins.harness.codex` | Launch construction for `codex app-server` and `codex exec-server`, a JSON-RPC client for the app-server, startup checks, turn observation and usage. Tool policy goes through a managed `preToolUse` command hook; #1356 records that a hook that itself fails lets the call run. The client refuses every request the server initiates, including approval requests. It is not a `HarnessAdapter` yet. | Built, not called. [#1360](https://github.com/realkarych/kora/issues/1360) moves the policy decision point to native app-server approvals. | [Codex execution profile](../specs/codex-execution-profile.md), [harness adapter](../specs/protocols.md#3-harness-adapter-fr-21-fr-33-fr-66-fr-91-dd-27), [ADR-0004](../../docs/decisions/0004-harness-adapters-over-vendor-sdks.md) |
 
 ### 4.4 Composition roots, tooling and tests

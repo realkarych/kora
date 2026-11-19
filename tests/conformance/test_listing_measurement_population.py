@@ -9,6 +9,7 @@ from pydantic import TypeAdapter
 from kora.ir.json import JsonObjectField
 from tests.measurements.listing_measurement import DATASET_COUNTS
 from tests.measurements.listing_population import (
+    CORE_TARGETS,
     InstalledEntry,
     declared_entries,
     fixture_entries,
@@ -77,8 +78,8 @@ def test_listing_measurement_population_matches_installed_entries(
     observed = installed_entries(python)
     verify_inventory(external, observed)
 
-    assert len(observed) == 9 + external
-    assert sum(entry.distribution == "kora" for entry in observed) == 9
+    assert len(observed) == len(CORE_TARGETS) + external
+    assert sum(entry.distribution == "kora" for entry in observed) == len(CORE_TARGETS)
     assert (
         sum(entry.distribution == "kora-tooling-fixture" for entry in observed)
         == external
@@ -112,6 +113,7 @@ def test_listing_measurement_rejects_changed_inventory(
 
 
 def test_listing_measurement_retains_rejected_inventory(tmp_path: Path) -> None:
+    count = DATASET_COUNTS[0]
     setup = tmp_path / "setup"
     setup.mkdir()
     wheel = build_fixture_wheel(
@@ -145,7 +147,9 @@ def test_listing_measurement_retains_rejected_inventory(tmp_path: Path) -> None:
     assert isinstance(datasets, list)
     record = datasets[0]
     assert isinstance(record, dict)
-    retained = Path((tmp_path / "listing-artifacts/10/control-root.txt").read_text())
+    retained = Path(
+        (tmp_path / "listing-artifacts" / str(count) / "control-root.txt").read_text()
+    )
     retained.rmdir()
 
     assert completed.returncode != 0
@@ -153,18 +157,18 @@ def test_listing_measurement_retains_rejected_inventory(tmp_path: Path) -> None:
     assert evidence["all_420_cycles"] is False
     assert record["inventory_verified"] is False
     assert record["verified_inventory"] == []
-    assert record["entries"] == 10
+    assert record["entries"] == count
     assert record["fixture_entries"] == 1
     assert record["fixture_schema_bytes"] == 8192
     declared = record["declared_inventory"]
     observed = record["observed_inventory"]
     assert isinstance(declared, list)
     assert isinstance(observed, list)
-    assert len(declared) == 10
+    assert len(declared) == count
     assert len(observed) == 2
     observed_entries = TypeAdapter(tuple[InstalledEntry, ...]).validate_python(observed)
     assert sorted(entry.name for entry in observed_entries) == [
         "policy.unexpected",
         "policy.zz_controlled",
     ]
-    assert not (tmp_path / "listing-artifacts/10/0").exists()
+    assert not (tmp_path / "listing-artifacts" / str(count) / "0").exists()

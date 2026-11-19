@@ -22,6 +22,7 @@ CORE_TARGETS: dict[str, str] = {
         "kora.plugins.artifact_type.structured_output:provider_metadata"
     ),
     "artifact_type.vcs_ref": "kora.plugins.artifact_type.vcs_ref:provider_metadata",
+    "harness.claude": "kora.plugins.harness.claude.adapter:provider_metadata",
     "policy.allow_deny": "kora.plugins.policy.allow_deny:provider_metadata",
     "secrets.env": "kora.plugins.secrets.env:provider_metadata",
     "vcs.git": "kora.plugins.vcs.git:provider_metadata",

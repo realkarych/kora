@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Final
 
 from kora.ir import ConfigWarning
 from kora.ir.cost import UsageCoverage
@@ -25,10 +25,19 @@ from kora.protocols.harness import (
     SessionResult,
     SessionSpec,
 )
+from kora.protocols.metadata import ProtocolName, ProviderMetadata
 from kora.protocols.policy import PolicyClient
 from kora.protocols.vcs import WorkspaceTarget
 from kora.runner.calls import CallScope
 from kora.runner.outcome import select_output
+
+VERSION: Final[str] = "1"
+
+
+def provider_metadata() -> ProviderMetadata:
+    return ProviderMetadata(
+        ProtocolName.HARNESS, "claude", ClaudeHarness, CONFIG_SCHEMA, VERSION
+    )
 
 
 @dataclass(frozen=True)
