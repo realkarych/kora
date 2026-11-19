@@ -356,9 +356,15 @@ async def test_poll_keeps_cursor_when_grant_writer_fails(
     ) -> None:
         nonlocal failed
         normalized = statement.lstrip().upper()
-        matched = statement_marker in normalized and (
-            statement_marker in {"TRANSACTION_READ_ONLY", "ATTEMPT_CLAIM_READ_ADMISSION"}
-            or normalized.startswith("UPDATE")
+        writer_statement = not database.writer_is_free()
+        matched = (
+            writer_statement
+            and statement_marker in normalized
+            and (
+                statement_marker == "TRANSACTION_READ_ONLY"
+                or statement_marker == "ATTEMPT_CLAIM_READ_ADMISSION"
+                or normalized.startswith("UPDATE")
+            )
         )
         if not failed and matched:
             failed = True
@@ -382,6 +388,11 @@ async def test_poll_keeps_cursor_when_grant_writer_fails(
 
     assert failed
     assert str(refusal.value) == "claim sources are unavailable"
+    assert refusal.value.__cause__ is refusal.value.__context__ is None
+    assert case.binding.attempt_id not in str(refusal.value)
+    assert after == before
+    assert database.units_in_flight() == 0
+    assert database.writer_is_free()
 
 
 @pytest.mark.asyncio
@@ -412,10 +423,5 @@ async def test_poll_advances_past_an_unrepresentable_saved_timeout(
     assert advanced["attempt_dispatcher"] == before["attempt_dispatcher"]
     assert wrapped is None
     assert after["worker"][0]["claim_cursor"] is None
-    assert database.units_in_flight() == 0
-    assert database.writer_is_free()
-    assert refusal.value.__cause__ is refusal.value.__context__ is None
-    assert case.binding.attempt_id not in str(refusal.value)
-    assert after == before
     assert database.units_in_flight() == 0
     assert database.writer_is_free()
