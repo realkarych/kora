@@ -6,10 +6,12 @@ from sqlalchemy import Connection, select
 
 from kora.db.claim_sources_v1 import SQLITE_KEY
 from kora.db.connection import Database, DatabaseSettings, Dialect
+from kora.db.deadline_discovery_v1 import PG_CANCEL
 from kora.db.grant_history_v1 import ACK_FIELDS, TIP_FIELDS
 from kora.db.migrations import current_revision, upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt, attempt_claim_read_admission
+from kora.db.worker_claim_poll_v1 import CANDIDATE_INDEX, CANDIDATE_ROWS
 from kora.db.worker_claims_v1 import OPEN_ROWS, UNKNOWN_ROWS
 from tests.db.cancel_cause_support import attempt_schema_objects
 from tests.db.seed import Seeder
@@ -31,6 +33,27 @@ def worker_slot_index(name: str, predicate: str, dialect: Dialect) -> dict[str, 
         "dialect_options": {
             "postgresql_include": [],
             "postgresql_where": f"({predicate})",
+        },
+    }
+
+
+def candidate_index(dialect: Dialect) -> dict[str, object]:
+    if dialect is Dialect.SQLITE:
+        return {
+            "name": CANDIDATE_INDEX,
+            "column_names": ["runtime", "id"],
+            "unique": 0,
+            "dialect_options": {"sqlite_where": CANDIDATE_ROWS},
+        }
+    return {
+        "name": CANDIDATE_INDEX,
+        "column_names": ["runtime", "id"],
+        "unique": False,
+        "dialect_options": {
+            "postgresql_include": [],
+            "postgresql_where": (
+                f"(({PG_CANCEL} OR (recovery_required IS TRUE)) IS TRUE)"
+            ),
         },
     }
 
@@ -59,6 +82,7 @@ def assert_attempt_schema_extension(
         expected["ix_attempt_worker_unknown"] = worker_slot_index(
             "ix_attempt_worker_unknown", UNKNOWN_ROWS, dialect
         )
+        expected[CANDIDATE_INDEX] = candidate_index(dialect)
 
     assert after[0] == before[0]
     assert {str(index["name"]): index for index in current} == expected
