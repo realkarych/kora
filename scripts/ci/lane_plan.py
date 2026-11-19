@@ -11,7 +11,7 @@ from xml.parsers.expat import ParserCreate
 
 TARGET_MILLISECONDS = 270_000
 CHILDREN = 3
-MAXIMUM_LANES = 8
+MAXIMUM_LANES = 12
 SPECIAL_LANES = frozenset({"storage", "local-runtime"})
 TABLE = Path(__file__).with_name("lane_durations.json")
 MAXIMUM_INPUT = 67108864

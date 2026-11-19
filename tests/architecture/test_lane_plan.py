@@ -213,10 +213,23 @@ def test_a_single_test_above_the_target_gets_a_child_of_its_own() -> None:
     ]
 
 
+def test_lane_count_accepts_exactly_the_lane_bound() -> None:
+    nodes, durations = uniform_suite(3 * MAXIMUM_LANES)
+
+    lanes = lane_count(nodes, durations, 3, 100)
+    plan = assign(nodes, durations, lanes, 3, 100)
+
+    assert lanes == MAXIMUM_LANES
+    assert len(plan) == MAXIMUM_LANES
+    assert all(len(lane) == 3 for lane in plan)
+    assert all(child.milliseconds == 100 for lane in plan for child in lane)
+    assert sorted(placed(plan)) == sorted(nodes)
+
+
 def test_lane_count_refuses_more_than_the_lane_bound() -> None:
     nodes, durations = uniform_suite(3 * (MAXIMUM_LANES + 1))
 
-    with pytest.raises(PlanFailure, match="more than 8 lanes"):
+    with pytest.raises(PlanFailure, match=f"more than {MAXIMUM_LANES} lanes"):
         lane_count(nodes, durations, 3, 100)
 
 

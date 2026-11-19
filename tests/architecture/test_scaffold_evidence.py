@@ -606,7 +606,7 @@ def test_collection_preserves_parameter_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "lane", ["integration", "conformance", "general-0", "general-9"]
+    "lane", ["integration", "conformance", "general-0", "general-13"]
 )
 def test_record_refuses_an_unplanned_lane_before_reading_evidence(
     tmp_path: Path, lane: str
@@ -763,7 +763,7 @@ def test_lane_assignment_writes_planned_nodes_in_collection_order(
         assert written[name] == [node for node in collected if node in child.nodes]
 
 
-@pytest.mark.parametrize(("lane", "lanes"), [("general-3", "2"), ("general-1", "9")])
+@pytest.mark.parametrize(("lane", "lanes"), [("general-3", "2"), ("general-1", "13")])
 def test_lane_assignment_refuses_a_lane_outside_its_plan(
     tmp_path: Path, lane: str, lanes: str
 ) -> None:
@@ -809,7 +809,7 @@ def test_plan_outputs_split_lane_rows_by_platform(tmp_path: Path) -> None:
         "[]",
         '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1}',
         '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1, "macos-15-3.11.17": 0}',
-        '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1, "macos-15-3.11.17": 9}',
+        '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1, "macos-15-3.11.17": 13}',
         '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1, '
         '"macos-15-3.11.17": true}',
         '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1, '
