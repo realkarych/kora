@@ -11,9 +11,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.cel_eval.errors import raise_safe
-from kora.db.claim_source_values import ClaimSourcesRejected
+from kora.db.claim_source_values import ClaimSourcesRejected, ClaimWriterFailed
 from kora.db.connection import Database, clear_snapshot_error
-from kora.db.grant_history import GrantHistoryRejected, HistoryReadLimits, HistoryScope
+from kora.db.grant_history import (
+    GrantHistoryRejected,
+    HistoryReadLimits,
+    HistoryScope,
+    HistoryWriterFailed,
+)
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import attempt_dispatcher, worker
 from kora.db.types import POSTGRESQL, normalise_timestamp
@@ -410,6 +415,8 @@ class WorkerClaimPoll:
                 position = attempt_id
             try:
                 result = await self._selected(attempt_id, query, principal, cursor)
+            except (ClaimWriterFailed, HistoryWriterFailed):
+                raise
             except (ClaimSourcesRejected, GrantHistoryRejected):
                 try:
                     terminal = await self._empty(query, principal, cursor, position)

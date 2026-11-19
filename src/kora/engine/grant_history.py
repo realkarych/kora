@@ -20,6 +20,7 @@ from kora.db.grant_history import (
     HistoryPosition,
     HistoryReadLimits,
     HistoryScope,
+    HistoryWriterFailed,
     RawGrant,
     read_history_rows,
     verify_history_scope,
@@ -365,9 +366,11 @@ async def save_history_batch(
 ) -> GrantHistorySnapshot | None:
     try:
         return await _save_history_batch(connection, locks, prepared, limits)
+    except GrantHistoryRejected:
+        raise
     except (SQLAlchemyError, OSError, ValueError):
         del prepared
-        raise_safe(GrantHistoryRejected())
+        raise_safe(HistoryWriterFailed())
 
 
 async def append_grant(
@@ -381,6 +384,8 @@ async def append_grant(
 ) -> GrantHistorySnapshot | None:
     try:
         return await _append_grant(connection, locks, scope, grant, mode, now, limits)
+    except GrantHistoryRejected:
+        raise
     except (SQLAlchemyError, OSError, ValueError):
         del grant
-        raise_safe(GrantHistoryRejected())
+        raise_safe(HistoryWriterFailed())

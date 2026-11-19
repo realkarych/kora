@@ -4,9 +4,11 @@ from typing import cast
 
 import pytest
 from sqlalchemy import delete, event, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.util.concurrency import await_
 
 from kora.cel_eval.thread import Evaluator
+from kora.db.claim_source_values import ClaimSourcesRejected
 from kora.db.connection import Database
 from kora.db.grant_history_v1 import ACK_FIELDS, TIP_FIELDS
 from kora.db.tables import (
@@ -315,5 +317,52 @@ async def test_poll_cancellation_releases_sources_and_rolls_back_tentative_write
         event.remove(engine.sync_engine, "after_cursor_execute", pause_native_operation)
 
     assert before == after
+    assert database.units_in_flight() == 0
+    assert database.writer_is_free()
+
+
+@pytest.mark.asyncio
+async def test_poll_keeps_cursor_when_grant_writer_fails(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await claim_case(database, evaluator)
+    before = await state(database)
+    poll = poller(database, AuthorityClock())
+    failed = False
+
+    def fail_grant_write(
+        connection: object, cursor: object, statement: str, *arguments: object
+    ) -> None:
+        nonlocal failed
+        normalized = statement.lstrip().upper()
+        if (
+            not failed
+            and normalized.startswith("UPDATE")
+            and "EXECUTION_STATE" in normalized
+        ):
+            failed = True
+            raise OperationalError(statement, {}, Exception())
+
+    event.listen(
+        database.writer_engine.sync_engine,
+        "before_cursor_execute",
+        fail_grant_write,
+    )
+    try:
+        with pytest.raises(ClaimSourcesRejected) as refusal:
+            await poll.poll(case.query, case.principal)
+        after = await state(database)
+    finally:
+        event.remove(
+            database.writer_engine.sync_engine,
+            "before_cursor_execute",
+            fail_grant_write,
+        )
+
+    assert failed
+    assert str(refusal.value) == "claim sources are unavailable"
+    assert refusal.value.__cause__ is refusal.value.__context__ is None
+    assert case.binding.attempt_id not in str(refusal.value)
+    assert after == before
     assert database.units_in_flight() == 0
     assert database.writer_is_free()

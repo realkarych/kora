@@ -8,11 +8,20 @@ from sqlalchemy import and_, insert, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from kora.cel_eval.errors import raise_safe
-from kora.db.claim_source_values import ClaimSourcesRejected, prepare_claim_sources
+from kora.db.claim_source_values import (
+    ClaimSourcesRejected,
+    ClaimWriterFailed,
+    prepare_claim_sources,
+)
 from kora.db.claim_sources import ClaimSourceReadLimits
 from kora.db.claim_sources_v1 import SOURCE_FIELDS
 from kora.db.connection import clear_snapshot_error
-from kora.db.grant_history import HistoryReadLimits, HistoryScope, read_history_rows
+from kora.db.grant_history import (
+    GrantHistoryRejected,
+    HistoryReadLimits,
+    HistoryScope,
+    read_history_rows,
+)
 from kora.db.tables import attempt, attempt_dispatcher, event, namespace
 from kora.db.types import POSTGRESQL, normalise_timestamp
 from kora.db.worker_claims import claim_row, worker_slot_available
@@ -573,10 +582,10 @@ async def claim_attempt(
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)
         raise
-    except ClaimAccessRejected:
+    except (ClaimAccessRejected, ClaimSourcesRejected, GrantHistoryRejected):
         raise
     except (SQLAlchemyError, OSError, ValueError, TypeError, OverflowError):
-        raise_safe(ClaimSourcesRejected())
+        raise_safe(ClaimWriterFailed())
     finally:
         del context, query, principal, prepared
     diagnostics = current_diagnostics()

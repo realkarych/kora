@@ -18,6 +18,10 @@ class GrantHistoryRejected(ValueError):
         super().__init__("grant history is unavailable")
 
 
+class HistoryWriterFailed(GrantHistoryRejected):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class HistoryScope:
     namespace_id: str

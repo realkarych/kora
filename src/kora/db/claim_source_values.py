@@ -11,6 +11,10 @@ class ClaimSourcesRejected(ValueError):
         super().__init__("claim sources are unavailable")
 
 
+class ClaimWriterFailed(ClaimSourcesRejected):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class SourceAllowance:
     native: int
