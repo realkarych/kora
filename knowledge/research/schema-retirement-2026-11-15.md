@@ -12,7 +12,7 @@ The caller inventory covered production, tests, configuration and documentation.
 
 ## Retained behavioral coverage
 
-The new cases live in [test_standard_schema_retained_cases.py](../../tests/ir/test_standard_schema_retained_cases.py). Both exact v2 domains exercise shared behavior; large-integer output cases deliberately use only the output domain. They call the real source checker and validator, with no replacement library behavior. The unchanged [semantics](../../tests/ir/test_standard_schema_semantics.py), [source](../../tests/ir/test_standard_schema_source.py), [admission](../../tests/ir/test_standard_schema_admission.py), [source bounds](../../tests/ir/test_standard_schema_source_bounds.py), [source lifetime](../../tests/ir/test_standard_schema_source_lifetime.py) and [value lifetime](../../tests/ir/test_standard_schema_lifetime.py) suites retain the remaining accepted obligations.
+The new cases live in [test_standard_schema_retained_cases.py](../../tests/ir/test_standard_schema_retained_cases.py). Both exact v2 domains exercise shared behavior; large-integer output cases deliberately use only the output domain. They call the real source checker and validator, with no replacement library behavior. The unchanged [semantics](../../tests/ir/test_standard_schema_semantics.py), [source](../../tests/ir/test_standard_schema_source.py), [admission](../../tests/ir/test_standard_schema_admission.py), [source bounds](../../tests/ir/), [source lifetime](../../tests/ir/test_standard_schema_source_lifetime.py) and [value lifetime](../../tests/ir/test_standard_schema_lifetime.py) suites retain the remaining accepted obligations.
 
 | Retired behavior | Surviving named checks |
 |---|---|
