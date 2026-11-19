@@ -350,25 +350,27 @@ async def test_poll_keeps_cursor_when_grant_writer_fails(
         assert database.writer_is_free()
         return
     failed = False
+    admission_reads = 0
 
     def fail_grant_write(
         connection: object, cursor: object, statement: str, *arguments: object
     ) -> None:
-        nonlocal failed
+        nonlocal failed, admission_reads
         normalized = statement.lstrip().upper()
-        writer_statement = not database.writer_is_free()
-        matched = (
-            writer_statement
-            and statement_marker in normalized
-            and (
-                statement_marker == "TRANSACTION_READ_ONLY"
-                or statement_marker == "ATTEMPT_CLAIM_READ_ADMISSION"
-                or normalized.startswith("UPDATE")
-            )
+        admission = statement_marker == "ATTEMPT_CLAIM_READ_ADMISSION"
+        matched = statement_marker in normalized and (
+            admission
+            or statement_marker == "TRANSACTION_READ_ONLY"
+            or normalized.startswith("UPDATE")
         )
-        if not failed and matched:
-            failed = True
-            raise OperationalError(statement, {}, Exception())
+        if not matched or failed:
+            return
+        if admission:
+            admission_reads += 1
+            if database.dialect is Dialect.POSTGRESQL and admission_reads == 1:
+                return
+        failed = True
+        raise OperationalError(statement, {}, Exception())
 
     event.listen(
         database.writer_engine.sync_engine,
