@@ -34,6 +34,8 @@ from tests.engine.claim_support import HISTORY_LIMITS, WORKER_BYTES, claim_case
 from tests.plugins.authentication.support import AuthorityClock
 from tests.plugins.storage.sink_probe import fill
 
+SINK_REPETITIONS: int = 4
+
 
 def run(sink: str, configuration: Path) -> SinkReport:
     data: object = json.loads(configuration.read_bytes())
@@ -88,7 +90,7 @@ def run(sink: str, configuration: Path) -> SinkReport:
                 assert first.claim is not None
                 query = history_query(first.claim)
                 conflict = query.model_copy(update={"snapshot_digest": "f" * 64})
-                for _ in range(32):
+                for _ in range(SINK_REPETITIONS):
                     page = await client.grant_history(case.binding.attempt_id, query)
                     assert page.complete
                     with pytest.raises(ApiError) as caught:

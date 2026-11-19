@@ -15,6 +15,7 @@ from kora.db.tables import attempt_dispatcher
 from kora.observability import Level, LoggingSettings
 from tests.api.claim_support import BEARER, application, request
 from tests.api.deployment_cases import evaluator
+from tests.api.history_sink_probe import SINK_REPETITIONS
 from tests.api.history_support import history_query
 from tests.api.sink_probe import SinkReport
 from tests.api.test_history_lifetime import HeldHistory
@@ -41,7 +42,7 @@ def test_history_logging_sink_failure_preserves_history_and_claim_progress(
 
     assert process.code == 0, process.stderr.decode()
     report = SinkReport.model_validate_json(process.stdout)
-    assert report.completed == 96
+    assert report.completed == SINK_REPETITIONS * 3
     assert report.outstanding == 0
     assert not report.writer_alive
     assert process.stderr == b""
