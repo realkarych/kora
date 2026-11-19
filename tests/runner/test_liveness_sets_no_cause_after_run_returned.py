@@ -22,6 +22,7 @@ from tests.runner.agent_support import (
     HeldWriter,
     SignalledScript,
     SteppedClock,
+    advance_batch,
     drained,
     make_world,
     script,
@@ -71,6 +72,7 @@ class WriterHeldScript(SignalledScript):
 
     async def steps(self) -> AsyncGenerator[Step]:
         yield self.listed[0]
+        await advance_batch(self.clock)
         assert await asyncio.to_thread(self.writer.entered.wait, 10)
         await self.clock.advance_to(5 * SECOND)
         for item in self.listed[1:-1]:

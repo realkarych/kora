@@ -212,6 +212,8 @@ def test_pull_requests_that_edit_a_scheduled_input_run_the_daily_workflow() -> N
         "scripts/ci/scheduled_lanes.sh",
         "scripts/ci/scheduled_report.py",
         "tests/scaffold_evidence.py",
+        "tests/measurements/test_runner_sink_cost.py",
+        "tests/measurements/runner_sink_workload.py",
         *SCHEDULED_LIFETIME_MODULES,
         *SCHEDULED_MACOS_STORAGE_MODULES,
     ]

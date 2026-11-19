@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Final
@@ -38,6 +39,12 @@ class JournalAppendOutcome(Enum):
 
 
 @dataclass(frozen=True)
+class BatchAppend:
+    admitted: int
+    outcome: JournalAppendOutcome | None
+
+
+@dataclass(frozen=True)
 class JournalLocation:
     offset: int
     length: int
@@ -45,7 +52,8 @@ class JournalLocation:
 
 
 class _Write:
-    def __init__(self, line: bytes, deadline: int, position: int) -> None:
+    def __init__(self, line: bytes, deadline: int, position: int, count: int) -> None:
+        self.count = count
         self.line = line
         self.deadline = deadline
         self.position = position
@@ -90,12 +98,22 @@ class RunningJournal:
     def append_outcome(
         self, kind: str, data: JsonObject, *, reader_bounded: bool = False
     ) -> JournalAppendOutcome:
-        return self._append(kind, data, reader_bounded)[0]
+        return self._append(((kind, data),), reader_bounded)[0]
+
+    def append_batch(
+        self, records: Sequence[tuple[str, JsonObject]], *, cap_bytes: int
+    ) -> BatchAppend:
+        if not records:
+            raise ValueError("a journal batch must not be empty")
+        outcome, job = self._append(records, False, cap_bytes=cap_bytes)
+        if job is None and outcome is JournalAppendOutcome.DURABLE:
+            return BatchAppend(0, None)
+        return BatchAppend(0 if job is None else job.count, outcome)
 
     def append_located(
         self, kind: str, data: JsonObject
     ) -> tuple[JournalAppendOutcome, JournalLocation | None]:
-        outcome, job = self._append(kind, data, True)
+        outcome, job = self._append(((kind, data),), True)
         with self._state:
             prefix = self._prefix_bytes
         if outcome is not JournalAppendOutcome.DURABLE or job is None or prefix is None:
@@ -104,7 +122,11 @@ class RunningJournal:
         return outcome, JournalLocation(prefix + job.position, len(job.line), digest)
 
     def _append(
-        self, kind: str, data: JsonObject, reader_bounded: bool
+        self,
+        records: Sequence[tuple[str, JsonObject]],
+        reader_bounded: bool,
+        *,
+        cap_bytes: int | None = None,
     ) -> tuple[JournalAppendOutcome, _Write | None]:
         deadline = self._clock.monotonic_ns() + SYNC_DEADLINE_NS
         launch: tuple[threading.Thread, DirectoryAnchor, BorrowedInvocation] | None = (
@@ -114,25 +136,37 @@ class RunningJournal:
             if self._closed:
                 return JournalAppendOutcome.ABSENT, None
             try:
-                line = (
-                    canonical_bytes(
-                        {
-                            "i": self._next,
-                            "at": instant_wire(self._clock.now()),
-                            "kind": kind,
-                            "data": data,
-                        }
+                lines: list[bytes] = []
+                admitted_bytes = self._admitted_bytes
+                for offset, (kind, data) in enumerate(records):
+                    encoded = (
+                        canonical_bytes(
+                            {
+                                "i": self._next + offset,
+                                "at": instant_wire(self._clock.now()),
+                                "kind": kind,
+                                "data": data,
+                            }
+                        )
+                        + b"\n"
                     )
-                    + b"\n"
-                )
-                next_index = self._next + 1
-                admitted_bytes = self._admitted_bytes + len(line)
+                    if cap_bytes is not None and (
+                        (self._prefix_bytes or 0) + admitted_bytes + len(encoded)
+                        > cap_bytes
+                    ):
+                        break
+                    lines.append(encoded)
+                    admitted_bytes += len(encoded)
+                if not lines:
+                    return JournalAppendOutcome.DURABLE, None
+                line = b"".join(lines)
+                next_index = self._next + len(lines)
                 if reader_bounded and (
                     self._prefix_bytes is None
                     or self._prefix_bytes + admitted_bytes > RECORD_LIMIT
                 ):
                     raise JournalCapacityError
-                job = _Write(line, deadline, self._admitted_bytes)
+                job = _Write(line, deadline, self._admitted_bytes, len(lines))
                 self._jobs.append(job)
             except MemoryError:
                 if reader_bounded:
@@ -201,7 +235,7 @@ class RunningJournal:
                 return JournalAppendOutcome.DURABLE
             self._close_locked()
             if job.written or (job.write_admitted and not job.done):
-                self._not_durable += 1
+                self._not_durable += job.count
                 return JournalAppendOutcome.UNCERTAIN
             return JournalAppendOutcome.ABSENT
 

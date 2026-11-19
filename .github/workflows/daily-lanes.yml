@@ -12,6 +12,8 @@ on:
       - scripts/ci/scheduled_lanes.sh
       - scripts/ci/scheduled_report.py
       - tests/scaffold_evidence.py
+      - tests/measurements/test_runner_sink_cost.py
+      - tests/measurements/runner_sink_workload.py
       - tests/conformance/test_lifetime_cleanup_controls.py
       - tests/conformance/test_lifetime_direct_inputs.py
       - tests/conformance/test_lifetime_helper_phases.py
@@ -281,6 +283,20 @@ jobs:
           name: protocol-models-cost-measurement
           path: measurements/protocol-models-cost.json
           if-no-files-found: error
+      - name: Measure runner sink drain and memory
+        id: runner_sink_measurement
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/runner-sink-cost.json \
+            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_runner_sink_cost.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        id: runner_sink_upload
+        if: ${{ !cancelled() && steps.runner_sink_measurement.outcome != 'skipped' }}
+        with:
+          name: runner-sink-measurement
+          path: measurements/runner-sink-cost.json
+          if-no-files-found: error
       - name: Check the synced environment and unchanged dependency files
         id: final_sync
         if: ${{ always() && !cancelled() }}
@@ -302,6 +318,8 @@ jobs:
           PROVIDER_UPLOAD_OUTCOME: ${{ steps.provider_upload.outcome }}
           PROTOCOL_MODELS_MEASUREMENT_OUTCOME: ${{ steps.protocol_models_measurement.outcome }}
           PROTOCOL_UPLOAD_OUTCOME: ${{ steps.protocol_upload.outcome }}
+          RUNNER_SINK_MEASUREMENT_OUTCOME: ${{ steps.runner_sink_measurement.outcome }}
+          RUNNER_SINK_UPLOAD_OUTCOME: ${{ steps.runner_sink_upload.outcome }}
           FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
@@ -312,6 +330,8 @@ jobs:
             PROVIDER_UPLOAD_OUTCOME=success \
             PROTOCOL_MODELS_MEASUREMENT_OUTCOME=success \
             PROTOCOL_UPLOAD_OUTCOME=success \
+            RUNNER_SINK_MEASUREMENT_OUTCOME=success \
+            RUNNER_SINK_UPLOAD_OUTCOME=success \
             FINAL_SYNC_OUTCOME=success \
             WORKFLOW_CANCELLED=false
 

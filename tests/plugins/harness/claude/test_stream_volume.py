@@ -2,6 +2,7 @@ import asyncio
 import threading
 import time
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from tempfile import mkdtemp
 
@@ -21,7 +22,7 @@ from kora.plugins.harness.text import (
 )
 from kora.protocols.harness import MAX_TEXT_BYTES, TurnEvent
 from kora.protocols.time import Clock
-from kora.runner.journal import JournalAppendOutcome
+from kora.runner.journal import BatchAppend, JournalAppendOutcome
 from kora.runner.sink import RunnerSink
 from tests.plugins.harness.claude import recording_builder as frames
 from tests.plugins.harness.claude.conformance_launch import ClaudeLaunches, wait_signal
@@ -56,6 +57,17 @@ class MemoryJournal:
         self.appended_at.append(time.monotonic_ns())
         self.loop.call_soon_threadsafe(self.changed.set)
         return JournalAppendOutcome.DURABLE
+
+    def append_batch(
+        self, records: Sequence[tuple[str, JsonObject]], *, cap_bytes: int
+    ) -> BatchAppend:
+        self.loop.call_soon_threadsafe(self.entered.set)
+        self.release.wait()
+        for kind, data in records:
+            self.records.append((kind, canonical_bytes(data)))
+            self.appended_at.append(time.monotonic_ns())
+        self.loop.call_soon_threadsafe(self.changed.set)
+        return BatchAppend(len(records), JournalAppendOutcome.DURABLE)
 
     async def wait_for_kinds(self, kinds: set[str]) -> None:
         async with asyncio.timeout(10):

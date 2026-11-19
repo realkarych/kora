@@ -512,6 +512,7 @@ async def test_writer_progress_closes_full_episode() -> None:
 
     try:
         sink.emit("turn", turn())
+        barrier = asyncio.create_task(sink.settle(10_000_000_000))
         assert await asyncio.to_thread(writer.entered.wait, 10)
         for _ in range(QUEUE_RECORDS + 1):
             sink.emit("turn", turn())
@@ -523,6 +524,7 @@ async def test_writer_progress_closes_full_episode() -> None:
         await clock.requested(30_000_000_000)
         await clock.advance_to(29_000_000_000)
         writer.gate.set()
+        await barrier
         await sink.settle(89_000_000_000)
         recovered = sink.liveness()
         await clock.advance_to(30_000_000_000)

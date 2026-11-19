@@ -40,6 +40,7 @@ from tests.runner.agent_support import (
     RaisingPolicy,
     SignalledScript,
     World,
+    advance_batch,
     execution,
     hosted,
     journal_threads_exited,
@@ -89,13 +90,15 @@ async def stopped(
     host = world.host(world.resolver(source, deaf), journal=journal)
     host.start(world.workload(deadline=deadline, **changes), world.workspace())
     await source.paused.wait()
+    if journal is not None:
+        await advance_batch(world.clock)
     abandoned = asyncio.ensure_future(host.finished())
     asyncio.get_running_loop().call_soon(abandoned.cancel)
     await asyncio.wait({abandoned})
     cancelled = asyncio.ensure_future(host.cancel() if cancel else host.finished())
     for due_ns in releases:
-        await world.clock.requested(due_ns)
-        await world.clock.release(due_ns)
+        await world.clock.requested(due_ns + world.clock.current)
+        await world.clock.release(due_ns + world.clock.current)
     await cancelled
     await host.finished()
     return host, await host.stop()

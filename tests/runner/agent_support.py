@@ -39,8 +39,8 @@ from kora.runner.agent import (
     Released,
 )
 from kora.runner.filesystem import DirectoryAnchor
-from kora.runner.journal import JournalAppendOutcome, RunningJournal
-from kora.runner.sink import JournalWriter, RunnerSink
+from kora.runner.journal import BatchAppend, JournalAppendOutcome, RunningJournal
+from kora.runner.sink import BATCH_WINDOW_NS, JournalWriter, RunnerSink
 from tests.plugins.harness.fake.fake_support import step
 from tests.protocols.runtime_documents import ATTEMPT, workload
 
@@ -55,18 +55,26 @@ def run(work: Coroutine[object, object, T]) -> T:
 
 class GatedClock:
     def __init__(self) -> None:
+        self.current = 0
         self.deadlines: list[int] = []
         self.released: set[int] = set()
         self.changed = asyncio.Condition()
 
     def now(self) -> datetime:
-        return FIXED_NOW
+        return FIXED_NOW + timedelta(microseconds=self.current // 1000)
 
     def monotonic_ns(self) -> int:
-        return 0
+        return self.current
 
     def sample(self) -> ClockSample:
-        return ClockSample(wall=FIXED_NOW, monotonic_ns=0)
+        return ClockSample(wall=self.now(), monotonic_ns=self.current)
+
+    async def advance_to(self, instant_ns: int) -> None:
+        async with self.changed:
+            if instant_ns < self.current:
+                raise ValueError("time cannot move backwards")
+            self.current = instant_ns
+            self.changed.notify_all()
 
     async def sleep_until(self, deadline_ns: int) -> None:
         async with self.changed:
@@ -121,6 +129,10 @@ class SteppedClock:
             self.changed.notify_all()
 
 
+async def advance_batch(clock: GatedClock | SteppedClock) -> None:
+    await clock.advance_to(clock.current + BATCH_WINDOW_NS)
+
+
 class HeldWriter:
     def __init__(
         self,
@@ -132,6 +144,7 @@ class HeldWriter:
         self.gate = threading.Event()
         self.outcome = outcome
         self.appended: list[tuple[str, JsonObject]] = []
+        self.batches: list[tuple[tuple[str, JsonObject], ...]] = []
 
     def append_outcome(self, kind: str, data: JsonObject) -> JournalAppendOutcome:
         if self.journal is not None and kind.startswith("runner."):
@@ -143,12 +156,29 @@ class HeldWriter:
             return self.journal.append_outcome(kind, data)
         return self.outcome
 
+    def append_batch(
+        self, records: Sequence[tuple[str, JsonObject]], *, cap_bytes: int
+    ) -> BatchAppend:
+        self.entered.set()
+        self.gate.wait()
+        self.batches.append(tuple(records))
+        self.appended.extend(records)
+        if self.journal is not None:
+            return self.journal.append_batch(records, cap_bytes=cap_bytes)
+        return BatchAppend(len(records), self.outcome)
+
 
 class FailingWriter:
     def __init__(self) -> None:
         self.attempts = 0
 
     def append_outcome(self, kind: str, data: JsonObject) -> JournalAppendOutcome:
+        self.attempts += 1
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    def append_batch(
+        self, records: Sequence[tuple[str, JsonObject]], *, cap_bytes: int
+    ) -> BatchAppend:
         self.attempts += 1
         raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
 
@@ -357,6 +387,20 @@ class JournalProxy:
         if kind == self.on and self.action in {"fence", "close"}:
             self.journal.close()
         return self.journal.append_outcome(kind, data)
+
+    def append_batch(
+        self, records: Sequence[tuple[str, JsonObject]], *, cap_bytes: int
+    ) -> BatchAppend:
+        if any(kind == self.on for kind, _ in records):
+            if self.action == "fail":
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            if self.action == "hold":
+                self.gate.wait()
+            if self.action == "fence" and self.host is not None:
+                self.host.fence()
+            if self.action in {"fence", "close"}:
+                self.journal.close()
+        return self.journal.append_batch(records, cap_bytes=cap_bytes)
 
 
 def sink_for(
