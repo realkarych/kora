@@ -382,6 +382,38 @@ async def test_poll_keeps_cursor_when_grant_writer_fails(
 
     assert failed
     assert str(refusal.value) == "claim sources are unavailable"
+
+
+@pytest.mark.asyncio
+async def test_poll_advances_past_an_unrepresentable_saved_timeout(
+    database: Database, evaluator: Evaluator
+) -> None:
+    ir = skeleton_ir()
+    agent = cast(
+        JsonObject, cast(JsonObject, cast(JsonObject, ir["graph"])["nodes"])["agent"]
+    )
+    agent["limits"] = {"timeout": "999999999999d"}
+    case = await claim_case(database, evaluator, ir)
+    before = await state(database)
+    poll = poller(database, AuthorityClock())
+
+    with pytest.raises(ClaimSourcesRejected) as refusal:
+        await poll.poll(case.query, case.principal)
+    advanced = await state(database)
+    wrapped = await poll.poll(
+        case.query.model_copy(update={"claim_id": "after-timeout"}), case.principal
+    )
+    after = await state(database)
+
+    assert str(refusal.value) == "claim sources are unavailable"
+    assert case.binding.attempt_id not in str(refusal.value)
+    assert advanced["worker"][0]["claim_cursor"] == case.binding.attempt_id
+    assert advanced["worker"][0]["claim_cursor_generation"] == 1
+    assert advanced["attempt_dispatcher"] == before["attempt_dispatcher"]
+    assert wrapped is None
+    assert after["worker"][0]["claim_cursor"] is None
+    assert database.units_in_flight() == 0
+    assert database.writer_is_free()
     assert refusal.value.__cause__ is refusal.value.__context__ is None
     assert case.binding.attempt_id not in str(refusal.value)
     assert after == before

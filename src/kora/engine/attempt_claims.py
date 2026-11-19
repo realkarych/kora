@@ -37,6 +37,7 @@ from kora.engine.claim_selection import ClaimDelivery, SelectedClaim
 from kora.engine.claim_sources import recheck_claim_sources, update_claim_sources
 from kora.engine.claim_timing import first_claim_deadline
 from kora.engine.deadline_records import (
+    DeadlineRecordRejected,
     RecordedDeadlineBinding,
     deadline_document,
     prepare_deadline_record,
@@ -582,6 +583,8 @@ async def claim_attempt(
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)
         raise
+    except DeadlineRecordRejected:
+        raise_safe(ClaimSourcesRejected())
     except (ClaimAccessRejected, ClaimSourcesRejected, GrantHistoryRejected):
         raise
     except (SQLAlchemyError, OSError, ValueError, TypeError, OverflowError):
