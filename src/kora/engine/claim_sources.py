@@ -11,6 +11,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from kora.cel_eval.errors import raise_safe
 from kora.db.claim_source_values import (
     ClaimSourcesRejected,
+    ClaimWriterFailed,
     PreparedClaimSources,
     decode_claim_source,
 )
@@ -243,7 +244,10 @@ async def update_claim_sources(
         return await _update_claim_sources(
             connection, locks, binding, prepared, limits, expected_revision, now
         )
-    except (ValueError, OSError, SQLAlchemyError):
+    except (OSError, SQLAlchemyError):
+        del connection, locks, binding, prepared, limits, expected_revision, now
+        raise_safe(ClaimWriterFailed())
+    except ValueError:
         del connection, locks, binding, prepared, limits, expected_revision, now
         raise_safe(ClaimSourcesRejected())
 
@@ -256,6 +260,9 @@ async def recheck_claim_sources(
 ) -> bool:
     try:
         return await _recheck_claim_sources(connection, locks, acquired, limits)
-    except (ValueError, OSError, SQLAlchemyError):
+    except (OSError, SQLAlchemyError):
+        del connection, locks, acquired, limits
+        raise_safe(ClaimWriterFailed())
+    except ValueError:
         del connection, locks, acquired, limits
         raise_safe(ClaimSourcesRejected())

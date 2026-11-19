@@ -50,7 +50,7 @@ from kora.engine.lease_recovery import (
     recover_expired_lease,
 )
 from kora.engine.locks import COMPONENT
-from kora.engine.writer_mode import writable_postgres_transaction
+from kora.engine.writer_mode import postgres_transaction_is_writable
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 from kora.protocols.authentication import Principal
 from kora.protocols.boundary import BoundaryModel
@@ -303,7 +303,7 @@ async def _claim(
     context.locks.require(context.run_id)
     if (
         connection.dialect.name == POSTGRESQL
-        and not await writable_postgres_transaction(connection)
+        and not await postgres_transaction_is_writable(connection)
     ):
         raise ClaimSourcesRejected()
     registered, incarnation = await claim_worker(

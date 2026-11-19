@@ -9,7 +9,7 @@ from sqlalchemy.util.concurrency import await_
 
 from kora.cel_eval.thread import Evaluator
 from kora.db.claim_source_values import ClaimSourcesRejected
-from kora.db.connection import Database
+from kora.db.connection import Database, Dialect
 from kora.db.grant_history_v1 import ACK_FIELDS, TIP_FIELDS
 from kora.db.tables import (
     attempt,
@@ -322,12 +322,33 @@ async def test_poll_cancellation_releases_sources_and_rolls_back_tentative_write
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "statement_marker",
+    [
+        "EXECUTION_STATE",
+        "SOURCE_REVISION",
+        "ATTEMPT_CLAIM_READ_ADMISSION",
+        "TRANSACTION_READ_ONLY",
+    ],
+)
 async def test_poll_keeps_cursor_when_grant_writer_fails(
-    database: Database, evaluator: Evaluator
+    database: Database, evaluator: Evaluator, statement_marker: str
 ) -> None:
     case = await claim_case(database, evaluator)
     before = await state(database)
     poll = poller(database, AuthorityClock())
+    if (
+        statement_marker == "TRANSACTION_READ_ONLY"
+        and database.dialect is not Dialect.POSTGRESQL
+    ):
+        delivery = await poll.poll(case.query, case.principal)
+        saved = await state(database)
+
+        assert delivery is not None
+        assert saved["worker"][0]["claim_cursor"] == case.binding.attempt_id
+        assert database.units_in_flight() == 0
+        assert database.writer_is_free()
+        return
     failed = False
 
     def fail_grant_write(
@@ -335,11 +356,11 @@ async def test_poll_keeps_cursor_when_grant_writer_fails(
     ) -> None:
         nonlocal failed
         normalized = statement.lstrip().upper()
-        if (
-            not failed
-            and normalized.startswith("UPDATE")
-            and "EXECUTION_STATE" in normalized
-        ):
+        matched = statement_marker in normalized and (
+            statement_marker in {"TRANSACTION_READ_ONLY", "ATTEMPT_CLAIM_READ_ADMISSION"}
+            or normalized.startswith("UPDATE")
+        )
+        if not failed and matched:
             failed = True
             raise OperationalError(statement, {}, Exception())
 

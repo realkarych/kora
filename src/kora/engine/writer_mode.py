@@ -17,16 +17,20 @@ class _NativePostgresTransaction(Protocol):
     def is_in_transaction(self) -> bool: ...
 
 
-async def writable_postgres_transaction(connection: AsyncConnection) -> bool:
+async def postgres_transaction_is_writable(connection: AsyncConnection) -> bool:
     if connection.dialect.driver != "asyncpg":
         return False
+    raw = await connection.get_raw_connection()
+    driver: object = raw.driver_connection
+    if not isinstance(driver, _NativePostgresTransaction):
+        return False
+    if driver.is_in_transaction() is not True:
+        return False
+    return (await connection.scalar(WRITABLE_POSTGRES_MODE)) is True
+
+
+async def writable_postgres_transaction(connection: AsyncConnection) -> bool:
     try:
-        raw = await connection.get_raw_connection()
-        driver: object = raw.driver_connection
-        if not isinstance(driver, _NativePostgresTransaction):
-            return False
-        if driver.is_in_transaction() is not True:
-            return False
-        return (await connection.scalar(WRITABLE_POSTGRES_MODE)) is True
+        return await postgres_transaction_is_writable(connection)
     except SQLAlchemyError:
         return False
