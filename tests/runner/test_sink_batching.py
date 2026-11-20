@@ -148,6 +148,38 @@ async def test_writer_flushes_after_50_ms() -> None:
 
 
 @pytest.mark.asyncio
+async def test_writer_keeps_late_queued_records_out_of_an_expired_batch() -> None:
+    clock = SteppedClock()
+    writer = HeldWriter()
+    sink = RunnerSink(writer, SecretRegistry(), clock, None, 900_000_000_000)
+    for index in range(BATCH_RECORDS):
+        sink.emit("turn", turn(message_id=f"held{index}"))
+
+    try:
+        entered = await asyncio.to_thread(writer.entered.wait, 10)
+        sink.emit("turn", turn(message_id="first"))
+        await clock.advance_to(BATCH_WINDOW_NS - 1)
+        sink.emit("turn", turn(message_id="inside"))
+        await clock.advance_to(BATCH_WINDOW_NS)
+        sink.emit("turn", turn(message_id="cutoff"))
+        sink.close()
+        writer.gate.set()
+        joined = await sink.joined(clock.current + 10_000_000_000)
+    finally:
+        sink.close()
+        writer.gate.set()
+        await sink.joined(clock.current + 10_000_000_000)
+
+    assert entered
+    assert joined
+    assert [len(batch) for batch in writer.batches] == [BATCH_RECORDS, 2, 1]
+    assert [
+        tuple(data["message_id"] for _, data in batch) for batch in writer.batches[1:]
+    ] == [("first", "inside"), ("cutoff",)]
+    assert sink.omitted() == 0
+
+
+@pytest.mark.asyncio
 async def test_supervisor_record_flushes_batch_first(tmp_path: Path) -> None:
     attempt = private_directory(tmp_path / "attempt")
     journal = RunningJournal(attempt, SystemClock())

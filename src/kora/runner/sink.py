@@ -51,7 +51,6 @@ QUEUE_BYTES: Final[int] = 4 * 1_048_576
 QUEUE_RECORDS: Final[int] = 4_096
 BATCH_RECORDS: Final[int] = 256
 BATCH_WINDOW_NS: Final[int] = 50_000_000
-MIN_BATCH_WAIT_NS: Final[int] = 1_000_000
 MAX_ERROR_EVENTS: Final[int] = 100
 T = TypeVar("T")
 
@@ -385,7 +384,11 @@ class RunnerSink:
             while len(batch) < BATCH_RECORDS:
                 if self._queue:
                     item = self._queue[0]
-                    if not isinstance(item, Record) or item.kind not in ADAPTER_KINDS:
+                    if (
+                        not isinstance(item, Record)
+                        or item.kind not in ADAPTER_KINDS
+                        or item.queued_ns >= deadline
+                    ):
                         break
                     self._queue.popleft()
                     self._queued_bytes -= item.size
@@ -395,7 +398,7 @@ class RunnerSink:
                 remaining = deadline - self._clock.monotonic_ns()
                 if self._closing or remaining <= 0:
                     break
-                self._state.wait(max(remaining, MIN_BATCH_WAIT_NS) / 1_000_000_000)
+                self._state.wait(remaining / 1_000_000_000)
         return batch
 
     def _append_batch(self, batch: Sequence[Record]) -> bool:
