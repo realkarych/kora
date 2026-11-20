@@ -219,23 +219,26 @@ class ScriptedHandler(BaseHTTPRequestHandler):
             self._send(500, b"", "text/plain")
             return
         host = self.client_address[0]
+        authorized = self.headers.get("x-api-key") == KEY
+        self._record(server, host, authorized)
         length_text = self.headers.get("content-length", "")
         if not length_text.isdecimal():
-            self._record(server, host, False)
             self._send(400, b"", "text/plain")
             return
         length = int(length_text)
         if length > BODY_LIMIT:
-            self._record(server, host, False)
             self._send(413, b"", "text/plain")
             return
         body = self.rfile.read(length)
-        with server.state.lock:
-            server.state.bodies.append(body.decode("utf-8"))
-        authorized = self.headers.get("x-api-key") == KEY
-        self._record(server, host, authorized)
         if len(body) != length:
             return
+        try:
+            decoded = body.decode("utf-8")
+        except UnicodeDecodeError:
+            self._send(400 if authorized else 401, b"", "text/plain")
+            return
+        with server.state.lock:
+            server.state.bodies.append(decoded)
         if not authorized:
             self._send(401, b"", "text/plain")
             return

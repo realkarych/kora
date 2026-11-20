@@ -5,6 +5,8 @@ from pathlib import Path
 from socket import create_connection
 from typing import Final
 
+import pytest
+
 from tests.plugins.harness.claude.contained import assert_no_outbound
 from tests.plugins.harness.claude.scripted_model import (
     KEY,
@@ -89,7 +91,10 @@ def test_scripted_messages_counts_a_refusal_before_a_successful_request() -> Non
     assert unauthorized == 1
 
 
-def test_scripted_server_settles_a_request_that_is_waiting_for_its_body() -> None:
+@pytest.mark.parametrize("body_prefix", [b"", b"\xc3"])
+def test_scripted_server_settles_a_request_that_is_waiting_for_its_body(
+    body_prefix: bytes,
+) -> None:
     state = ScriptedState([])
     server, thread, _ = serve(state)
 
@@ -100,7 +105,7 @@ def test_scripted_server_settles_a_request_that_is_waiting_for_its_body() -> Non
                 b"Host: 127.0.0.1\r\n"
                 b"Content-Length: 2\r\n"
                 b"Expect: 100-continue\r\n"
-                b"x-api-key: incorrect-fixture-key\r\n\r\n"
+                b"x-api-key: incorrect-fixture-key\r\n\r\n" + body_prefix
             )
             with client.makefile("rb") as response:
                 assert response.readline() == b"HTTP/1.1 100 Continue\r\n"
@@ -109,7 +114,7 @@ def test_scripted_server_settles_a_request_that_is_waiting_for_its_body() -> Non
                 stop_server(server, thread)
                 snapshot = state.observed_requests()
 
-                assert snapshot == ([""], ["127.0.0.1"], 1)
+                assert snapshot == ([], ["127.0.0.1"], 1)
                 assert response.read(1) == b""
     finally:
         if thread.is_alive():
