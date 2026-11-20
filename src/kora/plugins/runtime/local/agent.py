@@ -760,12 +760,16 @@ class AgentSession:
         self.fence()
         self.close_journal()
         try:
-            finished = self._finished
             try:
-                if self._host is not None:
-                    released = await self._host.stop()
-                    if finished is not None and released.session:
-                        await asyncio.wait({finished})
+                try:
+                    if self._launches is not None:
+                        await self._launches.close()
+                finally:
+                    finished = self._finished
+                    if self._host is not None:
+                        released = await self._host.stop()
+                        if finished is not None and released.session:
+                            await asyncio.wait({finished})
             finally:
                 try:
                     await self._close_launches()

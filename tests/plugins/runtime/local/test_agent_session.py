@@ -30,6 +30,7 @@ from kora.plugins.runtime.local.agent import (
 from kora.plugins.runtime.local.command import COMPONENT
 from kora.plugins.runtime.local.completed import recorded_exited
 from kora.plugins.runtime.local.installation import InstallationConfiguration
+from kora.plugins.runtime.local.launch import ExpectedBinary
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.workload_session import Completion
@@ -37,17 +38,17 @@ from kora.plugins.runtime.local.workspace import Admitted
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import AgentExecution
+from kora.protocols.harness import AgentExecution, LaunchInputs
 from kora.protocols.identity import Handle
 from kora.protocols.runtime import (
     SessionObservation,
     SessionResultObservation,
     Workload,
 )
-from kora.protocols.secret_value import SecretScope
+from kora.protocols.secret_value import SecretRevealRefused, SecretScope
 from kora.protocols.time import Clock, SystemClock
 from kora.protocols.vcs import WorkspaceRef
-from kora.runner.agent import INTERRUPT_GRACE_NS
+from kora.runner.agent import INTERRUPT_GRACE_NS, STOP_DEADLINE_NS
 from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
@@ -752,6 +753,82 @@ async def test_agent_session_stop_is_immediate(
     assert journal_threads_exited()
     assert writer_threads_exited()
     assert events[-1] == {"level": "INFO", "outcome": "started"}
+
+
+@pytest.mark.asyncio
+async def test_agent_session_revokes_pending_launch_before_waiting_for_its_host(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    source = script([turn("m1"), PAUSE], on_interrupt="ignore")
+    resolver = FakeResolver(source, context_for(kora_capture), deaf=True)
+    clock = GatedClock()
+    target = tmp_path.resolve() / "sdk-target"
+    executable = b"#!/bin/sh\nexit 0\n"
+    target.write_bytes(executable)
+    target.chmod(0o500)
+    binary = ExpectedBinary(
+        target, hashlib.sha256(executable).hexdigest(), len(executable)
+    )
+    sources = AgentSources(resolver, AllowDenyPolicies(), binary=binary)
+    work = detached_workload({})
+    async with agent_session(tmp_path, kora_capture, sources, clock) as (
+        session,
+        attempt,
+    ):
+        stopping: asyncio.Task[None] | None = None
+        try:
+            session.accept(SUBMITTER, None, work)
+            await unless_busy(
+                lambda: asyncio.to_thread(
+                    session.supervise, SUBMITTER, False, work, lambda: None
+                )
+            )
+            await asyncio.wait_for(source.paused.wait(), CONDITION_SECONDS)
+            launches = session.launches()
+            assert launches is not None
+            launch = await launches.allocate(LaunchInputs({}, attempt / "candidate"))
+            await asyncio.wait_for(clock.requested(launch.deadline), CONDITION_SECONDS)
+            await clock.advance_to(1)
+
+            stopping = asyncio.create_task(session.stop())
+            await asyncio.wait_for(
+                clock.requested(clock.monotonic_ns() + STOP_DEADLINE_NS),
+                CONDITION_SECONDS,
+            )
+            host_waiting = not stopping.done()
+            table_closed = launches.directory.closed
+            launch_revoked = (
+                launch.capability is None and not launch.cli_path.parent.exists()
+            )
+            launch_ended = launch.result.done()
+            placements_retained = all(
+                path.is_dir() for path in launches.placements.values()
+            )
+            scope_retained = bool(launches.token.reveal())
+        finally:
+            for adapter in resolver.adapters:
+                adapter.killed.set()
+            if stopping is not None:
+                await asyncio.wait_for(stopping, CONDITION_SECONDS)
+        outcome = await launch.ended()
+
+    assert host_waiting
+    assert table_closed
+    assert launch_revoked
+    assert launch_ended
+    assert placements_retained
+    assert scope_retained
+    assert outcome.cause == "launch_failed"
+    assert launches.pending == {}
+    assert launch.timer.cancelled()
+    assert not launches.path.exists()
+    assert not (attempt / "harness").exists()
+    with pytest.raises(SecretRevealRefused):
+        launches.token.reveal()
+    assert session.completion() is Completion.COMPLETE
+    assert session.result_reference() is None
+    assert journal_threads_exited()
+    assert writer_threads_exited()
 
 
 @pytest.mark.asyncio
