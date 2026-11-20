@@ -12,6 +12,7 @@ from kora.db.tables import (
 )
 from kora.engine.attempt_claims import ClaimOutcome
 from kora.ir.json import JsonObject
+from tests.api.claim_support import admit_expiry_run
 from tests.api.deployment_cases import evaluator, skeleton_ir
 from tests.engine.claim_support import (
     another_run,
@@ -32,6 +33,7 @@ async def test_parent_expiry_uses_time_after_worker_guard_wait(
     runtime["limits"] = {"timeout": "1s"}
     case = await claim_case(database, evaluator, ir)
     other = await another_run(database, case)
+    await admit_expiry_run(database, other, "1s")
     async with database.transaction() as writer:
         await writer.execute(
             update(run)

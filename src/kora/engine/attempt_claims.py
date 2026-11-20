@@ -43,7 +43,11 @@ from kora.engine.deadline_records import (
     prepare_deadline_record,
 )
 from kora.engine.expiry import record_attempt_expiry, record_run_expiry
-from kora.engine.expiry_context import ACTIVE_ATTEMPT_STATUSES, ExpiryContext
+from kora.engine.expiry_context import (
+    ACTIVE_ATTEMPT_STATUSES,
+    ExpiryContext,
+    ExpiryFailed,
+)
 from kora.engine.grant_history import append_grant, save_history_batch
 from kora.engine.lease_recovery import (
     LeaseState,
@@ -614,7 +618,14 @@ async def claim_attempt(
         raise_safe(ClaimSourcesRejected())
     except (ClaimAccessRejected, ClaimSourcesRejected, GrantHistoryRejected):
         raise
-    except (SQLAlchemyError, OSError, ValueError, TypeError, OverflowError):
+    except (
+        SQLAlchemyError,
+        OSError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        ExpiryFailed,
+    ):
         raise_safe(ClaimWriterFailed())
     finally:
         del context, query, principal, prepared

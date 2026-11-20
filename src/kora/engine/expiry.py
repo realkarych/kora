@@ -163,6 +163,14 @@ async def _record_run_expiry(context: ExpiryContext, observed_at: datetime) -> N
 
 async def record_run_expiry(context: ExpiryContext, observed_at: datetime) -> None:
     async with expiry_transition(context, "run_expiry_intent"):
+        saved = await read_expiry_run(context)
+        if (
+            saved is None
+            or saved.status != "running"
+            or saved.started_at is None
+            or not timeout_reached(saved.started_at, observed_at, saved.limits.timeout)
+        ):
+            raise ValueError("run expiry requires an admitted timeout observation")
         await _record_run_expiry(context, observed_at)
 
 

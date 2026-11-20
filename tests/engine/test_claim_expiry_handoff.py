@@ -10,7 +10,7 @@ from sqlalchemy import event, select, update
 from sqlalchemy.util.concurrency import await_
 
 from kora.cel_eval.thread import Evaluator
-from kora.db.claim_source_values import prepare_claim_sources
+from kora.db.claim_source_values import ClaimSourcesRejected, prepare_claim_sources
 from kora.db.claim_sources_v1 import SOURCE_FIELDS
 from kora.db.connection import Database, Dialect
 from kora.db.tables import attempt, node_instance, run
@@ -137,6 +137,26 @@ async def hold_target(database: Database, case: ClaimCase) -> None:
                 target_held_since=START,
             )
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admitted_timeout", [None, "2h"])
+async def test_claim_run_expiry_requires_admitted_due_parent(
+    database: Database, evaluator: Evaluator, admitted_timeout: str | None
+) -> None:
+    case = await claim_case(database, evaluator, expiry_ir(enclosing=True))
+    if admitted_timeout is not None:
+        await admit_expiry_run(database, case, admitted_timeout)
+    await hold_target(database, case)
+    before = await state(database)
+    poll = poller(database, AuthorityClock(START + timedelta(seconds=1)))
+
+    with pytest.raises(ClaimSourcesRejected, match="claim sources are unavailable"):
+        await poll.poll(case.query, case.principal)
+    after = await state(database)
+
+    assert after == before
+    assert database.units_in_flight() == 0
 
 
 @pytest.mark.asyncio
