@@ -149,6 +149,10 @@ class ScriptedState:
         self.authorized: list[bool] = []
         self.lock = threading.Lock()
 
+    def observed_requests(self) -> tuple[list[str], list[str], int]:
+        with self.lock:
+            return list(self.bodies), list(self.clients), self.authorized.count(False)
+
 
 class ScriptedServer(ThreadingHTTPServer):
     def __init__(self, state: ScriptedState) -> None:

@@ -157,9 +157,6 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
                 "probes": len(launches.probes.read_text().splitlines())
                 if launches.probes.exists()
                 else 0,
-                "requests": list(state.bodies),
-                "clients": list(state.clients),
-                "unauthorized_requests": state.authorized.count(False),
                 "events": [event.model_dump(mode="json") for event in sink.events],
                 "placements": {
                     name: str(path) for name, path in launches.placements.items()
@@ -173,6 +170,8 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
     finally:
         await launches.close()
         stop_server(server, thread)
+    bodies, clients, unauthorized = state.observed_requests()
+    report.update(requests=bodies, clients=clients, unauthorized_requests=unauthorized)
     report["leftover"] = await released(
         workspace, clock, clock.monotonic_ns() + 5_000_000_000
     )

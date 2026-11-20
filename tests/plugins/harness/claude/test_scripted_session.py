@@ -1,10 +1,18 @@
 import json
 import shlex
+from http.client import HTTPConnection
 from pathlib import Path
 from typing import Final
 
 from tests.plugins.harness.claude.contained import assert_no_outbound
-from tests.plugins.harness.claude.scripted_model import KEY, mapping, objects
+from tests.plugins.harness.claude.scripted_model import (
+    KEY,
+    ScriptedState,
+    mapping,
+    objects,
+    serve,
+    stop_server,
+)
 from tests.plugins.harness.claude.test_session_isolation import run_scenario
 
 PROMPT: Final[str] = "conformance"
@@ -50,6 +58,34 @@ def assert_diagnostics(report: dict[str, object], outcome: str, target: Path) ->
     rendered = json.dumps(records)
     for secret in (KEY, PROMPT, SCRIPTED, str(target)):
         assert json.dumps(secret)[1:-1] not in rendered
+
+
+def count_tokens(connection: HTTPConnection, api_key: str) -> int:
+    connection.request(
+        "POST", "/v1/messages/count_tokens", body=b"{}", headers={"x-api-key": api_key}
+    )
+    with connection.getresponse() as response:
+        response.read()
+        return response.status
+
+
+def test_scripted_messages_counts_a_refusal_before_a_successful_request() -> None:
+    state = ScriptedState([])
+    server, thread, _ = serve(state)
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+
+    try:
+        refused = count_tokens(connection, "incorrect-fixture-key")
+        accepted = count_tokens(connection, KEY)
+    finally:
+        connection.close()
+        stop_server(server, thread)
+    bodies, clients, unauthorized = state.observed_requests()
+
+    assert (refused, accepted) == (401, 200)
+    assert bodies == ["{}", "{}"]
+    assert clients == ["127.0.0.1", "127.0.0.1"]
+    assert unauthorized == 1
 
 
 def test_scripted_claude_write_changes_the_file_when_allowed(tmp_path: Path) -> None:
