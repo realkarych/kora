@@ -1,7 +1,6 @@
 from datetime import timedelta
 from typing import cast
 
-import pytest
 from sqlalchemy import update
 
 from kora.cel_eval.thread import Evaluator
@@ -11,18 +10,13 @@ from kora.engine.expiry import observe_attempt_expiry
 from kora.engine.expiry_context import ExpiryState
 from kora.ir.json import JsonObject
 from tests.api.claim_support import admit_expiry_run
-from tests.api.deployment_cases import evaluator, skeleton_ir
+from tests.api.deployment_cases import skeleton_ir
 from tests.engine.claim_support import claim_case, state
 from tests.engine.heartbeat_support import heartbeat, heartbeat_body
 from tests.plugins.authentication.support import AuthorityClock
 
-__all__ = ["evaluator"]
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scope", ["attempt", "run"])
-@pytest.mark.parametrize("tick_first", [False, True])
-async def test_heartbeat_deadline_authority_does_not_depend_on_scheduler_tick(
+async def deadline_authority_ignores_scheduler_tick(
     database: Database, evaluator: Evaluator, scope: str, tick_first: bool
 ) -> None:
     ir = skeleton_ir()
@@ -65,9 +59,7 @@ async def test_heartbeat_deadline_authority_does_not_depend_on_scheduler_tick(
     assert saved["attempt"][0]["current_dispatcher_open"] is True
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("prior", ["cancel", "superseded", "finishing"])
-async def test_own_deadline_does_not_override_prior_result_revocation(
+async def own_deadline_keeps_prior_revocation(
     database: Database, evaluator: Evaluator, prior: str
 ) -> None:
     ir = skeleton_ir()

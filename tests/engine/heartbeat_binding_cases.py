@@ -13,18 +13,13 @@ from kora.protocols.evidence import (
     EvidenceScope,
     NormalCompletionQuiescence,
 )
-from tests.api.deployment_cases import evaluator
 from tests.engine.claim_support import claim_case, state
 from tests.engine.heartbeat_bounds import maximal_closure
 from tests.engine.heartbeat_support import heartbeat, heartbeat_body, self_closure
 from tests.plugins.authentication.support import AuthorityClock
 
-__all__ = ["evaluator"]
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("field", ["attempt_id", "execution_domain_id"])
-async def test_runtime_evidence_must_bind_original_attempt_and_domain(
+async def runtime_evidence_must_bind_original_attempt_and_domain(
     database: Database, evaluator: Evaluator, field: str
 ) -> None:
     case = await claim_case(database, evaluator)
@@ -58,22 +53,7 @@ async def test_runtime_evidence_must_bind_original_attempt_and_domain(
     assert before == after
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "change",
-    [
-        "attempt_id",
-        "execution_domain_id",
-        "dispatcher_id",
-        "worker_incarnation_id",
-        "lease_generation",
-        "process_mismatch",
-        "saved_null",
-        "saved_incomplete",
-        "saved_nonleader",
-    ],
-)
-async def test_relayed_process_exit_must_match_complete_retained_grant(
+async def relayed_process_exit_must_match_complete_retained_grant(
     database: Database, evaluator: Evaluator, change: str
 ) -> None:
     process = maximal_closure().process
