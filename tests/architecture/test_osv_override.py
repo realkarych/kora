@@ -2,6 +2,7 @@ import hashlib
 import tomllib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import cast
 
@@ -169,7 +170,7 @@ def test_osv_override_is_scoped_to_the_binding_root_crate() -> None:
     configurations = list(scanner_configurations(ROOT))
     copy_files = sorted(entry.name for entry in COPY_DIRECTORY.iterdir())
 
-    assert set(document) == {"PackageOverrides"}
+    assert set(document) == {"PackageOverrides", "IgnoredVulns"}
     assert len(overrides) == 1
     assert set(entry) == OVERRIDE_KEYS
     assert entry["name"] == "cel"
@@ -183,3 +184,17 @@ def test_osv_override_is_scoped_to_the_binding_root_crate() -> None:
     assert not OVERRIDE.is_symlink()
     assert not CRATE_LOCK.is_symlink()
     assert copy_files == [CRATE_LOCK.name, OVERRIDE.name]
+
+
+def test_osv_ignore_is_only_the_expiring_chrono_advisory() -> None:
+    document = read_toml(OVERRIDE)
+    packages = locked_packages(CRATE_LOCK)
+
+    (advisory,) = as_tables(document["IgnoredVulns"])
+    chrono = [package for package in packages if package.name == "chrono"]
+
+    assert set(advisory) == {"id", "ignoreUntil", "reason"}
+    assert advisory["id"] == "RUSTSEC-2026-0543"
+    assert advisory["ignoreUntil"] == date(2026, 12, 20)
+    assert as_text(advisory["reason"]).strip()
+    assert chrono == [LockedPackage("chrono", "0.4.45", has_source=True)]
