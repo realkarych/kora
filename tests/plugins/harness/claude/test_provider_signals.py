@@ -6,12 +6,16 @@ from tempfile import mkdtemp
 from typing import Literal
 
 import pytest
+from claude_agent_sdk import RateLimitEvent, RateLimitInfo
 from pydantic import ValidationError
 
 from kora.conformance.capture import Capture
 from kora.conformance.harness import ConformancePolicy, Trace
 from kora.ir.json import JsonObject
+from kora.observability.redaction import SecretRegistry
 from kora.plugins.harness.claude.configuration import ClaudeEnvironmentConfiguration
+from kora.plugins.harness.claude.events import ClaudeEvents
+from kora.plugins.harness.claude.sdk import feed
 from kora.plugins.harness.claude.signals import MAX_LIMIT_EVENTS, ProviderSignals
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
@@ -36,6 +40,7 @@ from tests.plugins.harness.claude.test_replay_events import (
 )
 from tests.plugins.harness.claude.test_session_lifecycle import session_spec
 from tests.plugins.harness.claude.test_stream_volume import MemoryJournal, close_sink
+from tests.runner.agent_support import SteppedClock
 
 BINDING = "provider-test-binding"
 MAX_RETRIES = 2
@@ -127,6 +132,41 @@ async def test_claude_provider_signals_are_normalised(
 
     assert result.stop_reason == "completed"
     assert signals == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["allowed", "allowed_warning"])
+async def test_claude_nonlimiting_rate_notices_refresh_liveness(
+    status: Literal["allowed", "allowed_warning"],
+) -> None:
+    clock = SteppedClock()
+    registry = SecretRegistry()
+    journal = MemoryJournal()
+    sink = RunnerSink(journal, registry, clock, 1, 1_000_000_000)
+    events = ClaudeEvents(
+        sink,
+        registry,
+        binding=BINDING,
+        max_retries=MAX_RETRIES,
+        output_format=False,
+        check_deadline=lambda: None,
+        observed_at=clock.now,
+    )
+    notice = RateLimitEvent(RateLimitInfo(status), uuid="rate", session_id="session")
+    activity_before = sink.liveness().last_event_ns
+
+    try:
+        await clock.advance_to(900_000_000)
+        feed(events, notice)
+        activity_after = sink.liveness().last_event_ns
+        enforcement = sink.enforcement()
+    finally:
+        await close_sink(sink, clock)
+
+    assert activity_before == 0
+    assert activity_after == 900_000_000
+    assert enforcement.action == "continue"
+    assert journal.records == []
 
 
 def rejected(reset: int = 123, group: str | None = "five_hour") -> JsonObject:

@@ -512,6 +512,8 @@ class ClaudeEvents:
             data = self._signals.rejected(resets_at, rate_limit_type)
             if data is not None:
                 self._emit("provider_limited", data)
+        else:
+            self.drop("message")
 
     def observation(self) -> ClaudeObservation:
         recorded = self._result
