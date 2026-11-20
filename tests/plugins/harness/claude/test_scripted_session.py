@@ -67,6 +67,7 @@ def test_scripted_claude_write_changes_the_file_when_allowed(tmp_path: Path) -> 
     assert_no_outbound(report)
     assert report["cause"] == "completed"
     assert report["error_class"] is None
+    assert report["unauthorized_requests"] == 0
     assert target.read_text() == SCRIPTED
     assert (workspace / "seeded.txt").read_text() == SEEDED
     calls = event_data(report, "tool_call")

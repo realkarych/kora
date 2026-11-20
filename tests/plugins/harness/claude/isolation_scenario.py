@@ -159,6 +159,7 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
                 else 0,
                 "requests": list(state.bodies),
                 "clients": list(state.clients),
+                "unauthorized_requests": state.authorized.count(False),
                 "events": [event.model_dump(mode="json") for event in sink.events],
                 "placements": {
                     name: str(path) for name, path in launches.placements.items()
