@@ -221,7 +221,7 @@ def test_vcs_ref_required_fields_are_not_defaulted(field: str) -> None:
         (b'{"a": 1,}', "VCS002"),
         (b"null", "VCS003"),
         (b"[]", "VCS003"),
-        (b"\xff" * 1_048_577, "VCS001"),
+        pytest.param(b"\xff" * 1_048_577, "VCS001", id="oversized-non-utf8"),
     ],
 )
 def test_vcs_ref_raw_refusals_are_safe(payload: bytes, code: str) -> None:
