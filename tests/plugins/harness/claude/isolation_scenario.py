@@ -168,8 +168,10 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
                 "report_path": str(launches.report_path),
             }
     finally:
-        await launches.close()
-        stop_server(server, thread)
+        try:
+            await launches.close()
+        finally:
+            stop_server(server, thread)
     bodies, clients, unauthorized = state.observed_requests()
     report.update(requests=bodies, clients=clients, unauthorized_requests=unauthorized)
     report["leftover"] = await released(

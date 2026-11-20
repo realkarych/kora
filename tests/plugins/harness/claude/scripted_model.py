@@ -1,10 +1,14 @@
 import json
 import threading
+from errno import EBADF, ENOTCONN
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socket import SHUT_RD, socket
+from time import monotonic
 from typing import Final, cast
 
 KEY: Final[str] = "fixture-key-value"
 BODY_LIMIT: Final[int] = 8_000_000
+STOP_SECONDS: Final[float] = 5.0
 
 
 def sse(events: list[tuple[str, dict[str, object]]]) -> bytes:
@@ -157,7 +161,50 @@ class ScriptedState:
 class ScriptedServer(ThreadingHTTPServer):
     def __init__(self, state: ScriptedState) -> None:
         self.state = state
+        self._requests: dict[socket, threading.Thread] = {}
+        self._requests_lock = threading.Lock()
         super().__init__(("127.0.0.1", 0), ScriptedHandler)
+
+    def process_request(
+        self, request: socket | tuple[bytes, socket], client_address: tuple[str, int]
+    ) -> None:
+        if not isinstance(request, socket):
+            raise TypeError("the scripted server requires a stream socket")
+        thread = threading.Thread(
+            target=self._serve_request, args=(request, client_address), daemon=True
+        )
+        with self._requests_lock:
+            self._requests[request] = thread
+        try:
+            thread.start()
+        except RuntimeError:
+            with self._requests_lock:
+                del self._requests[request]
+            raise
+
+    def _serve_request(self, request: socket, client_address: tuple[str, int]) -> None:
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            with self._requests_lock:
+                del self._requests[request]
+
+    def stop_requests(self, deadline: float) -> None:
+        with self._requests_lock:
+            requests = tuple(self._requests.items())
+        shutdown_failure: OSError | None = None
+        for request, _ in requests:
+            try:
+                request.shutdown(SHUT_RD)
+            except OSError as error:
+                if error.errno not in (EBADF, ENOTCONN) and shutdown_failure is None:
+                    shutdown_failure = error
+        for _, thread in requests:
+            thread.join(max(0.0, deadline - monotonic()))
+        if any(thread.is_alive() for _, thread in requests):
+            raise AssertionError("the scripted requests did not stop")
+        if shutdown_failure is not None:
+            raise shutdown_failure
 
 
 class ScriptedHandler(BaseHTTPRequestHandler):
@@ -187,6 +234,8 @@ class ScriptedHandler(BaseHTTPRequestHandler):
             server.state.bodies.append(body.decode("utf-8"))
         authorized = self.headers.get("x-api-key") == KEY
         self._record(server, host, authorized)
+        if len(body) != length:
+            return
         if not authorized:
             self._send(401, b"", "text/plain")
             return
@@ -240,7 +289,13 @@ def serve(state: ScriptedState) -> tuple[ScriptedServer, threading.Thread, str]:
 
 def stop_server(server: ScriptedServer, thread: threading.Thread) -> None:
     server.shutdown()
-    server.server_close()
-    thread.join(5)
+    deadline = monotonic() + STOP_SECONDS
+    try:
+        try:
+            server.server_close()
+        finally:
+            server.stop_requests(deadline)
+    finally:
+        thread.join(max(0.0, deadline - monotonic()))
     if thread.is_alive():
         raise AssertionError("the scripted server did not stop")
