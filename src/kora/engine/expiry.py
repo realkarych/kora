@@ -145,6 +145,36 @@ async def observe_run_expiry(
         return await _observe_run_expiry(context, observed_at)
 
 
+async def _record_run_expiry(context: ExpiryContext, observed_at: datetime) -> None:
+    await context.connection.execute(
+        update(run)
+        .where(
+            run.c.id == context.run_id,
+            run.c.status == "running",
+            run.c.deadline_expired_at.is_(None),
+        )
+        .values(
+            deadline_expired_at=observed_at,
+            needs_scheduling=True,
+            updated_at=observed_at,
+        )
+    )
+
+
+async def record_run_expiry(context: ExpiryContext, observed_at: datetime) -> None:
+    async with expiry_transition(context, "run_expiry_intent"):
+        await _record_run_expiry(context, observed_at)
+
+
+async def finish_run_expiry(context: ExpiryContext) -> None:
+    async with expiry_transition(context, "run_expiry_cancellation"):
+        observed_at = await context.connection.scalar(
+            select(run.c.deadline_expired_at).where(run.c.id == context.run_id)
+        )
+        if observed_at is not None:
+            await request_cancellation(context, normalise_timestamp(observed_at))
+
+
 async def _observe_run_expiry(
     context: ExpiryContext, observed_at: datetime | None = None
 ) -> ExpiryState:
@@ -158,11 +188,8 @@ async def _observe_run_expiry(
     now = normalise_timestamp(context.clock()) if observed_at is None else observed_at
     if not timeout_reached(saved.started_at, now, saved.limits.timeout):
         return ExpiryState.ACTIVE
-    await context.connection.execute(
-        update(run).where(run.c.id == context.run_id).values(deadline_expired_at=now)
-    )
+    await _record_run_expiry(context, now)
     await request_cancellation(context, now)
-    await context.mark(now)
     return ExpiryState.EXPIRED
 
 

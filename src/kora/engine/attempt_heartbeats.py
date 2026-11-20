@@ -390,7 +390,11 @@ async def _apply_heartbeat(
         if refreshed is context:
             break
         context = refreshed
-    expired = expired or (saved.deadline is not None and saved.deadline <= final_now)
+    expired = (
+        expired
+        or context.inherited_expiry
+        or (saved.deadline is not None and saved.deadline <= final_now)
+    )
     revoked = revoked or context.attempt.desired_state != "run"
     diagnostics = current_diagnostics()
     if diagnostics is not None:

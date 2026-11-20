@@ -94,6 +94,13 @@ class HeartbeatContext:
     grant: HeartbeatGrant
     sealed: bool
 
+    @property
+    def inherited_expiry(self) -> bool:
+        return (
+            self.node.deadline_expired_at is not None
+            or self.run.deadline_expired_at is not None
+        )
+
     def history(self) -> GrantHistorySnapshot:
         return GrantHistorySnapshot(
             version=1,
@@ -278,9 +285,7 @@ def heartbeat_actions(
         and node.status in ("queued", "running")
         and parent.status == "running"
     )
-    enclosing = (
-        node.deadline_expired_at is not None or parent.deadline_expired_at is not None
-    )
+    enclosing = context.inherited_expiry
     active = saved.status in ("claimed", "submitted", "running")
     eligible = (
         current

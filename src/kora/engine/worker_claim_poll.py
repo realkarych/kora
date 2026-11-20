@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.claim_source_values import ClaimSourcesRejected, ClaimWriterFailed
-from kora.db.connection import Database, clear_snapshot_error
+from kora.db.connection import Database, clear_snapshot_error, complete
 from kora.db.grant_history import (
     GrantHistoryRejected,
     HistoryReadLimits,
@@ -33,6 +33,7 @@ from kora.engine.attempt_claims import (
 from kora.engine.claim_context import (
     ClaimAccessRejected,
     ClaimQuery,
+    ClaimRun,
     ClaimTarget,
     claim_record,
     claim_target,
@@ -49,7 +50,7 @@ from kora.engine.claim_snapshot import (
     acquire_claim_snapshot,
     prepare_claim_snapshot,
 )
-from kora.engine.expiry import observe_attempt_expiry, observe_run_expiry
+from kora.engine.expiry import finish_run_expiry
 from kora.engine.expiry_context import ExpiryContext
 from kora.engine.grant_history import acquire_history, prepare_history
 from kora.engine.graph_resource_references import GraphResourceScope
@@ -235,22 +236,28 @@ class WorkerClaimPoll:
         return prepare_selected_claim(snapshot, history, target.attempt.deadline)
 
     def _context(
-        self, connection: AsyncConnection, locks: TransitionLocks, target: ClaimTarget
+        self, connection: AsyncConnection, locks: TransitionLocks, parent: ClaimRun
     ) -> ExpiryContext:
         return ExpiryContext(
             connection,
             locks,
             GraphResourceScope(
-                target.run.namespace_id,
-                target.run.graph_id,
-                target.run.graph_version_id,
+                parent.namespace_id,
+                parent.graph_id,
+                parent.graph_version_id,
             ),
-            target.run.id,
+            parent.id,
             self.clock.now,
             self.identifiers,
             self.limits.expiry,
             self.limits.snapshot.sources.attempt_row,
         )
+
+    async def _finish_expiry(self, parent: ClaimRun) -> None:
+        async with self.database.transaction() as writer:
+            locks = TransitionLocks(writer)
+            await locks.acquire_run(parent.id)
+            await finish_run_expiry(self._context(writer, locks, parent))
 
     async def _selected(
         self,
@@ -316,7 +323,7 @@ class WorkerClaimPoll:
             if not await locks.acquire_run(target.run.id, wait=replay is not None):
                 return ClaimDecision(ClaimOutcome.INELIGIBLE)
             decision = await claim_attempt(
-                self._context(writer, locks, target),
+                self._context(writer, locks, target.run),
                 attempt_id,
                 query,
                 principal,
@@ -334,15 +341,8 @@ class WorkerClaimPoll:
                 ClaimOutcome.EXPIRE,
             ):
                 await self._seen(writer, query)
-        if decision.outcome is ClaimOutcome.EXPIRE:
-            async with self.database.transaction() as writer:
-                locks = TransitionLocks(writer)
-                await locks.acquire_run(target.run.id)
-                context = self._context(writer, locks, target)
-                if target.attempt.started_at is None:
-                    await observe_run_expiry(context)
-                else:
-                    await observe_attempt_expiry(context, attempt_id)
+        if decision.run_expiry:
+            await complete(self._finish_expiry(target.run))
         return decision
 
     async def _empty(
