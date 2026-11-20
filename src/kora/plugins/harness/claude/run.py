@@ -113,6 +113,15 @@ class ClaudeSession:
             if not external:
                 self.escalation = asyncio.create_task(self.escalate())
 
+    def startup_stop(self) -> RunnerCause | None:
+        if self.cause is None:
+            cause = self.sink.enforcement().cause
+            if cause is not None:
+                self.stop(cause, external=True)
+            elif self.killed.is_set():
+                self.stop("cancel", external=True)
+        return self.cause
+
     async def escalate(self) -> None:
         await self.ctx.clock.sleep_until(
             self.ctx.clock.monotonic_ns() + INTERRUPT_GRACE_NS
@@ -140,6 +149,8 @@ class ClaudeSession:
         environment: ClaudeEnvironmentConfiguration,
     ) -> RunnerOutcome:
         options = ClaudeSessionOptions.model_validate(spec.options)
+        if (cause := self.startup_stop()) is not None:
+            return RunnerOutcome(cause, "none", None, None)
         try:
             inputs = environment.launch_inputs(
                 cwd=Path(self.scope.workspace.root), placements=launches.placements
@@ -147,9 +158,12 @@ class ClaudeSession:
             launch = await launches.allocate(inputs)
         except KoraProtocolError as error:
             return RunnerOutcome(
-                "launch_rejected"
-                if error.code == "launch_rejected"
-                else "launch_failed",
+                self.startup_stop()
+                or (
+                    "launch_rejected"
+                    if error.code == "launch_rejected"
+                    else "launch_failed"
+                ),
                 "none",
                 None,
                 None,
@@ -169,7 +183,7 @@ class ClaudeSession:
             await asyncio.wait({exchange, killed}, return_when=asyncio.FIRST_COMPLETED)
             if self.killed.is_set():
                 await launch.kill()
-                cause: RunnerCause | None = self.cause or "cancel"
+                cause = self.startup_stop() or "cancel"
                 termination: Termination = "killed_after_grace"
             else:
                 cause, termination = exchange.result()
@@ -195,16 +209,19 @@ class ClaudeSession:
         self, client: ClaudeSDKClient, launch: Launch, prompt: str
     ) -> tuple[RunnerCause | None, Termination]:
         try:
+            if (cause := self.startup_stop()) is not None:
+                await launch.kill()
+                return cause, "interrupted"
             await client.connect()
             info = cast("object", await client.get_server_info())
+            if (cause := self.startup_stop()) is not None:
+                return cause, "interrupted"
             if (
                 not isinstance(info, dict)
                 or cast("dict[object, object]", info).get("claude_code_version")
                 != CLI_VERSION
             ):
                 return "version_mismatch", "none"
-            if self.cause is not None:
-                return self.cause, "interrupted"
             await client.query(prompt)
             return await self.wait(client, launch)
         except CLIJSONDecodeError:
@@ -212,7 +229,8 @@ class ClaudeSession:
             await launch.kill()
             return self.cause or "oversized_message", "killed"
         except ClaudeSDKError:
-            return None, "none"
+            cause = self.startup_stop()
+            return cause, "interrupted" if cause is not None else "none"
 
     def ending(self, end: LaunchEnd) -> tuple[RunnerCause, Termination]:
         return (

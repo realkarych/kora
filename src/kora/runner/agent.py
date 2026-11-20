@@ -1,7 +1,7 @@
 import asyncio
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Final, Protocol
@@ -163,6 +163,10 @@ class RefusingLaunches:
         )
 
 
+def refusing_launches(_sink: RunnerSink) -> LaunchContext:
+    return RefusingLaunches()
+
+
 @dataclass(frozen=True)
 class HostServices:
     resolver: HarnessResolver
@@ -171,7 +175,7 @@ class HostServices:
     registry: SecretRegistry
     clock: Clock
     log: ComponentLogger
-    launches: LaunchContext = field(default_factory=RefusingLaunches)
+    launches: Callable[[RunnerSink], LaunchContext] = refusing_launches
 
 
 @dataclass(frozen=True)
@@ -241,9 +245,12 @@ class AgentHost:
             admitted.stall_after_ns,
         )
         policy = BoundPolicy(services.policy, services.ctx)
-        run = asyncio.create_task(
-            hosted.adapter.run(spec, policy, sink, services.launches)
-        )
+        try:
+            launches = services.launches(sink)
+        except BaseException:
+            sink.close()
+            raise
+        run = asyncio.create_task(hosted.adapter.run(spec, policy, sink, launches))
         timer = asyncio.create_task(
             watch_liveness(
                 sink, services.clock, admitted.stall_after_ns, deadline, run.done

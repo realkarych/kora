@@ -6,15 +6,18 @@ import signal
 import socket
 import sys
 import threading
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, Iterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.plugins.harness.claude.adapter import ClaudeHarness
+from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.plugins.runtime.local.channel import (
     PRE_ATTACH_BYTES,
     FrameType,
@@ -26,19 +29,37 @@ from kora.plugins.runtime.local.channel import (
     LaunchStarted,
 )
 from kora.plugins.runtime.local.launch import COMPONENT as LAUNCH_COMPONENT
-from kora.plugins.runtime.local.launch import ExpectedBinary, LocalLaunches
+from kora.plugins.runtime.local.launch import (
+    BinaryVerifier,
+    ExpectedBinary,
+    LocalLaunches,
+)
 from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.plugins.runtime.local.serving import ControlServer
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import LaunchInputs
+from kora.protocols.harness import (
+    AgentExecution,
+    HarnessAdapter,
+    LaunchInputs,
+    Placement,
+)
 from kora.protocols.lifetime import EnvironmentVariable
+from kora.protocols.runtime import SessionResultObservation
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
+from kora.protocols.vcs import WorkspaceRef
+from kora.runner.agent import AgentHost, HostedHarness, HostServices
 from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.peers import kernel_source
+from kora.runner.sink import RunnerSink
+from tests.plugins.harness.claude.test_claude_conformance import make_adapter
+from tests.plugins.harness.claude.test_replay_events import context_for
+from tests.plugins.harness.claude.test_session_lifecycle import session_spec
 from tests.plugins.runtime.local.frames_support import StepClock
+from tests.runner.agent_support import SteppedClock, make_world
+from tests.runner.test_agent_host_refuses_expired_deadline import SECOND, deadline
 from tests.support.local_peers import SOCKET_NAME, served, until
 from tests.support.local_runners import short_directory
 
@@ -299,17 +320,21 @@ async def test_launcher_reports_and_releases_resources(
 
 
 @asynccontextmanager
-async def launch_world(
-    root: Path, capture: Capture, binary: ExpectedBinary, clock: Clock | None = None
-) -> AsyncGenerator[tuple[LocalLaunches, ControlServer]]:
-    clock = SystemClock() if clock is None else clock
+async def launch_table(
+    root: Path,
+    capture: Capture,
+    binary: BinaryVerifier,
+    clock: Clock,
+    *,
+    placements: Mapping[Placement, Path] | None = None,
+) -> AsyncGenerator[LocalLaunches]:
     control = root / "control"
     control.mkdir(mode=0o700)
     anchor = DirectoryAnchor.open_path(control)
     scope = SecretScope(capture.diagnostics)
     reaper = AdoptedReaper()
     launches = LocalLaunches(
-        {},
+        {} if placements is None else placements,
         anchor,
         control,
         root / SOCKET_NAME,
@@ -321,14 +346,31 @@ async def launch_world(
         reaper,
     )
     try:
-        async with served(
-            root, clock, kernel_source(NativeIdentityReader()), capture, launches
-        ) as (server, _):
-            yield launches, server
+        yield launches
     finally:
-        await launches.close()
-        anchor.close()
-        scope.release()
+        try:
+            await launches.close()
+        finally:
+            await reaper.stop()
+            anchor.close()
+            scope.release()
+
+
+@asynccontextmanager
+async def launch_world(
+    root: Path, capture: Capture, binary: ExpectedBinary, clock: Clock | None = None
+) -> AsyncGenerator[tuple[LocalLaunches, ControlServer]]:
+    clock = SystemClock() if clock is None else clock
+    async with (
+        launch_table(root, capture, binary, clock) as launches,
+        served(
+            root, clock, kernel_source(NativeIdentityReader()), capture, launches
+        ) as (
+            server,
+            _,
+        ),
+    ):
+        yield launches, server
 
 
 def pid_absent(pid: int) -> bool:
@@ -856,6 +898,178 @@ class GatedBinaryVerifier:
             return True
         finally:
             self.finished.set()
+
+
+@dataclass(frozen=True)
+class StartupResolver:
+    adapter: ClaudeHarness
+
+    def resolve(
+        self, execution: AgentExecution, workspace: WorkspaceRef
+    ) -> HostedHarness:
+        return HostedHarness(cast(HarnessAdapter, self.adapter), self.adapter.kill)
+
+
+def startup_target(root: Path) -> tuple[ExpectedBinary, Path]:
+    started = root / "target-started"
+    executable = root / "target"
+    script = (
+        f"#!{sys.executable} -I\n"
+        "from pathlib import Path\n"
+        f"Path({str(started)!r}).touch()\n"
+    ).encode()
+    executable.write_bytes(script)
+    executable.chmod(0o500)
+    return ExpectedBinary(
+        executable, hashlib.sha256(script).hexdigest(), len(script)
+    ), started
+
+
+@pytest.mark.asyncio
+async def test_claude_deadline_refuses_native_allocation_during_verification(
+    launch_root: Path, kora_capture: Capture
+) -> None:
+    world = make_world(launch_root / "host", kora_capture)
+    clock = SteppedClock()
+    binary, candidate_started = startup_target(launch_root)
+    verifier = GatedBinaryVerifier(binary.path, asyncio.get_running_loop())
+    ctx = context_for(kora_capture, clock)
+    adapter = make_adapter(Path(world.candidate), ctx)
+    async with launch_table(
+        launch_root,
+        kora_capture,
+        verifier,
+        clock,
+        placements={
+            "harness_home": launch_root,
+            "harness_tmp": launch_root,
+            "harness_config": launch_root,
+        },
+    ) as launches:
+        services = HostServices(
+            StartupResolver(adapter),
+            AllowDenyPolicy(),
+            ctx,
+            kora_capture.diagnostics.registry,
+            clock,
+            kora_capture.diagnostics.logger("runner.agent"),
+            launches.bind,
+        )
+        host = AgentHost(services, world.journal, world.control, world.candidate)
+        workload = world.workload(
+            deadline=deadline(1),
+            session_spec=session_spec(adapter).model_dump(mode="json"),
+        )
+
+        try:
+            async with asyncio.timeout(4):
+                host.start(workload, world.workspace())
+                await verifier.entered.wait()
+                await clock.requested(SECOND)
+                await clock.advance_to(SECOND)
+                await host.finished()
+                observation = host.observation()
+                verified_while_stopping = verifier.finished.is_set()
+                launch_files = tuple(launches.path.iterdir())
+                released = await host.stop()
+                await launches.close()
+        finally:
+            verifier.release.set()
+            await asyncio.to_thread(verifier.finished.wait, 3)
+            await host.stop()
+            world.close()
+
+    assert isinstance(observation, SessionResultObservation)
+    assert observation.cause == "deadline"
+    assert observation.result.stop_reason == "deadline"
+    assert not verified_while_stopping
+    assert launch_files == ()
+    assert not candidate_started.exists()
+    assert released.session
+    assert released.writer
+    assert not launches.pending
+    assert not launches.tasks
+    assert launches.allocating == 0
+    assert launches.directory.closed
+    assert verifier.finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_launcher_refuses_partial_specification_after_runner_stop(
+    launch_root: Path, kora_capture: Capture
+) -> None:
+    world = make_world(launch_root / "host", kora_capture)
+    clock = SteppedClock()
+    binary, candidate_started = startup_target(launch_root)
+    sink = RunnerSink(
+        world.journal, kora_capture.diagnostics.registry, clock, None, 30 * SECOND
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        async with launch_table(launch_root, kora_capture, binary, clock) as launches:
+            listener.bind(str(launches.socket_path))
+            listener.listen(1)
+            listener.setblocking(False)
+            peer_source = kernel_source(NativeIdentityReader())
+            launch = await launches.bind(sink).allocate(
+                LaunchInputs(
+                    {f"LARGE_{index}": "x" * 30_000 for index in range(4)}, launch_root
+                )
+            )
+            child = await asyncio.create_subprocess_exec(
+                str(launch.cli_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            try:
+                async with asyncio.timeout(10):
+                    connection, _ = await asyncio.get_running_loop().sock_accept(
+                        listener
+                    )
+                    with connection:
+                        connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2048)
+                        peer = peer_source.attest(connection, peer_source.stamp())
+                        channel = BoundedChannel(connection, clock)
+                        _, payload = await channel.read_typed_frame(
+                            7 * SECOND, {FrameType.JSON.value: PRE_ATTACH_BYTES}
+                        )
+                        request = LaunchSpecRequest.model_validate_json(payload)
+                        child.send_signal(signal.SIGSTOP)
+                        _, status = await asyncio.to_thread(
+                            os.waitpid, child.pid, os.WUNTRACED
+                        )
+                        assert os.WIFSTOPPED(status)
+                        async with asyncio.TaskGroup() as tasks:
+                            tasks.create_task(launches.serve(request, peer, channel))
+                            await clock.requested(5 * SECOND)
+                            await asyncio.to_thread(
+                                sink.terminate, "journal_unavailable"
+                            )
+                            cause = await sink.termination()
+                            child.send_signal(signal.SIGCONT)
+                            output, errors = await child.communicate()
+                        ending = await launch.ended()
+            finally:
+                if child.returncode is None:
+                    child.kill()
+                    await child.wait()
+                sink.close()
+                try:
+                    assert await asyncio.wait_for(sink.joined(5 * SECOND), 3)
+                finally:
+                    world.close()
+
+    assert cause == "journal_unavailable"
+    assert (output, errors) == (b"", b"")
+    assert not candidate_started.exists()
+    assert child.returncode == 72
+    assert not launch.ready.is_set()
+    assert ending.cause == "launcher_died"
+    assert not launch.cli_path.parent.exists()
+    assert not launches.pending
+    assert not launches.held
+    assert not launches.tasks
+    assert launches.directory.closed
 
 
 @pytest.mark.asyncio

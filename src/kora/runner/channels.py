@@ -2,7 +2,8 @@ import asyncio
 import os
 import socket
 import struct
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from enum import StrEnum
 from typing import TypeVar
 
@@ -13,6 +14,7 @@ MAX_RECORD_BYTES: int = 1048576
 MAX_TYPED_FRAME_BYTES: int = 1048576
 TYPED_HEADER: struct.Struct = struct.Struct("!IB")
 T = TypeVar("T")
+SendGuard = Callable[[], AbstractContextManager[bool]]
 
 
 class ChannelFailure(StrEnum):
@@ -287,7 +289,20 @@ class BoundedChannel:
         finally:
             self._reading = False
 
-    async def _write(self, value: bytes | memoryview, deadline_ns: int) -> None:
+    def _send(self, value: memoryview, guard: SendGuard | None) -> int:
+        if guard is None:
+            return self._endpoint.send(value)
+        with guard() as allowed:
+            if not allowed:
+                raise ChannelError(ChannelFailure.CLOSED)
+            return self._endpoint.send(value)
+
+    async def _write(
+        self,
+        value: bytes | memoryview,
+        deadline_ns: int,
+        guard: SendGuard | None = None,
+    ) -> None:
         remaining = memoryview(value)
         while remaining:
             if self._revoked:
@@ -295,7 +310,7 @@ class BoundedChannel:
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)
             try:
-                written = self._endpoint.send(remaining)
+                written = self._send(remaining, guard)
             except BlockingIOError:
                 await self._wait(deadline_ns, writing=True)
                 continue
@@ -345,7 +360,12 @@ class BoundedChannel:
             self._writing = False
 
     async def write_typed_frame(
-        self, kind: int, value: bytes | memoryview, deadline_ns: int
+        self,
+        kind: int,
+        value: bytes | memoryview,
+        deadline_ns: int,
+        *,
+        guard: SendGuard | None = None,
     ) -> None:
         if len(value) > MAX_TYPED_FRAME_BYTES:
             raise ChannelError(ChannelFailure.CAPACITY)
@@ -353,8 +373,8 @@ class BoundedChannel:
             raise ChannelError(ChannelFailure.BUSY)
         self._writing = True
         try:
-            await self._write(TYPED_HEADER.pack(len(value), kind), deadline_ns)
-            await self._write(value, deadline_ns)
+            await self._write(TYPED_HEADER.pack(len(value), kind), deadline_ns, guard)
+            await self._write(value, deadline_ns, guard)
         except (ChannelError, asyncio.CancelledError, OSError):
             self._close_after_failure()
             raise

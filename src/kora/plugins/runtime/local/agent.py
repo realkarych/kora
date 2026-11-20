@@ -361,7 +361,7 @@ class AgentSession:
                 raise delivery_error("launch_rejected") from cleanup
             raise delivery_error("launch_rejected") from None
         services = HostServices(
-            launches=launches,
+            launches=launches.bind,
             resolver=self._sources.resolver,
             policy=policy,
             ctx=self._context(workload.attempt_id),

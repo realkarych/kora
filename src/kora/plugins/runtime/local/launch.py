@@ -7,6 +7,7 @@ import signal
 import stat
 import sys
 from collections.abc import Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
@@ -50,6 +51,7 @@ from kora.runner.filesystem import (
 )
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.native_io import observed
+from kora.runner.sink import RunnerSink
 
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.launcher")
 ENDED: Final[EventSpec] = CATALOG.register(
@@ -256,6 +258,7 @@ class LocalLaunches:
         self.verification: asyncio.Task[bool] | None = None
         self.allocating = 0
         self.closing: asyncio.Task[None] | None = None
+        self._sink: RunnerSink | None = None
         os.mkdir("launch", 0o700, dir_fd=control.descriptor)
         try:
             self.directory = open_private_directory(control, "launch")
@@ -263,11 +266,26 @@ class LocalLaunches:
             release_tree(control, "launch")
             raise
 
+    def bind(self, sink: RunnerSink) -> "LocalLaunches":
+        if self._sink is not None or self.closed:
+            raise refused("launch_rejected")
+        self._sink = sink
+        return self
+
+    def _launch_guard(self) -> AbstractContextManager[bool]:
+        if self.closed or self._sink is None:
+            return nullcontext(not self.closed)
+        return self._sink.launch_guard()
+
+    def _launch_allowed(self) -> bool:
+        with self._launch_guard() as allowed:
+            return allowed
+
     async def allocate(self, inputs: LaunchInputs) -> LocalLaunch:
         binary = self.binary
         shebang = f"#!{sys.executable} -I\n"
         if (
-            self.closed
+            not self._launch_allowed()
             or binary is None
             or len(self.pending) + self.allocating >= MAX_PENDING_LAUNCHES
             or not Path(sys.executable).is_absolute()
@@ -290,6 +308,10 @@ class LocalLaunches:
             if self.verification is None:
                 self.verification = asyncio.create_task(self._verify(binary))
             try:
+                if self._sink is not None:
+                    await self._sink.wait_for_launch_verification(self.verification)
+                    if not self._launch_allowed():
+                        raise refused("launch_rejected")
                 verified = await asyncio.shield(self.verification)
             except asyncio.CancelledError:
                 task = asyncio.current_task()
@@ -298,7 +320,7 @@ class LocalLaunches:
                 raise refused("launch_rejected") from None
         finally:
             self.allocating -= 1
-        if self.closed:
+        if not self._launch_allowed():
             raise refused("launch_rejected")
         launch_id = secrets.token_hex(16)
         capability = LaunchCapability(
@@ -405,7 +427,7 @@ class LocalLaunches:
         try:
             launch.revoke()
             await cancel_task(launch.timer)
-            if self.closed:
+            if not self._launch_allowed():
                 return
             if not launch.verified:
                 outcome = LaunchEnd("integrity_mismatch", None, None)
@@ -416,6 +438,7 @@ class LocalLaunches:
                 FrameType.JSON,
                 spec.model_dump_json().encode(),
                 self.clock.monotonic_ns() + 5_000_000_000,
+                guard=self._launch_guard,
             )
             spec = None
             while True:

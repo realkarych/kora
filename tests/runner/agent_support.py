@@ -35,7 +35,6 @@ from kora.runner.agent import (
     AgentHost,
     HostedHarness,
     HostServices,
-    RefusingLaunches,
     Released,
 )
 from kora.runner.filesystem import DirectoryAnchor
@@ -331,7 +330,6 @@ class World:
         clock: Clock | None = None,
     ) -> AgentHost:
         services = HostServices(
-            launches=RefusingLaunches(),
             resolver=resolver,
             policy=AllowDenyPolicy() if policy is None else policy,
             ctx=context_for(self.capture),

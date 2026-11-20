@@ -1,7 +1,8 @@
 import asyncio
 import threading
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Final, Protocol, TypeVar
 
@@ -273,6 +274,18 @@ class RunnerSink:
 
     async def termination(self) -> RunnerCause:
         return await asyncio.shield(self._stopped)
+
+    async def wait_for_launch_verification(
+        self, verification: asyncio.Task[bool]
+    ) -> None:
+        await asyncio.wait(
+            (self._stopped, verification), return_when=asyncio.FIRST_COMPLETED
+        )
+
+    @contextmanager
+    def launch_guard(self) -> Generator[bool]:
+        with self._state:
+            yield self._cause is None and not self._fenced
 
     def terminate(self, cause: RunnerCause) -> None:
         with self._state:
