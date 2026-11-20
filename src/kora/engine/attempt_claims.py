@@ -56,7 +56,7 @@ from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_dia
 from kora.protocols.authentication import Principal
 from kora.protocols.boundary import BoundaryModel
 from kora.protocols.history import GrantHistorySnapshot
-from kora.protocols.identity import Count, GrantBinding, Identifier, Sha256
+from kora.protocols.identity import MAX_COUNT, Count, GrantBinding, Identifier, Sha256
 from kora.protocols.worker_claim_system import PROCESS_BYTES, ClaimSystem
 
 PREPARED: EventSpec = CATALOG.register(
@@ -207,6 +207,13 @@ async def _grant(
 ) -> ClaimDecision:
     connection, saved = context.connection, target.attempt
     until = now + timedelta(seconds=120)
+    first_expires = (
+        first and binding.deadline is not None and binding.deadline.at <= now
+    )
+    maximum = 2**31 - 1 if connection.dialect.name == POSTGRESQL else MAX_COUNT
+    recovery_limit = maximum - int(first_expires)
+    if saved.recovery_version >= recovery_limit:
+        raise ClaimSourcesRejected()
     if first:
         values = {
             "deadline_binding": deadline_document(
@@ -228,9 +235,9 @@ async def _grant(
         )
     else:
         await recover_expired_lease(context, saved.id)
-    await connection.execute(
+    updated_attempt = await connection.scalar(
         update(attempt)
-        .where(attempt.c.id == saved.id)
+        .where(attempt.c.id == saved.id, attempt.c.recovery_version < recovery_limit)
         .values(
             worker_id=query.worker_id,
             lease_owner=query.worker_id,
@@ -247,7 +254,10 @@ async def _grant(
             deadline=None if binding.deadline is None else binding.deadline.at,
             updated_at=now,
         )
+        .returning(attempt.c.id)
     )
+    if updated_attempt is None:
+        raise ClaimSourcesRejected()
     history = await append_grant(
         connection, context.locks, scope, grant, mode, now, history_limits
     )
@@ -286,7 +296,7 @@ async def _grant(
                 updated_at=now,
             )
         )
-        if binding.deadline is not None and binding.deadline.at <= now:
+        if first_expires:
             await record_attempt_expiry(context, saved.id, now)
     return ClaimDecision(ClaimOutcome.GRANTED, delivery)
 

@@ -5,7 +5,8 @@ import pytest
 from sqlalchemy import update
 
 from kora.cel_eval.thread import Evaluator
-from kora.db.connection import Database
+from kora.db.claim_source_values import ClaimSourcesRejected
+from kora.db.connection import Database, Dialect
 from kora.db.tables import (
     attempt,
     node_instance,
@@ -14,6 +15,7 @@ from kora.db.tables import (
 from kora.engine.attempt_claims import ClaimOutcome
 from kora.engine.lease_recovery import recover_expired_lease
 from kora.ir.json import JsonObject
+from kora.protocols.identity import MAX_COUNT
 from tests.api.deployment_cases import evaluator, skeleton_ir
 from tests.db.seed import START
 from tests.engine.claim_support import (
@@ -134,3 +136,65 @@ async def test_regrant_advances_version_after_committed_lease_invalidation(
     assert second.delivery.system.lease_epoch == 2
     assert saved["attempt"][0]["recovery_version"] == 3
     assert saved["event"] == after_lease_loss["event"]
+
+
+@pytest.mark.parametrize("scenario", ["first", "first_expired", "regrant"])
+@pytest.mark.asyncio
+async def test_unrepresentable_grant_version_rolls_back_the_claim(
+    database: Database, evaluator: Evaluator, scenario: str
+) -> None:
+    ir = skeleton_ir()
+    graph = cast(JsonObject, ir["graph"])
+    node = cast(JsonObject, cast(JsonObject, graph["nodes"])["agent"])
+    if scenario == "first_expired":
+        node["limits"] = {"timeout": "0ms"}
+    case = await claim_case(database, evaluator, ir)
+    if scenario == "regrant":
+        first = await case.claim(database)
+        assert first.delivery is not None
+        case.clock.advance(121)
+        case = replace(
+            case, query=case.query.model_copy(update={"claim_id": "next-claim"})
+        )
+    maximum = 2**31 - 1 if database.dialect is Dialect.POSTGRESQL else MAX_COUNT
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(attempt)
+            .where(attempt.c.id == case.binding.attempt_id)
+            .values(recovery_version=maximum - int(scenario != "first"))
+        )
+    original = await state(database)
+
+    with pytest.raises(ClaimSourcesRejected) as refusal:
+        await case.claim(database)
+    saved = await state(database)
+
+    assert type(refusal.value) is ClaimSourcesRejected
+    assert saved == original
+
+
+@pytest.mark.asyncio
+async def test_final_representable_grant_version_allows_exact_replay(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await claim_case(database, evaluator)
+    maximum = 2**31 - 1 if database.dialect is Dialect.POSTGRESQL else MAX_COUNT
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(attempt)
+            .where(attempt.c.id == case.binding.attempt_id)
+            .values(recovery_version=maximum - 1)
+        )
+
+    first = await case.claim(database)
+    saved = await state(database)
+    repeated = await case.claim(database)
+    after_replay = await state(database)
+
+    assert first.outcome is ClaimOutcome.GRANTED
+    assert first.delivery is not None
+    assert repeated.outcome is ClaimOutcome.REPLAYED
+    assert repeated.delivery is not None
+    assert repeated.delivery.encode() == first.delivery.encode()
+    assert saved["attempt"][0]["recovery_version"] == maximum
+    assert after_replay == saved
