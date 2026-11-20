@@ -6,10 +6,11 @@ from datetime import datetime, timedelta
 from typing import cast
 
 import pytest
-from sqlalchemy import event, select, update
+from sqlalchemy import Connection, event, select, update
 from sqlalchemy.util.concurrency import await_
 
 from kora.cel_eval.thread import Evaluator
+from kora.conformance.capture import captured
 from kora.db.claim_source_values import ClaimSourcesRejected, prepare_claim_sources
 from kora.db.claim_sources_v1 import SOURCE_FIELDS
 from kora.db.connection import Database, Dialect
@@ -17,9 +18,10 @@ from kora.db.tables import attempt, node_instance, run
 from kora.engine.attempt_inputs import prepare_attempt_inputs
 from kora.engine.claim_context import ClaimQuery
 from kora.engine.claim_sources import insert_claim_attempt
-from kora.engine.locks import TransitionLocks
+from kora.engine.locks import COMPONENT, TransitionLocks
 from kora.engine.worker_registration import register_worker
 from kora.ir.json import JsonObject
+from kora.observability import Level, LoggingSettings
 from kora.protocols.authentication import Principal
 from tests.api.claim_support import admit_expiry_run, poller
 from tests.api.deployment_cases import evaluator, skeleton_ir
@@ -205,6 +207,147 @@ async def test_claim_attempt_expiry_survives_rollback_before_worker_commit(
     assert recovered is not None
     assert recovered.system.mode == "recover"
     assert database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retained_row", ["unadmitted-parent", "terminal-attempt"])
+async def test_claim_does_not_latch_expiry_on_ineligible_retained_attempt(
+    database: Database, evaluator: Evaluator, retained_row: str
+) -> None:
+    case = await claim_case(database, evaluator, expiry_ir(enclosing=False))
+    if retained_row == "terminal-attempt":
+        await admit_expiry_run(database, case, "2h")
+    first = await case.claim(database)
+    assert first.delivery is not None
+    if retained_row == "terminal-attempt":
+        async with database.transaction() as writer:
+            await writer.execute(
+                update(attempt)
+                .where(attempt.c.id == case.binding.attempt_id)
+                .values(status="failed", recovery_required=True)
+            )
+    await hold_target(database, case)
+    before = await state(database)
+    poll = poller(database, AuthorityClock(START + timedelta(hours=1)))
+    fresh = case.query.model_copy(update={"claim_id": "retained-attempt-expiry"})
+
+    result = await poll.poll(fresh, case.principal)
+    after = await state(database)
+
+    assert result is None
+    assert after["attempt"] == before["attempt"]
+    assert after["attempt_dispatcher"] == before["attempt_dispatcher"]
+    assert after["run"] == before["run"]
+    assert database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_claim_attempt_expiry_respects_saved_parent_timeout_precedence(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await claim_case(database, evaluator, expiry_ir(enclosing=False))
+    await admit_expiry_run(database, case, "30m")
+    first = await case.claim(database)
+    assert first.delivery is not None
+    cutoff = START + timedelta(hours=1)
+    poll = poller(database, AuthorityClock(cutoff))
+    fresh = case.query.model_copy(update={"claim_id": "enclosing-expiry"})
+
+    result = await poll.poll(fresh, case.principal)
+    after = await state(database)
+
+    assert result is None
+    assert after["run"][0]["deadline_expired_at"] == cutoff
+    assert after["attempt"][0]["deadline_expired_at"] is None
+    assert after["attempt"][0]["desired_state"] == "cancel"
+    assert after["attempt"][0]["updated_at"] == cutoff
+    assert database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("commit_succeeds", [False, True], ids=["rollback", "commit"])
+async def test_claim_cancellation_during_first_commit_settles_run_expiry(
+    database: Database, evaluator: Evaluator, commit_succeeds: bool
+) -> None:
+    case = await claim_case(database, evaluator, expiry_ir(enclosing=True))
+    await admit_expiry_run(database, case, "1s")
+    await hold_target(database, case)
+    before = await state(database)
+    cutoff = START + timedelta(seconds=1)
+    clock = AuthorityClock(cutoff)
+    poll = poller(database, clock)
+    engine = database.writer_engine.sync_engine
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cancellation_turn = asyncio.Event()
+    intent_connection: object | None = None
+
+    def record_intent(
+        connection: object, cursor: object, statement: str, *arguments: object
+    ) -> None:
+        nonlocal intent_connection
+        if (
+            statement.startswith("UPDATE run SET")
+            and "deadline_expired_at=" in statement
+        ):
+            intent_connection = connection
+
+    def hold_commit(connection: Connection) -> None:
+        if connection is intent_connection and not entered.is_set():
+            clock.moment = START
+            entered.set()
+            await_(release.wait())
+            if not commit_succeeds:
+                connection.exec_driver_sql("SELECT missing_claim_expiry_probe")
+
+    event.listen(engine, "after_cursor_execute", record_intent)
+    event.listen(engine, "commit", hold_commit)
+
+    try:
+        with captured(
+            COMPONENT, LoggingSettings(level=Level.DEBUG), "claim-run-expiry", clock.now
+        ) as capture:
+            async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+                original = tasks.create_task(poll.poll(case.query, case.principal))
+                try:
+                    await entered.wait()
+                    original.cancel("cancel at Claim commit")
+                    asyncio.get_running_loop().call_soon(cancellation_turn.set)
+                    await cancellation_turn.wait()
+                    still_settling = not original.done()
+                    during_commit = await state(database)
+                finally:
+                    release.set()
+                with pytest.raises(
+                    asyncio.CancelledError, match="cancel at Claim commit"
+                ):
+                    await original
+            records = capture.finish()
+        after = await state(database)
+    finally:
+        event.remove(engine, "after_cursor_execute", record_intent)
+        event.remove(engine, "commit", hold_commit)
+
+    assert still_settling
+    assert during_commit == before
+    assert [
+        row["action"] for row in records if row["event"] == "engine.expiry.prepared"
+    ] == ["run_expiry_intent", "run_expiry_cancellation"]
+    assert case.binding.run.run_id not in repr(records)
+    assert case.binding.attempt_id not in repr(records)
+    assert "missing_claim_expiry_probe" not in repr(records)
+    assert database.units_in_flight() == 0
+    if not commit_succeeds:
+        assert after == before
+        return
+    assert after["run"][0]["deadline_expired_at"] == cutoff
+    assert after["run"][0]["needs_scheduling"] is True
+    assert after["run"][0]["target_held_since"] == START
+    assert after["run"][0]["status"] == "running"
+    assert after["attempt"][0]["desired_state"] == "cancel"
+    assert after["attempt"][0]["cancel_cause"] == "timeout"
+    assert after["attempt"][0]["updated_at"] == cutoff
+    assert after["attempt_dispatcher"] == before["attempt_dispatcher"]
 
 
 @dataclass

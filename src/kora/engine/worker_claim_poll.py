@@ -318,30 +318,40 @@ class WorkerClaimPoll:
         ):
             return ClaimDecision(ClaimOutcome.INELIGIBLE)
         prepared = None if legacy else await self._prepare(target)
-        async with self.database.transaction() as writer:
-            locks = TransitionLocks(writer)
-            if not await locks.acquire_run(target.run.id, wait=replay is not None):
-                return ClaimDecision(ClaimOutcome.INELIGIBLE)
-            decision = await claim_attempt(
-                self._context(writer, locks, target.run),
-                attempt_id,
-                query,
-                principal,
-                prepared,
-                self.limits.snapshot.sources,
-                self.limits.history,
-                self.limits.worker_bytes,
-                self.uncertainty,
-            )
-            if decision.outcome is ClaimOutcome.GRANTED:
-                await self._advance(writer, query, cursor, attempt_id)
-            if decision.outcome in (
-                ClaimOutcome.GRANTED,
-                ClaimOutcome.MAINTAINED,
-                ClaimOutcome.EXPIRE,
-            ):
-                await self._seen(writer, query)
-        if decision.run_expiry:
+        run_expiry = False
+        try:
+            async with self.database.transaction() as writer:
+                locks = TransitionLocks(writer)
+                if not await locks.acquire_run(target.run.id, wait=replay is not None):
+                    return ClaimDecision(ClaimOutcome.INELIGIBLE)
+                decision = await claim_attempt(
+                    self._context(writer, locks, target.run),
+                    attempt_id,
+                    query,
+                    principal,
+                    prepared,
+                    self.limits.snapshot.sources,
+                    self.limits.history,
+                    self.limits.worker_bytes,
+                    self.uncertainty,
+                )
+                if decision.outcome is ClaimOutcome.GRANTED:
+                    await self._advance(writer, query, cursor, attempt_id)
+                if decision.outcome in (
+                    ClaimOutcome.GRANTED,
+                    ClaimOutcome.MAINTAINED,
+                    ClaimOutcome.EXPIRE,
+                ):
+                    await self._seen(writer, query)
+                run_expiry = decision.run_expiry
+        except BaseException as writer_error:
+            if run_expiry:
+                try:
+                    await complete(self._finish_expiry(target.run))
+                except BaseException as continuation_error:
+                    raise writer_error from continuation_error
+            raise
+        if run_expiry:
             await complete(self._finish_expiry(target.run))
         return decision
 

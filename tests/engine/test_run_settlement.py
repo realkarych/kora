@@ -9,7 +9,7 @@ from kora.db.connection import Database
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.reads import execution_run_usage, namespace_outstanding_usage
 from kora.db.tables import attempt, event, node_instance
-from kora.engine.expiry import expire_run, observe_run_expiry
+from kora.engine.expiry import expire_run, observe_run_expiry, record_run_expiry
 from kora.engine.expiry_context import ExpiryState
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.locks import LockError
@@ -173,6 +173,46 @@ async def test_run_finish_releases_target_after_the_independent_expiry_pass(
     assert released[0]["target_held_since"] is None
     assert released[2] == original_events
     assert outstanding == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["expire", "settle"])
+async def test_scheduler_settlement_uses_saved_run_expiry_observation(
+    database: Database, operation: str
+) -> None:
+    execution = await execution_case(database)
+    case = execution.promotion
+    observed_at = case.clock.now() + timedelta(hours=1)
+    async with database.transaction() as writer:
+        await record_run_expiry(await execution.context(writer, False), observed_at)
+    pending, _, _ = await case.snapshot(database)
+    case.clock.advance(10)
+    settlement_time = case.clock.now()
+
+    async with database.transaction() as writer:
+        if operation == "expire":
+            result = await expire_run(await execution.context(writer))
+        else:
+            result = await settle_run(
+                await settlement_context(writer, case, target=False)
+            )
+    saved, _, events = await case.snapshot(database)
+    cancelled = await execution.snapshot(database)
+
+    expected = (
+        ExpiryState.EXPIRED if operation == "expire" else RunSettlementState.EXPIRED
+    )
+    assert result is expected
+    assert saved["deadline_expired_at"] == observed_at
+    assert saved["status"] == "failed"
+    assert saved["finished_at"] == settlement_time
+    assert saved["target_held_since"] == pending["target_held_since"]
+    assert cancelled["desired_state"] == "cancel"
+    assert cancelled["cancel_cause"] == "timeout"
+    assert cancelled["updated_at"] == observed_at
+    [recovery] = [row for row in events if row["kind"] == "attempt.recovery_required"]
+    assert recovery["at"] == observed_at
+    assert database.units_in_flight() == 0
 
 
 @pytest.mark.asyncio

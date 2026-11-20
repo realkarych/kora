@@ -42,7 +42,11 @@ from kora.engine.deadline_records import (
     deadline_document,
     prepare_deadline_record,
 )
-from kora.engine.expiry import record_attempt_expiry, record_run_expiry
+from kora.engine.expiry import (
+    observe_claim_attempt_expiry,
+    record_attempt_expiry,
+    record_run_expiry,
+)
 from kora.engine.expiry_context import (
     ACTIVE_ATTEMPT_STATUSES,
     ExpiryContext,
@@ -523,19 +527,8 @@ async def _claim(
                 and parent.status == "running"
                 and parent.deadline_expired_at is None
             ):
-                if (
-                    binding.deadline.scope_kind == "run"
-                    and binding.deadline.scope_id == parent.id
-                ):
-                    await record_run_expiry(context, now)
-                    return ClaimDecision(ClaimOutcome.EXPIRE, run_expiry=True)
-                if (
-                    binding.deadline.scope_kind != "attempt"
-                    or binding.deadline.scope_id != saved.id
-                ):
-                    raise ClaimSourcesRejected()
-                await record_attempt_expiry(context, saved.id, now)
-                return ClaimDecision(ClaimOutcome.EXPIRE)
+                scope = await observe_claim_attempt_expiry(context, saved.id, now)
+                return ClaimDecision(ClaimOutcome.EXPIRE, run_expiry=scope == "run")
             eligible = False
         state = LeaseState.model_validate(
             {name: getattr(saved, name) for name in LeaseState.model_fields}
