@@ -41,11 +41,13 @@ async def test_zero_timeout_returns_learnable_expired_first_grant(
         records = capture.finish()
     saved = await state(database)
     replay = await case.claim(database)
+    after_replay = await state(database)
 
     assert first.outcome is ClaimOutcome.GRANTED
     assert first.delivery is not None
     assert replay.delivery is not None
     assert replay.delivery.encode() == first.delivery.encode()
+    assert after_replay == saved
     assert first.delivery.system.permitted_actions == ("seal_request",)
     deadline = first.delivery.system.deadline.value
     assert deadline is not None
@@ -55,6 +57,7 @@ async def test_zero_timeout_returns_learnable_expired_first_grant(
     )
     assert saved["attempt"][0]["deadline_expired_at"] == START
     assert saved["attempt"][0]["recovery_required"] is True
+    assert saved["attempt"][0]["recovery_version"] == 2
     assert saved["attempt"][0]["desired_state"] == "cancel"
     assert saved["run"][0]["needs_scheduling"] is True
     assert saved["run"][0]["deadline_expired_at"] is None

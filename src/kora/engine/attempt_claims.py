@@ -235,6 +235,7 @@ async def _grant(
             worker_id=query.worker_id,
             lease_owner=query.worker_id,
             lease_epoch=grant.lease_epoch,
+            recovery_version=attempt.c.recovery_version + 1,
             lease_until=until,
             execution_domain_id=query.execution_domain_id,
             execution_state="stopped"
