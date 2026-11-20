@@ -418,6 +418,10 @@ Follow [AGENTS.md](../AGENTS.md#issues-and-pull-requests) for issue/PR and plann
 
 A failed `CI` run that GitHub never executed in full may be rerun once by the [`CI recovery` workflow](../.github/workflows/ci-recovery.yml) under the CI infrastructure rerun rule in [AGENTS.md](../AGENTS.md#development-verification), which states what the workflow covers. Each recovery run writes its classification and decision to its log and step summary; the pull request author records a pull-request rerun in that pull request. On 2026-11-13, co-owner `klukashka` approved this paragraph under [issue #1349](https://github.com/realkarych/kora/issues/1349).
 
+### Current-base merge checks
+
+Required status checks for `master` use GitHub's strict mode. If GitHub marks a pull request branch behind, update it with the current `master` and obtain one successful complete CI execution on the resulting pull request revision before squash merge. Reuse still-applicable independent review evidence under [kora-verify](../.agents/skills/kora-verify/SKILL.md).
+
 ## Browser checks
 
 The owner approved removal of the experimental numerical browser benchmark under [issue #179](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349) on 2026-10-22, including matching documentation and delegated independent review before merge. The retained protocol is `console-functional-v1`.
