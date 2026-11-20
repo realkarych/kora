@@ -420,7 +420,7 @@ A failed `CI` run that GitHub never executed in full may be rerun once by the [`
 
 ### Current-base merge checks
 
-Required status checks for `master` use GitHub's strict mode. If GitHub marks a pull request branch behind, update it with the current `master` and obtain one successful complete CI execution on the resulting pull request revision before squash merge. Reuse still-applicable independent review evidence under [kora-verify](../.agents/skills/kora-verify/SKILL.md).
+Required status checks for `master` use GitHub's strict mode. If GitHub marks a pull request branch behind, update it with the current `master` and obtain one successful complete CI execution on the resulting pull request revision before squash merge. Reuse still-applicable independent review evidence under [kora-verify](../.claude/skills/kora-verify/SKILL.md).
 
 ## Browser checks
 
