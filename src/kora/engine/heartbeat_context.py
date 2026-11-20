@@ -292,8 +292,8 @@ def heartbeat_actions(
     )
     first = context.grant.mode == "execute" and saved.grant_history_count == 1
     actions: tuple[HeartbeatAction, ...] = ("observe", "retire")
-    if first and eligible and not closed and not stopped:
-        actions = () if context.sealed else ("seal_request",)
+    if first and eligible and not closed and not stopped and not context.sealed:
+        actions = ("seal_request",)
     own_timeout = (
         current
         and active

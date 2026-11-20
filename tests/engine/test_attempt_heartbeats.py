@@ -5,11 +5,13 @@ from sqlalchemy import update
 
 from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database
-from kora.db.tables import run
+from kora.db.tables import attempt, run
 from kora.engine.heartbeat_evidence import HeartbeatEvidenceRejected
 from kora.engine.worker_history import HistoryAccessRejected
 from kora.models.errors import DispatcherEvidenceDetails
 from kora.protocols.evidence import ClosureEvidence
+from kora.protocols.storage_models import ContentRef
+from kora.protocols.worker_claim_system import ClaimRequestDescriptor
 from tests.api.deployment_cases import evaluator
 from tests.engine.claim_support import claim_case, state
 from tests.engine.heartbeat_support import heartbeat, heartbeat_body, self_closure
@@ -43,6 +45,64 @@ async def test_heartbeat_renews_lease_and_same_time_replay_writes_nothing(
     assert repeated == after
     assert not after["attempt"][0]["recovery_required"]
     assert after["worker"][0]["last_seen_at"] == clock.now()
+
+
+def sealed_request() -> dict[str, object]:
+    return ClaimRequestDescriptor(
+        version=1,
+        digest="sha256:" + "ab" * 32,
+        storage_ref=ContentRef.model_validate(
+            {
+                "version": 1,
+                "address": {
+                    "version": 1,
+                    "storage_identity": {"version": 1, "store_id": "request-store"},
+                    "payload_digest": "sha256:" + "ab" * 32,
+                },
+                "object_incarnation": "request-object",
+                "total_size": 1,
+            }
+        ),
+        payload_state="present",
+        retention_class="transcripts",
+    ).model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_sealed_open_grant_keeps_observe_and_retire(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await claim_case(database, evaluator)
+    decision = await case.claim(database)
+    assert decision.delivery is not None
+    granted = decision.delivery.system
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(attempt)
+            .where(attempt.c.id == case.binding.attempt_id)
+            .values(execution_request=sealed_request())
+        )
+    stored = await state(database)
+    body = heartbeat_body(granted)
+    clock = AuthorityClock()
+
+    sealed = await heartbeat(database, case, clock, body)
+    opened = await state(database)
+    acknowledged = await heartbeat(
+        database,
+        case,
+        clock,
+        body.model_copy(update={"grant_history_complete": granted.grant_history}),
+    )
+    after = await state(database)
+
+    assert stored["attempt"][0]["execution_request"] is not None
+    assert stored["attempt"][0]["current_dispatcher_open"] is True
+    assert sealed.permitted_actions == ("observe", "retire")
+    assert opened["attempt"][0]["current_dispatcher_open"] is True
+    assert acknowledged.permitted_actions == ("observe", "retire", "report_result")
+    assert acknowledged.grant_history_verified == granted.grant_history
+    assert after["attempt"][0]["current_dispatcher_open"] is True
 
 
 @pytest.mark.asyncio
