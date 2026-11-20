@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import AsyncExitStack
 from dataclasses import replace
+from datetime import timedelta
 from hashlib import sha256
 from typing import cast
 
@@ -168,6 +169,7 @@ async def test_real_scheduler_admission_hands_pinned_attempt_to_worker_claim(
     promotion, _ = await promotion_from_http(
         database, namespace_id, accepted, deployed, clock, identifiers
     )
+    expected_deadline = clock.now() + timedelta(hours=1)
     promoted = await promotion.promote(database)
     async with database.read_transaction() as reader:
         node_id = await reader.scalar(
@@ -183,7 +185,8 @@ async def test_real_scheduler_admission_hands_pinned_attempt_to_worker_claim(
     )
     before_claim = await state(database)
     clock.advance(1)
-    api_clock.moment = clock.now()
+    claim_at = clock.now()
+    api_clock.moment = claim_at
     async with AsyncExitStack() as resources:
         origin = (
             await resources.enter_async_context(running_app(app))
@@ -196,6 +199,8 @@ async def test_real_scheduler_admission_hands_pinned_attempt_to_worker_claim(
         await client.register_worker(worker_registration)
         first = await client.claim_worker(worker_registration.name, request)
         before_replay = await state(database)
+        clock.advance(20)
+        api_clock.moment = clock.now()
         replay = await client.claim_worker(worker_registration.name, request)
     after = await state(database)
 
@@ -205,6 +210,7 @@ async def test_real_scheduler_admission_hands_pinned_attempt_to_worker_claim(
     assert len(before_claim["attempt"]) == len(after["attempt"]) == 1
     assert before_claim["attempt"][0]["status"] == "created"
     assert before_claim["attempt"][0]["started_at"] is None
+    assert before_claim["attempt"][0]["deadline"] is None
     assert before_claim["attempt_dispatcher"] == []
     assert len(after["attempt_dispatcher"]) == 1
     assert first.claim is not None
@@ -220,10 +226,18 @@ async def test_real_scheduler_admission_hands_pinned_attempt_to_worker_claim(
     assert first.claim.price_table == price
     assert first.claim.acknowledged_segment_offset == 0
     assert first.claim.permitted_actions == ("seal_request",)
-    assert after["attempt"][0]["lease_epoch"] == 1
+    assert first.claim.lease_epoch == after["attempt"][0]["lease_epoch"] == 1
+    lease_until = claim_at + timedelta(seconds=120)
+    assert first.claim.lease_until == after["attempt"][0]["lease_until"] == lease_until
+    assert first.claim.dispatcher_id == after["attempt_dispatcher"][0]["id"]
+    assert first.claim.execution_domain_id == worker_registration.execution_domain_id
     assert after["attempt"][0]["execution_state"] == "unknown"
-    assert after["attempt"][0]["started_at"] == clock.now()
-    assert after["attempt"][0]["deadline"] is not None
+    assert after["attempt"][0]["started_at"] == claim_at
+    deadline_record = first.claim.deadline.value
+    assert deadline_record is not None
+    deadline = deadline_record.deadline()
+    assert (deadline.scope_kind, deadline.scope_id) == ("run", promotion.run_id)
+    assert deadline.at == after["attempt"][0]["deadline"] == expected_deadline
     assert replay == first
     assert before_replay == after
     assert ledger.outstanding == database.units_in_flight() == 0
