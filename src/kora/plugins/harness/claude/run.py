@@ -208,11 +208,13 @@ class ClaudeSession:
     async def exchange(
         self, client: ClaudeSDKClient, launch: Launch, prompt: str
     ) -> tuple[RunnerCause | None, Termination]:
+        connecting = True
         try:
             if (cause := self.startup_stop()) is not None:
                 await launch.kill()
                 return cause, "interrupted"
             await client.connect()
+            connecting = False
             info = cast("object", await client.get_server_info())
             if (cause := self.startup_stop()) is not None:
                 return cause, "interrupted"
@@ -225,7 +227,8 @@ class ClaudeSession:
             await client.query(prompt)
             return await self.wait(client, launch)
         except CLIJSONDecodeError:
-            self.stop("oversized_message")
+            if not connecting or self.startup_stop() is None:
+                self.stop("oversized_message")
             await launch.kill()
             return self.cause or "oversized_message", "killed"
         except ClaudeSDKError:

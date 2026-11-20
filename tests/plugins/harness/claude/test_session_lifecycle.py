@@ -22,6 +22,7 @@ from kora.plugins.harness.claude.adapter import ClaudeHarness, ClaudeSummary
 from kora.plugins.harness.claude.stop import ClaudeObservation
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
+    Enforcement,
     EventSummary,
     Launch,
     LaunchInputs,
@@ -282,6 +283,23 @@ class StoppingSink(ConformanceSink):
             self.stop(self.cause)
 
 
+class HeldStartupStopSink(ConformanceSink):
+    def __init__(self, cause: RunnerCause | None) -> None:
+        super().__init__(None, Trace())
+        self.cause: RunnerCause | None = cause
+        self.observing = asyncio.Event()
+        self.observed = False
+
+    def enforcement(self) -> Enforcement:
+        if self.observed and self.cause is not None:
+            return Enforcement("terminate", self.cause)
+        return super().enforcement()
+
+    async def termination(self) -> RunnerCause:
+        self.observing.set()
+        return await super().termination()
+
+
 def session_spec(
     adapter: ClaudeHarness,
     limits: NodeLimits | None = None,
@@ -447,6 +465,59 @@ async def test_oversized_message_kills_at_once(
     assert result.usage_coverage.completeness == "partial"
     assert result.usage[0].input_tokens == 10
     assert outcome.termination == "killed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop", "expected_error"),
+    [
+        (None, ErrorClass.HARNESS_ERROR),
+        ("deadline", ErrorClass.TIMEOUT),
+        ("cancel", ErrorClass.CANCELLED),
+    ],
+)
+async def test_oversized_initialize_preserves_observed_stop(
+    claude_capture: Capture, stop: RunnerCause | None, expected_error: ErrorClass
+) -> None:
+    before = asyncio.all_tasks()
+    root = Path(mkdtemp(prefix="kc", dir="/tmp"))
+    launches = ClaudeLaunches(
+        root, RECORDINGS / "conformance-no_usage-2.1.301.ndjson", "oversized_initialize"
+    )
+    base = make_adapter(launches.workspace, context_for(claude_capture, SystemClock()))
+    adapter = ObservedHarness(base.scope, base.ctx, base.registry, base.environment)
+    sink = HeldStartupStopSink(stop)
+    policy = ConformancePolicy("Forbidden", sink.trace)
+    spec = session_spec(adapter)
+
+    operation = asyncio.create_task(adapter.run(spec, policy, sink, launches))
+    try:
+        async with asyncio.timeout(10):
+            await launches.allocated.wait()
+            launch = launches.launch
+            assert launch is not None
+            await launch.initializing.wait()
+            await sink.observing.wait()
+            sink.observed = True
+            launches.release_pause()
+            result = await operation
+            prompt_received = launches.recording.with_suffix(".prompt").exists()
+    finally:
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+        await launches.close()
+
+    assert result.stop_reason == ("oversized_message" if stop is None else stop)
+    assert result.error_class is expected_error
+    assert not sink.future().done()
+    assert adapter.outcome is not None
+    assert adapter.outcome.termination == "killed"
+    assert not prompt_received
+    assert launch.eof
+    assert launch.report.done()
+    assert not root.exists()
+    assert asyncio.all_tasks() == before
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,19 @@ def send(message: dict[str, object]) -> None:
     sys.stdout.flush()
 
 
+def pause(notification: bytes) -> None:
+    descriptor = os.open(
+        os.environ["KORA_CLAUDE_REPLAY_FIFO"], os.O_RDONLY | os.O_NONBLOCK
+    )
+    try:
+        os.write(int(sys.argv[2]), notification)
+        select.select([descriptor], [], [])
+        if os.read(descriptor, 1) != b"x":
+            raise ValueError("invalid pause release")
+    finally:
+        os.close(descriptor)
+
+
 def control(
     message: dict[str, object], version: str, ignore: bool = False
 ) -> str | None:
@@ -32,6 +45,10 @@ def control(
         raise ValueError("unexpected replay control")
     if subtype == "initialize" and version == "ignore_initialize":
         os.write(int(sys.argv[2]), b"initializing\n")
+        return "initialize"
+    if subtype == "initialize" and version == "oversized_initialize":
+        pause(b"initializing\n")
+        send({"type": "system", "subtype": "oversized", "value": "x" * 1_100_000})
         return "initialize"
     if subtype == "interrupt":
         os.write(int(sys.argv[2]), b"interrupt\n")
@@ -89,16 +106,7 @@ def play(recording: Path, version: str) -> None:
                 sys.stderr.flush()
                 continue
             if directive == "pause":
-                descriptor = os.open(
-                    os.environ["KORA_CLAUDE_REPLAY_FIFO"], os.O_RDONLY | os.O_NONBLOCK
-                )
-                try:
-                    os.write(int(sys.argv[2]), b"pause\n")
-                    select.select([descriptor], [], [])
-                    if os.read(descriptor, 1) != b"x":
-                        raise ValueError("invalid pause release")
-                finally:
-                    os.close(descriptor)
+                pause(b"pause\n")
                 continue
             if directive == "linger":
                 for raw in sys.stdin:
