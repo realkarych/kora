@@ -1,10 +1,12 @@
 from typing import ClassVar
 
+from pydantic import ValidationError
+
 from kora.ir import ConfigWarning
 from kora.ir.json import JsonObject
 from kora.plugins.harness.codex.deployment import CONFIG_SCHEMA
 from kora.plugins.harness.codex.launch_configuration import CODEX_VERSION
-from kora.plugins.harness.codex.options import session_options
+from kora.plugins.harness.codex.options import configuration_refused, session_options
 from kora.plugins.harness.codex.reservations import RESERVED_ENV
 from kora.protocols.harness import HarnessCapabilities, SessionInputs, SessionSpec
 from kora.protocols.vcs import WorkspaceTarget
@@ -44,15 +46,18 @@ class CodexHarness:
         inputs: SessionInputs,
     ) -> SessionSpec:
         options = session_options(config, inputs.limits)
-        return SessionSpec.model_validate(
-            {
-                "harness": self.name,
-                "adapter_version": CODEX_VERSION,
-                "options": options.model_dump(mode="json"),
-                "files": (),
-                "prompt": inputs.prompt,
-                "resume_handle": None,
-                "price_table_id": inputs.price_table_id,
-                "price_table": inputs.price_table.model_dump(mode="json"),
-            }
-        )
+        try:
+            return SessionSpec.model_validate(
+                {
+                    "harness": self.name,
+                    "adapter_version": CODEX_VERSION,
+                    "options": options.model_dump(mode="json"),
+                    "files": (),
+                    "prompt": inputs.prompt,
+                    "resume_handle": None,
+                    "price_table_id": inputs.price_table_id,
+                    "price_table": inputs.price_table.model_dump(mode="json"),
+                }
+            )
+        except ValidationError:
+            raise configuration_refused() from None

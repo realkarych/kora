@@ -2,7 +2,7 @@ import pytest
 
 from kora.conformance.harness import CONFORMANCE_PRICE_TABLE
 from kora.ir.config import NodeLimits
-from kora.ir.json import JsonObject
+from kora.ir.json import DEFAULT_MAX_DEPTH, JsonObject
 from kora.plugins.harness.codex.adapter import CodexHarness
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import SessionInputs, prompt_digest
@@ -137,3 +137,40 @@ def test_codex_session_spec_refuses_invalid_values(
     assert raised.value.code == "config_error"
     assert raised.value.details == {}
     assert raised.value.message == "the Codex session configuration is unsupported"
+
+
+def nested_output_schema(depth: int) -> JsonObject:
+    schema: JsonObject = {"title": "private-schema-title"}
+    for _ in range(depth - 1):
+        schema = {"not": schema}
+    return schema
+
+
+def test_codex_session_spec_admits_nested_schema_within_envelope() -> None:
+    adapter = CodexHarness()
+    workspace = WorkspaceTarget(root="/workspace", host_path=None)
+    inputs = session_inputs(NodeLimits())
+    schema = nested_output_schema(DEFAULT_MAX_DEPTH - 1)
+
+    spec = adapter.build_session_spec(
+        {"output_schema": schema}, workspace, None, inputs=inputs
+    )
+
+    assert spec.options["output_schema"] == schema
+
+
+def test_codex_session_spec_refuses_options_envelope_without_content() -> None:
+    adapter = CodexHarness()
+    workspace = WorkspaceTarget(root="/workspace", host_path=None)
+    inputs = session_inputs(NodeLimits())
+    schema = nested_output_schema(DEFAULT_MAX_DEPTH)
+
+    with pytest.raises(KoraProtocolError) as raised:
+        adapter.build_session_spec(
+            {"output_schema": schema}, workspace, None, inputs=inputs
+        )
+
+    assert raised.value.code == "config_error"
+    assert raised.value.details == {}
+    assert raised.value.message == "the Codex session configuration is unsupported"
+    assert "private-schema-title" not in str(raised.value)
