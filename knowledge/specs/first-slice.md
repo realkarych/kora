@@ -30,6 +30,8 @@ The project owner fixed the following depth on 2026-11-11 ([graph and startup an
   - **Installation recheck.** A start checks the selected version against the installation's selection with the deploy's installation checks and refuses a mismatch with `API003` and the same `IR018` and `IR028` findings, as item 3 of the installation feature inventory requires.
   - **Route.** The trigger route, `kora trigger` and the stdio `kora_trigger` behave as [walking-skeleton manual start](api-and-agent-surface.md#walking-skeleton-manual-start-issue-1463) states.
 
+The [proposed local CLI opening contract](cli-approval-opening.md#1-source-and-opening) under #1737 would apply the same input and context capability check in shared validation, deploy and fresh manual-start installation rechecks. It requires owner approval. The existing authenticated receipt precedence and authorized historical interpretation remain in force.
+
 ### Narrowed first-slice depth
 
 These changes apply to the first slice itself, not only to the skeleton:
