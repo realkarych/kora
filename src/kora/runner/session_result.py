@@ -2,31 +2,39 @@ import hashlib
 import os
 import stat
 from dataclasses import dataclass
+from threading import Event
 from typing import Final
 
 from pydantic import ValidationError
 
-from kora.ir.vcs_ref_json import canonical_bytes
-from kora.protocols.runtime import SESSION_OBSERVATION, SessionObservation
+from kora.protocols.harness import RunnerCause
+from kora.protocols.runtime import (
+    SESSION_OBSERVATION,
+    SessionFailedObservation,
+    SessionObservation,
+)
 from kora.runner.filesystem import (
     DirectoryAnchor,
     create_directory,
     open_private_directory,
 )
 from kora.runner.registry import synchronize, unlink_if_present
+from kora.runner.session_result_encoding import (
+    MAX_RESULT_BYTES,
+    ResultContainsSecret,
+    ResultEncodingRefused,
+    ResultTooLarge,
+    check_running,
+    encode_observation,
+)
 
 RESULT_DIRECTORY: Final[str] = "result"
-RESULT_NAME: Final[str] = "session.json"
-MAX_RESULT_BYTES: Final[int] = 16 * 1_048_576
+LEGACY_RESULT_NAME: Final[str] = "session.json"
+RESULT_NAME: Final[str] = "session.checked.json"
 CREATE_FLAGS: Final[int] = (
     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 )
 READ_FLAGS: Final[int] = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-
-
-class ResultTooLarge(Exception):
-    def __init__(self) -> None:
-        super().__init__("the session observation exceeds its size cap")
 
 
 class ResultUnreadable(Exception):
@@ -41,6 +49,60 @@ class ResultFile:
     digest: str
 
 
+@dataclass(frozen=True)
+class PreparedObservation:
+    payload: bytearray
+    reference: ResultFile
+    failure: str | None
+    cause: RunnerCause | None
+    stop_reason: str | None
+    journal_complete: bool
+
+
+def prepare_observation(
+    observation: SessionObservation, forms: tuple[str, ...], stop: Event
+) -> PreparedObservation:
+    try:
+        payload = encode_observation(observation, forms, stop)
+    except ResultContainsSecret:
+        return prepare_failure("secret_leak", stop)
+    except ResultTooLarge:
+        return prepare_failure("result_too_large", stop)
+    except ResultEncodingRefused:
+        return prepare_failure("result_unwritten", stop)
+    reference = result_reference(payload, stop)
+    if isinstance(observation, SessionFailedObservation):
+        return PreparedObservation(
+            payload, reference, observation.code, None, None, False
+        )
+    return PreparedObservation(
+        payload,
+        reference,
+        None,
+        observation.cause,
+        observation.result.stop_reason,
+        observation.journal_complete,
+    )
+
+
+def prepare_failure(code: str, stop: Event) -> PreparedObservation:
+    observation = SessionFailedObservation(kind="session_failed", code=code)
+    payload = encode_observation(observation, (), stop)
+    return PreparedObservation(
+        payload, result_reference(payload, stop), code, None, None, False
+    )
+
+
+def result_reference(payload: bytearray, stop: Event) -> ResultFile:
+    digest = hashlib.sha256()
+    view = memoryview(payload)
+    for offset in range(0, len(view), 16_384):
+        check_running(stop)
+        digest.update(view[offset : offset + 16_384])
+    check_running(stop)
+    return ResultFile(RESULT_NAME, len(payload), f"sha256:{digest.hexdigest()}")
+
+
 def digest_of(payload: bytes) -> str:
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
@@ -53,11 +115,8 @@ def result_directory(control: DirectoryAnchor) -> DirectoryAnchor:
 
 
 def write_observation(
-    control: DirectoryAnchor, observation: SessionObservation
+    control: DirectoryAnchor, prepared: PreparedObservation
 ) -> ResultFile:
-    payload = canonical_bytes(observation.model_dump(mode="json"))
-    if len(payload) > MAX_RESULT_BYTES:
-        raise ResultTooLarge
     directory = result_directory(control)
     try:
         descriptor = os.open(
@@ -65,7 +124,7 @@ def write_observation(
         )
         try:
             try:
-                written_through(descriptor, payload)
+                written_through(descriptor, prepared.payload)
             finally:
                 os.close(descriptor)
             synchronize(directory.descriptor)
@@ -74,10 +133,10 @@ def write_observation(
             raise
     finally:
         directory.close()
-    return ResultFile(RESULT_NAME, len(payload), digest_of(payload))
+    return prepared.reference
 
 
-def written_through(descriptor: int, payload: bytes) -> None:
+def written_through(descriptor: int, payload: bytearray) -> None:
     view = memoryview(payload)
     while view:
         view = view[os.write(descriptor, view) :]

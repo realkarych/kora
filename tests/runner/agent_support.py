@@ -250,6 +250,7 @@ class FakeResolver:
     ctx: ProtocolContext
     deaf: bool = False
     adapters: list[FakeHarness] = field(default_factory=lambda: [])
+    adapter_type: type[FakeHarness] = FakeHarness
 
     def resolve(
         self, execution: AgentExecution, workspace: WorkspaceRef
@@ -262,7 +263,7 @@ class FakeResolver:
             protected_paths=(),
             output_format=execution.output_format,
         )
-        harness = DeafHarness if self.deaf else FakeHarness
+        harness = DeafHarness if self.deaf else self.adapter_type
         adapter = harness(self.source, scope, self.ctx)
         self.adapters.append(adapter)
         return HostedHarness(adapter, adapter.kill)
@@ -336,6 +337,7 @@ class World:
             registry=self.capture.diagnostics.registry,
             clock=self.clock if clock is None else clock,
             log=self.capture.diagnostics.logger("runner.agent"),
+            secret_scope=self.capture.scope,
         )
         writer = self.journal if journal is None else journal
         return AgentHost(services, writer, self.control, self.candidate)

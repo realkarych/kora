@@ -48,12 +48,16 @@ from kora.protocols.runtime import (
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope
 from kora.protocols.time import Clock, SystemClock
 from kora.protocols.vcs import WorkspaceRef
-from kora.runner.agent import INTERRUPT_GRACE_NS, STOP_DEADLINE_NS
+from kora.runner.agent import INTERRUPT_GRACE_NS, STOP_DEADLINE_NS, ResultPreparation
 from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.registry import Completed, ControlFileRef
-from kora.runner.session_result import RESULT_DIRECTORY, RESULT_NAME
+from kora.runner.session_result import (
+    RESULT_DIRECTORY,
+    RESULT_NAME,
+    prepare_observation,
+)
 from kora.testing.local import script_chunks, script_item
 from kora.testing.local import testing_runner_command as runner_command
 from kora.testing.runner import AllowDenyPolicies
@@ -288,6 +292,7 @@ async def agent_session(
     clock: Clock,
     *,
     bind_socket: bool = True,
+    prepare_result: ResultPreparation = prepare_observation,
 ) -> AsyncGenerator[tuple[AgentSession, Path]]:
     attempt = private_directory(tmp_path.resolve(), "attempt")
     directory = open_local_directory(attempt)
@@ -300,6 +305,7 @@ async def agent_session(
         reaper,
         sources,
         NativeIdentityReader(clock=clock),
+        prepare_result=prepare_result,
     )
     if bind_socket:
         session.bind_launch_socket(attempt / "unused-socket")

@@ -7,18 +7,23 @@ from typing import Final
 import pytest
 
 from kora.conformance.capture import Capture
+from kora.conformance.common import context_for
 from kora.ir import ErrorClass
+from kora.plugins.harness.fake import FakeHarness
 from kora.plugins.harness.fake.script import Step
 from kora.protocols.deadlines import ExecutionDeadline
+from kora.protocols.harness import EventSummary, RunnerOutcome, SessionResult
 from kora.protocols.runtime import SessionResultObservation
 from kora.runner.agent import AgentHost
 from kora.runner.journal import SYNC_DEADLINE_NS
 from kora.runner.liveness import WRITER_STALL_NS
+from kora.runner.session_result import RESULT_DIRECTORY, RESULT_NAME
 from kora.runner.sink import QUEUE_RECORDS
 from tests.plugins.harness.fake.fake_support import turn
 from tests.runner.agent_support import (
     FIXED_NOW,
     PAUSE,
+    FakeResolver,
     HeldWriter,
     SignalledScript,
     SteppedClock,
@@ -113,6 +118,15 @@ async def stuck_writer(
         world.close()
 
 
+class ObservedFakeHarness(FakeHarness):
+    finalized_result: SessionResult | None = None
+
+    def finalise(self, summary: EventSummary, outcome: RunnerOutcome) -> SessionResult:
+        result = super().finalise(summary, outcome)
+        self.finalized_result = result
+        return result
+
+
 @pytest.mark.parametrize(
     ("cancel_at", "observed_at", "kill_seconds"),
     [(None, 120, 150), (110, 110, 140), (None, 130, 150), (None, 160, 160)],
@@ -128,7 +142,9 @@ async def test_runner_outcome_covers_every_stop_deadline_escalation(
     world = make_world(tmp_path, kora_capture)
     clock = SteppedClock()
     source = script([PAUSE], on_interrupt="ignore")
-    resolver = world.resolver(source)
+    resolver = FakeResolver(
+        source, context_for(kora_capture), adapter_type=ObservedFakeHarness
+    )
     host = world.host(resolver, clock=clock)
     kill_at = kill_seconds * SECOND
 
@@ -147,16 +163,31 @@ async def test_runner_outcome_covers_every_stop_deadline_escalation(
             await clock.advance_to(kill_at)
         await resolver.adapters[0].killed.wait()
         await stopped
-        observation = observed(host)
+        adapter = resolver.adapters[0]
         requested = list(clock.deadlines)
     finally:
-        await host.stop()
+        released = await host.stop()
         world.close()
+    observations = kora_capture.finish()
+    causes = [
+        record["cause"]
+        for record in observations
+        if record.get("event") == "harness.fake.session_finished"
+    ]
 
     assert not before_kill
     if observed_at > 120:
         assert (observed_at + 30) * SECOND not in requested
-    assert observation.cause == ("deadline" if cancel_at is None else "cancel")
-    assert observation.result.error_class is (
+    expected_cause = "deadline" if cancel_at is None else "cancel"
+    assert causes == [expected_cause]
+    assert isinstance(adapter, ObservedFakeHarness)
+    assert adapter.finalized_result is not None
+    assert adapter.finalized_result.stop_reason == expected_cause
+    assert adapter.finalized_result.error_class is (
         ErrorClass.TIMEOUT if cancel_at is None else ErrorClass.CANCELLED
     )
+    assert released.session
+    assert released.writer
+    assert host.result_reference() is None
+    assert not (world.root / "control" / RESULT_DIRECTORY / RESULT_NAME).exists()
+    assert "runner.session_result" not in world.kinds()

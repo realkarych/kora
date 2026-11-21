@@ -897,6 +897,9 @@ class CommandSession:
     def _halted(self) -> bool:
         return self._stop.is_set() or self._fenced.is_set()
 
+    def result_work_settled(self) -> bool:
+        return True
+
     def fence(self) -> None:
         with self._lock:
             self._fenced.set()
