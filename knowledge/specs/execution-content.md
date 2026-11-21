@@ -108,7 +108,7 @@ The [retirement transitions](upload-retirement.md#4-transitions-and-original-rec
 
 Both an inline seal body and `payload_kind = execution_request` pass through the same custody lifecycle. Inline is a transport convenience, not permission to commit a descriptor before bytes are durable. The request semantic schema, rendering, capability checks and policy selection remain with [#1453](https://github.com/realkarych/kora/issues/1453); storage receives the exact validated nonsecret bytes and identity.
 
-The [proposed canonical request format](execution-request.md) under #1736 specifies the shared body and the detached comparison needed for #1640's first ready upload and #1453's seal. It does not activate either writer or change the physical qualification and combined cleanup requirements.
+The [accepted canonical request format](execution-request.md) under #1736 specifies the shared body and the detached comparison needed for #1640's first ready upload and #1453's seal. It does not activate either writer or change the physical qualification and combined cleanup requirements.
 
 Ready upload recovery requires its original grant. First seal additionally requires current execute/result authority, the saved input/graph/price identities, current policy revision/capabilities and the inherited deadline. Under the run lock, an existing seal is checked after current namespace/service/lease authorization and before current-policy or new-effect checks. Equal replay returns the original descriptor and policy; a different digest conflicts without acquiring new storage authority.
 

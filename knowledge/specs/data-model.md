@@ -1445,7 +1445,7 @@ Nullable BIGINT `attempt.acknowledged_segment_offset` records the segment owner'
 
 The proposed [request owner and atomic seal handoff](execution-content.md#4-execution-request-handoff) supplies the content-side mapping for #1453, including the existing Claim descriptor and atomic attempt/read-admission/source-revision writer. Publication alone supplies no durable request producer.
 
-The [proposed version-one request body](execution-request.md) specifies the canonical bytes and the closely bound comparison record for ready and seal. It uses this descriptor and keeps runtime effect authority separate.
+The [accepted version-one request body](execution-request.md) specifies the canonical bytes and the closely bound comparison record for ready and seal. It uses this descriptor and keeps runtime effect authority separate.
 
 `input_bindings` is written with attempt creation under the run lock. Each declared input records its source (artifact version, immutable run parameter or subgraph binding), declared path/selector, selected list indices or fan-out element and order, relation (`consumed`, `reused_invariant`, `previous_attempt`) and explicit `absent` for an unresolved optional input. Bindings to parameter values reference the immutable run/parameter path; inline derived values belong to retained payloads. Nested bindings terminate at exact source artifact versions or run parameters. Saving these IDs does not claim that their bytes remain available forever. No scheduler action overwrites them, and output lineage uses them rather than the current instance cache.
 
