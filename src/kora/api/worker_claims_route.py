@@ -8,11 +8,15 @@ from kora.engine.worker_claim_poll import WorkerClaimPoll
 from kora.models.errors import ApiErrorCode
 from kora.models.worker_claims import WorkerClaimRequest
 from kora.models.workers import WorkerName
+from kora.observability import ProcessDiagnostics
 
 
 class WorkerClaimsRoute:
     def __init__(self, poll: WorkerClaimPoll) -> None:
         self.poll = poll
+
+    async def recover_expiry(self, diagnostics: ProcessDiagnostics) -> None:
+        await self.poll.recover_expiry(diagnostics)
 
     async def __call__(
         self, worker_id: WorkerName, body: WorkerClaimRequest

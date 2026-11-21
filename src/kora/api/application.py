@@ -174,6 +174,8 @@ def create_application(
     async def lifespan(application: FastAPI) -> AsyncGenerator[None]:
         if admission_initialization is not None:
             await admission_initialization.initialize(diagnostics)
+        if worker_claims is not None:
+            await worker_claims.recover_expiry(diagnostics)
         yield
 
     framework = FastAPI(

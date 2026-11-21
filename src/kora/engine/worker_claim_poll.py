@@ -9,10 +9,18 @@ from pydantic import Field, StrictInt
 from sqlalchemy import and_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.sql.elements import ColumnElement
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.claim_source_values import ClaimSourcesRejected, ClaimWriterFailed
-from kora.db.connection import Database, clear_snapshot_error, complete
+from kora.db.connection import (
+    Database,
+    DatabaseClosedError,
+    DatabaseSnapshotRejected,
+    clear_snapshot_error,
+    complete,
+)
+from kora.db.deadline_discovery import RunningRunSweep
 from kora.db.grant_history import (
     GrantHistoryRejected,
     HistoryReadLimits,
@@ -20,7 +28,7 @@ from kora.db.grant_history import (
     HistoryWriterFailed,
 )
 from kora.db.identifiers import IdentifierGenerator
-from kora.db.tables import attempt_dispatcher, worker
+from kora.db.tables import attempt_dispatcher, run, worker
 from kora.db.types import POSTGRESQL, normalise_timestamp
 from kora.db.worker_claim_poll import advance_claim_cursor, claim_candidates
 from kora.db.worker_claims import unknown_worker_slot
@@ -51,18 +59,41 @@ from kora.engine.claim_snapshot import (
     prepare_claim_snapshot,
 )
 from kora.engine.expiry import finish_run_expiry
-from kora.engine.expiry_context import ExpiryContext
+from kora.engine.expiry_context import ExpiryContext, ExpiryFailed
 from kora.engine.grant_history import acquire_history, prepare_history
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_version_identity import GraphVersionPin
-from kora.engine.locks import TransitionLocks
+from kora.engine.locks import COMPONENT, LockError, TransitionLocks
 from kora.engine.run_promotion_read import PromotionReadLimits
 from kora.engine.writer_mode import writable_postgres_transaction
+from kora.observability import CATALOG, EventSpec, Level, ProcessDiagnostics
 from kora.protocols.authentication import Principal
 from kora.protocols.boundary import BoundaryModel
 from kora.protocols.identity import Identifier
 from kora.protocols.runtime import RuntimeCapabilities
 from kora.protocols.time import Clock
+
+RECOVERY_FINISHED: EventSpec = CATALOG.register(
+    EventSpec(
+        "engine.claim_expiry_recovery.finished",
+        COMPONENT,
+        Level.DEBUG,
+        "startup Claim expiry recovery finished",
+        {},
+    )
+)
+RECOVERY_REFUSED: EventSpec = CATALOG.register(
+    EventSpec(
+        "engine.claim_expiry_recovery.refused",
+        COMPONENT,
+        Level.ERROR,
+        "startup Claim expiry recovery was refused",
+        {},
+    )
+)
+RUNNING_EXPIRY_LATCH: ColumnElement[bool] = and_(
+    run.c.status == "running", run.c.deadline_expired_at.is_not(None)
+)
 
 
 class ClaimCursor(BoundaryModel):
@@ -258,6 +289,62 @@ class WorkerClaimPoll:
             locks = TransitionLocks(writer)
             await locks.acquire_run(parent.id)
             await finish_run_expiry(self._context(writer, locks, parent))
+
+    async def _recover_run_expiry(self, run_id: str) -> None:
+        async with self.database.transaction() as writer:
+            locks = TransitionLocks(writer)
+            await locks.acquire_run(run_id)
+            parent = await claim_record(
+                writer,
+                ClaimRun,
+                run,
+                and_(run.c.id == run_id, RUNNING_EXPIRY_LATCH),
+                self.limits.snapshot.sources.run_row,
+            )
+            if parent is not None:
+                await finish_run_expiry(self._context(writer, locks, parent))
+
+    async def _recover_run_expiries(self) -> None:
+        sweep = RunningRunSweep()
+        loop = asyncio.get_running_loop()
+        while True:
+            deadline = loop.time() + self.limits.read_seconds
+            async with self.database.read_snapshot(deadline=deadline) as reader:
+                page = await sweep.next_page(reader)
+                if not page.run_ids:
+                    return
+                with await reader.execute(
+                    select(run.c.id)
+                    .where(run.c.id.in_(page.run_ids), RUNNING_EXPIRY_LATCH)
+                    .order_by(run.c.id)
+                ) as result:
+                    pending = tuple(str(run_id) for run_id in result.scalars())
+            for run_id in pending:
+                await self._recover_run_expiry(run_id)
+            if page.ceiling is None:
+                return
+
+    async def recover_expiry(self, diagnostics: ProcessDiagnostics) -> None:
+        logger = diagnostics.logger(COMPONENT)
+        try:
+            await self._recover_run_expiries()
+        except asyncio.CancelledError as error:
+            clear_snapshot_error(error)
+            raise
+        except (
+            DatabaseClosedError,
+            DatabaseSnapshotRejected,
+            ExpiryFailed,
+            LockError,
+            SQLAlchemyError,
+            OSError,
+            ValueError,
+            TypeError,
+            OverflowError,
+        ):
+            logger.emit(RECOVERY_REFUSED)
+            raise_safe(ExpiryFailed())
+        logger.emit(RECOVERY_FINISHED)
 
     async def _selected(
         self,
