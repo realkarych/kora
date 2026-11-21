@@ -299,7 +299,7 @@ class WorkerClaimPoll:
                 ClaimRun,
                 run,
                 and_(run.c.id == run_id, RUNNING_EXPIRY_LATCH),
-                self.limits.snapshot.sources.run_row,
+                self.limits.expiry.parent_bytes,
             )
             if parent is not None:
                 await finish_run_expiry(self._context(writer, locks, parent))

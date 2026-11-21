@@ -529,6 +529,38 @@ async def open_expiry_wait(database: Database, run_id: str) -> str:
     return wait_id
 
 
+async def latch_legacy_wait(
+    database: Database, case: ClaimCase, cutoff: datetime
+) -> tuple[str, str]:
+    binding = case.binding.run
+    inline = {"retained": "private-legacy-input-" + "x" * 8192}
+    async with database.transaction() as writer:
+        seed = Seeder.at(writer, START - timedelta(hours=1))
+        values = seed.run_values(
+            binding.namespace_id, binding.graph_id, binding.version_id
+        )
+        run_id = str(values["id"])
+        await writer.execute(
+            insert(run).values(
+                values
+                | {
+                    "input_encoding_version": None,
+                    "params": inline,
+                    "cel_params_projection": inline,
+                    "started_at": START,
+                }
+            )
+        )
+    legacy = replace(
+        case, binding=replace(case.binding, run=replace(binding, run_id=run_id))
+    )
+    await admit_expiry_run(database, legacy, "1s")
+    wait_id = await open_expiry_wait(database, run_id)
+    async with database.transaction() as writer:
+        await record_run_expiry(await legacy.context(writer), cutoff)
+    return run_id, wait_id
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interrupted", [False, True])
 async def test_run_latch_denies_competing_claim_and_live_heartbeat_before_cascade(
@@ -636,6 +668,7 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
             for _ in range(100)
         ]
         await writer.execute(insert(run), earlier_runs)
+    legacy_run, legacy_wait = await latch_legacy_wait(database, case, cutoff)
     pending = await state(database)
     recovered_database = Database(
         narrow_settings(database.settings),
@@ -669,14 +702,23 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
             async with lifespan(application):
                 final = await state(recovered_database)
                 stopped_wait = await expiry_wait_state(recovered_database, wait_id)
+                stopped_legacy_wait = await expiry_wait_state(
+                    recovered_database, legacy_wait
+                )
             async with lifespan(application):
                 repeated = await state(recovered_database)
+                repeated_legacy_wait = await expiry_wait_state(
+                    recovered_database, legacy_wait
+                )
             records = cap.finish()
     finally:
         await recovered_database.close()
 
     assert hold.entered.is_set()
-    assert len(pending["run"]) == 101
+    assert len(pending["run"]) == 102
+    assert pending["run"][-2]["id"] == legacy_run
+    assert pending["run"][-2]["input_encoding_version"] is None
+    assert pending["run"][-2]["deadline_expired_at"] == cutoff
     assert pending["run"][-1]["id"] == case.binding.run.run_id
     assert pending["run"][-1]["deadline_expired_at"] == cutoff
     assert pending["run"][-1]["target_held_since"] == START
@@ -692,6 +734,7 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
     assert final["attempt"][0]["updated_at"] == cutoff
     assert final["attempt"][1] == pending["attempt"][1]
     assert stopped_wait == ("cancelled", cutoff)
+    assert stopped_legacy_wait == repeated_legacy_wait == ("cancelled", cutoff)
     assert final["attempt_dispatcher"] == pending["attempt_dispatcher"]
     assert repeated == final
     assert [
@@ -706,6 +749,7 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
     ]
     assert case.binding.run.run_id not in repr(records)
     assert case.binding.attempt_id not in repr(records)
+    assert "private-legacy-input-" not in repr(records)
     assert "missing_startup_expiry_probe" not in repr(records)
     assert "requires FULL synchronization" not in repr(records)
     assert "requires durable WAL settings" not in repr(records)
