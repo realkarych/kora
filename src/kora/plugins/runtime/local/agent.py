@@ -4,7 +4,7 @@ import os
 import stat
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -12,6 +12,7 @@ from typing import Final, Literal, Protocol
 
 from pydantic import MISSING, ValidationError
 
+from kora.executor.digests import object_digest
 from kora.ir.config import AgentConfig
 from kora.ir.json import JsonObject
 from kora.observability import (
@@ -54,7 +55,7 @@ from kora.protocols.runtime import (
     TransferItem,
     Workload,
 )
-from kora.protocols.secret_value import SecretScope
+from kora.protocols.secret_value import SecretScope, SecretValue
 from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceRef
 from kora.runner.agent import COMPONENT as HOST_COMPONENT
@@ -141,12 +142,26 @@ class ProductionResolver:
         return resolver.resolve(execution, workspace)
 
 
+class HarnessCredentials(Protocol):
+    async def resolve(
+        self, execution: AgentExecution, ctx: ProtocolContext
+    ) -> Mapping[str, SecretValue]: ...
+
+
+class EmptyCredentials:
+    async def resolve(
+        self, execution: AgentExecution, ctx: ProtocolContext
+    ) -> Mapping[str, SecretValue]:
+        return {}
+
+
 @dataclass(frozen=True)
 class AgentSources:
     resolver: HarnessResolver
     policies: PolicySource
     scripts: ScriptIntake | None = None
     binary: ExpectedBinary | None = None
+    credentials: HarnessCredentials = field(default_factory=EmptyCredentials)
 
 
 def agent_admission(workload: Workload) -> Admitted | str:
@@ -274,7 +289,10 @@ class AgentSession:
                     authorize()
                     policy = self._policy(admitted.execution)
                     asyncio.run_coroutine_threadsafe(
-                        self._begin(admitted.workload, workspace, policy), self._loop
+                        self._begin(
+                            admitted.workload, admitted.execution, workspace, policy
+                        ),
+                        self._loop,
                     ).result()
             except KoraProtocolError as error:
                 journal = error.code == "journal_unavailable"
@@ -348,13 +366,48 @@ class AgentSession:
             self._refusal = code
 
     async def _begin(
-        self, workload: Workload, workspace: WorkspaceRef, policy: Policy
+        self,
+        workload: Workload,
+        execution: AgentExecution,
+        workspace: WorkspaceRef,
+        policy: Policy,
     ) -> None:
         if self._fenced:
             raise delivery_error("journal_unavailable")
+        if (
+            object_digest(workload.execution_request)
+            != workload.execution_request_digest
+        ):
+            self._fail("workload_conflict")
+            await self._close_launches()
+            raise delivery_error("workload_conflict")
+        ctx = ProtocolContext(
+            namespace_id=CONTEXT_NAMESPACE,
+            run_id=None,
+            attempt_id=workload.attempt_id,
+            logger=self._log.bind(attempt_id=workload.attempt_id),
+            secrets=None,
+            secret_admission=self._scope.admission(),
+            request_digest=workload.execution_request_digest,
+            deadline=None,
+            clock=self._clock,
+            activity=NoActivity(),
+        )
+        try:
+            credentials = await self._sources.credentials.resolve(execution, ctx)
+        except KoraProtocolError:
+            if self._fenced:
+                await self._close_launches()
+                raise delivery_error("journal_unavailable") from None
+            self._fail(UNAVAILABLE)
+            await self._close_launches()
+            raise delivery_error(UNAVAILABLE) from None
+        if self._fenced:
+            await self._close_launches()
+            raise delivery_error("journal_unavailable")
         try:
             control = self._control_anchor()
-            launches = self._prepare_launches(control)
+            launches = self._prepare_launches(control, credentials)
         except (OSError, FilesystemError, KoraProtocolError, SecretAdmissionError):
             self._fail("launch_rejected")
             try:
@@ -429,7 +482,9 @@ class AgentSession:
     def launches(self) -> LocalLaunches | None:
         return self._launches
 
-    def _prepare_launches(self, control: DirectoryAnchor) -> LocalLaunches:
+    def _prepare_launches(
+        self, control: DirectoryAnchor, credentials: Mapping[str, SecretValue]
+    ) -> LocalLaunches:
         socket_path = self._launch_socket
         if socket_path is None:
             raise delivery_error("launch_rejected")
@@ -448,6 +503,7 @@ class AgentSession:
             self._identities,
             self._diagnostics.logger(LAUNCH_COMPONENT),
             self._reaper,
+            credentials,
         )
         return self._launches
 

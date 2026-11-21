@@ -1117,11 +1117,17 @@ async def test_production_runner_refuses_claude_without_allocating_launch(
                     "harness": {
                         "claude": {
                             "credentials": {
-                                "ANTHROPIC_API_KEY": "secret://env/ANTHROPIC_API_KEY"
+                                "ANTHROPIC_API_KEY": "secret://file/ANTHROPIC_API_KEY"
                             }
                         }
                     },
                     "policy": {"allow_deny": {}},
+                    "secrets": {
+                        "file": {
+                            "directory": str(root / "credentials"),
+                            "namespace_prefixes": {"local-runner": ["ANTHROPIC_"]},
+                        }
+                    },
                 }
             )
         )
@@ -1145,7 +1151,7 @@ async def test_production_runner_refuses_claude_without_allocating_launch(
     assert refused.code == repeated.code == "workload_kind_unavailable"
     assert refused.retryable is False
     assert observation.code == "session_unobserved"
-    assert recorded == ["runner.workspace_prepared", "runner.session_spec"]
+    assert recorded == ["runner.workspace_prepared"]
     assert not launch_allocated
     assert not placements_retained
     assert "runner.agent.session_started" not in runner_events

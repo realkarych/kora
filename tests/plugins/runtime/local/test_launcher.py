@@ -351,6 +351,7 @@ async def launch_table(
         NativeIdentityReader(),
         capture.diagnostics.logger(LAUNCH_COMPONENT),
         reaper,
+        {},
     )
     try:
         yield launches
@@ -1121,6 +1122,7 @@ async def test_cancelling_allocate_does_not_wait_for_binary_verification(
         NativeIdentityReader(),
         kora_capture.diagnostics.logger(LAUNCH_COMPONENT),
         reaper,
+        {},
     )
     allocation = asyncio.create_task(
         launches.allocate(LaunchInputs(environment={}, cwd=tmp_path))
@@ -1180,6 +1182,7 @@ async def test_close_refuses_pending_allocation_without_waiting_for_binary_verif
         NativeIdentityReader(clock=clock),
         kora_capture.diagnostics.logger(LAUNCH_COMPONENT),
         reaper,
+        {},
     )
     allocation = asyncio.create_task(
         launches.allocate(LaunchInputs(environment={}, cwd=tmp_path))

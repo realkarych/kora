@@ -432,7 +432,7 @@ def run(
     try:
         root = open_local_directory(arguments.state_root)
         try:
-            installation = read_installation(root, diagnostics)
+            installation = read_installation(root, diagnostics, arguments.state_root)
         finally:
             root.close()
         asyncio.run(
