@@ -18,7 +18,6 @@ from kora.plugins.runtime.local.production import ConfiguredPolicies, production
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import AgentExecution
 from kora.protocols.vcs import WorkspaceRef
-from tests.plugins.runtime.local.claude_runtime_composition import AvailableCredentials
 from tests.plugins.runtime.local.test_command_workspace import FAKE_COMMIT
 from tests.runner.agent_support import execution
 from tests.support.observability import run_python
@@ -26,7 +25,7 @@ from tests.support.observability import run_python
 __all__ = ["kora_capture"]
 
 CLAUDE: Final[JsonObject] = {
-    "credentials": {"ANTHROPIC_API_KEY": "secret://env/ANTHROPIC_API_KEY"}
+    "credentials": {"ANTHROPIC_API_KEY": "secret://file/ANTHROPIC_API_KEY"}
 }
 
 
@@ -34,10 +33,10 @@ def test_production_resolver_binds_execution_and_deployment(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     section: JsonObject = {**CLAUDE, "max_retries": 0, "cli_telemetry": True}
-    installation = InstallationConfiguration({"claude": section}, {"allow_deny": {}})
-    sources = production_sources(
-        kora_capture.diagnostics, installation, AvailableCredentials()
+    installation = InstallationConfiguration(
+        {"claude": section}, {"allow_deny": {}}, file_sections(tmp_path)
     )
+    sources = production_sources(kora_capture.diagnostics, installation)
     request = AgentExecution.model_validate(execution(deny=("claude:Bash",)))
     workspace = WorkspaceRef(
         attempt_id="attempt-1",
@@ -65,11 +64,41 @@ def test_production_resolver_binds_execution_and_deployment(
     assert adapter.ctx.secrets is None
 
 
-def test_production_sources_use_installed_binary_record_and_refuse_credentials(
+def file_sections(root: Path) -> dict[str, JsonObject]:
+    return {
+        "file": {
+            "directory": str(root / "credentials"),
+            "namespace_prefixes": {"local-runner": ["ANTHROPIC_"]},
+        }
+    }
+
+
+def test_production_sources_use_installed_binary_record(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    installation = InstallationConfiguration({"claude": CLAUDE}, {"allow_deny": {}})
+    installation = InstallationConfiguration(
+        {"claude": CLAUDE}, {"allow_deny": {}}, file_sections(tmp_path)
+    )
     recorded = recorded_file(distribution("claude-agent-sdk"), BINARY_ENTRY)
+    request = AgentExecution.model_validate(execution())
+
+    sources = production_sources(kora_capture.diagnostics, installation)
+    policy = sources.policies.policy(request)
+
+    assert sources.binary == ExpectedBinary(
+        recorded.path, recorded.sha256, recorded.size
+    )
+    assert policy.name == "allow_deny"
+    assert sources.policies.policy(request) is policy
+
+
+def test_absent_installation_keeps_refusal(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    sources = production_sources(
+        kora_capture.diagnostics, InstallationConfiguration.empty()
+    )
+    request = AgentExecution.model_validate(execution())
     workspace = WorkspaceRef(
         attempt_id="attempt-1",
         root=str(tmp_path),
@@ -78,20 +107,24 @@ def test_production_sources_use_installed_binary_record_and_refuse_credentials(
         base_commit=FAKE_COMMIT,
         branch=None,
     )
-    request = AgentExecution.model_validate(execution())
 
-    sources = production_sources(kora_capture.diagnostics, installation)
-    policy = sources.policies.policy(request)
     with pytest.raises(KoraProtocolError) as refused:
         sources.resolver.resolve(request, workspace)
 
-    assert sources.binary == ExpectedBinary(
-        recorded.path, recorded.sha256, recorded.size
-    )
-    assert policy.name == "allow_deny"
-    assert sources.policies.policy(request) is policy
     assert refused.value.code == "workload_kind_unavailable"
     assert refused.value.retryable is False
+    assert sources.binary is None
+
+
+def test_production_sources_refuse_unconfigured_credential_provider(
+    kora_capture: Capture,
+) -> None:
+    installation = InstallationConfiguration({"claude": CLAUDE}, {"allow_deny": {}})
+
+    with pytest.raises(RunnerRefused) as refused:
+        production_sources(kora_capture.diagnostics, installation)
+
+    assert refused.value.args == ("installation_invalid",)
 
 
 def test_production_sources_without_claude_do_not_import_sdk() -> None:
