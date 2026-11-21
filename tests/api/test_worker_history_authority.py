@@ -10,14 +10,15 @@ from kora.db.connection import Database
 from kora.db.tables import api_token, attempt, worker, worker_incarnation
 from kora.db.tokens import REVOKED
 from tests.api.claim_support import BEARER, request
-from tests.api.deployment_cases import evaluator
-from tests.api.history_support import history_api, history_query
+from tests.api.deployment_cases import default_prepared_deployment
+from tests.api.history_support import history_api_from_deployment as history_api
+from tests.api.history_support import history_query
 from tests.client.support import running_app
 from tests.db.seed import Seeder
 from tests.engine.claim_support import ClaimCase, state
 from tests.plugins.authentication.support import AuthorityClock
 
-__all__ = ["evaluator", "history_api"]
+__all__ = ["default_prepared_deployment", "history_api"]
 
 
 @pytest.mark.asyncio

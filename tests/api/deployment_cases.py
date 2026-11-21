@@ -198,6 +198,15 @@ async def prepared(
     return result
 
 
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def default_prepared_deployment() -> PreparedDeployment:
+    opened = Evaluator(evaluation_clock)
+    try:
+        return await prepared(opened)
+    finally:
+        await opened.close()
+
+
 async def publish(
     database: Database,
     deployment: PreparedDeployment,

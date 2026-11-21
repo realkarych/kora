@@ -8,6 +8,7 @@ from sqlalchemy import Connection, delete, event, insert, select, update
 from sqlalchemy.engine.interfaces import DBAPICursor
 from sqlalchemy.util.concurrency import await_
 
+from kora.api.graph_deployment import PreparedDeployment
 from kora.api.graph_deployment_limits import READ
 from kora.cel_eval.thread import Evaluator
 from kora.conformance.capture import captured
@@ -81,6 +82,36 @@ async def seed(
 ) -> tuple[ClaimSourceBinding, GraphVersionPin]:
     namespace_id, token_id = await seeded_namespace(database)
     deployment = await prepared(evaluator, ir)
+    return await _seed(
+        database,
+        deployment,
+        namespace_id,
+        token_id,
+        ir=ir,
+        node_path=node_path,
+        versions=versions,
+        global_price=global_price,
+    )
+
+
+async def seed_prepared_default(
+    database: Database, deployment: PreparedDeployment
+) -> tuple[ClaimSourceBinding, GraphVersionPin]:
+    namespace_id, token_id = await seeded_namespace(database)
+    return await _seed(database, deployment, namespace_id, token_id)
+
+
+async def _seed(
+    database: Database,
+    deployment: PreparedDeployment,
+    namespace_id: str,
+    token_id: str,
+    *,
+    ir: JsonObject | None = None,
+    node_path: str = "agent",
+    versions: dict[str, str | None] | None = None,
+    global_price: bool = False,
+) -> tuple[ClaimSourceBinding, GraphVersionPin]:
     published = await publish(database, deployment, namespace_id, token_id)
     initialization = initializer(
         database,

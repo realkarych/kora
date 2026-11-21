@@ -11,15 +11,15 @@ from kora.db.tables import api_token, attempt, worker, worker_incarnation
 from kora.db.tokens import REVOKED
 from kora.protocols.worker_heartbeats import WorkerHeartbeat
 from tests.api.claim_support import BEARER, request
-from tests.api.deployment_cases import evaluator
-from tests.api.heartbeat_support import heartbeat_api
+from tests.api.deployment_cases import default_prepared_deployment
+from tests.api.heartbeat_support import heartbeat_api_from_deployment as heartbeat_api
 from tests.api.support import HttpCall, client_for
 from tests.client.support import running_app
 from tests.db.seed import Seeder
 from tests.engine.claim_support import ClaimCase, state
 from tests.plugins.authentication.support import AuthorityClock
 
-__all__ = ["evaluator", "heartbeat_api"]
+__all__ = ["default_prepared_deployment", "heartbeat_api"]
 
 
 @pytest.mark.asyncio

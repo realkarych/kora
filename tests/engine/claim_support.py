@@ -6,6 +6,7 @@ from typing import cast
 from sqlalchemy import insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from kora.api.graph_deployment import PreparedDeployment
 from kora.cel_eval.thread import Evaluator
 from kora.db.claim_source_values import prepare_claim_sources
 from kora.db.claim_sources import ClaimSourceBinding
@@ -44,13 +45,19 @@ from tests.db.closing import until
 from tests.db.seed import START, FakeClock, Seeder
 from tests.engine.promotion_support import READ_LIMITS
 from tests.engine.test_claim_snapshot import LIMITS as SNAPSHOT_LIMITS
-from tests.engine.test_claim_snapshot import SELECTION, acquire, seed
+from tests.engine.test_claim_snapshot import (
+    SELECTION,
+    acquire,
+    seed,
+    seed_prepared_default,
+)
 from tests.engine.test_claim_sources import ALLOWANCE, source_values
 from tests.engine.test_claim_sources import LIMITS as SOURCE_LIMITS
 from tests.engine.test_grant_history import LIMITS as HISTORY_LIMITS
 
 WORKER_BYTES = 65_536
 UNCERTAINTY = timedelta(microseconds=17)
+DEFAULT_EXECUTION_DOMAIN = "original-domain"
 
 
 @dataclass(frozen=True)
@@ -156,10 +163,31 @@ async def claim_case(
     evaluator: Evaluator,
     ir: JsonObject | None = None,
     *,
-    execution_domain_id: str = "original-domain",
+    execution_domain_id: str = DEFAULT_EXECUTION_DOMAIN,
     process: ProcessIdentity | None = None,
 ) -> ClaimCase:
     binding, pin = await seed(database, evaluator, ir=ir)
+    return await _register_claim_case(
+        database, binding, pin, execution_domain_id, process
+    )
+
+
+async def claim_case_from_deployment(
+    database: Database, deployment: PreparedDeployment
+) -> ClaimCase:
+    binding, pin = await seed_prepared_default(database, deployment)
+    return await _register_claim_case(
+        database, binding, pin, DEFAULT_EXECUTION_DOMAIN, None
+    )
+
+
+async def _register_claim_case(
+    database: Database,
+    binding: ClaimSourceBinding,
+    pin: GraphVersionPin,
+    execution_domain_id: str,
+    process: ProcessIdentity | None,
+) -> ClaimCase:
     async with database.transaction() as writer:
         seeder = Seeder(writer)
         token_id = await seeder.token("c" * 64, kind="worker", owner="claim-worker")
