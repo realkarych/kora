@@ -20,10 +20,19 @@ from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ClockSample, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import AgentExecution
+from kora.protocols.harness import (
+    AgentExecution,
+    EventSink,
+    EventSummary,
+    LaunchContext,
+    RunnerOutcome,
+    SessionResult,
+    SessionSpec,
+)
 from kora.protocols.policy import (
     Policy,
     PolicyCapabilities,
+    PolicyClient,
     PolicyDecision,
     PolicyLayers,
     ToolCallRequest,
@@ -242,6 +251,27 @@ FAKE_SPEC: Final[JsonObject] = {
 class DeafHarness(FakeHarness):
     def kill(self) -> None:
         return None
+
+
+class ObservedFakeHarness(FakeHarness):
+    finalized_result: SessionResult | None = None
+    runner_sink: RunnerSink | None = None
+
+    async def run(
+        self,
+        spec: SessionSpec,
+        policy: PolicyClient,
+        sink: EventSink,
+        launches: LaunchContext,
+    ) -> SessionResult:
+        if isinstance(sink, RunnerSink):
+            self.runner_sink = sink
+        return await super().run(spec, policy, sink, launches)
+
+    def finalise(self, summary: EventSummary, outcome: RunnerOutcome) -> SessionResult:
+        result = super().finalise(summary, outcome)
+        self.finalized_result = result
+        return result
 
 
 @dataclass

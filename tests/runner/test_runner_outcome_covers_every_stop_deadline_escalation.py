@@ -9,10 +9,8 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.ir import ErrorClass
-from kora.plugins.harness.fake import FakeHarness
 from kora.plugins.harness.fake.script import Step
 from kora.protocols.deadlines import ExecutionDeadline
-from kora.protocols.harness import EventSummary, RunnerOutcome, SessionResult
 from kora.protocols.runtime import SessionResultObservation
 from kora.runner.agent import AgentHost
 from kora.runner.journal import SYNC_DEADLINE_NS
@@ -25,6 +23,7 @@ from tests.runner.agent_support import (
     PAUSE,
     FakeResolver,
     HeldWriter,
+    ObservedFakeHarness,
     SignalledScript,
     SteppedClock,
     advance_batch,
@@ -116,15 +115,6 @@ async def stuck_writer(
         writer.gate.set()
         await host.stop()
         world.close()
-
-
-class ObservedFakeHarness(FakeHarness):
-    finalized_result: SessionResult | None = None
-
-    def finalise(self, summary: EventSummary, outcome: RunnerOutcome) -> SessionResult:
-        result = super().finalise(summary, outcome)
-        self.finalized_result = result
-        return result
 
 
 @pytest.mark.parametrize(
