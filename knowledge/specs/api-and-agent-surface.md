@@ -456,6 +456,8 @@ The initial open execute grant offers `seal_request` only while unsealed and cur
 | `POST /attempts/{att}/usage` | `{lease_epoch, dispatcher_id, rows: [UsageRow], coverage: UsageCoverage}`, at most 64 rows and 64 distinct accumulated models per attempt | `{rows, coverage}` |
 | `POST /attempts/{att}/artifacts` | Single upload: `meta {lease_epoch, dispatcher_id, payload_kind: output \| execution_request \| transcript, output_name?, type_name?, digest, size}` then `payload`; generic chunked data/recovery uses the [closed variants below](#bounded-chunked-uploads-issue-224) | Single upload: `{artifact_version_id?, upload_ref?, state, validation}`; generic chunked upload: `progress \| ready \| completed` below |
 
+The [proposed first local grant closure](first-local-grant-closure.md#4-report-release-and-replay) defines the normal-completion producer and the conditional #1454 receipt interpretation for physical release. The existing report shape, current bearer and grant checks, and independent closure conditions own this handoff.
+
 **The terminal report.** `POST /attempts/{att}/transition` with `to: finishing` carries the attempt's one write-once `TerminalReport`:
 
 | outcome | from | authority | runtime evidence |
