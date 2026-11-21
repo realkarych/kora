@@ -1,19 +1,16 @@
 import hashlib
+import json
+import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from kora.observability import ProcessDiagnostics
 from kora.plugins.runtime.local.agent import AgentSources
 from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.plugins.runtime.local.launch import ExpectedBinary
-from kora.plugins.runtime.local.production import ClaudeResolver
+from kora.plugins.runtime.local.production import production_sources
 from kora.plugins.runtime.local.supervisor import run
-from kora.testing.runner import AllowDenyPolicies
-
-
-class AvailableCredentials:
-    def available(self) -> bool:
-        return True
 
 
 def sources(
@@ -23,15 +20,11 @@ def sources(
     binary = ExpectedBinary(
         target, hashlib.sha256(target.read_bytes()).hexdigest(), target.stat().st_size
     )
-    resolver = ClaudeResolver(
-        {
-            "credentials": {"ANTHROPIC_API_KEY": "secret://env/ANTHROPIC_API_KEY"},
-            "max_retries": 0,
-        },
-        diagnostics,
-        AvailableCredentials(),
+    sources = replace(production_sources(diagnostics, installation), binary=binary)
+    target.with_suffix(".runner-environment.json").write_text(
+        json.dumps(dict(os.environ))
     )
-    return AgentSources(resolver, AllowDenyPolicies(), binary=binary)
+    return sources
 
 
 if __name__ == "__main__":
