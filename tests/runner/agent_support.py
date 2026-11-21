@@ -45,9 +45,11 @@ from kora.runner.agent import (
     HostedHarness,
     HostServices,
     Released,
+    ResultPreparation,
 )
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.journal import BatchAppend, JournalAppendOutcome, RunningJournal
+from kora.runner.session_result import prepare_observation
 from kora.runner.sink import BATCH_WINDOW_NS, JournalWriter, RunnerSink
 from tests.plugins.harness.fake.fake_support import step
 from tests.protocols.runtime_documents import ATTEMPT, workload
@@ -255,6 +257,7 @@ class DeafHarness(FakeHarness):
 
 class ObservedFakeHarness(FakeHarness):
     finalized_result: SessionResult | None = None
+    finalized_outcome: RunnerOutcome | None = None
     runner_sink: RunnerSink | None = None
 
     async def run(
@@ -271,6 +274,7 @@ class ObservedFakeHarness(FakeHarness):
     def finalise(self, summary: EventSummary, outcome: RunnerOutcome) -> SessionResult:
         result = super().finalise(summary, outcome)
         self.finalized_result = result
+        self.finalized_outcome = outcome
         return result
 
 
@@ -359,6 +363,7 @@ class World:
         policy: Policy | None = None,
         journal: JournalWriter | None = None,
         clock: Clock | None = None,
+        prepare_result: ResultPreparation = prepare_observation,
     ) -> AgentHost:
         services = HostServices(
             resolver=resolver,
@@ -368,6 +373,7 @@ class World:
             clock=self.clock if clock is None else clock,
             log=self.capture.diagnostics.logger("runner.agent"),
             secret_scope=self.capture.scope,
+            prepare_result=prepare_result,
         )
         writer = self.journal if journal is None else journal
         return AgentHost(services, writer, self.control, self.candidate)

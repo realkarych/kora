@@ -723,6 +723,9 @@ class AgentSession:
                     or self._journal.closed
                     or self._workspace.state is WorkspaceState.FAILED
                 )
+            host = self._host
+            if not settled and host is not None:
+                settled = host.result_publication_expired()
             raise delivery_error("session_unobserved" if settled else "workload_busy")
         reference = self.result_reference()
         if reference is None:

@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Final, Protocol
+from typing import Annotated, Final, Literal, Protocol
 
 from pydantic import Field, StrictInt, StrictStr, StringConstraints, ValidationError
 
@@ -180,6 +180,16 @@ def refusing_launches(_sink: RunnerSink) -> LaunchContext:
 ResultPreparation = Callable[
     [SessionObservation, tuple[str, ...], threading.Event], PreparedObservation
 ]
+PreparationOutcome = PreparedObservation | Literal["stopped"]
+
+
+def invoke_preparation(
+    operation: Callable[[], PreparedObservation],
+) -> PreparationOutcome:
+    try:
+        return operation()
+    except ResultPreparationStopped:
+        return "stopped"
 
 
 class NativeResultWork:
@@ -193,11 +203,11 @@ class NativeResultWork:
 
     async def prepare(
         self, operation: Callable[[], PreparedObservation]
-    ) -> PreparedObservation:
+    ) -> PreparationOutcome:
         executor = self._executor
         if executor is None:
             raise NativeIOClosed
-        return await executor.run_nowait(operation)
+        return await executor.run_nowait(lambda: invoke_preparation(operation))
 
     async def close(self) -> None:
         executor = self._executor
@@ -359,6 +369,7 @@ class AgentHost:
                     kind="session_failed", code="kill_unconfirmed"
                 ),
                 sink,
+                fixed=True,
             )
             return
         try:
@@ -422,11 +433,16 @@ class AgentHost:
             fenced.cancel()
             grace.cancel()
 
+    def _result_deadline_passed(self) -> bool:
+        session = self._session
+        deadline = None if session is None else session.deadline
+        return (
+            deadline is not None
+            and self._services.clock.monotonic_ns() >= deadline.interrupt_at_ns
+        )
+
     def _result_deadline_due(self, sink: RunnerSink) -> bool:
-        deadline = self._started().deadline
-        if deadline is None:
-            return False
-        if self._services.clock.monotonic_ns() < deadline.interrupt_at_ns:
+        if not self._result_deadline_passed():
             return False
         sink.terminate("deadline")
         return True
@@ -468,13 +484,14 @@ class AgentHost:
                 )
             finally:
                 forms = ()
-            try:
-                self._seal(prepared, sink)
-            finally:
-                del prepared
-        except ResultPreparationStopped:
-            code = "fenced" if self._fenced.is_set() else "deadline_expired"
-            log.emit(SESSION_FAILED, code=code)
+            if prepared == "stopped":
+                code = "fenced" if self._fenced.is_set() else "deadline_expired"
+                log.emit(SESSION_FAILED, code=code)
+            else:
+                try:
+                    self._seal(prepared, sink)
+                finally:
+                    del prepared
         except (NativeIOBusy, NativeIOClosed, NativeIOUnresolved):
             log.emit(SESSION_FAILED, code="result_unwritten")
         finally:
@@ -583,6 +600,10 @@ class AgentHost:
     def result_reference(self) -> ResultFile | None:
         with self._lock:
             return self._sealed
+
+    def result_publication_expired(self) -> bool:
+        with self._lock:
+            return self._sealed is None and self._result_deadline_passed()
 
     def has_result_observation(self) -> bool:
         with self._lock:

@@ -22,6 +22,8 @@ from kora.runner.registry import synchronize, unlink_if_present
 from kora.runner.session_result_encoding import (
     MAX_RESULT_BYTES,
     ResultContainsSecret,
+    ResultEncoder,
+    ResultEncoderFactory,
     ResultEncodingRefused,
     ResultTooLarge,
     check_running,
@@ -60,16 +62,28 @@ class PreparedObservation:
 
 
 def prepare_observation(
-    observation: SessionObservation, forms: tuple[str, ...], stop: Event
+    observation: SessionObservation,
+    forms: tuple[str, ...],
+    stop: Event,
+    *,
+    encoder_factory: ResultEncoderFactory = ResultEncoder,
 ) -> PreparedObservation:
     try:
-        payload = encode_observation(observation, forms, stop)
+        payload = encode_observation(observation, forms, stop, encoder_factory)
     except ResultContainsSecret:
-        return prepare_failure("secret_leak", stop)
+        refusal = "secret_leak"
     except ResultTooLarge:
-        return prepare_failure("result_too_large", stop)
+        refusal = "result_too_large"
     except ResultEncodingRefused:
-        return prepare_failure("result_unwritten", stop)
+        refusal = "result_unwritten"
+    else:
+        return summarize_observation(observation, payload, stop)
+    return prepare_failure(refusal, stop)
+
+
+def summarize_observation(
+    observation: SessionObservation, payload: bytearray, stop: Event
+) -> PreparedObservation:
     reference = result_reference(payload, stop)
     if isinstance(observation, SessionFailedObservation):
         return PreparedObservation(

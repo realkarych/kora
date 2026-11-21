@@ -1,7 +1,7 @@
 import heapq
 import json
 import math
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
 from json.encoder import encode_basestring
@@ -137,7 +137,24 @@ def key_order(values: Mapping[str, object], stop: Event) -> Iterator[str]:
     if len(runs) == 1:
         yield from runs[0]
     else:
-        yield from heapq.merge(*runs)
+        yield from merge_key_runs(runs, stop)
+
+
+def merge_key_runs(runs: list[list[str]], stop: Event) -> Iterator[str]:
+    heads: list[tuple[str, int, Iterator[str]]] = []
+    for index, group in enumerate(runs):
+        if index % KEY_BATCH == 0:
+            check_running(stop)
+        remaining = iter(group)
+        heapq.heappush(heads, (next(remaining), index, remaining))
+    while heads:
+        key, index, remaining = heads[0]
+        yield key
+        following = next(remaining, None)
+        if following is None:
+            heapq.heappop(heads)
+        else:
+            heapq.heapreplace(heads, (following, index, remaining))
 
 
 class ResultEncoder:
@@ -265,10 +282,16 @@ class ResultEncoder:
         self.append(b"]")
 
 
+ResultEncoderFactory = Callable[[tuple[str, ...], Event], ResultEncoder]
+
+
 def encode_observation(
-    observation: SessionObservation, forms: tuple[str, ...], stop: Event
+    observation: SessionObservation,
+    forms: tuple[str, ...],
+    stop: Event,
+    encoder_factory: ResultEncoderFactory = ResultEncoder,
 ) -> bytearray:
-    encoder = ResultEncoder(forms, stop)
+    encoder = encoder_factory(forms, stop)
     encoder.value(observation)
     check_running(stop)
     return encoder.buffer

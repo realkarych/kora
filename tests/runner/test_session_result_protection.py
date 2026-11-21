@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from itertools import chain, islice, product
 from threading import Event
 from typing import Final
 
@@ -26,6 +27,11 @@ from kora.protocols.runtime import (
 )
 from kora.protocols.secret_value import registered_forms
 from kora.runner.session_result import digest_of, prepare_observation
+from kora.runner.session_result_encoding import (
+    KEY_BATCH,
+    ResultPreparationStopped,
+    merge_key_runs,
+)
 
 KEY: Final[str] = 'fixture-credential-é"\\'
 COVERAGE: Final[UsageCoverage] = UsageCoverage(
@@ -218,3 +224,56 @@ def test_session_observation_preserves_one_upper_bound_clean_output(
     assert result.reference.size == len(original)
     assert result.reference.digest == digest_of(original)
     assert (registry.count(), registry.retained_bytes()) == base
+
+
+def widest_output() -> dict[str, JsonValue]:
+    alphabet = tuple(chr(code) for code in range(127, 31, -1) if code not in (34, 92))
+    two_byte = chain(
+        ("".join(parts) for parts in product(alphabet, repeat=2)),
+        '"\\\b\f\n\r\t',
+        map(chr, range(128, 2048)),
+    )
+    three_byte = ("".join(parts) for parts in product(alphabet, repeat=3))
+    output: dict[str, JsonValue] = {}
+    remaining = MAX_CANONICAL_BYTES - 1
+    for width, keys in enumerate((("",), alphabet, two_byte, three_byte)):
+        entry_bytes = width + 5
+        for key in islice(keys, remaining // entry_bytes):
+            output[key] = 0
+            remaining -= entry_bytes
+    output[""] = 10**remaining
+    return output
+
+
+def test_session_observation_preserves_widest_clean_key_order() -> None:
+    output = widest_output()
+    candidate = observation(output)
+    original = canonical_bytes(candidate.model_dump(mode="json"))
+
+    result = prepare_observation(candidate, ("impossible-secret-match",), Event())
+
+    assert len(output) > KEY_BATCH**2
+    assert len(canonical_bytes(output)) == MAX_CANONICAL_BYTES
+    assert result.payload == original
+    assert result.reference.digest == digest_of(original)
+    assert result.failure is None
+
+
+class StopAtSecondPoll(Event):
+    polls: int = 0
+
+    def is_set(self) -> bool:
+        self.polls += 1
+        if self.polls == 2:
+            self.set()
+        return super().is_set()
+
+
+def test_result_key_merge_polls_stop_during_heap_initialization() -> None:
+    stop = StopAtSecondPoll()
+    groups = [[f"key-{index}"] for index in range(KEY_BATCH + 1)]
+
+    with pytest.raises(ResultPreparationStopped):
+        next(merge_key_runs(groups, stop))
+
+    assert stop.polls == 2

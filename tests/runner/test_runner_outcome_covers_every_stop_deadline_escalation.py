@@ -171,6 +171,10 @@ async def test_runner_outcome_covers_every_stop_deadline_escalation(
     expected_cause = "deadline" if cancel_at is None else "cancel"
     assert causes == [expected_cause]
     assert isinstance(adapter, ObservedFakeHarness)
+    assert adapter.runner_sink is not None
+    assert adapter.runner_sink.cause() == expected_cause
+    assert adapter.finalized_outcome is not None
+    assert adapter.finalized_outcome.cause == expected_cause
     assert adapter.finalized_result is not None
     assert adapter.finalized_result.stop_reason == expected_cause
     assert adapter.finalized_result.error_class is (

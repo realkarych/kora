@@ -6,12 +6,21 @@ from typing import Final
 import pytest
 
 from kora.conformance.capture import Capture
+from kora.conformance.common import context_for
 from kora.ir import ErrorClass
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
+from kora.plugins.harness.fake import FakeHarness
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import LaunchInputs
+from kora.protocols.harness import (
+    EventSink,
+    LaunchContext,
+    LaunchInputs,
+    SessionResult,
+    SessionSpec,
+)
+from kora.protocols.policy import PolicyClient
 from kora.protocols.runtime import (
     SessionFailedObservation,
     SessionObservation,
@@ -36,6 +45,7 @@ from tests.plugins.harness.fake.fake_support import result, tool_call, turn
 from tests.runner.agent_support import (
     FAKE_SPEC,
     PAUSE,
+    FakeResolver,
     JournalProxy,
     RaisingPolicy,
     SignalledScript,
@@ -243,6 +253,7 @@ def test_agent_host_returns_session_result_kill_ignored_on_cancel(
 ) -> None:
     world = make_world(tmp_path, kora_capture)
     source = script([turn("m1"), PAUSE, result()], on_interrupt="ignore")
+    kora_capture.scope.admit("kill_unconfirmed")
 
     host, released = run(
         stopped(
@@ -261,6 +272,45 @@ def test_agent_host_returns_session_result_kill_ignored_on_cancel(
     )
     assert world.kinds()[-1] == "runner.session_failed"
     assert released == SETTLED
+
+
+class AdapterRefusal(FakeHarness):
+    async def run(
+        self,
+        spec: SessionSpec,
+        policy: PolicyClient,
+        sink: EventSink,
+        launches: LaunchContext,
+    ) -> SessionResult:
+        raise KoraProtocolError("kill_unconfirmed", "fixture refusal", False, {})
+
+
+@pytest.mark.asyncio
+async def test_agent_host_scans_adapter_code_that_matches_fixed_code(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    world = make_world(tmp_path, kora_capture)
+    kora_capture.scope.admit("kill_unconfirmed")
+    resolver = FakeResolver(
+        script([result()]), context_for(kora_capture), adapter_type=AdapterRefusal
+    )
+    host = world.host(resolver)
+
+    try:
+        host.start(world.workload(), world.workspace())
+        await host.finished()
+        observation = observed(world, host)
+    finally:
+        await host.stop()
+        world.close()
+
+    assert observation == SessionFailedObservation(
+        kind="session_failed", code="secret_leak"
+    )
+    last = world.records()[-1]
+    assert last["kind"] == "runner.session_failed"
+    assert isinstance(last["data"], dict)
+    assert last["data"]["code"] == "secret_leak"
 
 
 def test_agent_host_returns_session_result_kill_ignored_on_stop(
