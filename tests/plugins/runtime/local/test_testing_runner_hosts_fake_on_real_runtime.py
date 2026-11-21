@@ -42,13 +42,12 @@ async def test_testing_runner_hosts_fake_on_real_runtime_agent(
         prepared = next(
             event for event in events if event.kind == "runner.workspace_prepared"
         )
+        session = next(event for event in events if event.kind == "runner.session_spec")
 
         assert ("materialised", "INFO") in transfer_outcomes(local)
         assert isinstance(result, SessionResultObservation)
         assert result.result.stop_reason == "completed"
         assert status.exit_code == 0
-        assert events[0].kind == "transfer.materialised"
-        assert events[0].data["sha256"] == item.sha256
         assert len(transfer) == 1
         assert transfer[0].data == {
             "name": item.name,
@@ -56,6 +55,8 @@ async def test_testing_runner_hosts_fake_on_real_runtime_agent(
             "sha256": item.sha256,
         }
         assert prepared.data["commit"] == local.commit
+        assert transfer[0].i < session.i
+        assert prepared.i < session.i
         script = attempt(local) / "control/script/script.json"
         assert script.read_bytes() == source.serialise()
         assert not script.is_relative_to(
