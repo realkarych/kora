@@ -286,6 +286,8 @@ A subagent is a closed record with required strict string `name`, `description` 
 
 The [first-slice chain](first-slice.md#refusal-contract) uses direct CLI bindings to its published `VcsRef` and command `CommandResult`, as in [dependency-upgrade.ir.yaml](examples/dependency-upgrade.ir.yaml). A ReviewBundle is an optional context artifact, not a requirement for this CLI path; its fact/narrative ownership remains unchanged when used.
 
+The [local CLI context proposal](cli-approval-opening.md#1-source-and-opening) under #1737 defines a proposed installation refusal for unsupported authored input and context selections in the walking skeleton. It retains ordinary IR path checking and the authored field.
+
 Only an absent `form` selects the built-in default form:
 
 ```json
@@ -790,6 +792,8 @@ A node that fails because of an evaluation error fails with `config_error`, reas
   - `approval.responded` records `applied: true` and the error record;
   - the channel is closed with `notify(resolved)` linking the canonical status, which shows `failed`;
   - the node fails with `config_error`.
+
+  The [proposed automatic expiry exception](cli-approval-opening.md#3-expiry-and-retained-response) under #1737 uses the same safe CEL error record in node-failure facts while preserving an expired request and scheduler audit. It requires owner approval and does not change human response or legacy error fields.
 
   A `failed` request never counts as approval, and a later response is recorded with `applied: false`. A direct API response returns HTTP 200 with the request's status.
 - **`retry.predicate`** is evaluated only when the class is retryable, listed in `retry_on` and attempts remain. It is never evaluated for `infrastructure` or `provider_limited`, which do not consume attempts. Every `outputs.*` read needs a `has()` guard (section 7.4). An error is recorded on the node's failure event.
