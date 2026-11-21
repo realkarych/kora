@@ -22,6 +22,7 @@ from kora.db.tables import attempt, node_instance, run, wait
 from kora.engine.attempt_inputs import prepare_attempt_inputs
 from kora.engine.claim_context import ClaimQuery
 from kora.engine.claim_sources import insert_claim_attempt
+from kora.engine.expiry import record_run_expiry
 from kora.engine.expiry_context import ExpiryFailed
 from kora.engine.locks import COMPONENT, TransitionLocks
 from kora.engine.worker_registration import register_worker
@@ -34,6 +35,7 @@ from tests.api.deployment_cases import evaluator, skeleton_ir
 from tests.api.support import RequestIds, lifespan
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
+    ConnectionLedger,
     narrow_database,
     narrow_settings,
 )
@@ -409,24 +411,29 @@ class HeldExpiryContinuation:
             event.remove(engine, name, listener)
 
 
-async def assert_startup_refuses(
-    application: ASGIApp, database: Database, private_reason: str
-) -> None:
+async def run_lifespan(application: ASGIApp, messages: list[Message]) -> None:
     incoming: asyncio.Queue[Message] = asyncio.Queue()
-    messages: list[Message] = []
     await incoming.put({"type": "lifespan.startup"})
     await incoming.put({"type": "lifespan.shutdown"})
 
     async def send(message: Message) -> None:
         messages.append(message)
 
+    await application(
+        {"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}},
+        incoming.get,
+        send,
+    )
+
+
+async def assert_startup_refuses(
+    application: ASGIApp, database: Database, private_reason: str
+) -> None:
+    messages: list[Message] = []
+
     async with asyncio.timeout(CONDITION_DEADLINE_SECONDS):
         with pytest.raises(ExpiryFailed) as refusal:
-            await application(
-                {"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}},
-                incoming.get,
-                send,
-            )
+            await run_lifespan(application, messages)
 
     assert [message["type"] for message in messages] == ["lifespan.startup.failed"]
     assert private_reason not in repr(messages)
@@ -503,6 +510,23 @@ async def expiry_wait_state(database: Database, wait_id: str) -> tuple[object, .
             select(wait.c.status, wait.c.updated_at).where(wait.c.id == wait_id)
         ) as result:
             return tuple(result.one())
+
+
+async def open_expiry_wait(database: Database, run_id: str) -> str:
+    async with database.transaction() as writer:
+        seed = Seeder(writer)
+        wait_node = await seed.node(run_id, "approve", status="waiting")
+        wait_id = seed.new_id()
+        await writer.execute(
+            insert(wait).values(
+                id=wait_id,
+                node_instance_id=wait_node,
+                kind="approval",
+                status="open",
+                **seed.stamps(),
+            )
+        )
+    return wait_id
 
 
 @pytest.mark.asyncio
@@ -585,21 +609,7 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
     sibling = await add_sibling(database, case)
     await case.claim(database)
     await hold_target(database, case)
-    async with database.transaction() as writer:
-        seed = Seeder(writer)
-        wait_node = await seed.node(
-            case.binding.run.run_id, "approve", status="waiting"
-        )
-        wait_id = seed.new_id()
-        await writer.execute(
-            insert(wait).values(
-                id=wait_id,
-                node_instance_id=wait_node,
-                kind="approval",
-                status="open",
-                **seed.stamps(),
-            )
-        )
+    wait_id = await open_expiry_wait(database, case.binding.run.run_id)
     cutoff = START + timedelta(seconds=1)
     clock = AuthorityClock(cutoff)
     hold = HeldExpiryContinuation(database, clock, START, refuse=True)
@@ -700,3 +710,102 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
     assert "requires FULL synchronization" not in repr(records)
     assert "requires durable WAL settings" not in repr(records)
     assert recovered_database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_claim_startup_releases_writer_and_replays_latch(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await claim_case(database, evaluator, expiry_ir(enclosing=True))
+    run_id = case.binding.run.run_id
+    await admit_expiry_run(database, case, "1s")
+    await case.claim(database)
+    await hold_target(database, case)
+    wait_id = await open_expiry_wait(database, run_id)
+    cutoff = START + timedelta(seconds=1)
+    async with database.transaction() as writer:
+        await record_run_expiry(await case.context(writer), cutoff)
+    pending = await state(database)
+    recovered_database = narrow_database(database)
+    ledger = ConnectionLedger(recovered_database)
+    engine = recovered_database.writer_engine.sync_engine
+    clock = AuthorityClock(START)
+    entered, release = asyncio.Event(), asyncio.Event()
+    messages: list[Message] = []
+
+    def hold_recovery_write(
+        connection: Connection, cursor: object, statement: str, *arguments: object
+    ) -> None:
+        if statement.startswith("UPDATE attempt SET") and not entered.is_set():
+            entered.set()
+            await_(release.wait())
+
+    try:
+        with captured(
+            "api",
+            LoggingSettings(level=Level.DEBUG),
+            "cancel-expiry-startup",
+            clock.now,
+        ) as cap:
+            application = create_application(
+                StaticTokenAuthenticator({}, recovered_database),
+                cap.diagnostics,
+                clock,
+                RequestIds(),
+                worker_claims=WorkerClaimsRoute(poller(recovered_database, clock)),
+            )
+            event.listen(engine, "after_cursor_execute", hold_recovery_write)
+            try:
+                async with (
+                    asyncio.timeout(CONDITION_DEADLINE_SECONDS),
+                    asyncio.TaskGroup() as tasks,
+                ):
+                    startup = tasks.create_task(run_lifespan(application, messages))
+                    try:
+                        await entered.wait()
+                        live_writer = (
+                            ledger.outstanding,
+                            recovered_database.units_in_flight(),
+                        )
+                        startup.cancel("cancel Claim startup")
+                    finally:
+                        release.set()
+                    with pytest.raises(
+                        asyncio.CancelledError, match="cancel Claim startup"
+                    ):
+                        await startup
+            finally:
+                event.remove(engine, "after_cursor_execute", hold_recovery_write)
+            settled_writer = (ledger.outstanding, recovered_database.units_in_flight())
+            rolled_back = await state(database)
+            open_wait = await expiry_wait_state(database, wait_id)
+            async with asyncio.timeout(CONDITION_DEADLINE_SECONDS):
+                async with database.transaction() as writer:
+                    reacquired = await TransitionLocks(writer).acquire_run(
+                        run_id, wait=False
+                    )
+            async with lifespan(application):
+                recovered = await state(recovered_database)
+                stopped_wait = await expiry_wait_state(recovered_database, wait_id)
+            records = cap.finish()
+    finally:
+        await recovered_database.close()
+
+    assert [message["type"] for message in messages] == ["lifespan.startup.failed"]
+    assert live_writer == (1, 1)
+    assert settled_writer == (0, 0)
+    assert reacquired
+    assert rolled_back == pending
+    assert open_wait == ("open", START)
+    assert recovered["run"] == pending["run"]
+    assert recovered["run"][0]["deadline_expired_at"] == cutoff
+    assert recovered["run"][0]["target_held_since"] == START
+    assert recovered["attempt"][0]["desired_state"] == "cancel"
+    assert recovered["attempt"][0]["updated_at"] == cutoff
+    assert stopped_wait == ("cancelled", cutoff)
+    assert [
+        row["event"]
+        for row in records
+        if str(row["event"]).startswith("engine.claim_expiry_recovery.")
+    ] == ["engine.claim_expiry_recovery.finished"]
+    assert ledger.outstanding == recovered_database.units_in_flight() == 0
