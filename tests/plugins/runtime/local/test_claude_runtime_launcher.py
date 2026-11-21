@@ -20,6 +20,7 @@ from kora.plugins.harness.claude.options import session_options
 from kora.plugins.runtime.local.placements import PLACEMENTS
 from kora.protocols.harness import Placement
 from kora.protocols.runtime import SessionResultObservation
+from tests.plugins.runtime.local.test_agent_credentials import KEY, key_file
 from tests.plugins.runtime.local.test_agent_session import (
     agent_fields,
     agent_runtime,
@@ -27,6 +28,7 @@ from tests.plugins.runtime.local.test_agent_session import (
 )
 from tests.plugins.runtime.local.test_command import attempt_directory
 from tests.plugins.runtime.local.test_command_observation import unless_busy
+from tests.plugins.runtime.local.test_production_sources import CLAUDE, file_sections
 from tests.support.local_peers import until
 from tests.support.local_runners import submitted
 
@@ -43,6 +45,7 @@ class ReplayObservation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     environment: dict[str, str]
+    argv: list[str]
     pid: PositiveInt
     launcher_pid: PositiveInt
 
@@ -67,10 +70,9 @@ def finished_sessions(attempt: Path) -> list[JsonObject]:
     ]
 
 
-@pytest.mark.asyncio
-async def test_claude_session_receives_only_constructed_environment_from_local_runner(
+async def replay_session(
     tmp_path: Path, kora_capture: Capture
-) -> None:
+) -> tuple[Path, Path, ReplayObservation, str]:
     directory = Path(__file__).parents[2] / "harness" / "claude"
     recording = tmp_path / "recording.ndjson"
     recording.write_bytes(
@@ -78,6 +80,24 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
             directory / "recordings" / "conformance-result_text-2.1.301.ndjson"
         ).read_bytes()
     )
+    frames = recording.read_text().splitlines()
+    frames.insert(
+        1,
+        json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "credential-turn",
+                "session_id": "sess-replay-1",
+                "message": {
+                    "id": "credential-turn",
+                    "model": "claude-sonnet-4-5",
+                    "content": [{"type": "text", "text": "captured " + KEY}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            }
+        ),
+    )
+    recording.write_text("\n".join(frames) + "\n")
     observation = tmp_path / "environment.json"
     target = tmp_path / "replay"
     player = (
@@ -90,8 +110,10 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
         + player
         + "\nassert sys.argv[1:] != ['-v']\n"
         + f"Path({str(observation)!r}).write_text(json.dumps(\n"
-        + "{'environment': dict(os.environ), 'pid': os.getpid(), "
+        + "{'environment': dict(os.environ), 'argv': sys.argv, 'pid': os.getpid(), "
         + "'launcher_pid': os.getppid()}))\n"
+        + "sys.stderr.write(os.environ['ANTHROPIC_API_KEY'] + '\\n')\n"
+        + "sys.stderr.flush()\n"
         + f"play(Path({str(recording)!r}), {CLI_VERSION!r})\n"
     )
     target.chmod(0o500)
@@ -114,6 +136,15 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
     }
 
     async with agent_runtime(tmp_path, kora_capture, runner) as (runtime, ctx, root):
+        key = key_file(root)
+        installation: JsonObject = {
+            "format": "kora.runner/1",
+            "harness": {"claude": {**CLAUDE, "max_retries": 0}},
+            "policy": {"allow_deny": {}},
+            "secrets": {"file": file_sections(root)["file"]},
+        }
+        (root / "runner.json").write_text(json.dumps(installation))
+        (root / "runner.json").chmod(0o600)
         handle = await runtime.submit(submitted(runtime, "attempt-1", **fields), ctx)
         await unless_busy(lambda: runtime.start(handle, ctx))
         result = await asyncio.wait_for(sealed(runtime, handle, ctx), 30)
@@ -134,7 +165,10 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
             .environment
         )
         expected.update(
-            PATH="/usr/bin:/bin", PWD=str(candidate), KORA_ATTEMPT_TOKEN=token
+            PATH="/usr/bin:/bin",
+            PWD=str(candidate),
+            KORA_ATTEMPT_TOKEN=token,
+            ANTHROPIC_API_KEY=KEY,
         )
         observed = ReplayObservation.model_validate_json(observation.read_text())
         await until(
@@ -153,6 +187,7 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
         }
         await until(lambda: bool(finished_sessions(attempt)))
         finished = finished_sessions(attempt)
+        journal = (attempt / "journal.jsonl").read_text()
 
     assert isinstance(result, SessionResultObservation)
     assert result.result.stop_reason == "completed"
@@ -166,3 +201,32 @@ async def test_claude_session_receives_only_constructed_environment_from_local_r
     assert finished[0]["attempt_id"] == "attempt-1"
     assert not (attempt / "harness").exists()
     assert not (attempt / "control" / "launch").exists()
+
+    return root, key, observed, journal
+
+
+@pytest.mark.asyncio
+async def test_production_claude_session_receives_configured_credential(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    await replay_session(tmp_path, kora_capture)
+
+
+@pytest.mark.asyncio
+async def test_configured_credential_stays_in_cli_environment(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    root, key, observed, journal = await replay_session(tmp_path, kora_capture)
+
+    persisted = [
+        path.read_bytes() for path in root.rglob("*") if path.is_file() and path != key
+    ]
+    runner_environment = (tmp_path / "replay.runner-environment.json").read_text()
+
+    assert observed.environment["ANTHROPIC_API_KEY"] == KEY
+    assert all(KEY not in argument for argument in observed.argv)
+    assert all(KEY.encode() not in content for content in persisted)
+    assert KEY not in runner_environment
+    assert "ANTHROPIC_API_KEY" not in json.loads(runner_environment)
+    assert "captured [redacted]" in journal
+    assert KEY not in journal

@@ -2,7 +2,7 @@ import os
 import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Final, Protocol, cast
+from typing import Final, cast
 
 from pydantic import ValidationError
 
@@ -16,6 +16,8 @@ from kora.plugins.harness.claude.session import COMPONENT
 from kora.plugins.runtime.local.agent import (
     UNAVAILABLE,
     AgentSources,
+    EmptyCredentials,
+    HarnessCredentials,
     ProductionResolver,
 )
 from kora.plugins.runtime.local.channel import delivery_error
@@ -31,6 +33,8 @@ from kora.protocols.harness import AgentExecution, HarnessAdapter
 from kora.protocols.loading import load_provider
 from kora.protocols.metadata import ProtocolName
 from kora.protocols.policy import Policy
+from kora.protocols.secret_value import SecretValue
+from kora.protocols.secrets import SecretsProvider
 from kora.protocols.time import SystemClock
 from kora.protocols.vcs import WorkspaceRef
 from kora.runner.agent import HarnessResolver, HostedHarness
@@ -59,16 +63,30 @@ class ConfiguredPolicies:
         return self.configured
 
 
-class CredentialSource(Protocol):
-    def available(self) -> bool: ...
+class InstallationCredentials:
+    def __init__(
+        self,
+        reference: str,
+        sections: Mapping[str, JsonObject],
+        diagnostics: ProcessDiagnostics,
+    ) -> None:
+        name = reference.removeprefix("secret://").split("/", 1)[0]
+        if name not in sections:
+            raise RunnerRefused("installation_invalid")
+        metadata = load_provider(ProtocolName.SECRETS, name, diagnostics)
+        factory = cast(Callable[[JsonObject], SecretsProvider], metadata.implementation)
+        try:
+            self.provider: SecretsProvider = factory(sections[name])
+        except (ValidationError, ValueError, TypeError):
+            raise RunnerRefused("installation_invalid") from None
+        self.reference = reference
 
-
-class RefusingCredentials:
-    def available(self) -> bool:
-        return False
-
-
-REFUSING_CREDENTIALS: Final[CredentialSource] = RefusingCredentials()
+    async def resolve(
+        self, execution: AgentExecution, ctx: ProtocolContext
+    ) -> Mapping[str, SecretValue]:
+        if execution.harness != "claude":
+            return {}
+        return {"ANTHROPIC_API_KEY": await self.provider.resolve(self.reference, ctx)}
 
 
 class ClaudeResolver:
@@ -76,20 +94,16 @@ class ClaudeResolver:
         self,
         section: JsonObject,
         diagnostics: ProcessDiagnostics,
-        credentials: CredentialSource,
     ) -> None:
         try:
             self.deployment: ClaudeDeployment = ClaudeDeployment.model_validate(section)
         except ValidationError:
             raise RunnerRefused("installation_invalid") from None
         self.diagnostics: ProcessDiagnostics = diagnostics
-        self.credentials: CredentialSource = credentials
 
     def resolve(
         self, execution: AgentExecution, workspace: WorkspaceRef
     ) -> HostedHarness:
-        if not self.credentials.available():
-            raise delivery_error(UNAVAILABLE)
         try:
             usable_bash = (
                 BASH_PATH.is_absolute()
@@ -132,13 +146,17 @@ class ClaudeResolver:
 def production_sources(
     diagnostics: ProcessDiagnostics,
     installation: InstallationConfiguration,
-    credentials: CredentialSource = REFUSING_CREDENTIALS,
 ) -> AgentSources:
     hosted: dict[str, HarnessResolver] = {}
     binary: ExpectedBinary | None = None
+    credentials: HarnessCredentials = EmptyCredentials()
     if "claude" in installation.harness:
-        hosted["claude"] = ClaudeResolver(
-            installation.harness["claude"], diagnostics, credentials
+        resolver = ClaudeResolver(installation.harness["claude"], diagnostics)
+        hosted["claude"] = resolver
+        credentials = InstallationCredentials(
+            resolver.deployment.credentials.ANTHROPIC_API_KEY,
+            installation.secrets,
+            diagnostics,
         )
         recorded = recorded_binary()
         binary = ExpectedBinary(recorded.path, recorded.sha256, recorded.size)
@@ -146,4 +164,5 @@ def production_sources(
         ProductionResolver(hosted),
         ConfiguredPolicies(installation.policy, diagnostics),
         binary=binary,
+        credentials=credentials,
     )

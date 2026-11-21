@@ -50,7 +50,7 @@ sys.exit(run(sys.argv[1:5], compose))
 def read_root(root: Path, capture: Capture) -> InstallationConfiguration:
     directory = open_local_directory(root)
     try:
-        return read_installation(directory, capture.diagnostics)
+        return read_installation(directory, capture.diagnostics, root)
     finally:
         directory.close()
 
@@ -297,3 +297,85 @@ def test_provider_schema_failures_are_refusals(
         validate_section(schema, section)
 
     assert refused.value.args == (reason,)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "valid",
+        "absent",
+        "fake",
+        "scenario",
+        "env",
+        "unknown",
+        "outside",
+        "parent",
+        "dot",
+        "empty_component",
+        "relative",
+        "root",
+        "prefix",
+        "schema",
+        "namespace",
+        "extra_namespace",
+        "empty_namespace",
+    ],
+)
+def test_installation_secrets_section_is_validated(
+    tmp_path: Path, kora_capture: Capture, kind: str
+) -> None:
+    root = state_root(tmp_path)
+    section: JsonObject = {
+        "directory": str(root / "credentials"),
+        "namespace_prefixes": {"local-runner": ["ANTHROPIC_"]},
+    }
+    expected = "installation_invalid"
+    provider = "file"
+    if kind in {"fake", "scenario", "env", "unknown"}:
+        provider = kind
+        expected = "installation_provider"
+    elif kind in {
+        "outside",
+        "parent",
+        "dot",
+        "empty_component",
+        "relative",
+        "root",
+        "prefix",
+    }:
+        section["directory"] = {
+            "outside": str(tmp_path / "credentials"),
+            "parent": str(root) + "/../credentials",
+            "dot": str(root) + "/./credentials",
+            "empty_component": str(root) + "//credentials",
+            "relative": "credentials",
+            "root": str(root),
+            "prefix": str(root) + "-other/credentials",
+        }[kind]
+    elif kind == "schema":
+        section["namespace_prefixes"] = []
+    elif kind == "namespace":
+        section["namespace_prefixes"] = {"graph": ["ANTHROPIC_"]}
+    elif kind == "extra_namespace":
+        section["namespace_prefixes"] = {
+            "local-runner": ["ANTHROPIC_"],
+            "graph": ["ANTHROPIC_"],
+        }
+    elif kind == "empty_namespace":
+        section["namespace_prefixes"] = {}
+    document: JsonObject = {**VALID}
+    if kind != "absent":
+        document["secrets"] = {provider: section}
+    (root / "runner.json").write_text(json.dumps(document))
+    (root / "runner.json").chmod(0o600)
+
+    if kind in {"valid", "absent"}:
+        installation = read_root(root, kora_capture)
+
+        assert installation.secrets == ({"file": section} if kind == "valid" else {})
+        assert isinstance(installation.secrets, MappingProxyType)
+    else:
+        with pytest.raises(RunnerRefused) as refused:
+            read_root(root, kora_capture)
+
+        assert refused.value.args == (expected,)
