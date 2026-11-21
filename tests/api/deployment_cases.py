@@ -178,7 +178,7 @@ async def _owned_evaluator() -> AsyncGenerator[Evaluator]:
         yield opened
     finally:
         await opened.close()
-    assert_settled(owner)
+        assert_settled(owner)
 
 
 @pytest_asyncio.fixture
