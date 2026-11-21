@@ -14,8 +14,8 @@ from sqlalchemy.sql.elements import ColumnElement
 from kora.cel_eval.errors import raise_safe
 from kora.db.claim_source_values import ClaimSourcesRejected, ClaimWriterFailed
 from kora.db.connection import (
+    WRITER_ENTRY_NATIVE_ERRORS,
     Database,
-    DatabaseClosedError,
     DatabaseSnapshotRejected,
     clear_snapshot_error,
     complete,
@@ -332,12 +332,10 @@ class WorkerClaimPoll:
             clear_snapshot_error(error)
             raise
         except (
-            DatabaseClosedError,
+            *WRITER_ENTRY_NATIVE_ERRORS,
             DatabaseSnapshotRejected,
             ExpiryFailed,
             LockError,
-            SQLAlchemyError,
-            OSError,
             ValueError,
             TypeError,
             OverflowError,

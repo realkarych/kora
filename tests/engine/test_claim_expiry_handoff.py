@@ -17,7 +17,7 @@ from kora.cel_eval.thread import Evaluator
 from kora.conformance.capture import captured
 from kora.db.claim_source_values import ClaimSourcesRejected, prepare_claim_sources
 from kora.db.claim_sources_v1 import SOURCE_FIELDS
-from kora.db.connection import Database, Dialect
+from kora.db.connection import POSTGRESQL_WAL_SETTINGS_QUERY, Database, Dialect
 from kora.db.tables import attempt, node_instance, run, wait
 from kora.engine.attempt_inputs import prepare_attempt_inputs
 from kora.engine.claim_context import ClaimQuery
@@ -32,8 +32,13 @@ from kora.protocols.authentication import Principal
 from tests.api.claim_support import admit_expiry_run, poller
 from tests.api.deployment_cases import evaluator, skeleton_ir
 from tests.api.support import RequestIds, lifespan
-from tests.db.closing import narrow_database
+from tests.db.closing import (
+    CONDITION_DEADLINE_SECONDS,
+    narrow_database,
+    narrow_settings,
+)
 from tests.db.seed import START, Seeder
+from tests.db.test_sqlite_writer_entry import writer_driver
 from tests.engine.claim_support import SOURCE_LIMITS, ClaimCase, claim_case, state
 from tests.engine.heartbeat_support import heartbeat, heartbeat_body
 from tests.engine.test_claim_sources import ALLOWANCE, source_values
@@ -404,11 +409,35 @@ class HeldExpiryContinuation:
             event.remove(engine, name, listener)
 
 
-async def refuse_native_startup(application: ASGIApp, database: Database) -> None:
-    engine = database.reader_engine.sync_engine
+async def assert_startup_refuses(
+    application: ASGIApp, database: Database, private_reason: str
+) -> None:
     incoming: asyncio.Queue[Message] = asyncio.Queue()
     messages: list[Message] = []
     await incoming.put({"type": "lifespan.startup"})
+    await incoming.put({"type": "lifespan.shutdown"})
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    async with asyncio.timeout(CONDITION_DEADLINE_SECONDS):
+        with pytest.raises(ExpiryFailed) as refusal:
+            await application(
+                {"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}},
+                incoming.get,
+                send,
+            )
+
+    assert [message["type"] for message in messages] == ["lifespan.startup.failed"]
+    assert private_reason not in repr(messages)
+    assert str(refusal.value) == "execution authority expiry failed"
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None
+    assert database.units_in_flight() == 0
+
+
+async def refuse_native_startup_read(application: ASGIApp, database: Database) -> None:
+    engine = database.reader_engine.sync_engine
 
     def fail_discovery(
         connection: Connection, cursor: object, statement: str, *arguments: object
@@ -416,24 +445,64 @@ async def refuse_native_startup(application: ASGIApp, database: Database) -> Non
         if statement.startswith("SELECT max(run.id)"):
             connection.exec_driver_sql("SELECT missing_startup_expiry_probe")
 
-    async def send(message: Message) -> None:
-        messages.append(message)
-
     event.listen(engine, "before_cursor_execute", fail_discovery)
     try:
-        with pytest.raises(ExpiryFailed) as refusal:
-            await application(
-                {"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}},
-                incoming.get,
-                send,
-            )
+        await assert_startup_refuses(
+            application, database, "missing_startup_expiry_probe"
+        )
     finally:
         event.remove(engine, "before_cursor_execute", fail_discovery)
 
-    assert [message["type"] for message in messages] == ["lifespan.startup.failed"]
-    assert "missing_startup_expiry_probe" not in repr(messages)
-    assert refusal.value.__context__ is None
-    assert database.units_in_flight() == 0
+
+async def refuse_native_startup_writer(
+    application: ASGIApp, database: Database
+) -> None:
+    if database.dialect is Dialect.SQLITE:
+        async with database.writer_engine.connect() as connection:
+            driver = await writer_driver(connection)
+            async with driver.execute("PRAGMA main.synchronous=NORMAL"):
+                pass
+        try:
+            await assert_startup_refuses(
+                application, database, "requires FULL synchronization"
+            )
+        finally:
+            async with database.writer_engine.connect() as connection:
+                assert await writer_driver(connection) is driver
+                async with driver.execute("PRAGMA main.synchronous=FULL"):
+                    pass
+        assert database.writer_is_free()
+        return
+
+    engine = database.writer_engine.sync_engine
+    checks = 0
+
+    def weaken_durability_at_commit(
+        connection: Connection, cursor: object, statement: str, *arguments: object
+    ) -> None:
+        nonlocal checks
+        if statement == POSTGRESQL_WAL_SETTINGS_QUERY.text:
+            checks += 1
+            if checks == 2:
+                connection.exec_driver_sql("SET LOCAL synchronous_commit TO off")
+
+    event.listen(engine, "before_cursor_execute", weaken_durability_at_commit)
+    try:
+        await assert_startup_refuses(
+            application, database, "requires durable WAL settings"
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", weaken_durability_at_commit)
+
+    assert checks == 2
+
+
+async def expiry_wait_state(database: Database, wait_id: str) -> tuple[object, ...]:
+    async with database.read_transaction() as reader:
+        with await reader.execute(
+            select(wait.c.status, wait.c.updated_at).where(wait.c.id == wait_id)
+        ) as result:
+            return tuple(result.one())
 
 
 @pytest.mark.asyncio
@@ -558,7 +627,11 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
         ]
         await writer.execute(insert(run), earlier_runs)
     pending = await state(database)
-    recovered_database = narrow_database(database)
+    recovered_database = Database(
+        narrow_settings(database.settings),
+        require_sqlite_full_sync=database.dialect is Dialect.SQLITE,
+        require_postgresql_wal_settings=database.dialect is Dialect.POSTGRESQL,
+    )
     try:
         with captured(
             "api", LoggingSettings(level=Level.DEBUG), "expiry-startup", clock.now
@@ -576,17 +649,16 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
             )
             async with lifespan(bare_application):
                 before_claim_startup = await state(recovered_database)
-            await refuse_native_startup(application, recovered_database)
-            after_refusal = await state(recovered_database)
+            await refuse_native_startup_read(application, recovered_database)
+            after_read_refusal = await state(recovered_database)
+            await refuse_native_startup_writer(application, recovered_database)
+            after_writer_refusal = await state(recovered_database)
+            wait_after_writer_refusal = await expiry_wait_state(
+                recovered_database, wait_id
+            )
             async with lifespan(application):
                 final = await state(recovered_database)
-                async with recovered_database.read_transaction() as reader:
-                    with await reader.execute(
-                        select(wait.c.status, wait.c.updated_at).where(
-                            wait.c.id == wait_id
-                        )
-                    ) as result:
-                        stopped_wait = tuple(result.one())
+                stopped_wait = await expiry_wait_state(recovered_database, wait_id)
             async with lifespan(application):
                 repeated = await state(recovered_database)
             records = cap.finish()
@@ -602,7 +674,8 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
     assert isinstance(lease_until, datetime)
     assert lease_until > clock.now()
     assert pending["attempt"][0]["desired_state"] == "run"
-    assert before_claim_startup == after_refusal == pending
+    assert before_claim_startup == after_read_refusal == after_writer_refusal == pending
+    assert wait_after_writer_refusal == ("open", START)
     assert final["run"] == pending["run"]
     assert final["attempt"][0]["desired_state"] == "cancel"
     assert final["attempt"][0]["cancel_cause"] == "timeout"
@@ -617,10 +690,13 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
         if str(row["event"]).startswith("engine.claim_expiry_recovery.")
     ] == [
         "engine.claim_expiry_recovery.refused",
+        "engine.claim_expiry_recovery.refused",
         "engine.claim_expiry_recovery.finished",
         "engine.claim_expiry_recovery.finished",
     ]
     assert case.binding.run.run_id not in repr(records)
     assert case.binding.attempt_id not in repr(records)
     assert "missing_startup_expiry_probe" not in repr(records)
+    assert "requires FULL synchronization" not in repr(records)
+    assert "requires durable WAL settings" not in repr(records)
     assert recovered_database.units_in_flight() == 0
