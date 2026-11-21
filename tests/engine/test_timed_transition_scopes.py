@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import Connection, event, text
+from sqlalchemy.engine.interfaces import ExceptionContext
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.util import await_
 
@@ -353,6 +354,7 @@ async def test_timed_scope_contention_releases_partial_owned_set(
     candidate = Database(narrow_settings(database.settings, pool_size=1))
     ledger = ConnectionLedger(candidate)
     observed: list[tuple[str, tuple[object, ...]]] = []
+    statement_timeouts: list[object] = []
     ready: asyncio.Future[Backend] = loop.create_future()
     task: asyncio.Task[None] | None = None
     commits = 0
@@ -361,7 +363,21 @@ async def test_timed_scope_contention_releases_partial_owned_set(
         nonlocal commits
         commits += 1
 
-    event.listen(candidate.writer_engine.sync_engine, "commit", record_commit)
+    def record_statement_timeout(context: ExceptionContext) -> None:
+        statement = context.statement
+        error = context.original_exception
+        if (
+            statement is not None
+            and "pg_advisory_xact_lock" in statement
+            and getattr(error, "sqlstate", None) == "57014"
+            and "canceling statement due to statement timeout" in str(error)
+        ):
+            statement_timeouts.append(context.parameters)
+
+    engine = candidate.writer_engine.sync_engine
+    event.listen(engine, "commit", record_commit)
+    if mode == "native":
+        event.listen(engine, "handle_error", record_statement_timeout)
     try:
         async with database.transaction() as holder:
             lock = TransitionLocks(holder)
@@ -374,7 +390,8 @@ async def test_timed_scope_contention_releases_partial_owned_set(
                 wait_on_later_scope(candidate, cutoff, mode, ready, observed)
             )
             original = await asyncio.wait_for(ready, CONDITION_DEADLINE_SECONDS)
-            await observe_postgresql_wait(database, original, blocker)
+            if mode != "native":
+                await observe_postgresql_wait(database, original, blocker)
             if mode == "cancel":
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError) as cancelled:
@@ -419,6 +436,8 @@ async def test_timed_scope_contention_releases_partial_owned_set(
                     CONDITION_DEADLINE_SECONDS,
                 )
         finally:
+            if mode == "native":
+                event.remove(engine, "handle_error", record_statement_timeout)
             await candidate.close()
 
     keys = [
@@ -435,6 +454,7 @@ async def test_timed_scope_contention_releases_partial_owned_set(
         assert 0 < int(second) < int(first) <= 1500
     elif mode == "native":
         assert armed == ["600", "600"]
+        assert statement_timeouts == [LATER.key]
     assert committed == [17]
     assert ledger.opened == ledger.closed
     assert ledger.outstanding == 0
