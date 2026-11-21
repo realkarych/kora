@@ -1,9 +1,11 @@
 import asyncio
 import json
 import os
+import signal
 import socket
 import sys
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -24,22 +26,103 @@ __all__ = ["api_capture", "preparer"]
 PROCESS_DEADLINE_SECONDS = 60.0
 
 
-async def kora(arguments: list[str], environment: dict[str, str]) -> ProcessResult:
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-I",
-        "-m",
-        "kora",
-        *arguments,
-        env={"PATH": os.environ["PATH"], **environment},
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await asyncio.wait_for(
-        process.communicate(), PROCESS_DEADLINE_SECONDS
-    )
+async def stop_cli(
+    launch: asyncio.Task[asyncio.subprocess.Process],
+    communication: asyncio.Task[tuple[bytes, bytes]] | None,
+) -> None:
+    process = await launch
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        if communication is None:
+            await process.communicate()
+        else:
+            await communication
+    finally:
+        await process.wait()
+
+
+async def collect_cli(
+    launch: asyncio.Task[asyncio.subprocess.Process], timeout: float
+) -> ProcessResult:
+    communication: asyncio.Task[tuple[bytes, bytes]] | None = None
+    try:
+        process = await asyncio.shield(launch)
+        communication = asyncio.create_task(process.communicate())
+        async with asyncio.timeout(timeout):
+            stdout, stderr = await asyncio.shield(communication)
+    except BaseException:
+        cleanup = asyncio.create_task(stop_cli(launch, communication))
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        cleanup.result()
+        raise
     assert process.returncode is not None
     return ProcessResult(process.returncode, stdout, stderr)
+
+
+async def kora(arguments: list[str], environment: dict[str, str]) -> ProcessResult:
+    launch = asyncio.create_task(
+        asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-m",
+            "kora",
+            *arguments,
+            env={"PATH": os.environ["PATH"], **environment},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    )
+    return await collect_cli(launch, PROCESS_DEADLINE_SECONDS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["timeout", "cancel"])
+async def test_cli_collection_reaps_the_child_on_interruption(
+    interruption: Literal["timeout", "cancel"],
+) -> None:
+    launch = asyncio.create_task(
+        asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-c",
+            "import signal; signal.alarm(10); signal.pause()",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    )
+    process = await launch
+    collecting = asyncio.Event()
+
+    async def collect() -> ProcessResult:
+        collecting.set()
+        return await collect_cli(launch, PROCESS_DEADLINE_SECONDS)
+
+    try:
+        if interruption == "timeout":
+            with pytest.raises(TimeoutError):
+                await collect_cli(launch, 0)
+        else:
+            collection = asyncio.create_task(collect())
+            await asyncio.wait_for(collecting.wait(), PROCESS_DEADLINE_SECONDS)
+            collection.cancel("original cancellation")
+            asyncio.get_running_loop().call_soon(
+                collection.cancel, "cancellation during cleanup"
+            )
+            with pytest.raises(asyncio.CancelledError, match="original cancellation"):
+                await collection
+        returncode = process.returncode
+    finally:
+        await stop_cli(launch, None)
+
+    assert returncode == -signal.SIGKILL
 
 
 def written(directory: Path, name: str, document: JsonObject) -> Path:
