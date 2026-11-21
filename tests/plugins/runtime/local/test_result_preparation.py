@@ -17,9 +17,10 @@ from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.harness.fake.adapter import NAME, SESSION_ID, VERSION
 from kora.plugins.runtime.local.agent import AgentSources
 from kora.plugins.runtime.local.completed import recorded_exited
+from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, rebound
 from kora.protocols.deadlines import ExecutionDeadline
-from kora.protocols.runtime import SessionObservation
+from kora.protocols.runtime import SessionObservation, Workload
 from kora.runner.agent import STOP_DEADLINE_NS, NativeResultWork
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
@@ -41,12 +42,19 @@ from kora.testing.runner import AllowDenyPolicies
 from kora.testing.script import FakeScript
 from tests.plugins.harness.fake.fake_support import result
 from tests.plugins.runtime.local.test_agent_session import (
+    agent_fields,
     agent_session,
     code_of_call,
     detached_workload,
 )
+from tests.plugins.runtime.local.test_command import journal_events
 from tests.plugins.runtime.local.test_command_observation import SUBMITTER
-from tests.plugins.runtime.local.test_completion import completed_entry
+from tests.plugins.runtime.local.test_completion import (
+    answered,
+    answered_code,
+    completed_entry,
+    started_on,
+)
 from tests.plugins.runtime.local.testing_support import attempt, composition
 from tests.runner.agent_support import (
     FakeResolver,
@@ -60,9 +68,10 @@ from tests.runner.test_runner_outcome_covers_every_stop_deadline_escalation impo
     deadline,
 )
 from tests.runner.test_session_result_protection import observation
+from tests.support.local_delivery import delivery_server
 from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
-from tests.support.local_runners import short_directory, written
-from tests.support.local_runtime import protocol_error
+from tests.support.local_runners import short_directory, submitted, written
+from tests.support.local_runtime import private_directory, protocol_error
 
 __all__ = ["kora_capture"]
 
@@ -188,6 +197,7 @@ class HeldPreparation:
         self.gate = threading.Event()
         self.completed = threading.Event()
         self.return_gate = threading.Event()
+        self.returning = threading.Event()
         self.hold_completed = hold_completed
         self.thread: threading.Thread | None = None
         self.stop: threading.Event | None = None
@@ -214,6 +224,7 @@ class HeldPreparation:
             self.completed.set()
             if not self.return_gate.wait(CONDITION_SECONDS):
                 raise TimeoutError("prepared result did not receive its test release")
+        self.returning.set()
         return prepared
 
     def build(self, forms: tuple[str, ...], stop: threading.Event) -> ResultEncoder:
@@ -267,19 +278,16 @@ def descriptors_for(path: Path) -> tuple[int, ...]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop", ["shutdown", "deadline", "late_success"])
+@pytest.mark.parametrize("expires", [False, True], ids=["shutdown", "deadline"])
 async def test_session_result_scan_settles_on_cancel_and_shutdown(
-    tmp_path: Path,
-    kora_capture: Capture,
-    stop: Literal["shutdown", "deadline", "late_success"],
+    tmp_path: Path, kora_capture: Capture, expires: bool
 ) -> None:
-    expires = stop != "shutdown"
     clock = SteppedClock()
     binding = TypeAdapter(ExecutionDeadline).dump_python(deadline(120), mode="json")
     work = detached_workload({"deadline": binding} if expires else {})
     resolver = FakeResolver(script([CHECKOUT_SCRIPT]), context_for(kora_capture))
     sources = AgentSources(resolver, AllowDenyPolicies())
-    held = HeldPreparation(hold_completed=stop == "late_success")
+    held = HeldPreparation()
     registry = kora_capture.diagnostics.registry
     old_scope = (registry.count(), registry.retained_bytes())
     with short_directory() as sockets:
@@ -321,9 +329,6 @@ async def test_session_result_scan_settles_on_cancel_and_shutdown(
                     before_stop = code_of_call(
                         lambda: session.session_observation(SUBMITTER)
                     )
-                    if stop == "late_success":
-                        held.gate.set()
-                        await until(held.completed.is_set)
                     if expires:
                         await clock.requested(DEADLINE_NS, count=2)
                         await clock.advance_to(DEADLINE_NS)
@@ -351,12 +356,7 @@ async def test_session_result_scan_settles_on_cancel_and_shutdown(
                     assert retained[0] > 0
                     assert retained[1] == while_held[0] - old_scope[0] > 0
                     assert retained[2] == while_held[1] - old_scope[1] > 0
-                    if stop == "late_success":
-                        assert held.retained_work() == (0, 0, 0)
-                        assert held.retained_prepared() > 0
-                        assert held.completed_clean
-                    else:
-                        assert held.retained_work() == retained
+                    assert held.retained_work() == retained
                     assert not closing.done()
                     assert not server.resources_settled
                     assert not session.result_work_settled()
@@ -387,6 +387,88 @@ async def test_session_result_scan_settles_on_cancel_and_shutdown(
         finally:
             bound.close()
             registry_owner.directory.close()
+
+
+@pytest.mark.asyncio
+async def test_result_prepared_before_deadline_and_returned_late_stays_unpublished(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = SteppedClock()
+    binding = TypeAdapter(ExecutionDeadline).dump_python(deadline(120), mode="json")
+    fields = {**agent_fields(), "deadline": binding}
+    resolver = FakeResolver(script([CHECKOUT_SCRIPT]), context_for(kora_capture))
+    sources = AgentSources(resolver, AllowDenyPolicies())
+    held = HeldPreparation(hold_completed=True)
+
+    def work_for(runtime: LocalRuntime) -> Workload:
+        return submitted(runtime, "attempt-1", **fields)
+
+    async with (
+        agent_session(tmp_path, kora_capture, sources, clock, prepare_result=held) as (
+            session,
+            path,
+        ),
+        delivery_server(
+            private_directory(tmp_path, "server"),
+            kora_capture,
+            clock=clock,
+            agent=session,
+            workload=work_for,
+        ) as live,
+    ):
+        journal = path / "journal.jsonl"
+        result_file = path / "control" / RESULT_DIRECTORY / RESULT_NAME
+        try:
+            channel = await live.attach()
+            try:
+                await live.deliver(channel)
+            finally:
+                channel.close()
+            await unless_busy(lambda: started_on(live))
+            await until(held.entered.is_set)
+            held.gate.set()
+            await until(held.completed.is_set)
+            await clock.requested(DEADLINE_NS, count=2)
+            await clock.advance_to(DEADLINE_NS)
+            await until(held.fenced)
+            pending = await answered_code(live)
+            retained = held.retained_prepared()
+            observed = code_of_call(
+                lambda: session.session_observation(live.entry.submitter)
+            )
+            assert not live.server.resources_settled
+            assert not session.result_work_settled()
+
+            held.return_gate.set()
+            await until(session.result_work_settled)
+            file_after_return = result_file.exists()
+            reference_after_return = session.result_reference()
+            after_return = tuple(event.kind for event in journal_events(journal))
+            quiescence = await unless_busy(lambda: answered(live, clock))
+            saved = completed_entry(live.runtime)
+            completed_event = journal_events(journal)[-1]
+            assert not live.server.resources_settled
+        finally:
+            held.release()
+
+    assert pending == "workload_busy"
+    assert observed == "session_unobserved"
+    assert retained > 0
+    assert held.completed_clean
+    assert held.returning.is_set()
+    assert held.calls == 1
+    assert held.retained_prepared() == 0
+    assert held.thread is not None
+    assert not held.thread.is_alive()
+    assert not file_after_return
+    assert reference_after_return is None
+    assert "runner.session_spec" in after_return
+    assert "runner.session_result" not in after_return
+    assert "runner.session_failed" not in after_return
+    assert saved.result is None
+    assert saved.quiescence == quiescence
+    assert completed_event.kind == "runner.quiescence"
+    assert completed_event.data == quiescence.model_dump(mode="json")
 
 
 @pytest.mark.asyncio
