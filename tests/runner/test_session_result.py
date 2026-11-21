@@ -2,6 +2,7 @@ import os
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from typing import Final
 
 import pytest
@@ -12,6 +13,7 @@ from kora.runner.session_result import (
     RESULT_NAME,
     ResultFile,
     ResultUnreadable,
+    prepare_observation,
     read_observation,
     write_observation,
 )
@@ -66,7 +68,9 @@ TAMPERING: Final[dict[str, Callable[[Path, ResultFile], ResultFile]]] = {
 def test_session_result_round_trip(tmp_path: Path) -> None:
     control = private_directory(tmp_path / "control")
 
-    reference = write_observation(control, OBSERVATION)
+    reference = write_observation(
+        control, prepare_observation(OBSERVATION, (), Event())
+    )
     observation = read_observation(control, reference)
     control.close()
 
@@ -77,7 +81,7 @@ def test_session_result_round_trip(tmp_path: Path) -> None:
 @pytest.mark.parametrize("tampering", sorted(TAMPERING))
 def test_session_result_read_refuses_tampering(tmp_path: Path, tampering: str) -> None:
     control = private_directory(tmp_path / "control")
-    written = write_observation(control, OBSERVATION)
+    written = write_observation(control, prepare_observation(OBSERVATION, (), Event()))
     path = tmp_path / "control" / RESULT_DIRECTORY / RESULT_NAME
     reference = TAMPERING[tampering](path, written)
 
@@ -101,7 +105,7 @@ def test_session_result_create_refuses_existing_name(
         (directory / RESULT_NAME).symlink_to(target)
 
     with pytest.raises(FileExistsError):
-        write_observation(control, OBSERVATION)
+        write_observation(control, prepare_observation(OBSERVATION, (), Event()))
     control.close()
 
     assert (directory / RESULT_NAME).read_bytes() == b"kept"

@@ -7,6 +7,7 @@ from typing import Final
 import pytest
 
 from kora.conformance.capture import Capture
+from kora.conformance.common import context_for
 from kora.ir import ErrorClass
 from kora.plugins.harness.fake.script import Step
 from kora.protocols.deadlines import ExecutionDeadline
@@ -14,12 +15,15 @@ from kora.protocols.runtime import SessionResultObservation
 from kora.runner.agent import AgentHost
 from kora.runner.journal import SYNC_DEADLINE_NS
 from kora.runner.liveness import WRITER_STALL_NS
+from kora.runner.session_result import RESULT_DIRECTORY, RESULT_NAME
 from kora.runner.sink import QUEUE_RECORDS
 from tests.plugins.harness.fake.fake_support import tool_call, turn
 from tests.runner.agent_support import (
     FIXED_NOW,
     PAUSE,
+    FakeResolver,
     HeldWriter,
+    ObservedFakeHarness,
     SignalledScript,
     SteppedClock,
     advance_batch,
@@ -122,7 +126,10 @@ async def test_runner_outcome_covers_every_stop_open_call(
     source = TimerStartedScript(
         script([tool_call("Bash", "c1", outcome=None), PAUSE]), clock
     )
-    host = world.host(world.resolver(source), clock=clock)
+    resolver = FakeResolver(
+        source, context_for(kora_capture), adapter_type=ObservedFakeHarness
+    )
+    host = world.host(resolver, clock=clock)
     work = world.workload(limits={"stall_after_us": "60000000"}, deadline=deadline(120))
 
     try:
@@ -130,14 +137,30 @@ async def test_runner_outcome_covers_every_stop_open_call(
         await source.paused.wait()
         await clock.advance_to(STALL + SECOND)
         await clock.requested(120 * SECOND)
-        running = host.observation() is None
+        adapter = resolver.adapters[0]
+        assert isinstance(adapter, ObservedFakeHarness)
+        sink = adapter.runner_sink
+        assert sink is not None
+        open_before_deadline = sink.liveness().calls_open
+        stopped_before_deadline = sink.cause()
+        killed_before_deadline = adapter.killed.is_set()
+        running = adapter.finalized_result is None and host.result_reference() is None
         await clock.advance_to(120 * SECOND)
         await host.finished()
-        observation = observed(host)
     finally:
-        await host.stop()
+        released = await host.stop()
         world.close()
 
     assert running
-    assert observation.cause == "deadline"
-    assert observation.result.error_class is ErrorClass.TIMEOUT
+    assert open_before_deadline
+    assert stopped_before_deadline is None
+    assert not killed_before_deadline
+    assert sink.cause() == "deadline"
+    assert adapter.finalized_result is not None
+    assert adapter.finalized_result.stop_reason == "deadline"
+    assert adapter.finalized_result.error_class is ErrorClass.TIMEOUT
+    assert host.result_reference() is None
+    assert not (world.root / "control" / RESULT_DIRECTORY / RESULT_NAME).exists()
+    assert "runner.session_result" not in world.kinds()
+    assert released.session
+    assert released.writer

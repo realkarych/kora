@@ -1400,8 +1400,12 @@ class ControlServer:
                         await stopped(self._sessions)
                 finally:
                     if (
-                        settled or self._transfer_native_settled
-                    ) and self._unresolved_disposal is None:
+                        (settled or self._transfer_native_settled)
+                        and self._unresolved_disposal is None
+                        and all(
+                            session.result_work_settled() for session in self._sessions
+                        )
+                    ):
                         self._resources_settled = True
                         self._workload = None
                         self._workload_sha256 = None

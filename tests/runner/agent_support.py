@@ -20,10 +20,19 @@ from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ClockSample, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import AgentExecution
+from kora.protocols.harness import (
+    AgentExecution,
+    EventSink,
+    EventSummary,
+    LaunchContext,
+    RunnerOutcome,
+    SessionResult,
+    SessionSpec,
+)
 from kora.protocols.policy import (
     Policy,
     PolicyCapabilities,
+    PolicyClient,
     PolicyDecision,
     PolicyLayers,
     ToolCallRequest,
@@ -36,9 +45,11 @@ from kora.runner.agent import (
     HostedHarness,
     HostServices,
     Released,
+    ResultPreparation,
 )
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.journal import BatchAppend, JournalAppendOutcome, RunningJournal
+from kora.runner.session_result import prepare_observation
 from kora.runner.sink import BATCH_WINDOW_NS, JournalWriter, RunnerSink
 from tests.plugins.harness.fake.fake_support import step
 from tests.protocols.runtime_documents import ATTEMPT, workload
@@ -244,12 +255,36 @@ class DeafHarness(FakeHarness):
         return None
 
 
+class ObservedFakeHarness(FakeHarness):
+    finalized_result: SessionResult | None = None
+    finalized_outcome: RunnerOutcome | None = None
+    runner_sink: RunnerSink | None = None
+
+    async def run(
+        self,
+        spec: SessionSpec,
+        policy: PolicyClient,
+        sink: EventSink,
+        launches: LaunchContext,
+    ) -> SessionResult:
+        if isinstance(sink, RunnerSink):
+            self.runner_sink = sink
+        return await super().run(spec, policy, sink, launches)
+
+    def finalise(self, summary: EventSummary, outcome: RunnerOutcome) -> SessionResult:
+        result = super().finalise(summary, outcome)
+        self.finalized_result = result
+        self.finalized_outcome = outcome
+        return result
+
+
 @dataclass
 class FakeResolver:
     source: SignalledScript
     ctx: ProtocolContext
     deaf: bool = False
     adapters: list[FakeHarness] = field(default_factory=lambda: [])
+    adapter_type: type[FakeHarness] = FakeHarness
 
     def resolve(
         self, execution: AgentExecution, workspace: WorkspaceRef
@@ -262,7 +297,7 @@ class FakeResolver:
             protected_paths=(),
             output_format=execution.output_format,
         )
-        harness = DeafHarness if self.deaf else FakeHarness
+        harness = DeafHarness if self.deaf else self.adapter_type
         adapter = harness(self.source, scope, self.ctx)
         self.adapters.append(adapter)
         return HostedHarness(adapter, adapter.kill)
@@ -328,6 +363,7 @@ class World:
         policy: Policy | None = None,
         journal: JournalWriter | None = None,
         clock: Clock | None = None,
+        prepare_result: ResultPreparation = prepare_observation,
     ) -> AgentHost:
         services = HostServices(
             resolver=resolver,
@@ -336,6 +372,8 @@ class World:
             registry=self.capture.diagnostics.registry,
             clock=self.clock if clock is None else clock,
             log=self.capture.diagnostics.logger("runner.agent"),
+            secret_scope=self.capture.scope,
+            prepare_result=prepare_result,
         )
         writer = self.journal if journal is None else journal
         return AgentHost(services, writer, self.control, self.candidate)

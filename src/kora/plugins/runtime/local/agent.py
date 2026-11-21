@@ -51,7 +51,6 @@ from kora.protocols.harness import AgentExecution
 from kora.protocols.policy import Policy
 from kora.protocols.runtime import (
     CommandObservation,
-    SessionResultObservation,
     TransferItem,
     Workload,
 )
@@ -64,6 +63,7 @@ from kora.runner.agent import (
     HarnessResolver,
     HostedHarness,
     HostServices,
+    ResultPreparation,
     SessionLimits,
 )
 from kora.runner.filesystem import (
@@ -83,7 +83,7 @@ from kora.runner.registry import (
     synchronize,
     unlink_if_present,
 )
-from kora.runner.session_result import bounded_read
+from kora.runner.session_result import bounded_read, prepare_observation
 
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
 AGENT: Final[EventSpec] = CATALOG.register(
@@ -201,7 +201,9 @@ class AgentSession:
         reaper: AdoptedReaper,
         sources: AgentSources,
         identities: NativeIdentityReader,
+        prepare_result: ResultPreparation = prepare_observation,
     ) -> None:
+        self._prepare_result = prepare_result
         self._launch_cleanup: asyncio.Task[None] | None = None
         self._launches: LocalLaunches | None = None
         self._placements: HarnessPlacements | None = None
@@ -368,6 +370,8 @@ class AgentSession:
             registry=self._diagnostics.registry,
             clock=self._clock,
             log=self._diagnostics.logger(HOST_COMPONENT),
+            secret_scope=self._scope,
+            prepare_result=self._prepare_result,
         )
         host = AgentHost(services, self._journal, control, self._candidate)
         self._host = host
@@ -414,6 +418,9 @@ class AgentSession:
                 if self._placements is not None:
                     self._placements.close()
             finally:
+                host = self._host
+                if host is not None:
+                    await host.drain_result_work()
                 self._scope.release()
 
     def bind_launch_socket(self, path: Path) -> None:
@@ -473,7 +480,7 @@ class AgentSession:
             return "starting", "preparation", None
         if not finished.done():
             return "running", "execution", None
-        if isinstance(host.observation(), SessionResultObservation):
+        if host.has_result_observation():
             return "exited", "complete", EXIT_RESULT
         return "exited", "failed", EXIT_UNSEALED
 
@@ -716,6 +723,9 @@ class AgentSession:
                     or self._journal.closed
                     or self._workspace.state is WorkspaceState.FAILED
                 )
+            host = self._host
+            if not settled and host is not None:
+                settled = host.result_publication_expired()
             raise delivery_error("session_unobserved" if settled else "workload_busy")
         reference = self.result_reference()
         if reference is None:
@@ -737,6 +747,10 @@ class AgentSession:
 
     def record_completion(self, data: JsonObject) -> bool:
         return self._journal.append(QUIESCENCE, data)
+
+    def result_work_settled(self) -> bool:
+        host = self._host
+        return host is None or host.result_work_settled()
 
     def fence(self) -> None:
         with self._lock:
@@ -778,7 +792,7 @@ class AgentSession:
         finally:
             if self._script_directory is not None:
                 self._script_directory.close()
-            if self._control is not None:
+            if self._control is not None and self.result_work_settled():
                 self._control.close()
         finished = self._finished
         if finished is not None and finished.done() and not finished.cancelled():

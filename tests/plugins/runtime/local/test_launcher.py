@@ -16,6 +16,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.ir import ErrorClass
 from kora.plugins.harness.claude.adapter import ClaudeHarness
 from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.plugins.runtime.local.channel import (
@@ -39,12 +40,14 @@ from kora.plugins.runtime.local.serving import ControlServer
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
     AgentExecution,
+    EventSummary,
     HarnessAdapter,
     LaunchInputs,
     Placement,
+    RunnerOutcome,
+    SessionResult,
 )
 from kora.protocols.lifetime import EnvironmentVariable
-from kora.protocols.runtime import SessionResultObservation
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
 from kora.protocols.vcs import WorkspaceRef
@@ -53,10 +56,14 @@ from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.peers import kernel_source
+from kora.runner.session_result import RESULT_DIRECTORY, RESULT_NAME
 from kora.runner.sink import RunnerSink
 from tests.plugins.harness.claude.test_claude_conformance import make_adapter
 from tests.plugins.harness.claude.test_replay_events import context_for
-from tests.plugins.harness.claude.test_session_lifecycle import session_spec
+from tests.plugins.harness.claude.test_session_lifecycle import (
+    ObservedHarness,
+    session_spec,
+)
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.runner.agent_support import SteppedClock, make_world
 from tests.runner.test_agent_host_refuses_expired_deadline import SECOND, deadline
@@ -910,6 +917,15 @@ class StartupResolver:
         return HostedHarness(cast(HarnessAdapter, self.adapter), self.adapter.kill)
 
 
+class ObservedStartupHarness(ObservedHarness):
+    finalized_result: SessionResult | None = None
+
+    def finalise(self, summary: EventSummary, outcome: RunnerOutcome) -> SessionResult:
+        result = super().finalise(summary, outcome)
+        self.finalized_result = result
+        return result
+
+
 def startup_target(root: Path) -> tuple[ExpectedBinary, Path]:
     started = root / "target-started"
     executable = root / "target"
@@ -934,7 +950,10 @@ async def test_claude_deadline_refuses_native_allocation_during_verification(
     binary, candidate_started = startup_target(launch_root)
     verifier = GatedBinaryVerifier(binary.path, asyncio.get_running_loop())
     ctx = context_for(kora_capture, clock)
-    adapter = make_adapter(Path(world.candidate), ctx)
+    configured = make_adapter(Path(world.candidate), ctx)
+    adapter = ObservedStartupHarness(
+        configured.scope, configured.ctx, configured.registry, configured.environment
+    )
     async with launch_table(
         launch_root,
         kora_capture,
@@ -966,9 +985,11 @@ async def test_claude_deadline_refuses_native_allocation_during_verification(
                 host.start(workload, world.workspace())
                 await verifier.entered.wait()
                 await clock.requested(SECOND)
+                running_before_deadline = adapter.finalized_result is None
+                reference_before_deadline = host.result_reference()
                 await clock.advance_to(SECOND)
                 await host.finished()
-                observation = host.observation()
+                late_reference = host.result_reference()
                 verified_while_stopping = verifier.finished.is_set()
                 launch_files = tuple(launches.path.iterdir())
                 released = await host.stop()
@@ -979,9 +1000,16 @@ async def test_claude_deadline_refuses_native_allocation_during_verification(
             await host.stop()
             world.close()
 
-    assert isinstance(observation, SessionResultObservation)
-    assert observation.cause == "deadline"
-    assert observation.result.stop_reason == "deadline"
+    assert running_before_deadline
+    assert reference_before_deadline is None
+    assert adapter.outcome is not None
+    assert adapter.outcome.cause == "deadline"
+    assert adapter.finalized_result is not None
+    assert adapter.finalized_result.stop_reason == "deadline"
+    assert adapter.finalized_result.error_class is ErrorClass.TIMEOUT
+    assert late_reference is None
+    assert not (world.root / "control" / RESULT_DIRECTORY / RESULT_NAME).exists()
+    assert "runner.session_result" not in world.kinds()
     assert not verified_while_stopping
     assert launch_files == ()
     assert not candidate_started.exists()
