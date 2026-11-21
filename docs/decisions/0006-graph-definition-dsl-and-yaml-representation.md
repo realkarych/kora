@@ -41,6 +41,14 @@ Graphs are authored in Python with decorators and the `>>` operator; `kora compi
 - **Trigger overlap** defaults to `allow` for every trigger kind except webhooks, which default to `queue` so that a burst of events does not start a burst of runs (FR-6.2, aligned on 2026-10-16); `skip` and `queue` are per-graph options in `graph.overlap` (DD-12). [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md) makes starts bounded and canonical: `skip` considers accepted `pending` as well as `running` runs; `queue` promotion selects the oldest pending run under the graph scope lock when no run is running. Accepted delivery/skip replay precedes current-version validation and quota checks.
 - **Presets live in two places** (DD-25): Python objects in graph code and registry presets published by the platform team. `kora presets pull` fetches the latter into `.kora/presets/` beforehand, so compile stays offline; both kinds are snapshotted under `meta.presets`, and the scheduler reads only each node's resolved `config`.
 
+## Proposed automatic CLI approval expiry audit
+
+Proposed on 2026-11-21 under [#1737](https://github.com/realkarych/kora/issues/1737). Concrete behavior and wording are pending owner review.
+
+For a local CLI approval in the walking skeleton, the saved automatic default is a scheduler-originated expiry action. The response uses the saved form and checked predicate. The request remains `expired` and records no approver, including when the default resolves the node successfully. Record `approval.expired` with the scheduler actor. Keep a complete valid evaluated response and preserve the existing content-free CEL error record when evaluation fails. An automatic response evaluation error fails the node with `config_error` and keeps the expired audit status. The ordinary rule in this ADR for a human response still marks the request `failed` on an `approve_when` error.
+
+The [local CLI expiry proposal](../../knowledge/specs/cli-approval-opening.md#3-expiry-and-retained-response) defines the exact retained response, state changes and actor boundary. This exception requires owner approval before activation.
+
 ## Alternatives considered
 
 - **YAML authored by hand**, as Archon does. Rejected: typed artifacts as Pydantic models, presets with merge rules and source locations in compile errors (NFR-10.3) come naturally from a language, and the YAML still exists as the committed, generated output.

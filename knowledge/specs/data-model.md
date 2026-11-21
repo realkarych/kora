@@ -1981,6 +1981,8 @@ Recover uncertain creates through read-only marker lookup on the original resour
 
 After open/create is forbidden, release its form/context/ReviewBundle delivery payload hold. Retain only content-free marker/resource/credential references, learned ids and compact progress/error/evidence; unresolved metadata can outlive payload retention indefinitely. Current authorization applies to the original resource; an alias edit cannot retarget cleanup. A currently forbidden resource stays visibly blocked without external calls. This is not a promise to stop remote work or retain full payloads forever.
 
+The [proposed local CLI delivery record and close](cli-approval-opening.md#2-cli-delivery-record-and-discovery) under #1737 specify the compact original identity, exact indexed current pair, volatile due cursor, and typed delivery hold ownership. Its [proposed retained response](cli-approval-opening.md#3-expiry-and-retained-response) distinguishes scheduler defaults from human audit. Both remain pending owner approval; legacy rows preserve their authorized history.
+
 ### 14.4 Future acceptance contracts
 
 These are future release checks for issue #56; there is no runtime implementation in this repository and documentation CI does not execute them. Use configured conforming protocol fakes and real local services/components, explicit barriers/conditions and injected clock/randomness, no mocks, patched transports or synchronization sleeps. Every metadata case runs on PostgreSQL and SQLite; container-dependent PostgreSQL cases run on Linux only.
