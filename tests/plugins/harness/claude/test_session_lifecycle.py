@@ -521,6 +521,68 @@ async def test_oversized_initialize_preserves_observed_stop(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop", "expected_error"),
+    [(None, None), ("deadline", ErrorClass.TIMEOUT), ("cancel", ErrorClass.CANCELLED)],
+)
+async def test_initialize_refusal_preserves_observed_stop(
+    claude_capture: Capture,
+    stop: RunnerCause | None,
+    expected_error: ErrorClass | None,
+) -> None:
+    before = asyncio.all_tasks()
+    root = Path(mkdtemp(prefix="kc", dir="/tmp"))
+    launches = ClaudeLaunches(
+        root, RECORDINGS / "conformance-no_usage-2.1.301.ndjson", "refuse_initialize"
+    )
+    base = make_adapter(launches.workspace, context_for(claude_capture, SystemClock()))
+    adapter = ObservedHarness(base.scope, base.ctx, base.registry, base.environment)
+    sink = HeldStartupStopSink(stop)
+    policy = ConformancePolicy("Forbidden", sink.trace)
+    spec = session_spec(adapter)
+
+    operation = asyncio.create_task(adapter.run(spec, policy, sink, launches))
+    try:
+        async with asyncio.timeout(10):
+            await launches.allocated.wait()
+            launch = launches.launch
+            assert launch is not None
+            await launch.initializing.wait()
+            await sink.observing.wait()
+            sink.observed = True
+            launches.release_pause()
+            if stop is None:
+                with pytest.raises(
+                    Exception, match="^replay initialization refused$"
+                ) as refused:
+                    await operation
+                assert type(refused.value) is Exception
+                assert adapter.outcome is None
+            else:
+                result = await operation
+                assert result.stop_reason == stop
+                assert result.error_class is expected_error
+                assert adapter.outcome is not None
+                assert adapter.outcome.termination == "interrupted"
+            prompt_received = launches.recording.with_suffix(".prompt").exists()
+            assert launch.eof
+            assert launch.report.done()
+            assert launch.pid is not None
+            with pytest.raises(ProcessLookupError):
+                os.kill(launch.pid, 0)
+    finally:
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+        await launches.close()
+
+    assert not sink.future().done()
+    assert not prompt_received
+    assert not root.exists()
+    assert asyncio.all_tasks() == before
+
+
+@pytest.mark.asyncio
 async def test_cli_exit_without_result(claude_capture: Capture) -> None:
     result, outcome, _adapter = await run_lifecycle(claude_capture, "exit")
 

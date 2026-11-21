@@ -50,6 +50,19 @@ def control(
         pause(b"initializing\n")
         send({"type": "system", "subtype": "oversized", "value": "x" * 1_100_000})
         return "initialize"
+    if subtype == "initialize" and version == "refuse_initialize":
+        pause(b"initializing\n")
+        send(
+            {
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": message["request_id"],
+                    "error": "replay initialization refused",
+                },
+            }
+        )
+        return "initialize"
     if subtype == "interrupt":
         os.write(int(sys.argv[2]), b"interrupt\n")
     if ignore and subtype == "interrupt":

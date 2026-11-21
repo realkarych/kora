@@ -79,6 +79,7 @@ class ClaudeSession:
         self.killed = killed
         self.stopped = asyncio.Event()
         self.cause: RunnerCause | None = None
+        self.connecting = False
         self.surface_checked = False
         self.surface_refused = False
         self.bridge = PolicyBridge(
@@ -185,6 +186,12 @@ class ClaudeSession:
                 await launch.kill()
                 cause = self.startup_stop() or "cancel"
                 termination: Termination = "killed_after_grace"
+            elif (
+                self.connecting
+                and type(exchange.exception()) is Exception
+                and (cause := self.startup_stop()) is not None
+            ):
+                termination = "interrupted"
             else:
                 cause, termination = exchange.result()
         finally:
@@ -208,13 +215,13 @@ class ClaudeSession:
     async def exchange(
         self, client: ClaudeSDKClient, launch: Launch, prompt: str
     ) -> tuple[RunnerCause | None, Termination]:
-        connecting = True
         try:
             if (cause := self.startup_stop()) is not None:
                 await launch.kill()
                 return cause, "interrupted"
+            self.connecting = True
             await client.connect()
-            connecting = False
+            self.connecting = False
             info = cast("object", await client.get_server_info())
             if (cause := self.startup_stop()) is not None:
                 return cause, "interrupted"
@@ -227,11 +234,14 @@ class ClaudeSession:
             await client.query(prompt)
             return await self.wait(client, launch)
         except CLIJSONDecodeError:
-            if not connecting or self.startup_stop() is None:
+            was_connecting = self.connecting
+            self.connecting = False
+            if not was_connecting or self.startup_stop() is None:
                 self.stop("oversized_message")
             await launch.kill()
             return self.cause or "oversized_message", "killed"
         except ClaudeSDKError:
+            self.connecting = False
             cause = self.startup_stop()
             return cause, "interrupted" if cause is not None else "none"
 
