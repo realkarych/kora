@@ -384,6 +384,14 @@ async def test_session_result_scan_settles_on_cancel_and_shutdown(
                 assert not held.thread.is_alive()
                 assert held.retained_work() == (0, 0, 0)
                 assert held.retained_prepared() == 0
+                assert not (control / RESULT_DIRECTORY / RESULT_NAME).exists()
+                after_drain = {
+                    event.kind
+                    for event in journal_events(attempt_path / "journal.jsonl")
+                }
+                assert "runner.session_spec" in after_drain
+                assert "runner.session_result" not in after_drain
+                assert "runner.session_failed" not in after_drain
         finally:
             bound.close()
             registry_owner.directory.close()
