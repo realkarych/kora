@@ -3,7 +3,8 @@ import math
 import os
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, cast
 
@@ -15,6 +16,7 @@ from referencing.exceptions import Unresolvable
 
 from kora.ir.json import JsonObject, JsonValue
 from kora.observability import ProcessDiagnostics
+from kora.plugins.runtime.local.workspace import CONTEXT_NAMESPACE
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.loading import load_provider
 from kora.protocols.metadata import ProtocolName
@@ -34,10 +36,12 @@ class RunnerRefused(Exception):
 class InstallationConfiguration:
     harness: Mapping[str, JsonObject]
     policy: Mapping[str, JsonObject]
+    secrets: Mapping[str, JsonObject] = field(default_factory=lambda: {})
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "harness", MappingProxyType(dict(self.harness)))
         object.__setattr__(self, "policy", MappingProxyType(dict(self.policy)))
+        object.__setattr__(self, "secrets", MappingProxyType(dict(self.secrets)))
 
     @classmethod
     def empty(cls) -> "InstallationConfiguration":
@@ -130,7 +134,7 @@ def validate_section(schema: JsonObject, section: JsonObject) -> None:
 
 
 def read_installation(
-    root: DirectoryAnchor, diagnostics: ProcessDiagnostics
+    root: DirectoryAnchor, diagnostics: ProcessDiagnostics, state_root: Path
 ) -> InstallationConfiguration:
     content = installation_bytes(root)
     if content is None:
@@ -149,14 +153,38 @@ def read_installation(
         raise RunnerRefused("installation_malformed") from None
     if (
         not isinstance(value, dict)
-        or set(value) != {"format", "harness", "policy"}
+        or set(value)
+        not in (
+            {"format", "harness", "policy"},
+            {"format", "harness", "policy", "secrets"},
+        )
         or not isinstance(value["format"], str)
     ):
         raise RunnerRefused("installation_malformed")
     harness = provider_sections(value["harness"])
     policy = provider_sections(value["policy"])
+    secrets = provider_sections(value.get("secrets", {}))
     if value["format"] != FORMAT:
         raise RunnerRefused("installation_format")
     validate_sections(ProtocolName.HARNESS, harness, diagnostics)
     validate_sections(ProtocolName.POLICY, policy, diagnostics)
-    return InstallationConfiguration(harness, policy)
+    if any(name != "file" for name in secrets):
+        raise RunnerRefused("installation_provider")
+    validate_sections(ProtocolName.SECRETS, secrets, diagnostics)
+    if "file" in secrets:
+        section = secrets["file"]
+        directory = section.get("directory")
+        prefixes = section.get("namespace_prefixes")
+        if not isinstance(directory, str) or not isinstance(prefixes, dict):
+            raise RunnerRefused("installation_invalid")
+        components = directory.split("/")
+        root_components = str(state_root).split("/")
+        if (
+            set(prefixes) != {CONTEXT_NAMESPACE}
+            or components[0] != ""
+            or any(component in {"", ".", ".."} for component in components[1:])
+            or len(components) <= len(root_components)
+            or components[: len(root_components)] != root_components
+        ):
+            raise RunnerRefused("installation_invalid")
+    return InstallationConfiguration(harness, policy, secrets)
