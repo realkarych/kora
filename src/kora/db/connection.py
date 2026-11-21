@@ -16,7 +16,7 @@ from collections.abc import (
 from contextlib import AsyncExitStack, asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import Protocol, TypeVar, cast
 from weakref import ReferenceType, ref
 
 import aiosqlite
@@ -148,6 +148,14 @@ class DatabaseConfigurationError(ValueError):
 
 class SQLiteSynchronizationError(RuntimeError):
     pass
+
+
+class PostgresDriver(Protocol):
+    PostgresError: type[Exception]
+
+
+class PostgresAdapter(Protocol):
+    asyncpg: PostgresDriver
 
 
 class Dialect(enum.StrEnum):
@@ -762,6 +770,13 @@ class Database:
     @property
     def reader_engine(self) -> AsyncEngine:
         return self._reader
+
+    def postgresql_driver_error(self) -> type[Exception] | None:
+        if self.dialect is not Dialect.POSTGRESQL:
+            return None
+        return cast(
+            "PostgresAdapter", self._writer.dialect.loaded_dbapi
+        ).asyncpg.PostgresError
 
     @property
     def lifecycle(self) -> Lifecycle:
