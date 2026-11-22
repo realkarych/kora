@@ -14,6 +14,8 @@ Status: design draft for owner review (2026-10-15, revised after the design revi
 
 The split between scheduler and worker is a decision (DD-13) and follows the Airflow executor model: the scheduler decides and persists; workers perform the runtime calls and report through the API. There is no direct-SQL path for workers. Every state change goes through the shared transition functions of `kora.engine`: the API calls them for the requests it receives, and the scheduler for its passes and the results it observes (section 12).
 
+The opt-in [qualified PostgreSQL API launch profile](execution-custody-recovery-priority.md#qualified-postgresql-api-launch-profile) constrains the first eligible `kora api` serving process. [ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md) continues to govern the general process split and the worker's HTTP-only boundary.
+
 ## 2. The scheduling loop
 
 The scheduler runs the following passes continuously; each database phase is a short transaction that claims rows, decides, and writes rows. "Pass" means passes 1 to 8 below; clear-downstream is a transition, not a pass, and every transition goes through the shared functions of section 12. External observations and channel effects use separate claim, unlocked call and compare/apply phases (section 16, ADR-0021); no transaction, connection or run/scope lock spans provider hooks, network/storage I/O or secret resolution. Disposable bounded tasks carry no authoritative run state between passes (NFR-1.2). Passes 2 to 8 operate per run under the **run lock** (a transaction-scoped advisory lock on `run.id` on PostgreSQL, the single writer on SQLite), so two scheduler replicas never evaluate the same run concurrently (current contract [ADR-0022](../../docs/decisions/0022-inherited-execution-deadlines.md)); trigger and timeout discovery may claim individual rows, but their authoritative start, expiry and result transitions obey the shared run/scope locks (ADR-0020, ADR-0022). Discovery does not authorize an unlocked state mutation.
@@ -305,7 +307,7 @@ Passes run every 1 s when idle and immediately after a wake-up. A state transiti
 
 The [walking-skeleton acquisition exception](first-slice.md#skeleton-depth) temporarily defers the pinned-graph shared migration lease under explicit maintenance prerequisites. It does not qualify that lease through the generic snapshot; full qualification remains required before first-slice acceptance.
 
-The table describes the standard database paths. A qualified custody installation also applies the [native and pool priority contract](execution-custody-recovery-priority.md).
+The table describes the standard database paths. A qualified custody installation also applies the [native and pool priority contract](execution-custody-recovery-priority.md). The [installed API profile](execution-custody-recovery-priority.md#qualified-postgresql-api-launch-profile) adds the process, dial and retirement prerequisites for opening the qualified PostgreSQL pool.
 
 | concern | Postgres | SQLite (standalone) |
 |---|---|---|

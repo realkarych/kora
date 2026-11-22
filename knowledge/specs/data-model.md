@@ -637,6 +637,8 @@ Before a change that can weaken the profile or change the authority, fence depen
 
 Require current durable proof before provider entry and before relying on settlement, acknowledgment or owner changes to release or compact the last witness. When proof is unavailable, refuse dependent effects and retain exact witnesses and charges. Independently authorized history and recovery observations keep their existing rules. Resolve the exact original operation before treating a failed or lost COMMIT response as an abort or a durable result.
 
+The [exclusive original-writer protocol](execution-custody-native.md#3-original-metadata-commit-protocol) specifies the SQLite continuity witnesses, the PostgreSQL native command observation and timeout admission, and the exact release and settlement owner. A native settings check supplies durability input. It does not prove original-transaction continuity, terminal outcome or physical qualification.
+
 Before activation, qualify the real synchronization and recovery path on both databases. Separate process termination from a system crash after acknowledgment and before an unrelated flush or checkpoint. Verify setting and authority changes, actual checkout and writer release on success, failure, cancellation and shutdown, and mixed ordinary and custody progress. Keep synchronization, checkpoint and replica wait diagnostics separate from the existing hard checks. [#216](https://github.com/realkarych/kora/issues/216) and [#867](https://github.com/realkarych/kora/issues/867) own runtime enforcement, configuration and qualification.
 
 ### Local publication provenance
