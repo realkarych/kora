@@ -1080,10 +1080,11 @@ class ControlServer:
     ) -> bytes:
         started = self._clock.monotonic_ns()
         session = self._session
+        current = partial(self._current_submitter, submitter)
         try:
             if observational:
                 raise delivery_error("execution_unauthorized")
-            await self._executor.run(lambda: self._current_submitter(submitter))
+            await self._executor.run(current)
             if session is None or self._closing is not None:
                 raise delivery_error("workload_busy")
             async with self._completing:
@@ -1094,9 +1095,7 @@ class ControlServer:
                             session.first_closure_ready(retry=True)
                         raise delivery_error("workload_busy")
                     if self._registry.first_grant:
-                        await self._executor.run(
-                            lambda: self._current_submitter(submitter)
-                        )
+                        await self._executor.run(current)
                     if session.completion() is not Completion.COMPLETE:
                         raise delivery_error("workload_busy")
                     record = await self._complete(session, submitter)

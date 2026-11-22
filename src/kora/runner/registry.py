@@ -756,17 +756,16 @@ class Registry:
     def write_first(self, name: str, encoded: bytes, *, replace: bool) -> bool:
         if len(encoded) > (HEAD_LIMIT if replace else RETAINED_LIMIT):
             raise refusal("registry_unavailable")
+        directory = self.directory
         temporary = f"{name}.tmp-local2"
         try:
-            descriptor = open_private_file(self.directory, temporary, os.O_RDONLY)
+            descriptor = open_private_file(directory, temporary, os.O_RDONLY)
         except FileNotFoundError:
             pass
         else:
             os.close(descriptor)
-            unlink_if_present(self.directory, temporary)
-        return write_atomically(
-            self.directory, name, encoded, "local2", replace=replace
-        )
+            unlink_if_present(directory, temporary)
+        return write_atomically(directory, name, encoded, "local2", replace=replace)
 
     def put_evidence(
         self, key: AttemptKey, head: FirstGrantHead, leaf: str, record: bytes

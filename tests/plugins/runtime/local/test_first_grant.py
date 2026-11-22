@@ -694,6 +694,7 @@ async def close_during_attach(
 ) -> None:
     grant, page, ack = binding(runtime, ctx)
     await runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    before_launch = fifo_identities()
     handle = await runtime.submit(
         command_workload(
             runtime,
@@ -718,35 +719,67 @@ async def close_during_attach(
             lambda: runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
         )
     before = sockets_open()
-    readers = fifo_identities()
+    readers = fifo_identities() - before_launch
+    assert len(readers) == 1
     head = root / "registry" / f"{key.name}.json"
     before_head = stamps(head)
 
     os.kill(running.runner.pid, signal.SIGSTOP)
     try:
-        pending = asyncio.create_task(
-            runtime.quiescence(handle, ctx)
-            if completion
-            else runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
-        )
+        pending: list[asyncio.Task[object]] = []
+        clock = StepClock()
+        step = replace(ctx, clock=clock)
+        lock = None
         try:
+            if completion:
+                other = "held-closure-attempt"
+                other_grant, page, other_ack = binding(runtime, ctx, other)
+                await runtime.accept_grant_history(other, other_grant, page, ctx)
+                other_key = runtime.registry.key(other)
+                lock = os.open(root / "registry" / f"{other_key.name}.lock", os.O_RDWR)
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                pending.extend(
+                    asyncio.create_task(
+                        runtime.record_dispatcher_quiescence(
+                            other, other_ack, other_grant, step
+                        )
+                    )
+                    for _ in range(ADMITTED_JOBS - 1)
+                )
+                await until(lambda: len(clock.sleepers) == ADMITTED_JOBS - 1)
+            pending.append(
+                asyncio.create_task(
+                    runtime.quiescence(handle, step)
+                    if completion
+                    else runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, step)
+                )
+            )
             await until(lambda: bool(sockets_open() - before))
             attached = sockets_open() - before
+            if completion:
+                await expect_refusal("registry_busy", runtime.quiescence(handle, step))
+                assert sockets_open() - before == attached
+
             await runtime.close()
-            with pytest.raises(asyncio.CancelledError):
-                await pending
 
             assert sockets_open().isdisjoint(attached)
+            assert readers.isdisjoint(fifo_identities())
             assert runtime.executor.joined
-            assert readers - fifo_identities()
+            outcomes = await asyncio.gather(*pending, return_exceptions=True)
+            assert all(
+                isinstance(outcome, asyncio.CancelledError) for outcome in outcomes
+            )
             assert (
                 root / "registry" / f"{key.name}.first-closure.v1.json"
             ).exists() == completion
             assert stamps(head) == before_head
         finally:
-            if not pending.done():
-                pending.cancel()
-                await asyncio.gather(pending, return_exceptions=True)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if lock is not None:
+                os.close(lock)
     finally:
         if not recorded_exited(identities, running.runner):
             os.kill(running.runner.pid, signal.SIGCONT)

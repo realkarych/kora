@@ -344,6 +344,7 @@ async def spawn_runner(
             finally:
                 os.close(write_end)
             outcome = await read_readiness(read_end, clock, cutoff)
+            return outcome
         finally:
             try:
                 if launcher is not None:
@@ -354,16 +355,11 @@ async def spawn_runner(
                             launcher, clock, kill=outcome is Readiness.TIMEOUT
                         )
             finally:
-                if (
-                    completion is not None
-                    and outcome is Readiness.READY
-                    and launcher is not None
-                    and launcher.closed
-                ):
+                ready = outcome is Readiness.READY
+                if completion and launcher and ready and launcher.closed:
                     completion.reader = read_end
                 else:
                     os.close(read_end)
-        return outcome
     finally:
         launchers.spawning.discard(spawning)
         spawning.set_result(None)

@@ -1220,10 +1220,13 @@ class LocalRuntime:
                 raise refusal("attempt_retired") from None
             raise
 
-    def own_delivery(self, operation: Coroutine[object, object, T]) -> asyncio.Task[T]:
+    def admit_delivery(self) -> None:
         if self._closing is not None:
-            operation.close()
             raise refusal("runtime_closed")
+        if len(self._deliveries) >= ADMITTED_JOBS:
+            raise refusal("registry_busy")
+
+    def own_delivery(self, operation: Coroutine[object, object, T]) -> asyncio.Task[T]:
         task = asyncio.create_task(operation)
         self._deliveries.add(task)
         task.add_done_callback(self._deliveries.discard)
@@ -1253,6 +1256,8 @@ class LocalRuntime:
         runner = model_bytes(entry.runner) if owner is not None else b""
         if owner is not None and runner != model_bytes(self.first_runner(key)[1]):
             raise refusal("lineage_unavailable")
+        if owner is not None:
+            self.admit_delivery()
         try:
             command = quiesce_command(
                 entry.socket_path,
@@ -1273,7 +1278,10 @@ class LocalRuntime:
                     raise refusal("lineage_unavailable")
                 owner.completed = record, closure, runner
             return record
-        except (ListenerRefused, ChannelError, OSError):
+        except ChannelError as error:
+            if owner is not None and error.reason is ChannelFailure.MALFORMED:
+                raise
+        except (ListenerRefused, OSError):
             pass
         except KoraProtocolError as error:
             if owner is not None or error.code != "message_refused":
@@ -1369,8 +1377,7 @@ class LocalRuntime:
             read_delivery(payload, request.request_id, "dispatcher_quiescence_recorded")
 
         with report_first_grant(ctx, "closure"):
-            if len(self._deliveries) >= ADMITTED_JOBS:
-                raise refusal("registry_busy")
+            self.admit_delivery()
             await self.own_delivery(record())
 
     async def _from_completed(
@@ -1897,10 +1904,8 @@ class LocalRuntime:
         process = workload.dispatcher_process
         if process is None or process != self._launch.identity:
             raise rejection("dispatcher_process_mismatch")
-        if (
-            self._launch.first_grant
-            and process.leads_group != self._launch.identity.leads_group
-        ):
+        same_group = process.leads_group == self._launch.identity.leads_group
+        if self._launch.first_grant and not same_group:
             raise rejection("dispatcher_process_mismatch")
         digest = object_digest(workload.execution_request)
         if (
@@ -1983,6 +1988,7 @@ class LocalRuntime:
                     self.close_first_pipe()
 
         if launch.first_grant and pipe is None:
+            self.admit_delivery()
             pipe = self._first_pipe = CompletionPipe(key, nonce)
             task = self.own_delivery(submit_runner(pipe))
             if await observed(task):
