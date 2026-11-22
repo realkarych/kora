@@ -121,7 +121,11 @@ def locked_payload_wheel(
 
 
 def prepare_wheelhouse(
-    output: Path, *, conformance: bool = False, postgres: bool = False
+    output: Path,
+    *,
+    conformance: bool = False,
+    postgres: bool = False,
+    serve: bool = False,
 ) -> None:
     configuration = ProjectManifest.model_validate(
         tomllib.loads((REPOSITORY / "pyproject.toml").read_text())
@@ -135,6 +139,8 @@ def prepare_wheelhouse(
         requirements += configuration.project.optional_dependencies["conformance"]
     if postgres:
         requirements += configuration.project.optional_dependencies["postgres"]
+    if serve:
+        requirements += configuration.project.optional_dependencies["serve"]
     pending = [Requirement(value) for value in requirements]
     seen: dict[str, frozenset[str]] = {}
     while pending:
@@ -142,6 +148,14 @@ def prepare_wheelhouse(
         name = canonicalize_name(requested.name)
         extras = frozenset(requested.extras) | seen.get(name, frozenset())
         if name in seen and seen[name] == extras:
+            continue
+        if name == "kora":
+            seen[name] = extras
+            pending.extend(
+                Requirement(value)
+                for extra in extras
+                for value in configuration.project.optional_dependencies[extra]
+            )
             continue
         distribution = importlib.metadata.distribution(name)
         if (

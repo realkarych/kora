@@ -64,7 +64,7 @@ Under [scheduler §10](scheduler.md#10-standalone-sqlite-versus-postgres) and [#
 
 ## Qualified PostgreSQL API launch profile
 
-[Issue #1753](https://github.com/realkarych/kora/issues/1753) defines the first opt-in profile eligible to host the qualified PostgreSQL pool. [ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md) governs the `kora api` serving entry, scheduler placement and the workers' HTTP-only boundary. This profile constrains qualified pool eligibility within that process model. The general deployment shapes, the SQLite first shipping shape and the project's Linux/macOS and SQLite/PostgreSQL verification obligations retain their existing scope. The launcher, kernel gate, transport adapter and shared pool remain pending implementation and qualification.
+[Issue #1753](https://github.com/realkarych/kora/issues/1753) defines the first opt-in profile eligible to host the qualified PostgreSQL pool. [ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md) governs the `kora api` serving entry, scheduler placement and the workers' HTTP-only boundary. This profile constrains qualified pool eligibility within that process model. The general deployment shapes, the SQLite first shipping shape and the project's Linux/macOS and SQLite/PostgreSQL verification obligations retain their existing scope. The installed launcher under #1755 serves ordinary SQLite. Its Linux startup gate applies only to the PostgreSQL preflight, which refuses before dial or listen. The PostgreSQL transport adapter, shared pool and production launch qualification remain pending.
 
 ### Installed entry and process boundary
 

@@ -14,9 +14,10 @@ from contextlib import ExitStack, redirect_stdout
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import FrameType, TracebackType
-from typing import TYPE_CHECKING, Annotated, TypeVar
+from typing import TYPE_CHECKING, Annotated, TypeVar, cast
 
 import typer
 import typer.main
@@ -70,6 +71,9 @@ from kora.protocols.metadata import parse_config_schema
 from kora.protocols.time import Clock, SystemClock
 
 if TYPE_CHECKING:
+    from kora.db.connection import Database, DatabaseSettings
+    from kora.ir.json import JsonObject
+    from kora.protocols.authentication import Authenticator
     from kora.runner.channels import BoundedChannel
     from kora.runner.filesystem import DirectoryAnchor
     from kora.runner.processes import GatedProcess
@@ -91,6 +95,30 @@ MISSING_COMMAND: str = "a command or --version is required"
 CLIENT_CONFIGURATION_PREFIX: str = "kora: invalid client configuration"
 MCP_EXTRA_REQUIRED: str = "kora: the stdio MCP server requires the kora[mcp] extra"
 MCP_DISTRIBUTIONS: frozenset[str] = frozenset({"mcp", "mcp_types"})
+POSTGRES_SERVING_OVERRIDES: frozenset[str] = frozenset(
+    {
+        "PGDATABASE",
+        "PGGSSLIB",
+        "PGHOST",
+        "PGKRBSRVNAME",
+        "PGPASSFILE",
+        "PGPASSWORD",
+        "PGPORT",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGSSLCERT",
+        "PGSSLCRL",
+        "PGSSLKEY",
+        "PGSSLMAXPROTOCOLVERSION",
+        "PGSSLMINPROTOCOLVERSION",
+        "PGSSLMODE",
+        "PGSSLNEGOTIATION",
+        "PGSSLROOTCERT",
+        "PGTARGETSESSIONATTRS",
+        "PGUSER",
+        "SSLKEYLOGFILE",
+    }
+)
 
 
 class McpServerName(StrEnum):
@@ -665,6 +693,97 @@ def serve_mcp(
     asyncio.run(serve_stdio(server.value, settings, diagnostics))
 
 
+def installed_versions(expected: Mapping[str, str]) -> bool:
+    try:
+        return all(version(name) == required for name, required in expected.items())
+    except PackageNotFoundError:
+        return False
+
+
+def postgres_serving_candidate(
+    settings: "DatabaseSettings", environment: Mapping[str, str]
+) -> bool:
+    query = settings.url.query
+    certificate = query.get("sslrootcert")
+    port = settings.url.port
+    return (
+        installed_versions({"asyncpg": "0.32.0", "SQLAlchemy": "2.1.5"})
+        and settings.url.host == "127.0.0.1"
+        and port is not None
+        and 1 <= port <= 65535
+        and query.keys() <= {"sslmode", "sslrootcert", "target_session_attrs"}
+        and query.get("sslmode") == "verify-full"
+        and query.get("target_session_attrs", "any") == "any"
+        and isinstance(certificate, str)
+        and Path(certificate).is_absolute()
+        and Path(certificate).is_file()
+        and POSTGRES_SERVING_OVERRIDES.isdisjoint(environment)
+    )
+
+
+def serve_api(
+    environment: Mapping[str, str], diagnostics: ProcessDiagnostics, port: int
+) -> int:
+    if not installed_versions(
+        {"uvicorn": "0.54.0", "common-expression-language": "0.10.0"}
+    ):
+        write_stderr("kora: API startup refused (dependency_unavailable)\n")
+        return EXIT_CONFIGURATION
+
+    from kora.api.application import create_application
+    from kora.api.exchange import COMPONENT, ApiExchange
+    from kora.api.serving import ServingRefusal, refuse, serve_sqlite
+    from kora.db.connection import (
+        DatabaseConfigurationError,
+        Dialect,
+        read_database_settings,
+    )
+    from kora.protocols.loading import load_provider
+    from kora.protocols.metadata import ProtocolName
+
+    log = diagnostics.logger(COMPONENT)
+    try:
+        settings = read_database_settings(environment)
+    except DatabaseConfigurationError:
+        return refuse(log, ServingRefusal.DATABASE_CONFIGURATION, EXIT_CONFIGURATION)
+    if settings.dialect is Dialect.POSTGRESQL:
+        from kora.api._linux_serving_barrier import (
+            LinuxServingBarrierError,
+            LinuxServingBarrierRefusal,
+            install_linux_serving_barrier,
+        )
+
+        if not postgres_serving_candidate(settings, environment):
+            return refuse(
+                log, ServingRefusal.POSTGRESQL_PROFILE_UNAVAILABLE, EXIT_CONFIGURATION
+            )
+        try:
+            install_linux_serving_barrier()
+        except LinuxServingBarrierError as error:
+            reason = (
+                ServingRefusal.POSTGRESQL_PROFILE_UNAVAILABLE
+                if error.reason is LinuxServingBarrierRefusal.UNSUPPORTED_PROFILE
+                else ServingRefusal.POSTGRESQL_BARRIER_UNAVAILABLE
+            )
+            return refuse(log, reason, EXIT_CONFIGURATION)
+        return refuse(
+            log, ServingRefusal.POSTGRESQL_ACTIVATION_UNAVAILABLE, EXIT_CONFIGURATION
+        )
+
+    def application(database: "Database") -> ApiExchange:
+        provider = load_provider(
+            ProtocolName.AUTHENTICATION, "static_token", diagnostics
+        )
+        factory = cast(
+            "Callable[[JsonObject, Database], Authenticator]", provider.implementation
+        )
+        return create_application(
+            factory({}, database), diagnostics, SystemClock(), new_instance_id
+        )
+
+    return serve_sqlite(settings, port, log, application)
+
+
 def cel_check() -> CheckResult:
     from kora.cel_eval.binding import BindingUnavailable, load_binding
 
@@ -834,6 +953,12 @@ def compose_application(
         build_plugins_app(InstalledPluginDiscovery(diagnostics)), name="plugins"
     )
 
+    @app.command(name="api", help="Serve the configured local SQLite API.")
+    def serve_api_command(
+        port: Annotated[int, typer.Option("--port", min=0, max=65535)] = 8000,
+    ) -> None:
+        raise typer.Exit(serve_api(environment, diagnostics, port))
+
     @app.command(name="deploy", help="Deploy a compiled graph without command files.")
     def deploy(
         path: Path,
@@ -997,7 +1122,7 @@ def main(
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     environment = os.environ if environ is None else environ
-    for component in ("conformance.lifetime", "client", "mcp"):
+    for component in ("api", "conformance.lifetime", "client", "mcp"):
         CATALOG.register_component(component)
     try:
         settings = read_logging_settings(environment, CATALOG.components())

@@ -62,6 +62,15 @@ def record_finished(report: MigrationReport, started: float) -> MigrationReport:
 OpenDatabase = Callable[[DatabaseSettings], Database]
 
 
+def is_current_revision(connection: Connection) -> bool:
+    return current_revision(connection) == head_revision(alembic_config(connection))
+
+
+async def database_is_at_head(database: Database) -> bool:
+    async with database.read_transaction() as connection:
+        return await connection.run_sync(is_current_revision)
+
+
 async def upgrade_database(
     settings: DatabaseSettings, open_database: OpenDatabase = Database
 ) -> MigrationReport:
@@ -85,6 +94,7 @@ async def upgrade_database(
 __all__ = [
     "MigrationReport",
     "current_revision",
+    "database_is_at_head",
     "schema_differences",
     "upgrade_database",
     "upgrade_to_head",
