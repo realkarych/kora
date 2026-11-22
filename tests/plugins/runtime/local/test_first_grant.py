@@ -1,5 +1,6 @@
 import asyncio
 import fcntl
+import json
 import os
 import subprocess
 import sys
@@ -42,6 +43,7 @@ from kora.protocols.history import (
     record_bytes,
 )
 from kora.protocols.identity import MAX_COUNT, MAX_PID, GrantBinding, ProcessIdentity
+from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelError
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.peers import kernel_source
@@ -58,6 +60,7 @@ from kora.runner.registry import (
     FirstGrantRecord,
     RetainedReference,
     Running,
+    TransitionExecutor,
     Unsubmitted,
     model_bytes,
     runner_argv,
@@ -235,7 +238,21 @@ async def cancel_while_waiting_for_lock(
         os.close(descriptor)
 
 
-async def journal_full(runtime: LocalRuntime, ctx: ProtocolContext, root: Path) -> None:
+def settled_command(log: Path) -> bool:
+    raw = log.read_bytes()
+    records = [json.loads(line) for line in raw[: raw.rfind(b"\n") + 1].splitlines()]
+    return sum(
+        record.get("event") == "runtime.local.capture" for record in records
+    ) == 2 and any(
+        record.get("event") == "runtime.local.seal"
+        and record.get("outcome") == "sealed"
+        for record in records
+    )
+
+
+async def closure_storage_full(
+    runtime: LocalRuntime, ctx: ProtocolContext, root: Path
+) -> None:
     grant, page, ack = binding(runtime, ctx)
     await runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
     handle = await runtime.submit(
@@ -247,21 +264,30 @@ async def journal_full(runtime: LocalRuntime, ctx: ProtocolContext, root: Path) 
         ),
         ctx,
     )
+    await runtime.start(handle, ctx)
     key = runtime.registry.key(ATTEMPT)
     head = runtime.registry.read(key)
     attempt = attempt_directory(root, runtime, ATTEMPT)
+    await until(lambda: settled_command(attempt / "runner.log"))
     fill(attempt)
+
     try:
-        await expect_refusal("journal_unavailable", runtime.start(handle, ctx))
         await expect_refusal(
             "journal_unavailable",
-            runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx),
+            unless_busy(
+                lambda: runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
+            ),
         )
-
-        assert runtime.registry.read(key) == head
-        assert not (root / "registry" / f"{key.name}.first-closure.v1.json").exists()
     finally:
         (attempt / "filler").unlink()
+    await expect_refusal("journal_unavailable", runtime.quiescence(handle, ctx))
+    await expect_refusal(
+        "journal_unavailable",
+        runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx),
+    )
+
+    assert runtime.registry.read(key) == head
+    assert not (root / "registry" / f"{key.name}.first-closure.v1.json").exists()
 
 
 async def exercise(
@@ -360,7 +386,12 @@ async def exercise(
 
     await expect_refusal("workload_conflict", runtime.start(handle, ctx))
     await expect_refusal("workload_conflict", runtime.submit(workload, ctx))
+    spool_before = tuple(sorted((root / "spools").rglob("*")))
+    await expect_refusal(
+        "workload_conflict", anext(runtime.transfer_out(handle, "result", ctx))
+    )
 
+    assert tuple(sorted((root / "spools").rglob("*"))) == spool_before
     assert stamps(head_path, grant_path, closure_path) == attached
     assert isinstance(runtime.registry.entry(key), Running)
     head = runtime.registry.read(key)
@@ -401,6 +432,14 @@ async def exercise(
     assert sentinel.exists()
     assert open_descriptors() == descriptors
     lock_is_free(lock_path)
+
+    canonical_head = head_path.read_bytes()
+    head_path.write_bytes(b'{"format":"local/2",' + canonical_head[1:])
+    await expect_refusal(
+        "lineage_unavailable",
+        runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx),
+    )
+    head_path.write_bytes(canonical_head)
 
     data = closure_path.read_bytes()
     closure_path.unlink()
@@ -444,19 +483,42 @@ async def wrong_launch(
         (*selected[:-2], "foreign-domain", nonce),
         (*selected[:-1], "b" * 32),
         (*selected[:4], "--closure-profile=local/3", *selected[5:]),
+        (*selected[:4], *selected[5:]),
     ]
     for argv in wrong:
         result = await supervised(argv)
         assert result.code == EXIT_FAILED
         assert result.readiness == b""
         assert not (root / "attempts").exists()
-    without_marker = await supervised((*selected[:4], *selected[5:]))
-
-    assert without_marker.code == EXIT_FAILED
-    assert without_marker.readiness == b""
     assert stamps(head) == before
     assert runtime.registry.entry(key) == entry
-    assert len(list(attempt.iterdir())) == 2
+    assert not attempt.exists()
+
+
+async def leave_running(
+    runtime: LocalRuntime, ctx: ProtocolContext, root: Path
+) -> None:
+    grant, page, ack = binding(runtime, ctx)
+    await runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    await runtime.submit(
+        command_workload(
+            runtime,
+            ATTEMPT,
+            (sys.executable, "-I", "-c", "pass"),
+            dispatcher_id=grant.dispatcher_id,
+        ),
+        ctx,
+    )
+    running = runtime.registry.entry(runtime.registry.key(ATTEMPT))
+    assert isinstance(running, Running)
+    request = DispatcherQuiescenceRequest(
+        op="record_dispatcher_quiescence",
+        request_id="observer",
+        grant=grant,
+        acknowledgement=ack,
+    )
+    (root / "observer-request").write_bytes(model_bytes(request))
+    (root / "observer-running").write_bytes(model_bytes(running))
 
 
 async def original_worker(root: Path, sockets: Path, case: str) -> None:
@@ -474,7 +536,9 @@ async def original_worker(root: Path, sockets: Path, case: str) -> None:
             if case == "launch":
                 await wrong_launch(runtime, ctx, root, sockets)
             elif case == "full":
-                await journal_full(runtime, ctx, root)
+                await closure_storage_full(runtime, ctx, root)
+            elif case == "observer":
+                await leave_running(runtime, ctx, root)
             else:
                 await exercise(runtime, ctx, root, discard=case == "lost")
         finally:
@@ -502,33 +566,85 @@ async def original_worker(root: Path, sockets: Path, case: str) -> None:
         assert ("intake", "confirmed", True) in outcomes
         if case in {"normal", "lost"}:
             assert ("closure", "confirmed", True) in outcomes
-        if case != "launch":
+        if case not in {"launch", "observer"}:
             assert ("closure", "refused", True) in outcomes
+
+
+def start_worker(
+    root: Path, sockets: Path, case: str
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tests.plugins.runtime.local.test_first_grant",
+            str(root),
+            str(sockets),
+            case,
+        ],
+        start_new_session=True,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
 
 
 def run_worker(root: Path, case: str) -> subprocess.CompletedProcess[str]:
     with short_directory() as base:
         try:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "tests.plugins.runtime.local.test_first_grant",
-                    str(root),
-                    str(base / "sockets"),
-                    case,
-                ],
-                start_new_session=True,
-                capture_output=True,
-                text=True,
-                timeout=90,
-                check=False,
-            )
+            return start_worker(root, base / "sockets", case)
         finally:
             release_commands(root)
             reap_runners(root)
 
-    return result
+
+@pytest.mark.asyncio
+async def test_first_local_grant_runner_refuses_native_observer(tmp_path: Path) -> None:
+    root = state_root(tmp_path)
+    identities = NativeIdentityReader()
+    executor = TransitionExecutor()
+    with short_directory() as base:
+        try:
+            result = await asyncio.to_thread(
+                start_worker, root, base / "sockets", "observer"
+            )
+            assert result.returncode == 0, result.stderr
+            running = Running.model_validate_json(
+                (root / "observer-running").read_bytes()
+            )
+            request = DispatcherQuiescenceRequest.model_validate_json(
+                (root / "observer-request").read_bytes()
+            )
+            assert recorded_exited(identities, running.submitter.process)
+            assert not recorded_exited(identities, running.runner)
+            key = AttemptKey(request.grant.execution_domain_id, ATTEMPT)
+            head = root / "registry" / f"{key.name}.json"
+            before = stamps(head)
+
+            payload = await attached_request(
+                running.socket_path,
+                running.runner,
+                running.submitter.dispatcher_id,
+                kernel_source(identities),
+                executor,
+                SystemClock(),
+                request.request_id,
+                request,
+                ENVELOPE_BYTES,
+            )
+
+            with pytest.raises(KoraProtocolError) as refused:
+                read_delivery(
+                    payload, request.request_id, "dispatcher_quiescence_recorded"
+                )
+            assert refused.value.code == "execution_unauthorized"
+            assert stamps(head) == before
+            assert not head.with_suffix(".first-closure.v1.json").exists()
+        finally:
+            await executor.close()
+            release_commands(root)
+            reap_runners(root)
 
 
 def test_first_local_grant_closure_replays_across_normal_release(
@@ -558,7 +674,7 @@ def test_first_local_grant_runner_refuses_mismatched_startup(tmp_path: Path) -> 
 
 
 @pytest.mark.host_fixture
-def test_first_local_grant_refuses_a_closed_journal_on_full_disk() -> None:
+def test_first_local_grant_storage_full_fences_normal_completion() -> None:
     with tempfile.TemporaryDirectory(dir=prepared("small-filesystem")) as directory:
         root = state_root(Path(directory))
 

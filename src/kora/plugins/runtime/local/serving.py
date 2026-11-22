@@ -1026,12 +1026,7 @@ class ControlServer:
             saved = registry.linked_closure(key, head, grant)
             if self._first_intent is not None and self._first_intent != ref:
                 raise delivery_error("workload_conflict")
-            if saved is not None:
-                if self._first_intent != ref or model_bytes(saved) != record:
-                    raise delivery_error("workload_conflict")
-                if not self._first_confirmed:
-                    registry.synchronize_evidence(key, "first-closure")
-            else:
+            if not self._first_confirmed:
                 if (
                     not isinstance(self._session, CommandSession)
                     or self._admitted
@@ -1039,15 +1034,18 @@ class ControlServer:
                 ):
                     raise delivery_error("workload_busy")
                 self._session.first_closure_ready()
+            if saved is not None:
+                if self._first_intent != ref or model_bytes(saved) != record:
+                    raise delivery_error("workload_conflict")
+                if not self._first_confirmed:
+                    registry.synchronize_evidence(key, "first-closure")
+            else:
                 links = FirstGrantLinks(grant=head.first_grant.grant, closure=ref)
                 updated = FirstGrantHead.model_validate(
                     {**head.model_dump(), "first_grant": links}
                 )
-                resuming = self._first_intent is not None
                 self._first_intent = ref
-                registry.put_evidence(
-                    key, updated, "first-closure", record, resuming=resuming
-                )
+                registry.put_evidence(key, updated, "first-closure", record)
             self._first_confirmed = True
 
         try:
@@ -1064,13 +1062,26 @@ class ControlServer:
                 request.request_id, delivery_error("submitter_superseded")
             )
         except KoraProtocolError as error:
-            return self._transfer_answer(request.request_id, error)
+            return self._transfer_answer(
+                request.request_id, self._first_storage_error(error)
+            )
         return delivery_envelope(request.request_id, "dispatcher_quiescence_recorded")
+
+    def _first_storage_error(self, error: KoraProtocolError) -> KoraProtocolError:
+        cause, session = error.__cause__, self._session
+        if (
+            self._registry.first_grant
+            and isinstance(session, CommandSession)
+            and isinstance(cause, OSError)
+            and space_error(cause)
+        ):
+            session.fence_transfer()
+            return delivery_error("journal_unavailable")
+        return error
 
     def check_first_completion(self, head: LifecycleHead | None) -> None:
         if self._registry.first_grant and (
-            not self._first_confirmed
-            or not isinstance(head, FirstGrantHead)
+            not isinstance(head, FirstGrantHead)
             or head.first_grant.closure != self._first_intent
         ):
             raise delivery_error("workload_busy")
@@ -1093,12 +1104,15 @@ class ControlServer:
                 record = self._record
                 if record is None:
                     if self._registry.first_grant and not self._first_confirmed:
+                        if isinstance(session, CommandSession):
+                            session.first_closure_ready()
                         raise delivery_error("workload_busy")
                     if session.completion() is not Completion.COMPLETE:
                         raise delivery_error("workload_busy")
                     record = await self._complete(session, submitter)
                     self._record = record
         except KoraProtocolError as error:
+            error = self._first_storage_error(error)
             if error.code == "registry_busy":
                 error = delivery_error("workload_busy")
             if error.code != "workload_busy":

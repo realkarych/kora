@@ -817,9 +817,13 @@ class LocalRuntime:
         ctx: ProtocolContext,
         operation: str,
         check: Callable[[LifecycleHead | None], object] | None = None,
+        on_cancel: Callable[[Applied], None] | None = None,
     ) -> Applied:
         applied = await self.executor.locked(
-            lambda: self.registry.try_transition(key, decide, check), ctx, operation
+            lambda: self.registry.try_transition(key, decide, check),
+            ctx,
+            operation,
+            on_cancel,
         )
         if applied.transition.refusal is not None:
             raise refusal(applied.transition.refusal)
@@ -884,35 +888,34 @@ class LocalRuntime:
             if entry.gate_closed or expired(entry.deadline, ctx.clock.now()):
                 raise refusal("deadline_expired")
             raise refusal("workload_conflict")
-        if dispatcher is not None and dispatcher != record.grant.dispatcher_id:
+        if dispatcher not in (None, record.grant.dispatcher_id):
             raise refusal("workload_conflict")
 
-    async def first_state(
+    async def locked_head(
         self,
         key: AttemptKey,
         ctx: ProtocolContext,
-    ) -> FirstGrantState:
+        check: Callable[[LifecycleHead | None], T],
+    ) -> T:
         return await self.executor.locked(
             lambda: self.registry.under_lock(
-                key, lambda: self.checked_first(key, self.registry.read(key), ctx)
+                key, lambda: check(self.registry.read(key))
             ),
             ctx,
             "first_grant_state",
         )
 
-    async def check_first_effect(
-        self, key: AttemptKey, ctx: ProtocolContext, dispatcher: str | None = None
-    ) -> None:
+    async def first_state(
+        self, key: AttemptKey, ctx: ProtocolContext
+    ) -> FirstGrantState:
+        return await self.locked_head(
+            key, ctx, lambda head: self.checked_first(key, head, ctx)
+        )
+
+    async def check_first_effect(self, key: AttemptKey, ctx: ProtocolContext) -> None:
         if self._launch.first_grant:
-            await self.executor.locked(
-                lambda: self.registry.under_lock(
-                    key,
-                    lambda: self.first_effect(
-                        key, self.registry.read(key), ctx, dispatcher
-                    ),
-                ),
-                ctx,
-                "first_grant_effect",
+            await self.locked_head(
+                key, ctx, lambda head: self.first_effect(key, head, ctx)
             )
 
     def singleton(
@@ -1002,7 +1005,6 @@ class LocalRuntime:
             self.singleton(key, current_grant, snapshot, ctx)
             head = self.registry.read(key)
             owner = self._first_grants.get(key)
-            resuming = owner is not None
             if owner is None:
                 if head is not None:
                     raise refusal("lineage_unavailable")
@@ -1020,9 +1022,7 @@ class LocalRuntime:
                     ),
                     first_grant=FirstGrantLinks(grant=reference, closure=None),
                 )
-                self.registry.put_evidence(
-                    key, next_head, "first-grant", record, resuming=resuming
-                )
+                self.registry.put_evidence(key, next_head, "first-grant", record)
             else:
                 if (
                     not isinstance(head, FirstGrantHead)
@@ -1240,8 +1240,6 @@ class LocalRuntime:
             raise refusal("attempt_retired")
         if not isinstance(entry, Running):
             raise refusal("runner_starting")
-        if owner is not None and closure is None:
-            raise delivery_error("workload_busy")
         try:
             record = await quiesce_command(
                 entry.socket_path,
@@ -1278,7 +1276,12 @@ class LocalRuntime:
             raise refusal("runtime_closed")
 
         with report_first_grant(ctx, "closure"):
-            await self._record_dispatcher_quiescence(key, acknowledgement, grant, ctx)
+            task = asyncio.create_task(
+                self._record_dispatcher_quiescence(key, acknowledgement, grant, ctx)
+            )
+            self._deliveries.add(task)
+            task.add_done_callback(self._deliveries.discard)
+            await task
 
     async def _record_dispatcher_quiescence(
         self,
@@ -1287,10 +1290,8 @@ class LocalRuntime:
         grant: GrantBinding,
         ctx: ProtocolContext,
     ) -> None:
-        def checked() -> Running | None:
-            head, retained, owner, saved = self.checked_first(
-                key, self.registry.read(key), ctx
-            )
+        def checked(head: LifecycleHead | None) -> Running | None:
+            head, retained, owner, saved = self.checked_first(key, head, ctx)
             if model_bytes(retained.grant) != model_bytes(grant):
                 raise refusal("workload_conflict")
             if isinstance(head.entry, Running):
@@ -1310,11 +1311,7 @@ class LocalRuntime:
                 raise refusal("workload_conflict")
             return None
 
-        running = await self.executor.locked(
-            lambda: self.registry.under_lock(key, checked),
-            ctx,
-            "record_dispatcher_quiescence",
-        )
+        running = await self.locked_head(key, ctx, checked)
         if running is None:
             return
         request = DispatcherQuiescenceRequest(
@@ -1645,6 +1642,8 @@ class LocalRuntime:
         key = self.key_of(handle, ctx)
         if self._closing is not None:
             raise refusal("runtime_closed")
+        if gated:
+            await self.check_first_effect(key, ctx)
         if len(self._output_pulls) >= OUTPUT_PULLS:
             raise delivery_error("workload_busy")
         deadline = ctx.clock.monotonic_ns() + MESSAGE_PROGRESS_NS
@@ -1884,7 +1883,6 @@ class LocalRuntime:
         key = self.key(workload.attempt_id, ctx)
         if self._launch.first_grant and workload.kind != "command":
             raise refusal("workload_conflict")
-        await self.check_first_effect(key, ctx, workload.dispatcher_id)
         digest = await self.executor.run(lambda: self.checked_digest(workload, ctx))
         logical_digest = await self.executor.run(lambda: workload_digest(workload))
         launch = self._launch
@@ -1963,7 +1961,7 @@ class LocalRuntime:
         submitter = Submitter(
             dispatcher_id=workload.dispatcher_id, process=self._launch.identity
         )
-        await self.check_first_effect(key, ctx, submitter.dispatcher_id)
+        await self.check_first_effect(key, ctx)
         for attempt in range(2):
             await self.transition(
                 key,
@@ -2104,8 +2102,13 @@ class LocalRuntime:
                 {"foreign": progress.foreign},
             )
         now = ctx.clock.now()
+
+        def confirmed(applied: Applied) -> None:
+            if owner is not None and applied.transition.entry is not None:
+                owner.released = True
+
         try:
-            await self.transition(
+            applied = await self.transition(
                 key,
                 lambda current: released_cell(current, runner, now),
                 ctx,
@@ -2113,12 +2116,12 @@ class LocalRuntime:
                 (lambda head: self.checked_first(key, head, ctx))
                 if owner is not None
                 else None,
+                confirmed,
             )
         except KoraProtocolError:
             self._report_release(ctx, started, "refused", progress)
             raise
-        if owner is not None:
-            owner.released = True
+        confirmed(applied)
         self._report_release(ctx, started, "released", progress)
 
     def _release_files(self, key: AttemptKey) -> ReleaseProgress:
@@ -2164,9 +2167,6 @@ class LocalRuntime:
             lambda entry: retire_cell(entry, key, retirement_id, stopped_at),
             ctx,
             "retire",
-            (lambda head: self.checked_first(key, head, ctx))
-            if self._launch.first_grant
-            else None,
         )
         entry = None if applied.head is None else applied.head.entry
         if isinstance(entry, Starting) and entry.fence is not None:

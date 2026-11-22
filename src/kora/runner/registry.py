@@ -296,16 +296,8 @@ class FirstGrantLinks(BoundaryModel):
     @model_validator(mode="after")
     def bounded(self) -> Self:
         closure_size = 0 if self.closure is None else self.closure.size
-        if (
-            self.grant.size
-            + closure_size
-            + len(
-                canonical_bytes(
-                    {"first_grant": parse_json_object(self.model_dump(mode="json"))}
-                )
-            )
-            > RETAINED_LIMIT
-        ):
+        index_size = len(model_bytes(self)) + len(b'{"first_grant":}')
+        if self.grant.size + closure_size + index_size > RETAINED_LIMIT:
             raise ValueError("retained records exceed their bound")
         return self
 
@@ -694,6 +686,8 @@ class Registry:
             key.attempt_id,
         ):
             raise refusal("lineage_unavailable")
+        if isinstance(head, FirstGrantHead) and model_bytes(head) != encoded:
+            raise refusal("lineage_unavailable")
         return head
 
     def entry(self, key: AttemptKey) -> Entry | None:
@@ -730,6 +724,8 @@ class Registry:
         )
 
     def write_first(self, name: str, encoded: bytes, *, replace: bool) -> bool:
+        if len(encoded) > (HEAD_LIMIT if replace else RETAINED_LIMIT):
+            raise refusal("registry_unavailable")
         temporary = f"{name}.tmp-local2"
         try:
             descriptor = open_private_file(self.directory, temporary, os.O_RDONLY)
@@ -743,36 +739,23 @@ class Registry:
         )
 
     def put_evidence(
-        self,
-        key: AttemptKey,
-        head: FirstGrantHead,
-        leaf: str,
-        record: bytes,
-        *,
-        resuming: bool,
+        self, key: AttemptKey, head: FirstGrantHead, leaf: str, record: bytes
     ) -> None:
-        encoded = model_bytes(head)
         name = f"{key.name}.{leaf}.v1.json"
         try:
             if not self.write_first(name, record, replace=False):
-                if (
-                    not resuming
-                    or read_private_file(self.directory, name, len(record)) != record
-                ):
-                    raise refusal("workload_conflict")
-                self.sync_file(name)
-                synchronize(self.directory.descriptor)
-            self.write_first(f"{key.name}.json", encoded, replace=True)
-        except (OSError, FilesystemError):
-            raise refusal("registry_unavailable") from None
+                raise refusal("workload_conflict")
+            self.write_first(f"{key.name}.json", model_bytes(head), replace=True)
+        except (OSError, FilesystemError) as error:
+            raise refusal("registry_unavailable") from error
 
     def synchronize_evidence(self, key: AttemptKey, leaf: str) -> None:
         try:
             for name in (f"{key.name}.{leaf}.v1.json", f"{key.name}.json"):
                 self.sync_file(name)
             synchronize(self.directory.descriptor)
-        except (OSError, FilesystemError):
-            raise refusal("registry_unavailable") from None
+        except (OSError, FilesystemError) as error:
+            raise refusal("registry_unavailable") from error
 
     def sync_file(self, name: str) -> None:
         descriptor = open_private_file(self.directory, name, os.O_RDONLY)
@@ -863,8 +846,10 @@ class Registry:
                 self.directory, name, encoded, self.new_nonce(), replace=True
             )
             return Applied(RegistryHead.model_validate_json(encoded), transition)
-        except (OSError, FilesystemError, ValueError):
-            raise refusal("registry_unavailable") from None
+        except (OSError, FilesystemError, ValueError) as error:
+            raise refusal("registry_unavailable") from (
+                error if self.first_grant else None
+            )
 
 
 DOMAIN_LIMIT: Final[int] = 1048576

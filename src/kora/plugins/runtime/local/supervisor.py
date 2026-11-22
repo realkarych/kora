@@ -458,15 +458,16 @@ def run(
     harden()
     try:
         arguments = parsed_arguments(argv)
-        if arguments.first_grant:
-            with ExitStack() as resources:
-                root = open_local_directory(arguments.state_root)
-                resources.callback(root.close)
-                registry = startup_registry(root, arguments)
-                resources.callback(registry.directory.close)
-                registration_head(
-                    registry, registry.key(arguments.attempt_id), arguments
-                )
+        with ExitStack() as resources:
+            root = open_local_directory(arguments.state_root)
+            resources.callback(root.close)
+            registry = startup_registry(root, arguments)
+            resources.callback(registry.directory.close)
+            key = registry.key(arguments.attempt_id)
+            if arguments.first_grant:
+                registration_head(registry, key, arguments)
+            else:
+                registry.read(key)
         attempt = attempt_directory(arguments)
         try:
             faulthandler.enable(append_only(attempt, "runner.crash"))
