@@ -7,6 +7,7 @@ from pathlib import Path
 from kora.conformance.capture import Capture
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import ComponentLogger
+from kora.plugins.runtime.local.agent import AgentSession
 from kora.plugins.runtime.local.capture import CaptureIO
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
@@ -101,6 +102,7 @@ async def delivery_server(
     decoder: Callable[[bytearray], Workload] = decoded_workload,
     identities: IdentityReader | None = None,
     command: CommandSession | None = None,
+    agent: AgentSession | None = None,
     server_type: type[ControlServer] = ControlServer,
     workload: Callable[[LocalRuntime], Workload] | None = None,
 ) -> AsyncGenerator[DeliveryServer]:
@@ -123,7 +125,7 @@ async def delivery_server(
         bound = rebound(sockets, "delivery")
         entry = Running(
             state="running",
-            deadline=None,
+            deadline=work.deadline,
             gate_closed=False,
             request_digest=work.execution_request_digest,
             workload_digest=workload_digest(work),
@@ -145,6 +147,7 @@ async def delivery_server(
             identities or reader,
             decoder=decoder,
             session=command,
+            agent=agent,
         )
         server.start()
         try:

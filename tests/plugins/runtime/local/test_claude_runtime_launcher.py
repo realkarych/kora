@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -11,23 +12,46 @@ from pydantic import BaseModel, ConfigDict, PositiveInt
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.ir.config import NodeLimits
-from kora.ir.json import JsonObject, parse_json_object
+from kora.ir.cost import UsageCoverage
+from kora.ir.json import JsonObject, JsonValue, parse_json_object
+from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.harness.claude.configuration import (
     CLI_VERSION,
     ClaudeEnvironmentConfiguration,
 )
 from kora.plugins.harness.claude.options import session_options
+from kora.plugins.runtime.local.completed import recorded_exited
+from kora.plugins.runtime.local.control import observe_session
 from kora.plugins.runtime.local.placements import PLACEMENTS
-from kora.protocols.harness import Placement
-from kora.protocols.runtime import SessionResultObservation
+from kora.plugins.runtime.local.runtime import LocalRuntime
+from kora.protocols.common import ProtocolContext
+from kora.protocols.harness import (
+    DenialSample,
+    OutputCandidate,
+    Placement,
+    SessionResult,
+    UnconfirmedSample,
+)
+from kora.protocols.identity import Handle
+from kora.protocols.runtime import (
+    SessionFailedObservation,
+    SessionObservation,
+    SessionResultObservation,
+)
+from kora.protocols.secret_value import registered_forms
+from kora.runner.identity import NativeIdentityReader
+from kora.runner.peers import kernel_source
+from kora.runner.registry import CompletedResult, ControlFileRef, Running
+from kora.runner.session_result import RESULT_DIRECTORY, RESULT_NAME, digest_of
 from tests.plugins.runtime.local.test_agent_credentials import KEY, key_file
 from tests.plugins.runtime.local.test_agent_session import (
     agent_fields,
     agent_runtime,
     sealed,
 )
-from tests.plugins.runtime.local.test_command import attempt_directory
+from tests.plugins.runtime.local.test_command import attempt_directory, journal_events
 from tests.plugins.runtime.local.test_command_observation import unless_busy
+from tests.plugins.runtime.local.test_completion import completed_entry
 from tests.plugins.runtime.local.test_production_sources import CLAUDE, file_sections
 from tests.support.local_peers import until
 from tests.support.local_runners import submitted
@@ -48,6 +72,134 @@ class ReplayObservation(BaseModel):
     argv: list[str]
     pid: PositiveInt
     launcher_pid: PositiveInt
+
+
+@dataclass(frozen=True)
+class TerminalReplay:
+    value: JsonValue
+    matches: bool = False
+
+    def excluded_content(self) -> tuple[str, ...]:
+        forms = registered_forms(KEY)
+        if not self.matches:
+            return forms
+        original = canonical_bytes(self.original().model_dump(mode="json"))
+        return (*forms, digest_of(original))
+
+    def original(self) -> SessionResultObservation:
+        return SessionResultObservation(
+            kind="result",
+            result=SessionResult(
+                harness="claude",
+                session_id="sess-replay-1",
+                installed_version=CLI_VERSION,
+                billing_class="api_key",
+                stop_reason="completed",
+                terminal_reason=None,
+                api_error_status=None,
+                error_class=None,
+                error_summary=None,
+                output=OutputCandidate(source="result_text", value=self.value),
+                output_diagnostic=None,
+                usage=(),
+                usage_coverage=UsageCoverage(
+                    version=1,
+                    observation_id=None,
+                    observation_sequence=None,
+                    observed_at=None,
+                    completeness="unavailable",
+                    attribution_gap=False,
+                    observation_gap=False,
+                ),
+                turns=1,
+                denials=DenialSample(items=(), total=0),
+                denials_complete=True,
+                unconfirmed_calls=UnconfirmedSample(items=(), total=0),
+                policy_bypass=False,
+            ),
+            cause=None,
+            journal_complete=True,
+        )
+
+
+async def checked_replay(
+    runtime: LocalRuntime,
+    handle: Handle,
+    ctx: ProtocolContext,
+    root: Path,
+    attempt: Path,
+    replay: TerminalReplay,
+    live: SessionObservation,
+) -> None:
+    original = replay.original()
+    expected = (
+        SessionFailedObservation(kind="session_failed", code="secret_leak")
+        if replay.matches
+        else original
+    )
+    payload = canonical_bytes(expected.model_dump(mode="json"))
+    reference = ControlFileRef(
+        name=RESULT_NAME, size=len(payload), digest=digest_of(payload)
+    )
+    key = runtime.key_of(handle, ctx)
+    running = await runtime.entry(key)
+    assert isinstance(running, Running)
+    reader = NativeIdentityReader()
+    registry = root / "registry" / f"{key.name}.json"
+    path = attempt / "control" / RESULT_DIRECTORY / RESULT_NAME
+
+    live_reference = await observe_session(
+        running.socket_path,
+        running.runner,
+        running.submitter.dispatcher_id,
+        kernel_source(reader),
+        runtime.executor,
+        ctx.clock,
+        "replay-observation",
+    )
+    live_bytes = path.read_bytes()
+    live_registry = registry.read_bytes()
+    quiescence = await unless_busy(lambda: runtime.quiescence(handle, ctx))
+    completed = completed_entry(runtime)
+    await until(lambda: recorded_exited(reader, completed.runner))
+    historical = await runtime.session_observation(handle, ctx)
+    historical_bytes = path.read_bytes()
+    historical_registry = registry.read_bytes()
+    runner_log = (attempt / "runner.log").read_bytes()
+    journal_path = attempt / "journal.jsonl"
+    journal = journal_path.read_bytes()
+    records = [
+        (event.kind, event.data)
+        for event in journal_events(journal_path)
+        if event.kind in ("runner.session_result", "runner.session_failed")
+    ]
+
+    assert live == historical == expected
+    assert live_bytes == historical_bytes == payload
+    assert live_reference == reference
+    assert completed.result == CompletedResult(kind="agent", ref=reference)
+    assert completed.quiescence == quiescence
+    assert completed.runner == running.runner
+    metadata: JsonObject = {"digest": reference.digest, "size": reference.size}
+    if replay.matches:
+        assert records == [
+            ("runner.session_failed", {**metadata, "code": "secret_leak"})
+        ]
+    else:
+        assert records == [("runner.session_result", metadata)]
+    assert b"captured [redacted]" in journal
+    assert all(
+        value.encode() not in content
+        for value in replay.excluded_content()
+        for content in (
+            live_bytes,
+            historical_bytes,
+            live_registry,
+            historical_registry,
+            runner_log,
+            journal,
+        )
+    )
 
 
 def process_absent(pid: int) -> bool:
@@ -71,7 +223,7 @@ def finished_sessions(attempt: Path) -> list[JsonObject]:
 
 
 async def replay_session(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path, kora_capture: Capture, *, terminal: TerminalReplay | None = None
 ) -> tuple[Path, Path, ReplayObservation, str]:
     directory = Path(__file__).parents[2] / "harness" / "claude"
     recording = tmp_path / "recording.ndjson"
@@ -81,6 +233,17 @@ async def replay_session(
         ).read_bytes()
     )
     frames = recording.read_text().splitlines()
+    assistant: JsonObject = {
+        "id": "credential-turn",
+        "model": "claude-sonnet-4-5",
+        "content": [{"type": "text", "text": "captured " + KEY}],
+    }
+    if terminal is None:
+        assistant["usage"] = {"input_tokens": 1, "output_tokens": 1}
+    else:
+        message = parse_json_object(json.loads(frames[-1]))
+        message["result"] = json.dumps(terminal.value, ensure_ascii=False)
+        frames[-1] = json.dumps(message, ensure_ascii=False)
     frames.insert(
         1,
         json.dumps(
@@ -88,12 +251,7 @@ async def replay_session(
                 "type": "assistant",
                 "uuid": "credential-turn",
                 "session_id": "sess-replay-1",
-                "message": {
-                    "id": "credential-turn",
-                    "model": "claude-sonnet-4-5",
-                    "content": [{"type": "text", "text": "captured " + KEY}],
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
-                },
+                "message": assistant,
             }
         ),
     )
@@ -149,6 +307,8 @@ async def replay_session(
         await unless_busy(lambda: runtime.start(handle, ctx))
         result = await asyncio.wait_for(sealed(runtime, handle, ctx), 30)
         attempt = attempt_directory(root, runtime, "attempt-1")
+        if terminal is not None:
+            await checked_replay(runtime, handle, ctx, root, attempt, terminal, result)
         token = (attempt / "attempt.token").read_text()
         candidate = attempt / "candidate"
         placements: dict[Placement, Path] = {
@@ -189,9 +349,10 @@ async def replay_session(
         finished = finished_sessions(attempt)
         journal = (attempt / "journal.jsonl").read_text()
 
-    assert isinstance(result, SessionResultObservation)
-    assert result.result.stop_reason == "completed"
-    assert result.cause is None
+    if terminal is None:
+        assert isinstance(result, SessionResultObservation)
+        assert result.result.stop_reason == "completed"
+        assert result.cause is None
     assert observed.pid != observed.launcher_pid
     assert process_absent(observed.pid)
     assert process_absent(observed.launcher_pid)
@@ -230,3 +391,23 @@ async def test_configured_credential_stays_in_cli_environment(
     assert "ANTHROPIC_API_KEY" not in json.loads(runner_environment)
     assert "captured [redacted]" in journal
     assert KEY not in journal
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        TerminalReplay({"answer": "[redacted]"}),
+        TerminalReplay({"clean": ["é\\\n", True, -0.0]}),
+        TerminalReplay(None),
+        TerminalReplay({"answer": KEY}, matches=True),
+    ],
+    ids=["already-masked", "clean", "null", "registered-match"],
+)
+@pytest.mark.asyncio
+async def test_configured_file_credential_protects_live_and_completed_result(
+    tmp_path: Path, kora_capture: Capture, terminal: TerminalReplay
+) -> None:
+    await replay_session(tmp_path, kora_capture, terminal=terminal)
+    diagnostics = json.dumps(kora_capture.finish(), ensure_ascii=False)
+
+    assert all(value not in diagnostics for value in terminal.excluded_content())

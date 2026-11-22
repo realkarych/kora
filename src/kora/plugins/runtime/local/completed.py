@@ -33,7 +33,12 @@ from kora.runner.registry import (
     ControlFileRef,
     JournalRecordRef,
 )
-from kora.runner.session_result import ResultFile, ResultUnreadable, read_observation
+from kora.runner.session_result import (
+    LEGACY_RESULT_NAME,
+    ResultFile,
+    ResultUnreadable,
+    read_observation,
+)
 
 RESULT_DIRECTORY: Final[str] = "result"
 CONTROL_DIRECTORY: Final[str] = "control"
@@ -109,6 +114,8 @@ def control_file(attempt: DirectoryAnchor, ref: ControlFileRef) -> bytes:
 
 
 def sealed_session(attempt: DirectoryAnchor, ref: ControlFileRef) -> SessionObservation:
+    if ref.name == LEGACY_RESULT_NAME:
+        raise delivery_error("session_unobserved")
     try:
         control = open_private_directory(attempt, CONTROL_DIRECTORY)
     except (OSError, FilesystemError):

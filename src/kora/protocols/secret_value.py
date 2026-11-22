@@ -91,6 +91,12 @@ class SecretScope:
         for registration in registrations:
             registration.release()
 
+    def result_spellings(self) -> tuple[str, ...]:
+        with self._lock:
+            if self._released:
+                raise SecretAdmissionError("the secret scope is released")
+            return tuple(self._registrations)
+
     def registered_count(self) -> int:
         with self._lock:
             return len(self._registrations)

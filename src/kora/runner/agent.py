@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Final, Protocol
+from typing import Annotated, Final, Literal, Protocol
 
 from pydantic import Field, StrictInt, StrictStr, StringConstraints, ValidationError
 
@@ -37,19 +37,29 @@ from kora.protocols.runtime import (
     SessionResultObservation,
     Workload,
 )
+from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceRef
 from kora.runner.calls import TRACKING_CEILING
 from kora.runner.filesystem import DirectoryAnchor, FilesystemError
 from kora.runner.journal import SYNC_DEADLINE_NS, JournalAppendOutcome
 from kora.runner.liveness import watch_liveness
+from kora.runner.native_io import (
+    NativeExecutor,
+    NativeIOBusy,
+    NativeIOClosed,
+    NativeIOUnresolved,
+)
 from kora.runner.session_result import (
+    PreparedObservation,
     ResultFile,
-    ResultTooLarge,
     digest_of,
     discard_observation,
+    prepare_observation,
+    read_observation,
     write_observation,
 )
+from kora.runner.session_result_encoding import ResultPreparationStopped
 from kora.runner.sink import JournalWriter, RunnerSink, settled_by
 
 INTERRUPT_GRACE_NS: Final[int] = 30 * NANOSECONDS_PER_SECOND
@@ -167,6 +177,52 @@ def refusing_launches(_sink: RunnerSink) -> LaunchContext:
     return RefusingLaunches()
 
 
+ResultPreparation = Callable[
+    [SessionObservation, tuple[str, ...], threading.Event], PreparedObservation
+]
+PreparationOutcome = PreparedObservation | Literal["stopped"]
+
+
+def invoke_preparation(
+    operation: Callable[[], PreparedObservation],
+) -> PreparationOutcome:
+    try:
+        return operation()
+    except ResultPreparationStopped:
+        return "stopped"
+
+
+class NativeResultWork:
+    def __init__(self) -> None:
+        self._executor: NativeExecutor | None = NativeExecutor(workers=1, admitted=1)
+        self.stop = threading.Event()
+
+    @property
+    def settled(self) -> bool:
+        return self._executor is None
+
+    async def prepare(
+        self, operation: Callable[[], PreparedObservation]
+    ) -> PreparationOutcome:
+        executor = self._executor
+        if executor is None:
+            raise NativeIOClosed
+        return await executor.run_nowait(lambda: invoke_preparation(operation))
+
+    async def close(self) -> None:
+        executor = self._executor
+        if executor is None:
+            return
+        try:
+            await executor.close()
+        except NativeIOUnresolved:
+            if not executor.joined:
+                raise
+        finally:
+            if executor.joined:
+                self._executor = None
+
+
 @dataclass(frozen=True)
 class HostServices:
     resolver: HarnessResolver
@@ -176,6 +232,8 @@ class HostServices:
     clock: Clock
     log: ComponentLogger
     launches: Callable[[RunnerSink], LaunchContext] = refusing_launches
+    secret_scope: SecretScope | None = None
+    prepare_result: ResultPreparation = prepare_observation
 
 
 @dataclass(frozen=True)
@@ -210,7 +268,8 @@ class AgentHost:
         self._session: Session | None = None
         self._fenced = asyncio.Event()
         self._sealed: ResultFile | None = None
-        self._observation: SessionObservation | None = None
+        self._has_result = False
+        self._result_work: NativeResultWork | None = None
 
     def start(self, workload: Workload, workspace: WorkspaceRef) -> None:
         if self._session is not None or self._fenced.is_set():
@@ -305,22 +364,29 @@ class AgentHost:
         if sink.omitted():
             self._services.log.emit(JOURNAL_GAP, omitted=sink.omitted())
         if not ended:
-            self._seal(
-                SessionFailedObservation(kind="session_failed", code="kill_unconfirmed")
+            await self._finalize(
+                SessionFailedObservation(
+                    kind="session_failed", code="kill_unconfirmed"
+                ),
+                sink,
+                fixed=True,
             )
             return
         try:
             result = run.result()
         except KoraProtocolError as error:
-            self._seal(SessionFailedObservation(kind="session_failed", code=error.code))
+            await self._finalize(
+                SessionFailedObservation(kind="session_failed", code=error.code), sink
+            )
             return
-        self._seal(
+        await self._finalize(
             SessionResultObservation(
                 kind="result",
                 result=result,
                 cause=sink.cause(),
                 journal_complete=complete,
-            )
+            ),
+            sink,
         )
 
     async def _cancel_timer(self, timer: "asyncio.Task[None]") -> None:
@@ -367,44 +433,122 @@ class AgentHost:
             fenced.cancel()
             grace.cancel()
 
-    def _seal(self, observation: SessionObservation) -> None:
+    def _result_deadline_passed(self) -> bool:
+        session = self._session
+        deadline = None if session is None else session.deadline
+        return (
+            deadline is not None
+            and self._services.clock.monotonic_ns() >= deadline.interrupt_at_ns
+        )
+
+    def _result_deadline_due(self, sink: RunnerSink) -> bool:
+        if not self._result_deadline_passed():
+            return False
+        sink.terminate("deadline")
+        return True
+
+    async def _stop_expired_result(
+        self, deadline: LocalThresholds, work: NativeResultWork, sink: RunnerSink
+    ) -> None:
+        await self._services.clock.sleep_until(deadline.interrupt_at_ns)
+        sink.terminate("deadline")
+        work.stop.set()
+
+    async def _finalize(
+        self, observation: SessionObservation, sink: RunnerSink, *, fixed: bool = False
+    ) -> None:
         log = self._services.log
         with self._lock:
             if self._fenced.is_set():
                 log.emit(SESSION_FAILED, code="fenced")
                 return
+            if self._result_deadline_due(sink):
+                log.emit(SESSION_FAILED, code="deadline_expired")
+                return
+            if self._result_work is not None:
+                raise RuntimeError("the session result already has an owner")
+            work = NativeResultWork()
+            self._result_work = work
+        deadline = self._started().deadline
+        timer = (
+            None
+            if deadline is None
+            else asyncio.create_task(self._stop_expired_result(deadline, work, sink))
+        )
+        try:
+            scope = self._services.secret_scope
+            forms = () if fixed or scope is None else scope.result_spellings()
             try:
-                sealed, written = self._written(observation)
+                prepared = await work.prepare(
+                    lambda: self._services.prepare_result(observation, forms, work.stop)
+                )
+            finally:
+                forms = ()
+            if prepared == "stopped":
+                code = "fenced" if self._fenced.is_set() else "deadline_expired"
+                log.emit(SESSION_FAILED, code=code)
+            else:
+                try:
+                    self._seal(prepared, sink)
+                finally:
+                    del prepared
+        except (NativeIOBusy, NativeIOClosed, NativeIOUnresolved):
+            log.emit(SESSION_FAILED, code="result_unwritten")
+        finally:
+            try:
+                if timer is not None:
+                    await self._cancel_timer(timer)
+            finally:
+                await work.close()
+
+    async def drain_result_work(self) -> None:
+        work = self._result_work
+        if work is not None:
+            await work.close()
+
+    def result_work_settled(self) -> bool:
+        work = self._result_work
+        return work is None or work.settled
+
+    def _seal(self, prepared: PreparedObservation, sink: RunnerSink) -> None:
+        log = self._services.log
+        with self._lock:
+            if self._fenced.is_set():
+                log.emit(SESSION_FAILED, code="fenced")
+                return
+            if self._result_deadline_due(sink):
+                log.emit(SESSION_FAILED, code="deadline_expired")
+                return
+            try:
+                written = write_observation(self._control, prepared)
             except (OSError, FilesystemError):
                 log.emit(SESSION_FAILED, code="result_unwritten")
                 return
-            outcome = self._journal.append_outcome(*journal_record(sealed, written))
+            if self._result_deadline_due(sink):
+                log.emit(SESSION_FAILED, code="deadline_expired")
+                return
+            outcome = self._journal.append_outcome(*journal_record(prepared, written))
             if outcome is not JournalAppendOutcome.DURABLE:
                 self._discard()
                 log.emit(SESSION_FAILED, code="result_unsealed")
                 return
+            if self._fenced.is_set():
+                log.emit(SESSION_FAILED, code="fenced")
+                return
+            if self._result_deadline_due(sink):
+                log.emit(SESSION_FAILED, code="deadline_expired")
+                return
             self._sealed = written
-            self._observation = sealed
-        if isinstance(sealed, SessionFailedObservation):
-            log.emit(SESSION_FAILED, code=sealed.code)
+            self._has_result = prepared.failure is None
+        if prepared.failure is not None:
+            log.emit(SESSION_FAILED, code=prepared.failure)
             return
         log.emit(
             SESSION_FINISHED,
-            cause=sealed.cause or "none",
-            stop_reason=sealed.result.stop_reason,
-            journal_complete=sealed.journal_complete,
+            cause=prepared.cause or "none",
+            stop_reason=prepared.stop_reason,
+            journal_complete=prepared.journal_complete,
         )
-
-    def _written(
-        self, observation: SessionObservation
-    ) -> tuple[SessionObservation, ResultFile]:
-        try:
-            return observation, write_observation(self._control, observation)
-        except ResultTooLarge:
-            failed = SessionFailedObservation(
-                kind="session_failed", code="result_too_large"
-            )
-            return failed, write_observation(self._control, failed)
 
     def _discard(self) -> None:
         try:
@@ -420,6 +564,9 @@ class AgentHost:
     def fence(self) -> None:
         with self._lock:
             self._fenced.set()
+            work = self._result_work
+            if work is not None:
+                work.stop.set()
             session = self._session
             if session is None:
                 return
@@ -454,9 +601,17 @@ class AgentHost:
         with self._lock:
             return self._sealed
 
-    def observation(self) -> SessionObservation | None:
+    def result_publication_expired(self) -> bool:
         with self._lock:
-            return self._observation
+            return self._sealed is None and self._result_deadline_passed()
+
+    def has_result_observation(self) -> bool:
+        with self._lock:
+            return self._has_result
+
+    def observation(self) -> SessionObservation | None:
+        reference = self.result_reference()
+        return None if reference is None else read_observation(self._control, reference)
 
     def _started(self) -> Session:
         if self._session is None:
@@ -465,9 +620,9 @@ class AgentHost:
 
 
 def journal_record(
-    observation: SessionObservation, written: ResultFile
+    prepared: PreparedObservation, written: ResultFile
 ) -> tuple[str, JsonObject]:
     data: JsonObject = {"digest": written.digest, "size": written.size}
-    if isinstance(observation, SessionFailedObservation):
-        return "runner.session_failed", {**data, "code": observation.code}
+    if prepared.failure is not None:
+        return "runner.session_failed", {**data, "code": prepared.failure}
     return "runner.session_result", data
