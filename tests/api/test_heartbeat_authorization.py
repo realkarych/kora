@@ -1,3 +1,4 @@
+from contextlib import AsyncExitStack
 from datetime import timedelta
 
 import pytest
@@ -13,7 +14,7 @@ from kora.protocols.worker_heartbeats import WorkerHeartbeat
 from tests.api.claim_support import BEARER, request
 from tests.api.deployment_cases import default_prepared_deployment
 from tests.api.heartbeat_support import heartbeat_api_from_deployment as heartbeat_api
-from tests.api.support import HttpCall, client_for
+from tests.api.support import HttpCall, client_for, lifespan
 from tests.client.support import running_app
 from tests.db.seed import Seeder
 from tests.engine.claim_support import ClaimCase, state
@@ -49,14 +50,15 @@ async def test_heartbeat_reauthorizes_before_accepting_history(
     transport: str,
 ) -> None:
     case, clock, app = heartbeat_api
-    async with (
-        running_app(app) as origin,
-        KoraClient(
-            "http://127.0.0.1" if transport == "asgi" else origin,
-            BEARER,
-            asgi_app=app if transport == "asgi" else None,
-        ) as client,
-    ):
+    async with AsyncExitStack() as resources:
+        if transport == "asgi":
+            await resources.enter_async_context(lifespan(app))
+            origin = "http://127.0.0.1"
+        else:
+            origin = await resources.enter_async_context(running_app(app))
+        client = await resources.enter_async_context(
+            KoraClient(origin, BEARER, asgi_app=app if transport == "asgi" else None)
+        )
         granted = (await client.claim_worker(case.query.worker_id, request(case))).claim
         assert granted is not None
         body = WorkerHeartbeat(
