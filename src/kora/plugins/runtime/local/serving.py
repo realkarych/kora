@@ -998,9 +998,8 @@ class ControlServer:
             if not original_submitter(grant, submitter):
                 raise delivery_error("submitter_superseded")
             ack = request.acknowledgement
-            if model_bytes(request.grant) != model_bytes(
-                grant
-            ) or not key.matches_closure(ack, grant):
+            same_grant = model_bytes(request.grant) == model_bytes(grant)
+            if not same_grant or not key.matches_closure(ack, grant):
                 raise delivery_error("workload_conflict")
             record = model_bytes(
                 FirstClosureRecord(
@@ -1047,17 +1046,17 @@ class ControlServer:
                 )
                 if isinstance(applied, LockOutcome):
                     raise delivery_error("workload_busy")
-        except (AuthenticationRefused, PeerRefused):
+        except (AuthenticationRefused, PeerRefused, KoraProtocolError) as error:
             return self._transfer_answer(
-                request.request_id, delivery_error("submitter_superseded")
-            )
-        except KoraProtocolError as error:
-            return self._transfer_answer(
-                request.request_id, self._first_storage_error(error)
+                request.request_id, self._first_operation_error(error)
             )
         return delivery_envelope(request.request_id, "dispatcher_quiescence_recorded")
 
-    def _first_storage_error(self, error: KoraProtocolError) -> KoraProtocolError:
+    def _first_operation_error(
+        self, error: KoraProtocolError | PeerRefused | AuthenticationRefused
+    ) -> KoraProtocolError:
+        if not isinstance(error, KoraProtocolError):
+            return delivery_error("submitter_superseded")
         cause, session = error.__cause__, self._session
         if (
             self._registry.first_grant
@@ -1103,11 +1102,7 @@ class ControlServer:
                     record = await self._complete(session, submitter)
                     self._record = record
         except (KoraProtocolError, PeerRefused) as refused:
-            error = (
-                delivery_error("submitter_superseded")
-                if isinstance(refused, PeerRefused)
-                else self._first_storage_error(refused)
-            )
+            error = self._first_operation_error(refused)
             if error.code == "registry_busy":
                 error = delivery_error("workload_busy")
             if error.code != "workload_busy":

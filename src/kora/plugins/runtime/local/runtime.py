@@ -594,7 +594,7 @@ class LocalRuntime:
         self._scanner = scanner
         self._peers = peers
         self._observations: set[asyncio.Task[RuntimeStatus]] = set()
-        self._deliveries: set[asyncio.Task[None]] = set()
+        self._deliveries: set[asyncio.Task[object]] = set()
         self._spool = spool
         self._spool_admission = asyncio.Lock()
         self._spool_allocations = 0
@@ -1220,6 +1220,21 @@ class LocalRuntime:
                 raise refusal("attempt_retired") from None
             raise
 
+    def own_delivery(self, operation: Coroutine[object, object, T]) -> asyncio.Task[T]:
+        if self._closing is not None:
+            operation.close()
+            raise refusal("runtime_closed")
+        task = asyncio.create_task(operation)
+        self._deliveries.add(task)
+        task.add_done_callback(self._deliveries.discard)
+        return task
+
+    def first_runner(self, key: AttemptKey) -> tuple[CompletionPipe, ProcessIdentity]:
+        pipe = self._first_pipe
+        if pipe is None or pipe.key != key or pipe.runner is None:
+            raise refusal("lineage_unavailable")
+        return pipe, pipe.runner
+
     async def quiescence(
         self, handle: Handle, ctx: ProtocolContext
     ) -> NormalCompletionQuiescence:
@@ -1230,22 +1245,16 @@ class LocalRuntime:
         if isinstance(entry, Completed):
             if owner is None or owner.confirms(entry, closure):
                 return entry.quiescence
-            return await self.recover_completion(key, ctx, self._first_pipe)
+            return await self.recover_completion(key, ctx)
         if isinstance(entry, Retiring | Retired):
             raise refusal("attempt_retired")
         if not isinstance(entry, Running):
             raise refusal("runner_starting")
-        pipe = self._first_pipe
         runner = model_bytes(entry.runner) if owner is not None else b""
-        if owner is not None and (
-            pipe is None
-            or pipe.key != key
-            or pipe.runner is None
-            or runner != model_bytes(pipe.runner)
-        ):
+        if owner is not None and runner != model_bytes(self.first_runner(key)[1]):
             raise refusal("lineage_unavailable")
         try:
-            record = await quiesce_command(
+            command = quiesce_command(
                 entry.socket_path,
                 entry.runner,
                 entry.submitter.dispatcher_id,
@@ -1254,6 +1263,9 @@ class LocalRuntime:
                 ctx.clock,
                 self._new_identifier(),
             )
+            record = (
+                await command if owner is None else await self.own_delivery(command)
+            )
             if owner is not None:
                 if closure is None:
                     _, _, closure = await self.completion_state(key, ctx)
@@ -1261,13 +1273,8 @@ class LocalRuntime:
                     raise refusal("lineage_unavailable")
                 owner.completed = record, closure, runner
             return record
-        except (ListenerRefused, OSError, ChannelError) as error:
-            if (
-                owner is not None
-                and isinstance(error, ChannelError)
-                and error.reason is ChannelFailure.MALFORMED
-            ):
-                raise
+        except (ListenerRefused, ChannelError, OSError):
+            pass
         except KoraProtocolError as error:
             if owner is not None or error.code != "message_refused":
                 raise
@@ -1278,11 +1285,9 @@ class LocalRuntime:
         raise refusal("runner_unreachable")
 
     async def recover_completion(
-        self, key: AttemptKey, ctx: ProtocolContext, pipe: CompletionPipe | None
+        self, key: AttemptKey, ctx: ProtocolContext
     ) -> NormalCompletionQuiescence:
-        if pipe is None or pipe.key != key or pipe.runner is None:
-            raise refusal("lineage_unavailable")
-        runner = pipe.runner
+        pipe, runner = self.first_runner(key)
         if not await self.executor.run(
             lambda: recorded_exited(self._identities, runner)
         ):
@@ -1366,10 +1371,7 @@ class LocalRuntime:
         with report_first_grant(ctx, "closure"):
             if len(self._deliveries) >= ADMITTED_JOBS:
                 raise refusal("registry_busy")
-            task = asyncio.create_task(record())
-            self._deliveries.add(task)
-            task.add_done_callback(self._deliveries.discard)
-            await task
+            await self.own_delivery(record())
 
     async def _from_completed(
         self,
@@ -1893,13 +1895,11 @@ class LocalRuntime:
         if workload.execution_domain_id != self.execution_domain_id:
             raise rejection("execution_domain_mismatch")
         process = workload.dispatcher_process
+        if process is None or process != self._launch.identity:
+            raise rejection("dispatcher_process_mismatch")
         if (
-            process is None
-            or process != self._launch.identity
-            or (
-                self._launch.first_grant
-                and process.leads_group != self._launch.identity.leads_group
-            )
+            self._launch.first_grant
+            and process.leads_group != self._launch.identity.leads_group
         ):
             raise rejection("dispatcher_process_mismatch")
         digest = object_digest(workload.execution_request)
@@ -1921,9 +1921,10 @@ class LocalRuntime:
         digest = await self.executor.run(lambda: self.checked_digest(workload, ctx))
         logical_digest = await self.executor.run(lambda: workload_digest(workload))
         launch = self._launch
-        await self.executor.run(
-            lambda: verified_socket_directory(launch.socket_directory)
-        )
+        if not launch.first_grant:
+            await self.executor.run(
+                lambda: verified_socket_directory(launch.socket_directory)
+            )
         nonce = self._new_identifier()
         starting = Starting(
             state="starting",
@@ -1941,9 +1942,18 @@ class LocalRuntime:
             fence=None,
         )
         pipe = self._first_pipe
-        if pipe is not None and (pipe.key != key or pipe.runner is None):
+        if pipe is not None and (
+            pipe.key != key or (pipe.reader is None and pipe.runner is None)
+        ):
             raise refusal("runner_starting")
-        submission = self.transition(
+
+        def admitted_start() -> Starting:
+            if launch.first_grant:
+                verified_socket_directory(launch.socket_directory)
+            return starting
+
+        submission = partial(
+            self.transition,
             key,
             lambda entry: submit_cell(
                 entry,
@@ -1951,7 +1961,7 @@ class LocalRuntime:
                 logical_digest,
                 workload.deadline,
                 expired(workload.deadline, ctx.clock.now()),
-                lambda: starting,
+                admitted_start,
             ),
             ctx,
             "submit",
@@ -1959,13 +1969,32 @@ class LocalRuntime:
             if self._launch.first_grant
             else None,
         )
+
+        async def submit_runner(fresh: CompletionPipe | None = None) -> None:
+            try:
+                if (await submission()).transition.entry is starting:
+                    if launch.first_grant and fresh is None:
+                        raise refusal("lineage_unavailable")
+                    await self.spawn(
+                        runner_argv(starting.runner_prefix, key, nonce), ctx
+                    )
+            finally:
+                if fresh is not None and fresh.reader is None:
+                    self.close_first_pipe()
+
         if launch.first_grant and pipe is None:
-            await self.spawn_first(key, starting, ctx, submission)
-        elif (await submission).transition.entry is starting:
-            if launch.first_grant:
-                raise refusal("lineage_unavailable")
-            await self.spawn(runner_argv(starting.runner_prefix, key, nonce), ctx)
+            pipe = self._first_pipe = CompletionPipe(key, nonce)
+            task = self.own_delivery(submit_runner(pipe))
+            if await observed(task):
+                raise asyncio.CancelledError
+            task.result()
+        else:
+            await submit_runner()
         entry = await self.entry(key)
+        if isinstance(entry, Running) and launch.first_grant:
+            if pipe is None or pipe.reader is None:
+                raise refusal("lineage_unavailable")
+            pipe.runner = entry.runner if pipe.runner is None else pipe.runner
         if isinstance(entry, Running):
             task = asyncio.create_task(self.deliver(key, entry, workload, ctx))
             self._deliveries.add(task)
@@ -2064,42 +2093,12 @@ class LocalRuntime:
                 raise
             raise refusal("runner_unreachable") from None
 
-    async def spawn_first(
-        self,
-        key: AttemptKey,
-        starting: Starting,
-        ctx: ProtocolContext,
-        submission: Coroutine[object, object, Applied],
-    ) -> None:
-        pipe = self._first_pipe = CompletionPipe(key, starting.nonce)
-        try:
-            applied = await submission
-            if applied.transition.entry is not starting:
-                if applied.head is not None and isinstance(applied.head.entry, Running):
-                    raise refusal("lineage_unavailable")
-                return
-            await self.spawn(
-                runner_argv(starting.runner_prefix, key, pipe.nonce), ctx, pipe
-            )
-            entry, _, _ = await self.completion_state(key, ctx)
-            if pipe.reader is None or not isinstance(entry, Running):
-                raise refusal("lineage_unavailable")
-            pipe.runner = entry.runner
-        finally:
-            if pipe.runner is None:
-                self.close_first_pipe()
-
     def close_first_pipe(self) -> None:
         pipe, self._first_pipe = self._first_pipe, None
         if pipe is not None:
             pipe.close()
 
-    async def spawn(
-        self,
-        argv: tuple[str, ...],
-        ctx: ProtocolContext,
-        pipe: CompletionPipe | None = None,
-    ) -> None:
+    async def spawn(self, argv: tuple[str, ...], ctx: ProtocolContext) -> None:
         started = ctx.clock.monotonic_ns()
         cutoff = launch_deadline(ctx.clock, ctx.deadline)
         outcome = "failed"
@@ -2110,7 +2109,7 @@ class LocalRuntime:
                 ctx.clock,
                 self.launchers,
                 deadline_ns=cutoff,
-                completion=pipe,
+                completion=self._first_pipe,
             )
             outcome = readiness.value
         except OSError:
@@ -2190,10 +2189,12 @@ class LocalRuntime:
                 partial(self.checked_first, key, ctx) if owner is not None else None,
                 confirmed,
             )
+            confirmed(applied)
+            if owner is not None and not owner.released:
+                raise refusal("lineage_unavailable")
         except KoraProtocolError:
             self._report_release(ctx, started, "refused", progress)
             raise
-        confirmed(applied)
         self._report_release(ctx, started, "released", progress)
 
     def _release_files(self, key: AttemptKey) -> ReleaseProgress:

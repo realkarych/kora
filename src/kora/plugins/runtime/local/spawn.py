@@ -328,8 +328,6 @@ async def spawn_runner(
         if clock.monotonic_ns() >= cutoff:
             return Readiness.TIMEOUT
         read_end, write_end = readiness_pipe()
-        if completion is not None:
-            completion.reader = read_end
         launcher: Launcher | None = None
         outcome = Readiness.TIMEOUT
         try:
@@ -356,10 +354,15 @@ async def spawn_runner(
                             launcher, clock, kill=outcome is Readiness.TIMEOUT
                         )
             finally:
-                if completion is None:
+                if (
+                    completion is not None
+                    and outcome is Readiness.READY
+                    and launcher is not None
+                    and launcher.closed
+                ):
+                    completion.reader = read_end
+                else:
                     os.close(read_end)
-        if completion is not None and (launcher is None or not launcher.closed):
-            return Readiness.TIMEOUT
         return outcome
     finally:
         launchers.spawning.discard(spawning)

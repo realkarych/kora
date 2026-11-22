@@ -363,7 +363,7 @@ def prepare_registration(arguments: RunnerArguments) -> PreparedRegistration:
             raise RunnerRefused("domain")
         registry = Registry(
             open_private_directory(root, "registry"),
-            domain.execution_domain_id,
+            arguments.execution_domain_id,
             lambda: secrets.token_hex(16),
             first_grant=arguments.first_grant,
         )

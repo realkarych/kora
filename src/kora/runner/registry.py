@@ -357,11 +357,10 @@ class AttemptKey:
     def matches_history(
         self, snapshot: GrantHistorySnapshot, grant: GrantBinding
     ) -> bool:
+        domain = self.execution_domain_id
         return (
             snapshot.attempt_id == self.attempt_id
-            and snapshot.execution_domain_id
-            == grant.execution_domain_id
-            == self.execution_domain_id
+            and snapshot.execution_domain_id == grant.execution_domain_id == domain
             and snapshot.count == 1
             and snapshot.upper_epoch == grant.lease_epoch
             and snapshot.digest == chain_step(snapshot.seed(), model_bytes(grant))
