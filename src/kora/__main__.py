@@ -783,9 +783,9 @@ def serve_api(
     environment: Mapping[str, str], diagnostics: ProcessDiagnostics, port: int
 ) -> int:
     harness = environment.get(API_HARNESS_VARIABLE)
-    cel_installed = installed_versions({"common-expression-language": "0.10.0"})
+    cel_requirement = {"common-expression-language": "0.10.0"}
     if not installed_versions({"uvicorn": "0.54.0"}) or (
-        harness is None and not cel_installed
+        harness is None and not installed_versions(cel_requirement)
     ):
         return api_dependency_refusal()
 
@@ -803,7 +803,7 @@ def serve_api(
     except DatabaseConfigurationError:
         return refuse(log, ServingRefusal.DATABASE_CONFIGURATION, EXIT_CONFIGURATION)
     if settings.dialect is Dialect.POSTGRESQL:
-        if not cel_installed:
+        if harness is not None and not installed_versions(cel_requirement):
             return api_dependency_refusal()
         from kora.api._linux_serving_barrier import (
             LinuxServingBarrierError,
@@ -858,7 +858,13 @@ def serve_sqlite_api(
         try:
             load_provider(ProtocolName.HARNESS, harness, diagnostics)
             preparer = serving_deployment_preparer(clock)
-        except (KoraProtocolError, GraphValueRejected, ServingFailure):
+        except (
+            GraphValueRejected,
+            KoraProtocolError,
+            OSError,
+            ServingFailure,
+            UnicodeDecodeError,
+        ):
             return refuse(log, ServingRefusal.DOMAIN_CONFIGURATION, EXIT_CONFIGURATION)
         selection = deployment_selection(
             harness, LocalRuntimeConfiguration(state_root=None).capabilities()

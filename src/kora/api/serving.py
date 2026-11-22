@@ -349,7 +349,7 @@ async def serve_on_loop(
                 domain = AsyncExitStack()
                 try:
                     await domain.enter_async_context(preparer)
-                except BindingUnavailable as error:
+                except (BindingUnavailable, OSError, UnicodeDecodeError) as error:
                     raise ServingFailure(ServingRefusal.DOMAIN_CONFIGURATION) from error
             if signals.received is None:
                 server = ApiServer(make_application(database), port, log)

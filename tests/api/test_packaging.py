@@ -696,7 +696,17 @@ def installed_site_packages(python: Path) -> Path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "damage", ["missing", "version", "record", "harness", "schema"]
+    "damage",
+    [
+        "missing",
+        "version",
+        "record",
+        "harness",
+        "schema",
+        "cel-metadata-encoding",
+        "cel-record-encoding",
+        "harness-entry-encoding",
+    ],
 )
 async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
     core_wheel: Path,
@@ -713,12 +723,22 @@ async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
             site / "kora" / "ir" / "artifact_schemas" / "StructuredOutput.schema.json"
         )
         schema.write_bytes(schema.read_bytes() + b"\n")
-    elif damage == "harness":
+    elif damage in {"harness", "harness-entry-encoding"}:
         [entry_points] = site.glob("kora-*.dist-info/entry_points.txt")
-        lines = entry_points.read_text().splitlines()
-        remaining = [line for line in lines if not line.startswith("harness.claude ")]
-        assert len(remaining) == len(lines) - 1
-        entry_points.write_text("\n".join(remaining) + "\n")
+        if damage == "harness":
+            lines = entry_points.read_text().splitlines()
+            remaining = [
+                line for line in lines if not line.startswith("harness.claude ")
+            ]
+            assert len(remaining) == len(lines) - 1
+            entry_points.write_text("\n".join(remaining) + "\n")
+        else:
+            entry_points.write_bytes(entry_points.read_bytes() + b"\xff")
+    elif damage in {"cel-metadata-encoding", "cel-record-encoding"}:
+        damaged = metadata / (
+            "METADATA" if damage == "cel-metadata-encoding" else "RECORD"
+        )
+        damaged.write_bytes(damaged.read_bytes() + b"\xff")
     elif damage == "missing":
         shutil.rmtree(metadata)
         shutil.rmtree(site / "cel")
