@@ -83,23 +83,6 @@ async def register_worker(
     ):
         raise RegistrationForbidden("worker registration authority is required")
     domain = registration.execution_domain_id
-    owner = None if portable else registration.name
-    await insert_registration_row(
-        connection,
-        worker_execution_domain,
-        {
-            "execution_domain_id": domain,
-            "runtime": registration.runtime,
-            "worker_id": owner,
-        },
-    )
-    domain_result = await connection.execute(
-        select(
-            worker_execution_domain.c.runtime, worker_execution_domain.c.worker_id
-        ).where(worker_execution_domain.c.execution_domain_id == domain)
-    )
-    if tuple(domain_result.one()) != (registration.runtime, owner):
-        raise RegistrationConflict("execution domain ownership conflicts")
     values: dict[str, object] = {
         "incarnation_id": registration.incarnation_id,
         "execution_domain_id": domain,
@@ -127,6 +110,23 @@ async def register_worker(
         or current["runtime"] != registration.runtime
     ):
         raise RegistrationForbidden("worker registration authority is required")
+    owner = None if portable else registration.name
+    await insert_registration_row(
+        connection,
+        worker_execution_domain,
+        {
+            "execution_domain_id": domain,
+            "runtime": registration.runtime,
+            "worker_id": owner,
+        },
+    )
+    domain_result = await connection.execute(
+        select(
+            worker_execution_domain.c.runtime, worker_execution_domain.c.worker_id
+        ).where(worker_execution_domain.c.execution_domain_id == domain)
+    )
+    if tuple(domain_result.one()) != (registration.runtime, owner):
+        raise RegistrationConflict("execution domain ownership conflicts")
     digest = registration.digest()
     previous = await registered_incarnation(
         connection, registration.name, registration.incarnation_id

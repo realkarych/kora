@@ -49,13 +49,16 @@ LIMITS = ClaimPollLimits(SNAPSHOT_LIMITS, HISTORY_LIMITS, READ_LIMITS, WORKER_BY
 
 
 def poller(
-    database: Database, clock: Clock, default_stall: timedelta = UNCERTAINTY
+    database: Database,
+    clock: Clock,
+    default_stall: timedelta = UNCERTAINTY,
+    limits: ClaimPollLimits = LIMITS,
 ) -> WorkerClaimPoll:
     return WorkerClaimPoll(
         database,
         {"local": replace(CAPABILITIES, default_stall_after=default_stall)},
         clock,
-        LIMITS,
+        limits,
         UNCERTAINTY,
     )
 
@@ -77,15 +80,18 @@ def claim_application(
     *,
     heartbeat: WorkerHeartbeatRoute | None = None,
     default_stall: timedelta = UNCERTAINTY,
+    limits: ClaimPollLimits = LIMITS,
+    single_claim: bool = False,
 ) -> ApiExchange:
     return create_application(
         StaticTokenAuthenticator({}, database),
         capture.diagnostics,
         clock,
         RequestIds(),
-        worker_claims=WorkerClaimsRoute(poller(database, clock, default_stall)),
+        worker_claims=WorkerClaimsRoute(poller(database, clock, default_stall, limits)),
         worker_history=history,
         worker_heartbeat=heartbeat,
+        single_claim=single_claim,
     )
 
 

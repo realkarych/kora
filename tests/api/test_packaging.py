@@ -28,6 +28,7 @@ from kora.models.runs import AcceptedRun
 from tests.api.deployment_cases import GRAPH, NAMESPACE, skeleton_ir
 from tests.api.serving_lifecycle_child import SLOW_RESPONSE_BYTES, serving_event
 from tests.api.test_linux_serving_barrier import native_probe_required_here
+from tests.api.test_worker_registration import registry_state
 from tests.cli.test_deploy_command import collect_cli
 from tests.client.support import tls_pair
 from tests.engine.graph_output_cases import child as ir_child
@@ -54,6 +55,7 @@ PRIVATE_PARAMETER = "private-installed-parameter-value"
 DOMAIN_HARNESS = "KORA_API_HARNESS"
 DEPLOY_PATH = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/versions"
 TRIGGER_PATH = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/runs"
+WORKER_ROUTES = ("/api/v1/workers", "/api/v1/workers/staged-worker/claims")
 
 BUILD_TREE = """
 import os
@@ -341,6 +343,35 @@ def head_headers(response: bytes, status: int) -> dict[bytes, bytes]:
     return headers
 
 
+async def check_inactive_worker_routes(
+    settings: DatabaseSettings, responses: list[httpx.Response]
+) -> None:
+    database = Database(settings)
+    try:
+        registry = await registry_state(database)
+    finally:
+        await database.close()
+
+    for response in responses:
+        assert response.status_code == 404
+        error = ApiErrorEnvelope.model_validate_json(response.content).error
+        assert error.code == "API001"
+        assert error.request_id == response.headers["x-request-id"]
+    assert all(not rows for rows in registry.values())
+
+
+def assert_worker_startup_absent(stderr: bytes) -> None:
+    events = diagnostics(stderr)
+    assert all(
+        event["event"]
+        not in (
+            "engine.admission_initialization.finished",
+            "engine.claim_expiry_recovery.finished",
+        )
+        for event in events
+    )
+
+
 @pytest.mark.asyncio
 async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
     serving_installation: Path, tmp_path: Path, sqlite_template: Path
@@ -384,6 +415,10 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
                 )
                 for path in (DEPLOY_PATH, TRIGGER_PATH)
             ]
+            disabled_workers = [
+                await client.post(path, json={}) for path in WORKER_ROUTES
+            ]
+            await check_inactive_worker_routes(settings, disabled_workers)
         head_missing = await read_raw_head(port)
         head_denied = await read_raw_head(port, service_token)
         head_wrong_method = await read_raw_head(port, personal_token)
@@ -391,6 +426,7 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
         stdout, trailing = await terminate_installed_api(process)
 
     stderr = early + trailing
+    assert_worker_startup_absent(stderr)
     assert process.returncode == 0, stderr
     assert stdout == b""
     assert health.status_code == 200
@@ -534,6 +570,10 @@ async def test_installed_sqlite_api_deploys_and_replays_manual_trigger(
             base_url=origin, trust_env=False, timeout=10
         ) as client:
             schema = await client.get(SCHEMA, headers={"Authorization": authorization})
+            disabled_workers = [
+                await client.post(path, json={}) for path in WORKER_ROUTES
+            ]
+            await check_inactive_worker_routes(settings, disabled_workers)
             wrong_namespace = await client.post(
                 DEPLOY_PATH,
                 headers={"Authorization": foreign_authorization},
@@ -578,6 +618,7 @@ async def test_installed_sqlite_api_deploys_and_replays_manual_trigger(
     finally:
         stdout, trailing = await terminate_installed_api(process)
     rows, version_id, attempts = await deployment_rows(settings)
+    assert_worker_startup_absent(early + trailing)
 
     assert process.returncode == 0, early + trailing
     assert stdout == b""
