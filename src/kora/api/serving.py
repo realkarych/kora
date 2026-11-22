@@ -197,10 +197,13 @@ class ApiServer(Server):
 
     async def seal_connections(self) -> tuple[_ServingHttpConnection, ...]:
         for listener in self.servers:
-            listener.close()
+            for bound_socket in listener.sockets:
+                self._loop.remove_reader(bound_socket.fileno())
         accepted: asyncio.Future[None] = self._loop.create_future()
         self._loop.call_soon(accepted.set_result, None)
         await accepted
+        for listener in self.servers:
+            listener.close()
         connections: list[_ServingHttpConnection] = []
         for connection in self.server_state.connections:
             if not isinstance(connection, _ServingHttpConnection):

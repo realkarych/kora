@@ -442,15 +442,24 @@ async def test_installed_sigterm_preserves_buffered_response(
                 client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32768)
                 client.setblocking(False)
                 await asyncio.get_running_loop().sock_connect(client, (LOOPBACK, port))
-                reader, writer = await asyncio.open_connection(sock=client)
+                reader, writer = await asyncio.open_connection(sock=client, limit=8192)
                 try:
                     writer.write(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
                     await writer.drain()
-                    queued = await child.stdout.readline()
-                    assert queued == b"response_queued\n"
-                    child.send_signal(signal.SIGTERM)
-                    await serving_event(child.stderr, "api.serving_draining")
-                    response = await reader.read()
+                    buffered = await child.stdout.readline()
+                    assert buffered == b"response_buffered\n"
+                    idle_reader, idle_writer = await asyncio.open_connection(
+                        LOOPBACK, port
+                    )
+                    try:
+                        child.send_signal(signal.SIGTERM)
+                        await serving_event(child.stderr, "api.serving_draining")
+                        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
+                        idle_tail = await idle_reader.read()
+                        response = await reader.read()
+                    finally:
+                        idle_writer.close()
+                        await idle_writer.wait_closed()
                 finally:
                     writer.close()
                     await writer.wait_closed()
@@ -464,6 +473,7 @@ async def test_installed_sigterm_preserves_buffered_response(
     assert separator == b"\r\n\r\n"
     assert headers.startswith(b"HTTP/1.1 200 OK\r\n")
     assert body == b"x" * SLOW_RESPONSE_BYTES
+    assert idle_tail == b""
     assert output == b"lifespan_shutdown\n"
     assert child.returncode == 0
     assert b"api.serving_stopped" in trailing

@@ -3,7 +3,7 @@ import errno
 import json
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -19,7 +19,7 @@ from kora.db.connection import Database, DatabaseClosedError, read_database_sett
 from kora.observability import configure_process, read_logging_settings
 
 PRIVATE_LIFESPAN_REASON: str = "private-lifespan-startup-reason"
-SLOW_RESPONSE_BYTES: int = 2 * 1024 * 1024
+SLOW_RESPONSE_BYTES: int = 4 * 1024 * 1024
 
 
 class SqliteTraceControl(Protocol):
@@ -107,7 +107,17 @@ def buffered_response(database: Database) -> ASGIApp:
             }
         )
         await send({"type": "http.response.body", "body": b"x" * SLOW_RESPONSE_BYTES})
-        os.write(1, b"response_queued\n")
+        installed_transports: object = vars(asyncio.get_running_loop())["_transports"]
+        assert isinstance(installed_transports, Mapping)
+        inventory = cast("Mapping[int, object]", installed_transports)
+        original = next(
+            active
+            for active in inventory.values()
+            if isinstance(active, asyncio.Transport)
+            and active.get_extra_info("peername") == scope["client"]
+        )
+        assert original.get_write_buffer_size() > 0
+        os.write(1, b"response_buffered\n")
 
     return application
 
