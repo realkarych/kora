@@ -20,13 +20,14 @@ from kora.db.tables import (
     attempt,
     attempt_claim_read_admission,
     attempt_dispatcher,
+    attempt_first_claim_basis,
     event,
     node_instance,
     run,
     run_inputs,
     worker,
 )
-from kora.engine.attempt_claims import ClaimDecision, claim_attempt
+from kora.engine.attempt_claims import ClaimDecision, ClaimOutcome, claim_attempt
 from kora.engine.attempt_inputs import prepare_attempt_inputs
 from kora.engine.claim_context import ClaimQuery
 from kora.engine.claim_selection import SelectedClaim, prepare_selected_claim
@@ -37,10 +38,12 @@ from kora.engine.grant_history import acquire_history, prepare_history
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.engine.locks import TransitionLocks
+from kora.engine.worker_claim_poll import ClaimPollLimits, WorkerClaimPoll
 from kora.engine.worker_registration import Registration, register_worker
 from kora.ir.json import JsonObject
 from kora.protocols.authentication import NamespaceGrant, Principal
 from kora.protocols.identity import ProcessIdentity
+from tests.api.worker_support import CAPABILITIES
 from tests.db.closing import until
 from tests.db.seed import START, FakeClock, Seeder
 from tests.engine.promotion_support import READ_LIMITS
@@ -54,6 +57,7 @@ from tests.engine.test_claim_snapshot import (
 from tests.engine.test_claim_sources import ALLOWANCE, source_values
 from tests.engine.test_claim_sources import LIMITS as SOURCE_LIMITS
 from tests.engine.test_grant_history import LIMITS as HISTORY_LIMITS
+from tests.plugins.authentication.support import AuthorityClock
 
 WORKER_BYTES = 65_536
 UNCERTAINTY = timedelta(microseconds=17)
@@ -135,10 +139,37 @@ class ClaimCase:
         )
 
     async def claim(self, database: Database) -> ClaimDecision:
+        async with database.read_transaction() as reader:
+            receipt_id = await reader.scalar(
+                select(attempt_dispatcher.c.id).where(
+                    attempt_dispatcher.c.worker_id == self.query.worker_id,
+                    attempt_dispatcher.c.incarnation_id == self.query.incarnation_id,
+                    attempt_dispatcher.c.claim_id == self.query.claim_id,
+                )
+            )
+        if receipt_id is not None:
+            return await self.replay(database)
         prepared = await self.prepare(database)
         async with database.transaction() as writer:
             result = await self.apply(writer, prepared)
         return result
+
+    async def replay(self, database: Database) -> ClaimDecision:
+        poller = WorkerClaimPoll(
+            database,
+            {
+                "local": replace(
+                    CAPABILITIES, default_stall_after=SELECTION.default_stall_after
+                )
+            },
+            AuthorityClock(self.clock.now()),
+            ClaimPollLimits(
+                SNAPSHOT_LIMITS, HISTORY_LIMITS, READ_LIMITS, WORKER_BYTES, 10
+            ),
+            UNCERTAINTY,
+        )
+        delivery = await poller.replay(self.query, self.principal)
+        return ClaimDecision(ClaimOutcome.REPLAYED, delivery)
 
 
 async def wait_for_claim_waiter(database: Database) -> None:
@@ -165,10 +196,11 @@ async def claim_case(
     *,
     execution_domain_id: str = DEFAULT_EXECUTION_DOMAIN,
     process: ProcessIdentity | None = None,
+    capacity: int = 1,
 ) -> ClaimCase:
     binding, pin = await seed(database, evaluator, ir=ir)
     return await _register_claim_case(
-        database, binding, pin, execution_domain_id, process
+        database, binding, pin, execution_domain_id, process, capacity=capacity
     )
 
 
@@ -187,6 +219,8 @@ async def _register_claim_case(
     pin: GraphVersionPin,
     execution_domain_id: str,
     process: ProcessIdentity | None,
+    *,
+    capacity: int = 1,
 ) -> ClaimCase:
     async with database.transaction() as writer:
         seeder = Seeder(writer)
@@ -219,7 +253,7 @@ async def _register_claim_case(
             "local",
             execution_domain_id,
             "0.1.0",
-            1,
+            capacity,
             process
             or ProcessIdentity(
                 host_id="host",
@@ -347,6 +381,7 @@ async def state(database: Database) -> dict[str, list[dict[str, object]]]:
             attempt,
             attempt_claim_read_admission,
             attempt_dispatcher,
+            attempt_first_claim_basis,
             event,
         ):
             with await reader.execute(

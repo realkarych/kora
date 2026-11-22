@@ -167,6 +167,34 @@ async def test_claim_refused_source_advances_past_legacy_to_valid_tail(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replay", [False, True])
+async def test_claim_refuses_damaged_current_basis_schema_without_writes(
+    database: Database,
+    claim_api: tuple[ClaimCase, AuthorityClock, ApiExchange],
+    replay: bool,
+) -> None:
+    case, _clock, app = claim_api
+    async with KoraClient("http://127.0.0.1", BEARER, asgi_app=app) as client:
+        if replay:
+            assert (
+                await client.claim_worker(case.query.worker_id, request(case))
+            ).claim
+        async with database.transaction() as writer:
+            await writer.exec_driver_sql(
+                "ALTER TABLE attempt_first_claim_basis ADD COLUMN unexpected TEXT"
+            )
+        before = await state(database)
+
+        with pytest.raises(ApiError) as refusal:
+            await client.claim_worker(case.query.worker_id, request(case))
+        after = await state(database)
+
+    assert refusal.value.code == ApiErrorCode.INTERNAL
+    assert after == before
+    assert database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("namespace_scope", ["empty", "foreign"])
 async def test_claim_http_rechecks_namespace_scope_for_replay_and_fresh_work(
     database: Database,

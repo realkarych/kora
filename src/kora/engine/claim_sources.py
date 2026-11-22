@@ -198,13 +198,11 @@ async def _update_claim_sources(
     return revision
 
 
-async def _recheck_claim_sources(
+async def claim_sources_current(
     connection: AsyncConnection,
-    locks: TransitionLocks,
     acquired: AcquiredClaimSources | DecodedClaimSources,
     limits: ClaimSourceReadLimits,
 ) -> bool:
-    _require_locks(connection, locks, acquired.binding)
     if not await verify_claim_source_binding(connection, acquired.binding, limits):
         return False
     current = await read_claim_source_admission(
@@ -259,7 +257,8 @@ async def recheck_claim_sources(
     limits: ClaimSourceReadLimits,
 ) -> bool:
     try:
-        return await _recheck_claim_sources(connection, locks, acquired, limits)
+        _require_locks(connection, locks, acquired.binding)
+        return await claim_sources_current(connection, acquired, limits)
     except (OSError, SQLAlchemyError):
         del connection, locks, acquired, limits
         raise_safe(ClaimWriterFailed())

@@ -30,12 +30,8 @@ async def test_receipt_redirect_and_stale_refusal_precede_source_preparation(
         redirect = await replay_from_other_run.apply(writer, None)
     first.clock.advance(121)
 
-    async def stale_without_sources() -> None:
-        async with database.transaction() as writer:
-            await first.apply(writer, None)
-
     with pytest.raises(ClaimAccessRejected) as caught:
-        await stale_without_sources()
+        await first.replay(database)
     after = await state(database)
 
     assert redirect.outcome is ClaimOutcome.REDIRECT

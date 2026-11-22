@@ -42,6 +42,7 @@ from kora.engine.namespace_policy import (
     write_namespace_policy,
 )
 from kora.engine.price_initialization import PriceConfiguration
+from kora.engine.worker_claim_poll import ClaimPollLimits
 from kora.ir.graph_json import ObjectReader
 from kora.ir.json import JsonObject
 from kora.observability import LoggingSettings
@@ -54,6 +55,7 @@ from tests.api.deployment_cases import (
 )
 from tests.db.closing import ConnectionLedger, narrow_database, until
 from tests.db.seed import START, FakeClock, Seeder
+from tests.engine.promotion_support import READ_LIMITS
 from tests.engine.test_admission_initialization import initializer, rates
 from tests.engine.test_claim_sources import (
     ALLOWANCE,
@@ -62,6 +64,7 @@ from tests.engine.test_claim_sources import (
 from tests.engine.test_claim_sources import (
     LIMITS as SOURCE_LIMITS,
 )
+from tests.engine.test_grant_history import LIMITS as HISTORY_LIMITS
 from tests.engine.test_run_input_reads import LIMITS as INPUT_LIMITS
 
 __all__ = ["evaluator"]
@@ -287,6 +290,21 @@ async def test_claim_snapshot_aggregate_admission_precedes_checkout(
         )
 
     assert ledger.checkouts == ledger.outstanding == database.units_in_flight() == 0
+
+
+def test_claim_replay_aggregate_charges_both_projections_at_exact_margins() -> None:
+    fitted = replace(LIMITS, native_bytes=122_612_732, raw_bytes=87_612_156)
+    replay = ClaimPollLimits(fitted, HISTORY_LIMITS, READ_LIMITS, 65_536, 10)
+    native_short = replace(fitted, native_bytes=fitted.native_bytes - 1)
+    raw_short = replace(fitted, raw_bytes=fitted.raw_bytes - 1)
+
+    fitted.admit(extra_bytes=replay.replay_bytes)
+    with pytest.raises(ClaimSourcesRejected):
+        native_short.admit(extra_bytes=replay.replay_bytes)
+    with pytest.raises(ClaimSourcesRejected):
+        raw_short.admit(extra_bytes=replay.replay_bytes)
+
+    assert replay.replay_bytes == 4_694_272
 
 
 @pytest.mark.asyncio

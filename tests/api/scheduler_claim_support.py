@@ -191,9 +191,12 @@ async def scheduler_claim_setup(
     )
 
 
-def scheduler_claim_ir() -> JsonObject:
+def scheduler_claim_ir(authored_stall: str | None = None) -> JsonObject:
     ir = skeleton_ir()
-    cast(JsonObject, ir["runtime"])["limits"] = {"timeout": "1h"}
+    runtime = cast(JsonObject, ir["runtime"])
+    runtime["limits"] = {"timeout": "1h"}
+    if authored_stall is not None:
+        runtime["stall_after"] = authored_stall
     cast(JsonObject, ir["graph"])["params"] = {
         "type": "object",
         "properties": {"quantity": {"type": "integer"}},
@@ -232,6 +235,7 @@ async def scheduler_claim_case(
     api_capture: Capture,
     *,
     with_heartbeat: bool = False,
+    authored_stall: str | None = None,
 ) -> SchedulerClaimCase:
     setup = await scheduler_claim_setup(
         database, preparer, api_capture, with_heartbeat=with_heartbeat
@@ -240,7 +244,11 @@ async def scheduler_claim_case(
     async with client_for(setup.app) as deployment_client:
         publication = await deployment_client.post(
             VERSIONS,
-            json={"graph": GRAPH, "ir": scheduler_claim_ir(), "resources": []},
+            json={
+                "graph": GRAPH,
+                "ir": scheduler_claim_ir(authored_stall),
+                "resources": [],
+            },
             headers=headers,
         )
         start = await deployment_client.post(

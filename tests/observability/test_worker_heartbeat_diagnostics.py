@@ -43,6 +43,7 @@ async def test_heartbeat_diagnostics_exclude_content_and_native_failure(
     first = await heartbeat(database, case, clock, body)
     replay = await heartbeat(database, case, clock, body)
     async with database.transaction() as writer:
+        await writer.exec_driver_sql("DROP TABLE attempt_first_claim_basis")
         await writer.exec_driver_sql("DROP TABLE attempt_dispatcher")
     with pytest.raises(GrantHistoryRejected) as caught:
         await heartbeat(database, case, clock, body)

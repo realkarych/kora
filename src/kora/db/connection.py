@@ -1445,7 +1445,7 @@ class Database:
             try:
                 yield connection
                 self._refuse_when_closed()
-                if verify_postgresql_writer:
+                if verify_postgresql_writer and connection.in_transaction():
                     await complete(self._commit_verified_postgresql_writer(connection))
                 elif transactional:
                     await self._run_snapshot_phase(deadline, connection.commit)

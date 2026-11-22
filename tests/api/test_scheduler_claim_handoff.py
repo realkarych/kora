@@ -11,7 +11,7 @@ from kora.db.connection import Database
 from kora.db.cost_reads import read_latest_price
 from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun
-from tests.api.claim_support import BEARER
+from tests.api.claim_support import BEARER, claim_application
 from tests.api.deployment_cases import GRAPH, NAMESPACE, preparer
 from tests.api.scheduler_claim_support import (
     PARAMS,
@@ -20,7 +20,7 @@ from tests.api.scheduler_claim_support import (
     scheduler_claim_ir,
     scheduler_claim_setup,
 )
-from tests.api.support import api_capture
+from tests.api.support import api_capture, lifespan
 from tests.api.worker_support import bearer
 from tests.cli.test_deploy_command import kora, written
 from tests.client.support import running_app
@@ -198,3 +198,55 @@ async def test_cli_deploy_and_trigger_reach_first_worker_claim(
     assert replay == first
     assert before_replay == after
     assert ledger.outstanding == database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authored_stall", "microseconds"),
+    [("0s", "0"), ("1000000000000000d", "86400000000000000000000000")],
+    ids=["zero", "wide"],
+)
+async def test_scheduler_claim_replays_authored_stall_after_asgi_replacement(
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    authored_stall: str,
+    microseconds: str,
+) -> None:
+    case = await scheduler_claim_case(
+        database, preparer, api_capture, authored_stall=authored_stall
+    )
+    case.clock.advance(1)
+    replacement = Database(database.settings)
+    ledger = ConnectionLedger(replacement)
+    replacement_app = claim_application(
+        replacement, api_capture, case.clock, default_stall=timedelta(seconds=23)
+    )
+
+    try:
+        async with (
+            lifespan(case.app),
+            KoraClient("http://127.0.0.1", BEARER, asgi_app=case.app) as client,
+        ):
+            await client.register_worker(case.registration)
+            first = await client.claim_worker(case.registration.name, case.request)
+        before = await state(database)
+        case.clock.advance(20)
+        async with (
+            lifespan(replacement_app),
+            KoraClient("http://127.0.0.1", BEARER, asgi_app=replacement_app) as client,
+        ):
+            replay = await client.claim_worker(case.registration.name, case.request)
+        after = await state(database)
+    finally:
+        await replacement.close()
+
+    assert first.claim is not None
+    assert first.claim.limits["stall_after_us"] == microseconds
+    assert replay == first
+    assert before == after
+    (basis,) = after["attempt_first_claim_basis"]
+    assert basis["dispatcher_id"] == first.claim.dispatcher_id
+    assert basis["configured_stall_us"] is None
+    assert ledger.outstanding == replacement.units_in_flight() == 0
+    assert ledger.opened == ledger.closed
