@@ -1,0 +1,2 @@
+SCHEDULER_VARIABLE: str = "KORA_API_SCHEDULER"
+FIRST_CLAIM: str = "first-claim"

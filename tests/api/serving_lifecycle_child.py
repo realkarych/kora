@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import aiosqlite
+from sqlalchemy import event
+from sqlalchemy.engine import AdaptedConnection, Connection
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -21,6 +23,7 @@ from kora.__main__ import new_instance_id, serving_deployment_preparer
 from kora.api.application import create_application
 from kora.api.exchange import COMPONENT
 from kora.api.graph_deployment_worker import THREAD_NAME, DeploymentPreparer
+from kora.api.graph_services import deployment_selection
 from kora.api.installed_worker import installed_worker_profile
 from kora.api.serving import serve_sqlite
 from kora.api.worker_claims_route import WorkerClaimsRoute
@@ -44,6 +47,7 @@ from kora.observability import (
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.protocols.time import SystemClock
+from kora.scheduler.loop import Scheduler, first_claim_scheduler
 
 PRIVATE_LIFESPAN_REASON: str = "private-lifespan-startup-reason"
 SLOW_RESPONSE_BYTES: int = 4 * 1024 * 1024
@@ -70,6 +74,17 @@ def owns_sqlite_descriptor(path: Path) -> bool:
     return False
 
 
+def await_native_release(path: Path, release: int, *, native_sigterm: bool) -> None:
+    assert owns_sqlite_descriptor(path)
+    os.write(1, b"native_sqlite_held\n")
+    if native_sigterm:
+        assert os.read(release, 1) == b"s"
+        signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
+        os.write(1, b"native_sqlite_sigterm_sent\n")
+    if os.read(release, 1) == b"r":
+        os.write(1, b"native_sqlite_returned\n")
+
+
 async def hold_native_query(
     connection: AsyncConnection,
     release: int,
@@ -79,14 +94,7 @@ async def hold_native_query(
 ) -> None:
     def observe(statement: str) -> None:
         if statement == "SELECT 42":
-            assert owns_sqlite_descriptor(path)
-            os.write(1, b"native_sqlite_held\n")
-            if native_sigterm:
-                assert os.read(release, 1) == b"s"
-                signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
-                os.write(1, b"native_sqlite_sigterm_sent\n")
-            if os.read(release, 1) == b"r":
-                os.write(1, b"native_sqlite_returned\n")
+            await_native_release(path, release, native_sigterm=native_sigterm)
 
     driver = (await connection.get_raw_connection()).driver_connection
     assert isinstance(driver, aiosqlite.Connection)
@@ -308,6 +316,52 @@ def worker_lifecycle_app(
     return exercise
 
 
+def scheduler_lifecycle_owner(
+    database: Database, release: int, native_sigterm: bool
+) -> Scheduler:
+    profile = installed_worker_profile("2000")
+    assert profile is not None
+    clock = SystemClock()
+    capabilities = LocalRuntimeConfiguration(state_root=None).capabilities()
+    selected = deployment_selection("claude", capabilities)
+    observed = False
+
+    def pending_query(statement: str) -> bool:
+        return " ".join(statement.lower().split()).startswith(
+            "select run.id from run where run.status ="
+        )
+
+    def observe(statement: str) -> None:
+        nonlocal observed
+        if not observed and pending_query(statement) and "'pending'" in statement:
+            observed = True
+            await_native_release(
+                database.settings.sqlite_path, release, native_sigterm=native_sigterm
+            )
+
+    async def trace(driver: object) -> None:
+        assert isinstance(driver, aiosqlite.Connection)
+        await cast(SqliteTraceControl, driver).set_trace_callback(observe)
+
+    def attach(
+        connection: Connection, cursor: object, statement: str, *details: object
+    ) -> None:
+        if not observed and pending_query(statement):
+            adapter: object = connection.connection.dbapi_connection
+            assert isinstance(adapter, AdaptedConnection)
+            adapter.run_async(trace)
+
+    event.listen(database.reader_engine.sync_engine, "before_cursor_execute", attach)
+    return first_claim_scheduler(
+        database,
+        profile.limits,
+        clock.now,
+        IdentifierGenerator(clock.now),
+        selected,
+        capabilities,
+    )
+
+
 def now() -> datetime:
     return datetime.now(UTC)
 
@@ -320,6 +374,7 @@ def launch() -> int:
     preparer = None
     port = 0
     worker_startup = False
+    make_scheduler: Callable[[Database], Scheduler] | None = None
     try:
         match sys.argv[1:]:
             case ["refuse_lifespan"]:
@@ -350,6 +405,26 @@ def launch() -> int:
                 )
                 port = int(requested_port)
                 worker_startup = True
+            case [
+                ("hold_scheduler_poll" | "hold_scheduler_poll_native_term") as mode,
+                requested_port,
+                release,
+            ]:
+                preparer = serving_deployment_preparer(SystemClock())
+                make_application = partial(
+                    worker_lifecycle_app,
+                    diagnostics=diagnostics,
+                    release=int(release),
+                    recovery=False,
+                    native_sigterm=False,
+                )
+                make_scheduler = partial(
+                    scheduler_lifecycle_owner,
+                    release=int(release),
+                    native_sigterm=mode == "hold_scheduler_poll_native_term",
+                )
+                port = int(requested_port)
+                worker_startup = True
             case ["buffered_response"]:
                 make_application = buffered_response
             case _:
@@ -361,6 +436,7 @@ def launch() -> int:
             make_application,
             preparer=preparer,
             worker_startup=worker_startup,
+            make_scheduler=make_scheduler,
         )
         if sys.argv[1:2] == ["hold_native"]:
             assert not owns_sqlite_descriptor(settings.sqlite_path)
@@ -380,13 +456,15 @@ def launch() -> int:
 
 
 async def serving_event(
-    stderr: asyncio.StreamReader, event_name: str
+    stderr: asyncio.StreamReader, event_name: str, *, outcome: str | None = None
 ) -> dict[object, object]:
     while line := await stderr.readline():
         event: object = json.loads(line)
         if isinstance(event, dict):
             fields = cast("dict[object, object]", event)
-            if fields.get("event") == event_name:
+            if fields.get("event") == event_name and (
+                outcome is None or fields.get("outcome") == outcome
+            ):
                 return fields
     raise AssertionError(f"the child exited before {event_name}")
 

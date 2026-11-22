@@ -791,6 +791,7 @@ def serve_api(
         return api_dependency_refusal()
 
     from kora.api.exchange import COMPONENT
+    from kora.api.installed_scheduler import FIRST_CLAIM, SCHEDULER_VARIABLE
     from kora.api.serving import ServingRefusal, refuse
     from kora.db.connection import (
         DatabaseConfigurationError,
@@ -803,6 +804,13 @@ def serve_api(
         settings = read_database_settings(environment)
     except DatabaseConfigurationError:
         return refuse(log, ServingRefusal.DATABASE_CONFIGURATION, EXIT_CONFIGURATION)
+    scheduler = environment.get(SCHEDULER_VARIABLE)
+    if scheduler is not None and (
+        scheduler != FIRST_CLAIM
+        or settings.dialect is not Dialect.SQLITE
+        or harness != "claude"
+    ):
+        return refuse(log, ServingRefusal.SCHEDULER_CONFIGURATION, EXIT_CONFIGURATION)
     if settings.dialect is Dialect.POSTGRESQL:
         if harness is not None and not installed_versions(cel_requirement):
             return api_dependency_refusal()
@@ -833,6 +841,7 @@ def serve_api(
         settings,
         harness,
         environment.get(API_WORKER_UNCERTAINTY_VARIABLE),
+        scheduler is not None,
         port,
         diagnostics,
         log,
@@ -843,6 +852,7 @@ def serve_sqlite_api(
     settings: "DatabaseSettings",
     harness: str | None,
     worker_uncertainty: str | None,
+    scheduler_enabled: bool,
     port: int,
     diagnostics: ProcessDiagnostics,
     log: ComponentLogger,
@@ -851,7 +861,13 @@ def serve_sqlite_api(
     from kora.api.exchange import ApiExchange
     from kora.api.graph_services import GraphServices, deployment_selection
     from kora.api.installed_worker import installed_worker_profile
-    from kora.api.serving import ServingFailure, ServingRefusal, refuse, serve_sqlite
+    from kora.api.serving import (
+        ServingFailure,
+        ServingRefusal,
+        ServingScheduler,
+        refuse,
+        serve_sqlite,
+    )
     from kora.api.worker_claims_route import WorkerClaimsRoute
     from kora.api.worker_registration_route import WorkerRegistrationRoute
     from kora.db.graph_value_json import GraphValueRejected
@@ -862,13 +878,21 @@ def serve_sqlite_api(
     from kora.protocols.errors import KoraProtocolError
     from kora.protocols.loading import load_provider
     from kora.protocols.metadata import ProtocolName
+    from kora.scheduler.loop import first_claim_scheduler
 
     clock = SystemClock()
     worker = None
     if worker_uncertainty is not None:
         worker = installed_worker_profile(worker_uncertainty)
         if worker is None or harness != "claude":
-            return refuse(log, ServingRefusal.WORKER_CONFIGURATION, EXIT_CONFIGURATION)
+            reason = (
+                ServingRefusal.SCHEDULER_CONFIGURATION
+                if scheduler_enabled
+                else ServingRefusal.WORKER_CONFIGURATION
+            )
+            return refuse(log, reason, EXIT_CONFIGURATION)
+    if scheduler_enabled and worker is None:
+        return refuse(log, ServingRefusal.SCHEDULER_CONFIGURATION, EXIT_CONFIGURATION)
     preparer = None
     selection = None
     capabilities = LocalRuntimeConfiguration(state_root=None).capabilities()
@@ -929,6 +953,18 @@ def serve_sqlite_api(
             single_claim=worker is not None,
         )
 
+    def scheduler(database: "Database") -> ServingScheduler:
+        if worker is None or selection is None:
+            raise ServingFailure(ServingRefusal.SCHEDULER_CONFIGURATION)
+        return first_claim_scheduler(
+            database,
+            worker.limits,
+            clock.now,
+            IdentifierGenerator(clock.now),
+            selection,
+            capabilities,
+        )
+
     return serve_sqlite(
         settings,
         port,
@@ -936,6 +972,7 @@ def serve_sqlite_api(
         application,
         preparer=preparer,
         worker_startup=worker is not None,
+        make_scheduler=scheduler if scheduler_enabled else None,
     )
 
 
