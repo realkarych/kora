@@ -572,6 +572,11 @@ async def observed_worker_process(
         try:
             async with asyncio.timeout(SERVE_TIMEOUT):
                 yield child, release_write
+        except TimeoutError as error:
+            if child.returncode is None:
+                child.kill()
+            output, remaining = await child.communicate()
+            raise AssertionError((output, remaining)) from error
         finally:
             if child.returncode is None:
                 child.kill()
@@ -603,19 +608,30 @@ async def test_installed_worker_stop_during_recovery_never_binds(
     try:
         _, wait_id, cutoff = await latched_expiry(database)
         port = available_port()
+        native_sigterm = stop is signal.SIGTERM and not expired
+        mode = (
+            "hold_worker_recovery_native_term"
+            if native_sigterm
+            else "hold_worker_recovery"
+        )
         async with observed_worker_process(
             serving_installation,
             tmp_path,
             str(settings.url),
-            "hold_worker_recovery",
+            mode,
             port,
         ) as (child, release):
             assert child.stdout is not None
             assert child.stderr is not None
             held = await child.stdout.readline()
+            assert held == b"native_sqlite_held\n"
             await assert_port_closed(port)
 
-            child.send_signal(stop)
+            if native_sigterm:
+                os.write(release, b"s")
+                assert await child.stdout.readline() == b"native_sqlite_sigterm_sent\n"
+            else:
+                child.send_signal(stop)
             await serving_event(child.stderr, "api.serving_draining")
             refused = None
             if expired:
@@ -631,7 +647,6 @@ async def test_installed_worker_stop_during_recovery_never_binds(
     finally:
         await database.close()
 
-    assert held == b"native_sqlite_held\n"
     assert retained
     assert pending[0] == "open"
     assert observed == ("cancelled", cutoff)

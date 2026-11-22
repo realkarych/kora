@@ -2,6 +2,7 @@ import asyncio
 import errno
 import json
 import os
+import signal
 import socket
 import sys
 import threading
@@ -70,12 +71,20 @@ def owns_sqlite_descriptor(path: Path) -> bool:
 
 
 async def hold_native_query(
-    connection: AsyncConnection, release: int, path: Path
+    connection: AsyncConnection,
+    release: int,
+    path: Path,
+    *,
+    native_sigterm: bool = False,
 ) -> None:
     def observe(statement: str) -> None:
         if statement == "SELECT 42":
             assert owns_sqlite_descriptor(path)
             os.write(1, b"native_sqlite_held\n")
+            if native_sigterm:
+                assert os.read(release, 1) == b"s"
+                signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
+                os.write(1, b"native_sqlite_sigterm_sent\n")
             if os.read(release, 1) == b"r":
                 os.write(1, b"native_sqlite_returned\n")
 
@@ -211,17 +220,25 @@ def refused_lifespan(database: Database) -> ASGIApp:
 
 class HeldWorkerRecovery(WorkerClaimPoll):
     release: int
+    native_sigterm: bool
 
     async def _recover_run_expiry(self, run_id: str) -> None:
         async with self.database.read_transaction() as reader:
             await hold_native_query(
-                reader, self.release, self.database.settings.sqlite_path
+                reader,
+                self.release,
+                self.database.settings.sqlite_path,
+                native_sigterm=self.native_sigterm,
             )
         await super()._recover_run_expiry(run_id)
 
 
 def worker_lifecycle_app(
-    database: Database, diagnostics: ProcessDiagnostics, release: int, recovery: bool
+    database: Database,
+    diagnostics: ProcessDiagnostics,
+    release: int,
+    recovery: bool,
+    native_sigterm: bool,
 ) -> ASGIApp:
     profile = installed_worker_profile("2000")
     assert profile is not None
@@ -232,6 +249,7 @@ def worker_lifecycle_app(
     if recovery:
         held_recovery = HeldWorkerRecovery(*arguments)
         held_recovery.release = release
+        held_recovery.native_sigterm = native_sigterm
         poller = held_recovery
     else:
         poller = WorkerClaimPoll(*arguments)
@@ -314,7 +332,11 @@ def launch() -> int:
                     held_preparation_app, preparer=preparer, release=int(release)
                 )
             case [
-                ("hold_worker_recovery" | "hold_claim_response") as mode,
+                (
+                    "hold_worker_recovery"
+                    | "hold_worker_recovery_native_term"
+                    | "hold_claim_response"
+                ) as mode,
                 requested_port,
                 release,
             ]:
@@ -323,7 +345,8 @@ def launch() -> int:
                     worker_lifecycle_app,
                     diagnostics=diagnostics,
                     release=int(release),
-                    recovery=mode == "hold_worker_recovery",
+                    recovery=mode != "hold_claim_response",
+                    native_sigterm=mode == "hold_worker_recovery_native_term",
                 )
                 port = int(requested_port)
                 worker_startup = True

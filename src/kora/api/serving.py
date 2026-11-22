@@ -1,9 +1,10 @@
 import asyncio
 import logging
+import os
 import signal
 import socket
 from collections.abc import Callable, Generator
-from contextlib import AsyncExitStack, contextmanager
+from contextlib import AsyncExitStack, ExitStack, contextmanager, nullcontext
 from csv import Error as CsvError
 from enum import StrEnum
 from functools import partial
@@ -108,6 +109,21 @@ class ServingSignals:
                 signal.signal(signal.SIGTERM, terminate)
         finally:
             signal.signal(signal.SIGINT, interrupt)
+
+
+@contextmanager
+def own_signal_wakeup(loop: asyncio.AbstractEventLoop) -> Generator[None]:
+    with ExitStack() as cleanup:
+        receiver, sender = os.pipe()
+        cleanup.callback(os.close, receiver)
+        cleanup.callback(os.close, sender)
+        os.set_blocking(receiver, False)
+        os.set_blocking(sender, False)
+        loop.add_reader(receiver, os.read, receiver, 4096)
+        cleanup.callback(loop.remove_reader, receiver)
+        previous = signal.set_wakeup_fd(sender, warn_on_full_buffer=False)
+        cleanup.callback(signal.set_wakeup_fd, previous)
+        yield
 
 
 @contextmanager
@@ -475,6 +491,7 @@ def serve_sqlite(
         own_server_logs(),
         signals.own(),
         asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner,
+        own_signal_wakeup(runner.get_loop()) if worker_startup else nullcontext(),
     ):
         return runner.run(
             serve_on_loop(
