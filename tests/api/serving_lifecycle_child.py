@@ -14,12 +14,16 @@ from typing import Protocol, cast
 
 import aiosqlite
 from sqlalchemy.ext.asyncio import AsyncConnection
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from kora.__main__ import serving_deployment_preparer
+from kora.__main__ import new_instance_id, serving_deployment_preparer
+from kora.api.application import create_application
 from kora.api.exchange import COMPONENT
 from kora.api.graph_deployment_worker import THREAD_NAME, DeploymentPreparer
+from kora.api.installed_worker import installed_worker_profile
 from kora.api.serving import serve_sqlite
+from kora.api.worker_claims_route import WorkerClaimsRoute
+from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.cel_eval.evaluate import PatternCompilation
 from kora.cel_eval.thread import PROCESS, Evaluator
 from kora.db.connection import (
@@ -28,7 +32,16 @@ from kora.db.connection import (
     Lifecycle,
     read_database_settings,
 )
-from kora.observability import configure_process, read_logging_settings
+from kora.db.identifiers import IdentifierGenerator
+from kora.engine.admission_initialization import AdmissionInitialization
+from kora.engine.worker_claim_poll import WorkerClaimPoll
+from kora.observability import (
+    ProcessDiagnostics,
+    configure_process,
+    read_logging_settings,
+)
+from kora.plugins.authentication.static_token import StaticTokenAuthenticator
+from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.protocols.time import SystemClock
 
 PRIVATE_LIFESPAN_REASON: str = "private-lifespan-startup-reason"
@@ -151,25 +164,30 @@ def held_preparation_app(
     return application
 
 
+def limit_socket_send_buffer(scope: Scope) -> asyncio.Transport:
+    installed_transports: object = vars(asyncio.get_running_loop())["_transports"]
+    assert isinstance(installed_transports, Mapping)
+    inventory = cast("Mapping[int, object]", installed_transports)
+    original = next(
+        active
+        for active in inventory.values()
+        if isinstance(active, asyncio.Transport)
+        and active.get_extra_info("peername") == scope["client"]
+    )
+    original_socket: object = original.get_extra_info("socket")
+    assert isinstance(original_socket, TransportSocket)
+    with socket.socket(fileno=os.dup(original_socket.fileno())) as control:
+        control.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+        assert control.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) <= 65536
+    return original
+
+
 def buffered_response(database: Database) -> ASGIApp:
     async def application(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
             await lifecycle(receive, send)
             return
-        installed_transports: object = vars(asyncio.get_running_loop())["_transports"]
-        assert isinstance(installed_transports, Mapping)
-        inventory = cast("Mapping[int, object]", installed_transports)
-        original = next(
-            active
-            for active in inventory.values()
-            if isinstance(active, asyncio.Transport)
-            and active.get_extra_info("peername") == scope["client"]
-        )
-        original_socket: object = original.get_extra_info("socket")
-        assert isinstance(original_socket, TransportSocket)
-        with socket.socket(fileno=os.dup(original_socket.fileno())) as control:
-            control.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
-            assert control.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) <= 65536
+        original = limit_socket_send_buffer(scope)
         await send(
             {
                 "type": "http.response.start",
@@ -191,6 +209,87 @@ def refused_lifespan(database: Database) -> ASGIApp:
     return application
 
 
+class HeldWorkerRecovery(WorkerClaimPoll):
+    release: int
+
+    async def _recover_run_expiry(self, run_id: str) -> None:
+        async with self.database.read_transaction() as reader:
+            await hold_native_query(
+                reader, self.release, self.database.settings.sqlite_path
+            )
+        await super()._recover_run_expiry(run_id)
+
+
+def worker_lifecycle_app(
+    database: Database, diagnostics: ProcessDiagnostics, release: int, recovery: bool
+) -> ASGIApp:
+    profile = installed_worker_profile("2000")
+    assert profile is not None
+    clock = SystemClock()
+    runtimes = {"local": LocalRuntimeConfiguration(state_root=None).capabilities()}
+    arguments = database, runtimes, clock, profile.limits, profile.uncertainty
+    poller: WorkerClaimPoll
+    if recovery:
+        held_recovery = HeldWorkerRecovery(*arguments)
+        held_recovery.release = release
+        poller = held_recovery
+    else:
+        poller = WorkerClaimPoll(*arguments)
+    application = create_application(
+        StaticTokenAuthenticator({}, database),
+        diagnostics,
+        clock,
+        new_instance_id,
+        worker_registration=WorkerRegistrationRoute(
+            database, runtimes, clock, diagnostics
+        ),
+        worker_claims=WorkerClaimsRoute(poller),
+        admission_initialization=AdmissionInitialization(
+            database, clock, IdentifierGenerator(clock.now).new
+        ),
+        single_claim=True,
+    )
+    held = False
+
+    async def exercise(scope: Scope, receive: Receive, send: Send) -> None:
+        claim = (
+            scope["type"] == "http"
+            and scope["method"] == "POST"
+            and scope["path"].endswith("/claims")
+        )
+        successful = False
+        original: asyncio.Transport | None = None
+
+        async def observe(message: Message) -> None:
+            nonlocal held, original, successful
+            match message["type"]:
+                case "lifespan.shutdown.complete":
+                    assert owns_sqlite_descriptor(database.settings.sqlite_path)
+                    os.write(1, b"lifespan_shutdown\n")
+                case "http.response.start" if claim:
+                    successful = message["status"] == 200
+                case "http.response.body" if (
+                    claim and successful and not held and not recovery
+                ):
+                    held = True
+                    original = limit_socket_send_buffer(scope)
+                    async with database.read_transaction() as reader:
+                        await hold_native_query(
+                            reader, release, database.settings.sqlite_path
+                        )
+                case _:
+                    pass
+            await send(message)
+
+        await application(scope, receive, observe)
+        if original is not None:
+            assert original.get_write_buffer_size() > 1024 * 1024
+            assert owns_sqlite_descriptor(database.settings.sqlite_path)
+            os.write(1, b"claim_handed_to_socket\n")
+
+    return exercise
+
+
 def now() -> datetime:
     return datetime.now(UTC)
 
@@ -201,6 +300,8 @@ def launch() -> int:
         COMPONENT, read_logging_settings(os.environ, (COMPONENT,)), "api-lifecycle", now
     )
     preparer = None
+    port = 0
+    worker_startup = False
     try:
         match sys.argv[1:]:
             case ["refuse_lifespan"]:
@@ -212,16 +313,31 @@ def launch() -> int:
                 make_application = partial(
                     held_preparation_app, preparer=preparer, release=int(release)
                 )
+            case [
+                ("hold_worker_recovery" | "hold_claim_response") as mode,
+                requested_port,
+                release,
+            ]:
+                preparer = serving_deployment_preparer(SystemClock())
+                make_application = partial(
+                    worker_lifecycle_app,
+                    diagnostics=diagnostics,
+                    release=int(release),
+                    recovery=mode == "hold_worker_recovery",
+                )
+                port = int(requested_port)
+                worker_startup = True
             case ["buffered_response"]:
                 make_application = buffered_response
             case _:
                 make_application = held_request_app
         result = serve_sqlite(
             settings,
-            0,
+            port,
             diagnostics.logger(COMPONENT),
             make_application,
             preparer=preparer,
+            worker_startup=worker_startup,
         )
         if sys.argv[1:2] == ["hold_native"]:
             assert not owns_sqlite_descriptor(settings.sqlite_path)

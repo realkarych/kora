@@ -6,10 +6,12 @@ from collections.abc import Callable, Generator
 from contextlib import AsyncExitStack, contextmanager
 from csv import Error as CsvError
 from enum import StrEnum
+from functools import partial
 from types import FrameType
 
 from starlette.types import ASGIApp
 from uvicorn import Config, Server
+from uvicorn.lifespan.on import LifespanOn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from kora.api.exchange import COMPONENT
@@ -47,7 +49,7 @@ DRAINING: EventSpec = CATALOG.register(
         "api.serving_draining",
         COMPONENT,
         Level.INFO,
-        "the API listener stopped accepting",
+        "the API is draining its owned work",
         {},
     )
 )
@@ -65,6 +67,7 @@ REFUSED: EventSpec = CATALOG.register(
 class ServingRefusal(StrEnum):
     DATABASE_CONFIGURATION = "database_configuration"
     DOMAIN_CONFIGURATION = "domain_configuration"
+    WORKER_CONFIGURATION = "worker_configuration"
     SQLITE_UNPREPARED = "sqlite_unprepared"
     POSTGRESQL_PROFILE_UNAVAILABLE = "postgresql_profile_unavailable"
     POSTGRESQL_BARRIER_UNAVAILABLE = "postgresql_barrier_unavailable"
@@ -135,41 +138,101 @@ class _ServingHttpConnection(H11Protocol):
         await self._released.wait()
 
 
+class _StoppedBeforeBind(Exception):
+    pass
+
+
+class _WorkerLifespan(LifespanOn):
+    def __init__(self, config: Config, *, stopped: Callable[[], bool]) -> None:
+        super().__init__(config)
+        self._stopped = stopped
+
+    async def startup(self) -> None:
+        await super().startup()
+        stopped = self._stopped()
+        if stopped and not self.should_exit:
+            raise _StoppedBeforeBind()
+
+
+class _WorkerConfig(Config):
+    startup_stopped: Callable[[], bool]
+
+    def load(self) -> None:
+        super().load()
+        self.lifespan_class = partial(_WorkerLifespan, stopped=self.startup_stopped)
+
+
 class ApiServer(Server):
     log: ComponentLogger
     drain_deadline: float | None
     _loop: asyncio.AbstractEventLoop
     _force_requested: asyncio.Event
     _lifespan_shutdown: asyncio.Task[None] | None
+    _startup_pending: bool
+    _startup_timeout: asyncio.TimerHandle | None
+    _drain_unfinished: bool
 
-    def __init__(self, app: ASGIApp, port: int, log: ComponentLogger) -> None:
-        super().__init__(
-            Config(
-                app,
-                host=LOOPBACK,
-                port=port,
-                workers=1,
-                reload=False,
-                lifespan="on",
-                interface="asgi3",
-                http=_ServingHttpConnection,
-                ws="none",
-                proxy_headers=False,
-                forwarded_allow_ips=[],
-                access_log=False,
-                log_config=None,
-                use_colors=False,
-            )
+    def __init__(
+        self,
+        app: ASGIApp,
+        port: int,
+        log: ComponentLogger,
+        *,
+        worker_startup: bool = False,
+    ) -> None:
+        config_type = _WorkerConfig if worker_startup else Config
+        config = config_type(
+            app,
+            host=LOOPBACK,
+            port=port,
+            workers=1,
+            reload=False,
+            lifespan="on",
+            interface="asgi3",
+            http=_ServingHttpConnection,
+            ws="none",
+            proxy_headers=False,
+            forwarded_allow_ips=[],
+            access_log=False,
+            log_config=None,
+            use_colors=False,
         )
+        if isinstance(config, _WorkerConfig):
+            config.startup_stopped = self._startup_stopped
+        super().__init__(config)
         self.log = log
         self.servers = []
         self._loop = asyncio.get_running_loop()
         self._force_requested = asyncio.Event()
         self.drain_deadline = None
         self._lifespan_shutdown = None
+        self._startup_pending = worker_startup
+        self._startup_timeout = None
+        self._drain_unfinished = False
+
+    def _startup_stopped(self) -> bool:
+        self._startup_pending = False
+        return self.should_exit
+
+    def _watch_startup_drain(self, deadline: float) -> None:
+        self.log.emit(DRAINING)
+        self._startup_timeout = self._loop.call_at(deadline, self.report_unfinished)
+
+    def report_unfinished(self) -> None:
+        if not self._drain_unfinished:
+            self._drain_unfinished = True
+            self.log.emit(REFUSED, reason=ServingRefusal.DRAIN_UNFINISHED.value)
+
+    def finish_startup_watch(self) -> None:
+        if self._startup_timeout is not None:
+            self._startup_timeout.cancel()
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
         super().handle_exit(sig, frame)
+        if self._startup_pending and self.drain_deadline is None:
+            deadline = self._loop.time() + DEFAULT_CLOSE_DEADLINE_SECONDS
+            self.drain_deadline = deadline
+            self._loop.call_soon_threadsafe(self._watch_startup_drain, deadline)
         if self.force_exit:
             self._loop.call_soon_threadsafe(self._force_requested.set)
 
@@ -180,6 +243,9 @@ class ApiServer(Server):
             return
         try:
             await super().startup()
+        except _StoppedBeforeBind:
+            self._lifespan_shutdown = asyncio.create_task(self.lifespan.shutdown())
+            return
         except SystemExit as error:
             reason = (
                 ServingRefusal.STARTUP_FAILED
@@ -322,11 +388,16 @@ async def settle_serving(
     _, pending = await asyncio.wait(owners, timeout=max(0.0, deadline - loop.time()))
     unfinished = bool(pending) or loop.time() >= deadline
     if unfinished:
-        log.emit(REFUSED, reason=ServingRefusal.DRAIN_UNFINISHED.value)
+        if server is None:
+            log.emit(REFUSED, reason=ServingRefusal.DRAIN_UNFINISHED.value)
+        else:
+            server.report_unfinished()
     if pending:
         await asyncio.wait(pending)
     for owner in owners:
         owner.result()
+    if server is not None:
+        server.finish_startup_watch()
     return not unfinished
 
 
@@ -337,6 +408,7 @@ async def serve_on_loop(
     signals: ServingSignals,
     make_application: Callable[[Database], ASGIApp],
     preparer: DeploymentPreparer | None,
+    worker_startup: bool = False,
 ) -> int:
     database = Database(settings, observe_sqlite_serving=True)
     domain: AsyncExitStack | None = None
@@ -358,7 +430,9 @@ async def serve_on_loop(
                 ) as error:
                     raise ServingFailure(ServingRefusal.DOMAIN_CONFIGURATION) from error
             if signals.received is None:
-                server = ApiServer(make_application(database), port, log)
+                server = ApiServer(
+                    make_application(database), port, log, worker_startup=worker_startup
+                )
                 signals.server = server
                 await server.serve()
     except ServingFailure as error:
@@ -392,6 +466,7 @@ def serve_sqlite(
     make_application: Callable[[Database], ASGIApp],
     *,
     preparer: DeploymentPreparer | None = None,
+    worker_startup: bool = False,
 ) -> int:
     if not settings.sqlite_path.is_file():
         return refuse(log, ServingRefusal.SQLITE_UNPREPARED, 78)
@@ -402,5 +477,7 @@ def serve_sqlite(
         asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner,
     ):
         return runner.run(
-            serve_on_loop(settings, port, log, signals, make_application, preparer)
+            serve_on_loop(
+                settings, port, log, signals, make_application, preparer, worker_startup
+            )
         )

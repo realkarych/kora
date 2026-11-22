@@ -1,5 +1,5 @@
-from collections.abc import AsyncGenerator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable, Generator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Literal
 
 from fastapi import FastAPI
@@ -34,6 +34,7 @@ from kora.api.worker_history_route import WorkerHistoryRoute
 from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.api.worker_usage_route import WorkerUsageRoute
 from kora.engine.admission_initialization import AdmissionInitialization
+from kora.engine.worker_claim_poll import ClaimOverloaded
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
 from kora.models.runs import AcceptedRun, SkippedRun, TriggerRequest
@@ -53,6 +54,27 @@ class Health(BaseModel):
     status: Literal["ok"]
 
 
+class ClaimWorkSlot:
+    def __init__(self) -> None:
+        self._occupied: bool = False
+
+    @contextmanager
+    def for_exchange(self) -> Generator[Callable[[], None]]:
+        acquired = False
+
+        def admit() -> None:
+            nonlocal acquired
+            if self._occupied:
+                raise ClaimOverloaded()
+            self._occupied = acquired = True
+
+        try:
+            yield admit
+        finally:
+            if acquired:
+                self._occupied = False
+
+
 class ApiDispatch:
     def __init__(
         self,
@@ -62,12 +84,14 @@ class ApiDispatch:
         authenticator: Authenticator,
         clock: Clock,
         worker_history: WorkerHistoryRoute | None = None,
+        claim_slot: ClaimWorkSlot | None = None,
     ) -> None:
         self.application = app
         self.catalog = catalog
         self.authenticator = authenticator
         self.clock = clock
         self.worker_history = worker_history
+        self.claim_slot = claim_slot
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -151,7 +175,12 @@ class ApiDispatch:
             async def received_body() -> Message:
                 return {"type": "http.request", "body": bytes(body), "more_body": False}
 
-            await self.application(scope, received_body, send)
+            if matched.name is RouteName.WORKER_CLAIMS and self.claim_slot is not None:
+                with self.claim_slot.for_exchange() as admit:
+                    exchange.admit_claim = admit
+                    await self.application(scope, received_body, send)
+            else:
+                await self.application(scope, received_body, send)
         else:
             await self.application(scope, receive, send)
 
@@ -169,6 +198,7 @@ def create_application(
     worker_usage: WorkerUsageRoute | None = None,
     worker_heartbeat: WorkerHeartbeatRoute | None = None,
     admission_initialization: AdmissionInitialization | None = None,
+    single_claim: bool = False,
 ) -> ApiExchange:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncGenerator[None]:
@@ -347,5 +377,6 @@ def create_application(
         authenticator=authenticator,
         clock=clock,
         worker_history=worker_history,
+        claim_slot=ClaimWorkSlot() if single_claim else None,
     )
     return ApiExchange(framework, diagnostics, request_id)

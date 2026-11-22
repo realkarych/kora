@@ -1,17 +1,20 @@
 import asyncio
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import cast
 
 import pytest
+import pytest_asyncio
 from alembic import command
 from sqlalchemy import select
 from starlette.types import Message
 
 from kora.api.exchange import ApiExchange
+from kora.api.installed_worker import installed_worker_profile
 from kora.cel_eval.thread import Evaluator
 from kora.client import ClientError, KoraClient
-from kora.client.errors import Failure, Outcome
+from kora.client.errors import ApiError, Failure, Outcome
 from kora.conformance.capture import captured
 from kora.db.connection import Database, DatabaseSettings
 from kora.db.migrations import upgrade_database
@@ -28,6 +31,7 @@ from kora.observability import LoggingSettings
 from tests.api.claim_restart_process import claim_process, lose_claim_response
 from tests.api.claim_support import (
     BEARER,
+    LIMITS,
     authorize_claim_worker,
     claim_api,
     claim_application,
@@ -63,14 +67,40 @@ class HeldClaimResponse(HttpCall):
                 raise ConnectionResetError("claim response receiver disconnected")
 
 
+@pytest_asyncio.fixture
+async def claim_response_app(
+    database: Database, evaluator: Evaluator, single_claim: bool
+) -> AsyncGenerator[tuple[ClaimCase, ApiExchange]]:
+    case = await claim_case(database, evaluator)
+    await authorize_claim_worker(database, case)
+    profile = installed_worker_profile("2000")
+    assert profile is not None
+    clock = AuthorityClock()
+    with captured("api", LoggingSettings(), "claim-response", clock.now) as capture:
+        yield (
+            case,
+            claim_application(
+                database,
+                capture,
+                clock,
+                limits=profile.limits if single_claim else LIMITS,
+                single_claim=single_claim,
+            ),
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("receiver", ["slow", "lost", "cancelled"])
+@pytest.mark.parametrize(
+    "single_claim", [False, True], ids=["generic", "installed-slot"]
+)
 async def test_claim_settles_before_response_delivery_and_replays_after_loss(
     database: Database,
-    claim_api: tuple[ClaimCase, AuthorityClock, ApiExchange],
+    claim_response_app: tuple[ClaimCase, ApiExchange],
     receiver: str,
+    single_claim: bool,
 ) -> None:
-    case, _clock, app = claim_api
+    case, app = claim_response_app
     call = HeldClaimResponse(
         path="/api/v1/workers/claim-worker/claims",
         method="POST",
@@ -83,6 +113,7 @@ async def test_claim_settles_before_response_delivery_and_replays_after_loss(
     )
     ledger = ConnectionLedger(database)
 
+    replayed = None
     pending = asyncio.create_task(call.run(app))
     try:
         async with asyncio.timeout(10):
@@ -91,9 +122,16 @@ async def test_claim_settles_before_response_delivery_and_replays_after_loss(
             held_connections = ledger.outstanding
             committed = await state(database)
             async with KoraClient("http://127.0.0.1", BEARER, asgi_app=app) as client:
-                replayed = await client.claim_worker(
-                    case.query.worker_id, request(case)
-                )
+                if single_claim:
+                    with pytest.raises(ApiError) as busy:
+                        await client.claim_worker(case.query.worker_id, request(case))
+                    assert busy.value.status == 503
+                    assert busy.value.code == "API011"
+                    assert await state(database) == committed
+                else:
+                    replayed = await client.claim_worker(
+                        case.query.worker_id, request(case)
+                    )
             if receiver == "cancelled":
                 pending.cancel()
                 with pytest.raises(asyncio.CancelledError):
@@ -119,9 +157,10 @@ async def test_claim_settles_before_response_delivery_and_replays_after_loss(
     assert held_units == held_connections == 0
     assert len(committed["attempt_dispatcher"]) == 1
     assert committed == after
-    assert replayed.claim is not None
-    assert after_delivery == replayed
-    assert replayed.claim.attempt_id == case.binding.attempt_id
+    assert after_delivery.claim is not None
+    assert after_delivery.claim.attempt_id == case.binding.attempt_id
+    if not single_claim:
+        assert replayed == after_delivery
     assert ledger.outstanding == database.units_in_flight() == 0
     assert database.writer_is_free()
 
@@ -205,10 +244,17 @@ async def test_lost_http_claim_recovers_original_grant_after_api_process_restart
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "installed", [False, True], ids=["generic", "installed-limits"]
+)
 async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
     empty_database_settings: DatabaseSettings,
     evaluator: Evaluator,
+    installed: bool,
 ) -> None:
+    profile = installed_worker_profile("2000")
+    assert profile is not None
+    limits = profile.limits if installed else LIMITS
     database = Database(empty_database_settings)
     try:
         async with database.migration_connection() as migration:
@@ -219,7 +265,7 @@ async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
         await authorize_claim_worker(database, case)
         clock = AuthorityClock()
         with captured("api", LoggingSettings(), "legacy-claim", clock.now) as capture:
-            original_app = claim_application(database, capture, clock)
+            original_app = claim_application(database, capture, clock, limits=limits)
 
             async with (
                 lifespan(original_app),
@@ -244,7 +290,11 @@ async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
         before_replay = await state(database)
         with captured("api", LoggingSettings(), "legacy-claim", clock.now) as capture:
             replacement = claim_application(
-                database, capture, clock, default_stall=timedelta(microseconds=29)
+                database,
+                capture,
+                clock,
+                default_stall=timedelta(microseconds=29),
+                limits=limits,
             )
             async with (
                 lifespan(replacement),
