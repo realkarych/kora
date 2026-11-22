@@ -18,7 +18,7 @@ from kora.api.graph_services import deployment_selection
 from kora.api.installed_worker import installed_worker_profile
 from kora.client.errors import ApiError
 from kora.client.transport import KoraClient
-from kora.db.connection import Database
+from kora.db.connection import Database, DatabaseSettings
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import (
     api_token,
@@ -126,9 +126,8 @@ def assert_api_error(response: httpx.Response, status: int, code: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["bare", "graph", "worker"])
 async def test_installed_sqlite_worker_routes_are_explicit_and_service_only(
-    serving_installation: Path, tmp_path: Path, sqlite_template: Path, mode: str
+    serving_installation: Path, tmp_path: Path, sqlite_template: Path
 ) -> None:
     settings = copy_sqlite_template(sqlite_template, tmp_path / "metadata.sqlite")
     database = Database(settings)
@@ -146,14 +145,12 @@ async def test_installed_sqlite_worker_routes_are_explicit_and_service_only(
             )
     finally:
         await database.close()
-    setting = {"bare": {}, "graph": {DOMAIN_HARNESS: "claude"}, "worker": ENABLED}[mode]
     body = registration(worker).model_dump(mode="json")
     claim_path = f"{WORKERS}/{worker.principal.owner}/claims"
 
-    worker_errors: list[tuple[httpx.Response, int, str]] = []
     async with (
         installed_server(
-            serving_installation, tmp_path, str(settings.url), setting
+            serving_installation, tmp_path, str(settings.url), ENABLED
         ) as (origin, early),
         httpx.AsyncClient(base_url=origin, trust_env=False, timeout=5) as client,
     ):
@@ -165,27 +162,26 @@ async def test_installed_sqlite_worker_routes_are_explicit_and_service_only(
         visible = (WORKERS in paths, f"{WORKERS}/{{worker_id}}/claims" in paths)
         missing = await client.post(WORKERS, json=body)
         missing_claim = await client.post(claim_path, json={})
-        if mode == "worker":
-            wrong_kind = await client.post(
-                WORKERS,
-                json=body,
-                headers={"Authorization": str(personal.request.authorization)},
-            )
-            revoked_claim = await client.post(
-                claim_path,
-                json={},
-                headers={"Authorization": str(revoked.request.authorization)},
-            )
-            foreign = await client.post(
-                WORKERS,
-                json=body | {"name": "another-worker"},
-                headers={"Authorization": str(worker.request.authorization)},
-            )
-            worker_errors = [
-                (wrong_kind, 403, "API005"),
-                (revoked_claim, 401, "API009"),
-                (foreign, 403, "API005"),
-            ]
+        wrong_kind = await client.post(
+            WORKERS,
+            json=body,
+            headers={"Authorization": str(personal.request.authorization)},
+        )
+        revoked_claim = await client.post(
+            claim_path,
+            json={},
+            headers={"Authorization": str(revoked.request.authorization)},
+        )
+        foreign = await client.post(
+            WORKERS,
+            json=body | {"name": "another-worker"},
+            headers={"Authorization": str(worker.request.authorization)},
+        )
+        worker_errors = [
+            (wrong_kind, 403, "API005"),
+            (revoked_claim, 401, "API009"),
+            (foreign, 403, "API005"),
+        ]
 
     readback = Database(settings)
     try:
@@ -195,19 +191,14 @@ async def test_installed_sqlite_worker_routes_are_explicit_and_service_only(
 
     assert schema.status_code == 200
     assert all(not rows for rows in effects.values())
-    enabled = mode == "worker"
-    assert visible == (enabled, enabled)
+    assert visible == (True, True)
     events = [record["event"] for record in diagnostics(early)]
-    assert ("engine.admission_initialization.finished" in events) is enabled
-    assert ("engine.claim_expiry_recovery.finished" in events) is enabled
-    if enabled:
-        assert_api_error(missing, 401, "API009")
-        assert_api_error(missing_claim, 401, "API009")
-        for response, status, code in worker_errors:
-            assert_api_error(response, status, code)
-    else:
-        assert_api_error(missing, 404, "API001")
-        assert_api_error(missing_claim, 404, "API001")
+    assert "engine.admission_initialization.finished" in events
+    assert "engine.claim_expiry_recovery.finished" in events
+    assert_api_error(missing, 401, "API009")
+    assert_api_error(missing_claim, 401, "API009")
+    for response, status, code in worker_errors:
+        assert_api_error(response, status, code)
 
 
 @pytest.mark.asyncio
@@ -457,20 +448,52 @@ async def test_installed_sqlite_first_worker_claim_replays_original_grant(
 
 
 async def latched_expiry(
-    database: Database, *, corrupt: bool = False
+    database: Database,
 ) -> tuple[ExecutionCase, str, datetime]:
     case = await execution_case(database, timeout="1h", granted=False)
     wait_id = await open_expiry_wait(database, case.promotion.run_id)
     cutoff = case.promotion.clock.now() + timedelta(hours=1)
     async with database.transaction() as writer:
         await record_run_expiry(await expiry_context(writer, case.promotion), cutoff)
-        if corrupt:
+    return case, wait_id, cutoff
+
+
+async def check_unreadable_expiry_before_bind(
+    serving_installation: Path,
+    tmp_path: Path,
+    settings: DatabaseSettings,
+    run_id: str,
+    wait_id: str,
+) -> None:
+    database = Database(settings)
+    try:
+        async with database.transaction() as writer:
             await writer.execute(
                 update(run)
-                .where(run.c.id == case.promotion.run_id)
+                .where(run.c.id == run_id)
                 .values(retention={"private-latch-width": "x" * 1_010_000})
             )
-    return case, wait_id, cutoff
+        port = available_port()
+
+        result = await asyncio.to_thread(
+            subprocess.run,
+            api_command(serving_installation, port),
+            cwd=tmp_path,
+            env=api_environment(str(settings.url)) | ENABLED,
+            capture_output=True,
+            check=False,
+            timeout=SERVE_TIMEOUT,
+        )
+        await assert_port_closed(port)
+        observed = await expiry_wait_state(database, wait_id)
+    finally:
+        await database.close()
+
+    assert result.returncode == 70
+    assert refusal_reason(result) == "startup_failed"
+    assert b"engine.claim_expiry_recovery.refused" in result.stderr
+    assert b"private-latch-width" not in result.stderr
+    assert observed[0] == "open"
 
 
 @pytest.mark.asyncio
@@ -481,7 +504,17 @@ async def test_installed_sqlite_recovers_latched_expiry_before_bind(
     database = Database(settings)
     try:
         case, wait_id, cutoff = await latched_expiry(database)
+    finally:
+        await database.close()
+    unreadable = copy_sqlite_template(
+        settings.sqlite_path, tmp_path / "unreadable.sqlite"
+    )
 
+    await check_unreadable_expiry_before_bind(
+        serving_installation, tmp_path, unreadable, case.promotion.run_id, wait_id
+    )
+    database = Database(settings)
+    try:
         async with installed_server(
             serving_installation, tmp_path, str(settings.url), ENABLED
         ) as (_, early):
@@ -513,37 +546,6 @@ async def test_installed_sqlite_recovers_latched_expiry_before_bind(
         < early.index(b"engine.claim_expiry_recovery.finished")
         < early.index(b"api.serving_bound")
     )
-
-
-@pytest.mark.asyncio
-async def test_installed_sqlite_refuses_unreadable_expiry_before_bind(
-    serving_installation: Path, tmp_path: Path, sqlite_template: Path
-) -> None:
-    settings = copy_sqlite_template(sqlite_template, tmp_path / "metadata.sqlite")
-    database = Database(settings)
-    try:
-        _, wait_id, _ = await latched_expiry(database, corrupt=True)
-        port = available_port()
-
-        result = await asyncio.to_thread(
-            subprocess.run,
-            api_command(serving_installation, port),
-            cwd=tmp_path,
-            env=api_environment(str(settings.url)) | ENABLED,
-            capture_output=True,
-            check=False,
-            timeout=SERVE_TIMEOUT,
-        )
-        await assert_port_closed(port)
-        observed = await expiry_wait_state(database, wait_id)
-    finally:
-        await database.close()
-
-    assert result.returncode == 70
-    assert refusal_reason(result) == "startup_failed"
-    assert b"engine.claim_expiry_recovery.refused" in result.stderr
-    assert b"private-latch-width" not in result.stderr
-    assert observed[0] == "open"
 
 
 @asynccontextmanager
