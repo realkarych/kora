@@ -26,6 +26,8 @@ The [catalog architecture approved under #1640](https://github.com/realkarych/ko
 
 The [installed selection specification](../../knowledge/specs/installed-execution-selection.md#bind-the-actual-worker-and-the-original-claim) governs the bounded private connection, proof before payload and actual closure. Implementation and activation of the private listener require separate approval. The original Writer and physical qualification keep their existing gates.
 
+The project owner reviewed this amendment line by line and accepted its wording on 2026-11-22 at `dc47762381846cd777a25a9b3f71de03df605961`. [Owner acceptance](https://github.com/realkarych/kora/issues/1774#issuecomment-7082460790)
+
 ## Alternatives considered
 
 - A mandatory Uvicorn dependency would add the server to every CLI and client installation.
