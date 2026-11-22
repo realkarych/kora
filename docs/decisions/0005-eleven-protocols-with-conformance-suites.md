@@ -21,6 +21,8 @@ Bounded-read amendment dated 2026-10-23: the project owner approved the contract
 
 - Staged-storage amendment dated 2026-10-23: the [plan for #229](https://github.com/realkarych/kora/issues/229#issuecomment-6368221981) was [approved by the project owner](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832). The operation inventory and lifecycle below replace the four-method storage boundary; exact wording [reviewed line by line and approved by the project owner](https://github.com/realkarych/kora/pull/245#issuecomment-6369119893) on 2026-10-23. Runtime implementation and evidence remain separate.
 
+- Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). Wording awaits owner line-by-line review.
+
 ## Context
 
 Local-storage implementation amendment dated 2026-10-23: the [plan for #255](https://github.com/realkarych/kora/issues/255#issuecomment-6371758782) was [approved by the project owner](https://github.com/realkarych/kora/issues/255#issuecomment-6373658551). Exact wording approval must be recorded in the implementing PR before merge.
@@ -41,7 +43,7 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 8. **observability exporter**: one `on_event` over the append-only event table, replayable, control plane only. MVP: `otel` (OTLP, GenAI semantic conventions) and nothing else; Langfuse and Datadog are OTLP endpoints.
 9. **authentication**: `authenticate(request) → Principal`, `revoke`. MVP: `static_token`.
 10. **sensor**: `observe(config) → Observation` for `wait_event` nodes and sensor triggers, stateless between polls. MVP: `change_request_status`, `ci_status`, `http`.
-11. **policy**: `decide(request, policy, protected_paths) → allow | deny` from the harness's pre-tool-call hook. MVP: `allow_deny`.
+11. **policy**: `decide(request, policy, protected_paths) → allow | deny` through the harness's before-effect policy mechanism under [ADR-0009](0009-target-repository-trust-boundary.md). MVP: `allow_deny`.
 
 **One entry point.** Implementations are discovered through the entry-point group `kora.provider`; each entry point returns validated `ProviderMetadata(protocol, name, implementation, config_schema, version)`. `kora plugins list` prints what is installed; the names are then used in the intermediate representation (IR, for example `runtime.runtime: docker`) or in deployment configuration. Amended 2026-10-21 ([issue #150](https://github.com/realkarych/kora/issues/150)): an entry point is named `<protocol>.<name>`, for example `runtime.inhouse_ci = "kora_inhouse:runtime_provider"`, because provider names repeat across protocols (`local` is a runtime and an artifact storage). A process loads only the providers it is configured with, by that name, importing only the requested entry point's module and its parent packages; the name `fake` and kora's test and conformance modules are refused, because kora's fakes are constructed by injection only ([provider loading](../../knowledge/specs/protocols.md#provider-loading-issue-150)).
 
