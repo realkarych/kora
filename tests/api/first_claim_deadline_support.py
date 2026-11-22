@@ -1,17 +1,22 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Literal, cast
 
 import httpx
 import pytest
-from sqlalchemy import Connection, event, text, update
+from sqlalchemy import Connection, delete, event, insert, text, update
 from sqlalchemy.util import await_
 
 from kora.client import KoraClient
 from kora.client.errors import ApiError
 from kora.db.connection import Database
-from kora.db.tables import attempt, run
+from kora.db.tables import (
+    attempt,
+    attempt_claim_read_admission,
+    attempt_dispatcher,
+    run,
+)
 from kora.engine.attempt_admission import AttemptAdmissionState
 from kora.engine.claim_timing import first_claim_deadline
 from kora.engine.locks import TransitionLocks
@@ -46,6 +51,7 @@ class Candidate:
     promotion: PromotionCase
     deployed: DeployResponse
     node_id: str
+    promoted_at: datetime
 
     @property
     def run_id(self) -> str:
@@ -86,9 +92,15 @@ async def promote_candidate(
         setup.processor.identifiers,
         key=key,
     )
+    if attempt_timeout is None:
+        setup.clock.advance(1)
+    promotion_time = setup.clock.now()
     assert await promoted.promote(database) is PromotionOutcome.APPLIED
     return Candidate(
-        promoted, deployed, await node_id(database, promoted.run_id, "agent")
+        promoted,
+        deployed,
+        await node_id(database, promoted.run_id, "agent"),
+        promotion_time,
     )
 
 
@@ -256,6 +268,112 @@ async def verify_nonterminal_refusals(
     assert empty_page.claim is None
 
 
+async def verify_saved_fact_changed_before_retry(
+    setup: SchedulerClaimSetup,
+    target: Candidate,
+    client: KoraClient,
+    worker_id: str,
+    fact: Literal["source", "dispatch", "lease"],
+) -> None:
+    database = setup.processor.database
+    engine = database.writer_engine.sync_engine
+    rolled_back = False
+    retry_entered = asyncio.Event()
+    allow_retry = asyncio.Event()
+    (saved,) = (await state(database))["attempt"]
+    attempt_id = saved["id"]
+    now = setup.clock.now()
+    dispatcher_id = setup.processor.identifiers.new()
+    native_source = attempt_claim_read_admission
+    source = native_source.c.attempt_id == attempt_id
+    revision = native_source.c.source_revision
+    physical = attempt.c.id == attempt_id
+
+    def observe_rollback(_connection: Connection) -> None:
+        nonlocal rolled_back
+        rolled_back = True
+
+    def hold_retry_checkout(*arguments: object) -> None:
+        if rolled_back and not retry_entered.is_set():
+            retry_entered.set()
+            await_(allow_retry.wait())
+
+    other_owner = Database(database.settings)
+    event.listen(engine, "rollback", observe_rollback)
+    event.listen(engine, "checkout", hold_retry_checkout)
+    try:
+        async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+            request = tasks.create_task(refuse_claim(client, worker_id, setup.request))
+            try:
+                await retry_entered.wait()
+                async with other_owner.transaction() as writer:
+                    locks = TransitionLocks(writer)
+                    assert await locks.acquire_run(target.run_id, wait=False)
+                    if fact == "source":
+                        await writer.execute(
+                            update(native_source)
+                            .where(source)
+                            .values(source_revision=revision + 1)
+                        )
+                    elif fact == "dispatch":
+                        await writer.execute(
+                            insert(attempt_dispatcher).values(
+                                id=dispatcher_id,
+                                attempt_id=attempt_id,
+                                execution_domain_id=setup.request.execution_domain_id,
+                                worker_id=worker_id,
+                                incarnation_id=setup.request.incarnation_id,
+                                lease_epoch=1,
+                                mode="execute",
+                                granted_at=now,
+                                closed_at=now,
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
+                    else:
+                        await writer.execute(
+                            update(attempt)
+                            .where(physical)
+                            .values(
+                                lease_owner=worker_id,
+                                lease_epoch=1,
+                                lease_until=now + timedelta(seconds=120),
+                            )
+                        )
+                expected = await state(database)
+            finally:
+                allow_retry.set()
+            refused = await request
+        unchanged = await state(database)
+
+        assert (refused.status, refused.code) == (500, ApiErrorCode.INTERNAL)
+        assert unchanged == expected
+        assert unchanged["attempt"][0]["status"] == "created"
+    finally:
+        event.remove(engine, "checkout", hold_retry_checkout)
+        event.remove(engine, "rollback", observe_rollback)
+        await other_owner.close()
+
+    async with database.transaction() as writer:
+        if fact == "source":
+            await writer.execute(
+                update(native_source).where(source).values(source_revision=revision - 1)
+            )
+        elif fact == "dispatch":
+            await writer.execute(
+                delete(attempt_dispatcher).where(
+                    attempt_dispatcher.c.id == dispatcher_id
+                )
+            )
+        else:
+            await writer.execute(
+                update(attempt)
+                .where(physical)
+                .values(lease_owner=None, lease_epoch=0, lease_until=None)
+            )
+
+
 async def verify_repeated_refusal_cannot_release_again(
     origin: str,
     setup: SchedulerClaimSetup,
@@ -285,17 +403,58 @@ async def verify_repeated_refusal_cannot_release_again(
         }
     )
 
+    competitor_selected = asyncio.Event()
+    allow_competitor = asyncio.Event()
+    reader = database.reader_engine.sync_engine
+    writer = database.writer_engine.sync_engine
+    probe = HeldDischargeCommit(commit=True)
+
+    def hold_competing_selection(
+        _connection: object, _cursor: object, statement: str, *arguments: object
+    ) -> None:
+        if (
+            probe.entered.is_set()
+            and "ORDER BY runtime, id" in statement
+            and not competitor_selected.is_set()
+        ):
+            competitor_selected.set()
+            await_(allow_competitor.wait())
+
     async with KoraClient(origin, COMPETING_CREDENTIAL) as competing:
         other_worker = (await competing.register_worker(other)).worker_id
         before = await state(database)
-        refused = await refuse_claim(client, worker_id, setup.request)
-        discharged = await state(database)
+        event.listen(writer, "after_cursor_execute", probe.record_write)
+        event.listen(writer, "commit", probe.hold_commit)
+        event.listen(reader, "after_cursor_execute", hold_competing_selection)
+        try:
+            async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+                original = tasks.create_task(
+                    refuse_claim(client, worker_id, setup.request)
+                )
+                try:
+                    await probe.entered.wait()
+                    contender = tasks.create_task(
+                        competing.claim_worker(other_worker, competing_request)
+                    )
+                    await competitor_selected.wait()
+                    while_held = await state(database)
+                    probe.release.set()
+                    refused = await original
+                    discharged = await state(database)
+                finally:
+                    probe.release.set()
+                    allow_competitor.set()
+            competed = contender.result()
+        finally:
+            event.remove(reader, "after_cursor_execute", hold_competing_selection)
+            event.remove(writer, "commit", probe.hold_commit)
+            event.remove(writer, "after_cursor_execute", probe.record_write)
         repeated = await client.claim_worker(worker_id, setup.request)
-        competed = await competing.claim_worker(other_worker, competing_request)
     after_repeats = await state(database)
 
     assert (refused.status, refused.code) == (500, ApiErrorCode.INTERNAL)
     assert target.run_id not in refused.content.decode()
+    assert while_held == before
     assert_original_discharge(before, discharged, target, setup.clock.now())
     assert repeated.claim is competed.claim is None
     for table in (
@@ -418,10 +577,14 @@ async def admit_after_first_claim_deadline_crossing(
     safe = await promote_candidate(origin, setup, "representable-cutoff")
     waiting = await process(setup.processor, safe.node_id, periodic=False)
     await clear_scheduling_mark(database, original)
-    setup.clock.advance(2)
+    setup.clock.advance(1)
 
     if transport == "http":
         await verify_nonterminal_refusals(database, setup, client, worker_id)
+        for fact in ("source", "dispatch", "lease"):
+            await verify_saved_fact_changed_before_retry(
+                setup, original, client, worker_id, fact
+            )
         await verify_original_commit_settlement(
             setup, original, client, worker_id, ledger, commit=False
         )

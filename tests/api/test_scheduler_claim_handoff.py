@@ -44,7 +44,6 @@ async def test_real_scheduler_admission_hands_pinned_attempt_to_worker_claim(
     ledger = ConnectionLedger(database)
     setup = await scheduler_claim_setup(database, preparer, api_capture)
     clock = setup.clock
-    expected_deadline = clock.now() + timedelta(hours=1)
     async with database.read_transaction() as reader:
         price = await read_latest_price(reader, None, clock.now())
 
@@ -102,6 +101,7 @@ async def test_real_scheduler_admission_hands_pinned_attempt_to_worker_claim(
     assert deadline_record is not None
     deadline = deadline_record.deadline()
     assert (deadline.scope_kind, deadline.scope_id) == ("run", safe.run_id)
+    expected_deadline = safe.promoted_at + timedelta(hours=1)
     assert deadline.at == claimed["deadline"] == expected_deadline
     assert replay == first
     assert before_replay == after
