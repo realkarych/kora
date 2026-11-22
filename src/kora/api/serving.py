@@ -3,7 +3,8 @@ import logging
 import signal
 import socket
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import AsyncExitStack, contextmanager
+from csv import Error as CsvError
 from enum import StrEnum
 from types import FrameType
 
@@ -12,6 +13,8 @@ from uvicorn import Config, Server
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from kora.api.exchange import COMPONENT
+from kora.api.graph_deployment_worker import DeploymentPreparer
+from kora.cel_eval.binding import BindingUnavailable
 from kora.db.connection import (
     DEFAULT_CLOSE_DEADLINE_SECONDS,
     Database,
@@ -61,6 +64,7 @@ REFUSED: EventSpec = CATALOG.register(
 
 class ServingRefusal(StrEnum):
     DATABASE_CONFIGURATION = "database_configuration"
+    DOMAIN_CONFIGURATION = "domain_configuration"
     SQLITE_UNPREPARED = "sqlite_unprepared"
     POSTGRESQL_PROFILE_UNAVAILABLE = "postgresql_profile_unavailable"
     POSTGRESQL_BARRIER_UNAVAILABLE = "postgresql_barrier_unavailable"
@@ -275,8 +279,26 @@ def refuse(log: ComponentLogger, reason: ServingRefusal, code: int) -> int:
     return code
 
 
+async def settle_domain(
+    database: Database,
+    server: ApiServer | None,
+    resources: AsyncExitStack,
+    deadline: float,
+) -> None:
+    try:
+        async with resources:
+            if server is not None:
+                await server.drain()
+    finally:
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        await database.close_sqlite_serving(remaining)
+
+
 async def settle_serving(
-    database: Database, server: ApiServer | None, log: ComponentLogger
+    database: Database,
+    server: ApiServer | None,
+    log: ComponentLogger,
+    domain: AsyncExitStack | None,
 ) -> bool:
     loop = asyncio.get_running_loop()
     observed_deadline = None if server is None else server.drain_deadline
@@ -285,13 +307,18 @@ async def settle_serving(
         if observed_deadline is None
         else observed_deadline
     )
-    owners = {
-        asyncio.create_task(
-            database.close_sqlite_serving(max(0.0, deadline - loop.time()))
-        )
-    }
-    if server is not None:
-        owners.add(asyncio.create_task(server.drain()))
+    if domain is None:
+        owners = {
+            asyncio.create_task(
+                database.close_sqlite_serving(max(0.0, deadline - loop.time()))
+            )
+        }
+        if server is not None:
+            owners.add(asyncio.create_task(server.drain()))
+    else:
+        owners = {
+            asyncio.create_task(settle_domain(database, server, domain, deadline))
+        }
     _, pending = await asyncio.wait(owners, timeout=max(0.0, deadline - loop.time()))
     unfinished = bool(pending) or loop.time() >= deadline
     if unfinished:
@@ -309,28 +336,50 @@ async def serve_on_loop(
     log: ComponentLogger,
     signals: ServingSignals,
     make_application: Callable[[Database], ASGIApp],
+    preparer: DeploymentPreparer | None,
 ) -> int:
     database = Database(settings, observe_sqlite_serving=True)
+    domain: AsyncExitStack | None = None
     server: ApiServer | None = None
     failure: ServingRefusal | None = None
     try:
         if not await database_is_at_head(database):
             failure = ServingRefusal.SQLITE_UNPREPARED
         elif signals.received is None:
-            server = ApiServer(make_application(database), port, log)
-            signals.server = server
-            await server.serve()
+            if preparer is not None:
+                domain = AsyncExitStack()
+                try:
+                    await domain.enter_async_context(preparer)
+                except (
+                    BindingUnavailable,
+                    CsvError,
+                    OSError,
+                    UnicodeDecodeError,
+                ) as error:
+                    raise ServingFailure(ServingRefusal.DOMAIN_CONFIGURATION) from error
+            if signals.received is None:
+                server = ApiServer(make_application(database), port, log)
+                signals.server = server
+                await server.serve()
     except ServingFailure as error:
         failure = error.reason
     except SystemExit:
         failure = ServingRefusal.STARTUP_FAILED
     finally:
-        in_time = await settle_serving(database, server, log)
+        in_time = await settle_serving(database, server, log, domain)
     if not in_time:
         return 70
     if failure is not None:
         return refuse(
-            log, failure, 78 if failure is ServingRefusal.SQLITE_UNPREPARED else 70
+            log,
+            failure,
+            78
+            if failure
+            in {
+                ServingRefusal.SQLITE_UNPREPARED,
+                ServingRefusal.DOMAIN_CONFIGURATION,
+            }
+            else 70,
         )
     log.emit(STOPPED)
     return 130 if signals.received == signal.SIGINT else 0
@@ -341,6 +390,8 @@ def serve_sqlite(
     port: int,
     log: ComponentLogger,
     make_application: Callable[[Database], ASGIApp],
+    *,
+    preparer: DeploymentPreparer | None = None,
 ) -> int:
     if not settings.sqlite_path.is_file():
         return refuse(log, ServingRefusal.SQLITE_UNPREPARED, 78)
@@ -350,4 +401,6 @@ def serve_sqlite(
         signals.own(),
         asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner,
     ):
-        return runner.run(serve_on_loop(settings, port, log, signals, make_application))
+        return runner.run(
+            serve_on_loop(settings, port, log, signals, make_application, preparer)
+        )

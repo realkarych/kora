@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import json
 import os
 import selectors
@@ -14,15 +15,26 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
+from sqlalchemy import select
 
-from kora.db.connection import Database
+from kora.api.routes import RouteName
+from kora.db.connection import Database, DatabaseSettings
+from kora.db.tables import attempt, graph_version
+from kora.engine.start_records import AcceptedStart, decode_start_receipt
 from kora.ir.json import JsonObject, parse_json_object
 from kora.models.errors import ApiErrorEnvelope
+from kora.models.graphs import DeployResponse
+from kora.models.runs import AcceptedRun
+from tests.api.deployment_cases import GRAPH, NAMESPACE, skeleton_ir
 from tests.api.serving_lifecycle_child import SLOW_RESPONSE_BYTES, serving_event
 from tests.api.test_linux_serving_barrier import native_probe_required_here
+from tests.cli.test_deploy_command import collect_cli
 from tests.client.support import tls_pair
+from tests.engine.graph_output_cases import child as ir_child
+from tests.engine.start_cases import start_rows
 from tests.plugins.authentication.support import seed_case
 from tests.support.databases import copy_sqlite_template
+from tests.support.observability import ProcessResult
 from tests.support.provider_tooling import (
     copy_core_wheel,
     core_wheel_build_stop,
@@ -38,6 +50,10 @@ SCHEMA = "/api/v1/openapi.json"
 SERVE_TIMEOUT = 20
 DRAIN_RECEIPT_TIMEOUT = 8
 PRIVATE_MARKER = "private-installed-api-marker"
+PRIVATE_PARAMETER = "private-installed-parameter-value"
+DOMAIN_HARNESS = "KORA_API_HARNESS"
+DEPLOY_PATH = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/versions"
+TRIGGER_PATH = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/runs"
 
 BUILD_TREE = """
 import os
@@ -84,7 +100,12 @@ def observe_build_tree(
 
 
 def installed_core(
-    core_wheel: Path, root: Path, *, serve: bool = False, postgres: bool = False
+    core_wheel: Path,
+    root: Path,
+    *,
+    serve: bool = False,
+    postgres: bool = False,
+    copy_payload: bool = False,
 ) -> Path:
     wheelhouse = root / "dependencies"
     wheelhouse.mkdir()
@@ -94,11 +115,13 @@ def installed_core(
     extras = ",".join(
         name for name, enabled in (("serve", serve), ("postgres", postgres)) if enabled
     )
+    file_isolation = ["--link-mode", "copy"] if copy_payload else []
     run_setup(
         [
             "uv",
             "pip",
             "install",
+            *file_isolation,
             "--offline",
             "--no-index",
             "--find-links",
@@ -207,8 +230,11 @@ def api_startup_result(
     port: int,
     *,
     ssl_keylog: Path | None = None,
+    harness: str | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     environment = api_environment(database_url)
+    if harness is not None:
+        environment[DOMAIN_HARNESS] = harness
     if ssl_keylog is not None:
         environment["SSLKEYLOGFILE"] = str(ssl_keylog)
     return subprocess.run(
@@ -352,6 +378,12 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
             )
             denied = await client.get(SCHEMA, headers={"Authorization": service_token})
             schema = await client.get(SCHEMA, headers={"Authorization": personal_token})
+            disabled = [
+                await client.post(
+                    path, headers={"Authorization": personal_token}, json={}
+                )
+                for path in (DEPLOY_PATH, TRIGGER_PATH)
+            ]
         head_missing = await read_raw_head(port)
         head_denied = await read_raw_head(port, service_token)
         head_wrong_method = await read_raw_head(port, personal_token)
@@ -382,6 +414,11 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
     assert isinstance(definition["paths"], dict)
     assert set(definition["paths"]) == {"/healthz"}
     assert "servers" not in definition
+    for response in disabled:
+        assert response.status_code == 404
+        error = ApiErrorEnvelope.model_validate_json(response.content)
+        assert error.error.code == "API001"
+        assert error.error.request_id == response.headers["x-request-id"]
     request_ids = {
         item.headers["x-request-id"]
         for item in (health, missing, invalid, denied, schema)
@@ -402,6 +439,8 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
     assert len(request_ids) == 8
     records = diagnostics(stderr)
     assert [record["event"] for record in records].count("api.serving_stopped") == 1
+    assert all(record["event"] != "cel.binding.loaded" for record in records)
+    assert all(record.get("provider") != "claude" for record in records)
     assert any(
         record["event"] == "protocols.loading.provider_loaded"
         and record["provider"] == "static_token"
@@ -414,6 +453,337 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
         probe.settimeout(2)
         with pytest.raises(ConnectionRefusedError):
             probe.connect((LOOPBACK, port))
+
+
+async def installed_cli(
+    python: Path, directory: Path, environment: dict[str, str], arguments: list[str]
+) -> ProcessResult:
+    launch = asyncio.create_task(
+        asyncio.create_subprocess_exec(
+            str(python.with_name("kora")),
+            *arguments,
+            cwd=directory,
+            env={"PATH": os.defpath, **environment},
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    )
+    return await collect_cli(launch, SERVE_TIMEOUT)
+
+
+async def deployment_rows(
+    settings: DatabaseSettings,
+) -> tuple[dict[str, list[dict[str, object]]], str, list[str]]:
+    database = Database(settings)
+    try:
+        rows = await start_rows(database)
+        async with database.read_transaction() as reader:
+            [version] = (await reader.scalars(select(graph_version.c.id))).all()
+            attempts = list(await reader.scalars(select(attempt.c.id)))
+        return rows, version, attempts
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_installed_sqlite_api_deploys_and_replays_manual_trigger(
+    serving_installation: Path, tmp_path: Path, sqlite_template: Path
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
+    database = Database(settings)
+    try:
+        seeded = await seed_case(database, NAMESPACE)
+        unauthorized = await seed_case(database, "other")
+    finally:
+        await database.close()
+    authorization = seeded.request.authorization
+    foreign_authorization = unauthorized.request.authorization
+    assert authorization is not None
+    assert foreign_authorization is not None
+    ir = skeleton_ir(harness="claude")
+    ir_child(ir, "graph")["params"] = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    }
+    ir_child(ir, "graph", "nodes", "approve", "config")["approve_when"] = (
+        'params.name.matches("^ready$")'
+    )
+    graph_file = tmp_path / "graph.ir.json"
+    graph_file.write_text(json.dumps(ir))
+    environment = api_environment(str(settings.url)) | {DOMAIN_HARNESS: "claude"}
+
+    process = await asyncio.create_subprocess_exec(
+        *api_command(serving_installation, 0),
+        cwd=tmp_path,
+        env=environment,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        port, early = await read_bound_port(process)
+        origin = f"http://{LOOPBACK}:{port}"
+        client_environment = {
+            "KORA_URL": origin,
+            "KORA_TOKEN": authorization.removeprefix("Bearer "),
+            "KORA_LOG_LEVEL": "DEBUG",
+        }
+        async with httpx.AsyncClient(
+            base_url=origin, trust_env=False, timeout=10
+        ) as client:
+            schema = await client.get(SCHEMA, headers={"Authorization": authorization})
+            wrong_namespace = await client.post(
+                DEPLOY_PATH,
+                headers={"Authorization": foreign_authorization},
+                json={"graph": GRAPH, "ir": ir, "resources": []},
+            )
+        deployed = await installed_cli(
+            serving_installation,
+            tmp_path,
+            client_environment,
+            ["deploy", str(graph_file), "--json"],
+        )
+        assert deployed.code == 0, deployed.stderr
+        published = DeployResponse.model_validate_json(deployed.stdout)
+        start = [
+            "trigger",
+            GRAPH,
+            "--namespace",
+            NAMESPACE,
+            "--json",
+            "--graph-version",
+            published.graph_version_id,
+            "--idempotency-key",
+            "installed-start",
+            "--param",
+            'name="ready"',
+            "--param",
+            f'extra="{PRIVATE_PARAMETER}"',
+        ]
+        accepted = await installed_cli(
+            serving_installation, tmp_path, client_environment, start
+        )
+        replay = await installed_cli(
+            serving_installation, tmp_path, client_environment, start
+        )
+        refused_replay = await installed_cli(
+            serving_installation,
+            tmp_path,
+            client_environment
+            | {"KORA_TOKEN": foreign_authorization.removeprefix("Bearer ")},
+            start,
+        )
+    finally:
+        stdout, trailing = await terminate_installed_api(process)
+    rows, version_id, attempts = await deployment_rows(settings)
+
+    assert process.returncode == 0, early + trailing
+    assert stdout == b""
+    assert schema.status_code == 200
+    paths = parse_json_object(schema.json())["paths"]
+    assert isinstance(paths, dict)
+    assert set(paths) == {
+        RouteName.HEALTH.value,
+        RouteName.GRAPH_VERSIONS.value,
+        RouteName.GRAPH_RUNS.value,
+    }
+    assert wrong_namespace.status_code == 403
+    assert (
+        ApiErrorEnvelope.model_validate_json(wrong_namespace.content).error.code
+        == "API005"
+    )
+    assert not published.reused
+    assert published.number == 1
+    assert accepted.code == replay.code == 0, (accepted.stderr, replay.stderr)
+    assert replay.stdout == accepted.stdout
+    assert refused_replay.code == 1
+    assert (
+        ApiErrorEnvelope.model_validate_json(refused_replay.stdout).error.code
+        == "API005"
+    )
+    outcome = AcceptedRun.model_validate_json(accepted.stdout)
+    [saved] = rows["run"]
+    [inputs] = rows["run_inputs"]
+    [receipt] = rows["receipt"]
+    [admission] = rows["admission"]
+    assert outcome.graph_version_id == published.graph_version_id == f"gv_{version_id}"
+    assert saved["graph_version_id"] == version_id
+    assert saved["status"] == outcome.status == "pending"
+    assert outcome.run_id == f"run_{saved['id']}"
+    assert inputs["run_id"] == admission["run_id"] == saved["id"]
+    assert inputs["params"] == (
+        f'{{"extra":"{PRIVATE_PARAMETER}","name":"ready"}}'.encode()
+    )
+    assert inputs["cel_projection"] == b'{"name":"ready"}'
+    assert receipt["idempotency_key"] == "installed-start"
+    assert admission["receipt_id"] == receipt["id"]
+    original_receipt = decode_start_receipt(receipt["start_outcome"])
+    assert original_receipt.namespace_id == saved["namespace_id"]
+    assert original_receipt.graph_id == saved["graph_id"]
+    receipt_outcome = original_receipt.response
+    assert isinstance(receipt_outcome, AcceptedStart)
+    assert receipt_outcome.run_id == saved["id"]
+    assert receipt_outcome.graph_version_id == version_id
+    assert saved["needs_scheduling"] is True
+    [created] = [event for event in rows["event"] if event["kind"] == "run.created"]
+    assert created["run_id"] == saved["id"]
+    assert created["actor"] == {
+        "kind": "user",
+        "owner": seeded.principal.owner,
+        "token_id": seeded.principal.token_id,
+    }
+    assert not attempts
+    records = diagnostics(early + trailing)
+    assert any(
+        record["event"] == "protocols.loading.provider_loaded"
+        and record["provider"] == "claude"
+        for record in records
+    )
+    assert sum(record["event"] == "api.serving_stopped" for record in records) == 1
+    assert sum(record["event"] == "cel.binding.loaded" for record in records) == 1
+    for private in (
+        authorization.removeprefix("Bearer "),
+        foreign_authorization.removeprefix("Bearer "),
+        "installed-start",
+        PRIVATE_PARAMETER,
+    ):
+        assert private.encode() not in (
+            early + trailing + accepted.stderr + replay.stderr + refused_replay.stderr
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harness", ["", " ", PRIVATE_MARKER])
+async def test_installed_sqlite_api_refuses_invalid_domain_configuration(
+    serving_installation: Path,
+    tmp_path: Path,
+    sqlite_template: Path,
+    harness: str,
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
+
+    result = api_startup_result(
+        serving_installation, tmp_path, str(settings.url), 0, harness=harness
+    )
+    await assert_domain_empty(settings)
+
+    assert result.returncode == 78
+    assert result.stdout == b""
+    assert refusal_reason(result) == "domain_configuration"
+    assert PRIVATE_MARKER.encode() not in result.stderr
+
+
+async def assert_domain_empty(settings: DatabaseSettings) -> None:
+    database = Database(settings)
+    try:
+        rows = await start_rows(database)
+        async with database.read_transaction() as reader:
+            versions = list(await reader.scalars(select(graph_version.c.id)))
+    finally:
+        await database.close()
+    assert not any(rows.values())
+    assert not versions
+
+
+def installed_site_packages(python: Path) -> Path:
+    result = subprocess.run(
+        [
+            str(python),
+            "-I",
+            "-c",
+            "import sysconfig; print(sysconfig.get_path('purelib'))",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=SERVE_TIMEOUT,
+    )
+    return Path(os.fsdecode(result.stdout.strip()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing",
+        "version",
+        "record",
+        "harness",
+        "schema",
+        "cel-metadata-encoding",
+        "cel-record-encoding",
+        "cel-record-field",
+        "harness-entry-unavailable",
+    ],
+)
+async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
+    core_wheel: Path,
+    tmp_path: Path,
+    sqlite_template: Path,
+    damage: str,
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
+    python = installed_core(core_wheel, tmp_path, serve=True, copy_payload=True)
+    site = installed_site_packages(python)
+    [metadata] = site.glob("common_expression_language-*.dist-info")
+    if damage == "schema":
+        schema = (
+            site / "kora" / "ir" / "artifact_schemas" / "StructuredOutput.schema.json"
+        )
+        schema.write_bytes(schema.read_bytes() + b"\n")
+    elif damage in {"harness", "harness-entry-unavailable"}:
+        [entry_points] = site.glob("kora-*.dist-info/entry_points.txt")
+        if damage == "harness":
+            lines = entry_points.read_text().splitlines()
+            remaining = [
+                line for line in lines if not line.startswith("harness.claude ")
+            ]
+            assert len(remaining) == len(lines) - 1
+            entry_points.write_text("\n".join(remaining) + "\n")
+        else:
+            entries = entry_points.read_text()
+            selected = (
+                "harness.claude = kora.plugins.harness.claude.adapter:provider_metadata"
+            )
+            assert entries.count(selected) == 1
+            entry_points.write_text(
+                entries.replace(
+                    selected,
+                    selected.removesuffix("provider_metadata") + "unavailable_provider",
+                )
+            )
+    elif damage == "cel-record-field":
+        record = metadata / "RECORD"
+        record.write_bytes(record.read_bytes() + b"a" * (csv.field_size_limit() + 1))
+    elif damage in {"cel-metadata-encoding", "cel-record-encoding"}:
+        damaged = metadata / (
+            "METADATA" if damage == "cel-metadata-encoding" else "RECORD"
+        )
+        damaged.write_bytes(damaged.read_bytes() + b"\xff")
+    elif damage == "missing":
+        shutil.rmtree(metadata)
+        shutil.rmtree(site / "cel")
+    elif damage == "version":
+        path = metadata / "METADATA"
+        source = path.read_bytes()
+        assert source.count(b"Version: 0.10.0\n") == 1
+        path.write_bytes(source.replace(b"Version: 0.10.0\n", b"Version: 0.0.0\n"))
+    else:
+        entry = site / "cel" / "__init__.py"
+        entry.write_bytes(entry.read_bytes() + b"\nraise SystemExit(42)\n")
+
+    result = api_startup_result(
+        python, tmp_path, str(settings.url), 0, harness="claude"
+    )
+    await assert_domain_empty(settings)
+
+    assert result.returncode == 78
+    assert result.stdout == b""
+    assert refusal_reason(result) == "domain_configuration"
+    assert all(
+        record["event"] != "cel.binding.loaded" for record in diagnostics(result.stderr)
+    )
 
 
 @pytest.mark.asyncio
@@ -557,6 +927,74 @@ async def test_serving_keeps_the_original_process_until_held_native_work_settles
     assert b"api.serving_stopped" not in diagnostics
 
 
+@pytest.mark.asyncio
+async def test_serving_settles_abandoned_preparation_and_sqlite_after_forced_drain(
+    serving_installation: Path,
+    tmp_path: Path,
+    sqlite_template: Path,
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
+    fixture = Path(__file__).with_name("serving_lifecycle_child.py")
+    release_read, release_write = os.pipe()
+    request_writer: asyncio.StreamWriter | None = None
+
+    try:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                str(serving_installation),
+                "-I",
+                str(fixture),
+                "hold_preparation",
+                str(release_read),
+                pass_fds=(release_read,),
+                cwd=tmp_path,
+                env=api_environment(str(settings.url)),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        finally:
+            os.close(release_read)
+        assert process.stdout is not None
+        assert process.stderr is not None
+        try:
+            async with asyncio.timeout(SERVE_TIMEOUT):
+                port, _ = await read_bound_port(process)
+                reader, request_writer = await asyncio.open_connection(LOOPBACK, port)
+                request_writer.write(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                await request_writer.drain()
+                assert await process.stdout.readline() == b"preparation_held\n"
+                process.send_signal(signal.SIGTERM)
+                await serving_event(process.stderr, "api.serving_draining")
+                process.send_signal(signal.SIGINT)
+                async with asyncio.timeout(DRAIN_RECEIPT_TIMEOUT):
+                    wire = await reader.read()
+                    assert (
+                        await process.stdout.readline() == b"request_sqlite_settled\n"
+                    )
+                    refused = await serving_event(process.stderr, "api.serving_refused")
+                still_running = process.returncode is None
+                with pytest.raises(ConnectionRefusedError):
+                    await asyncio.open_connection(LOOPBACK, port)
+                os.write(release_write, b"r")
+                stdout, stderr = await process.communicate()
+        finally:
+            if request_writer is not None:
+                request_writer.close()
+                await request_writer.wait_closed()
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    finally:
+        os.close(release_write)
+
+    assert wire == b""
+    assert refused["reason"] == "drain_unfinished"
+    assert still_running
+    assert process.returncode == 70, stderr
+    assert stdout == b"retained_cel_settled\ndomain_owners_settled\n"
+    assert b"api.serving_stopped" not in stderr
+
+
 def test_installed_core_refuses_api_without_its_extra(
     bare_installation: Path, tmp_path: Path, sqlite_template: Path
 ) -> None:
@@ -648,6 +1086,7 @@ def test_installed_api_refuses_before_bind_or_postgresql_dial(
             database_url,
             socket_port(reserved_api),
             ssl_keylog=keylog if profile == "key-log" else None,
+            harness="claude" if profile == "candidate" else None,
         )
 
         with pytest.raises(BlockingIOError):
