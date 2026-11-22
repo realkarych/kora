@@ -106,8 +106,8 @@ async def test_admission_wait_migration_preserves_history_and_recovers_indexes(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0027",
-            "0032",
-            5,
+            "0033",
+            6,
         )
         assert repeated.steps == 0
         assert after == before

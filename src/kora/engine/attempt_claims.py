@@ -2,10 +2,11 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Literal, cast
+from typing import Literal
 
 from sqlalchemy import and_, insert, select, update
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.claim_source_values import (
@@ -16,6 +17,10 @@ from kora.db.claim_source_values import (
 from kora.db.claim_sources import ClaimSourceReadLimits
 from kora.db.claim_sources_v1 import SOURCE_FIELDS
 from kora.db.connection import clear_snapshot_error
+from kora.db.first_claim_basis import (
+    first_claim_basis_available,
+    insert_first_claim_basis,
+)
 from kora.db.grant_history import (
     GrantHistoryRejected,
     HistoryReadLimits,
@@ -27,6 +32,7 @@ from kora.db.types import POSTGRESQL, normalise_timestamp
 from kora.db.worker_claims import claim_row, worker_slot_available
 from kora.engine.claim_context import (
     ClaimAccessRejected,
+    ClaimIncarnation,
     ClaimQuery,
     ClaimTarget,
     claim_record,
@@ -65,6 +71,7 @@ from kora.protocols.authentication import Principal
 from kora.protocols.boundary import BoundaryModel
 from kora.protocols.history import GrantHistorySnapshot
 from kora.protocols.identity import MAX_COUNT, Count, GrantBinding, Identifier, Sha256
+from kora.protocols.time import Clock
 from kora.protocols.worker_claim_system import PROCESS_BYTES, ClaimSystem
 
 PREPARED: EventSpec = CATALOG.register(
@@ -104,7 +111,76 @@ class ClaimReceipt(BoundaryModel):
     claim_digest: Sha256
     prefix_count: Count
     prefix_digest: Sha256
-    closed_at: datetime | None
+
+
+async def claim_receipt(
+    connection: AsyncConnection, query: ClaimQuery, maximum: int
+) -> ClaimReceipt | None:
+    receipt = await claim_record(
+        connection,
+        ClaimReceipt,
+        attempt_dispatcher,
+        and_(
+            attempt_dispatcher.c.worker_id == query.worker_id,
+            attempt_dispatcher.c.incarnation_id == query.incarnation_id,
+            attempt_dispatcher.c.claim_id == query.claim_id,
+        ),
+        maximum,
+    )
+    if receipt is not None and receipt.claim_digest != query.digest():
+        raise ClaimAccessRejected("conflict")
+    return receipt
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ClaimReplayAuthority:
+    receipt: ClaimReceipt
+    target: ClaimTarget
+    incarnation: ClaimIncarnation
+    lease_until: datetime
+
+
+async def claim_replay_authority(
+    connection: AsyncConnection,
+    query: ClaimQuery,
+    principal: Principal,
+    worker_bytes: int,
+    dispatcher_bytes: int,
+    limits: ClaimSourceReadLimits,
+    clock: Clock,
+) -> ClaimReplayAuthority:
+    _, incarnation = await claim_worker(connection, query, principal, worker_bytes)
+    receipt = await claim_receipt(connection, query, dispatcher_bytes)
+    if receipt is None:
+        raise ClaimAccessRejected("stale")
+    target = await claim_target(connection, receipt.attempt_id, limits)
+    if target is None:
+        raise ClaimAccessRejected("stale")
+    if not any(
+        grant.namespace_id == target.run.namespace_id for grant in principal.namespaces
+    ):
+        raise ClaimAccessRejected("forbidden")
+    saved = target.attempt
+    until = saved.lease_until
+    if (
+        saved.worker_id != query.worker_id
+        or saved.lease_owner != query.worker_id
+        or saved.lease_epoch != receipt.lease_epoch
+        or saved.execution_domain_id != receipt.execution_domain_id
+        or receipt.execution_domain_id != query.execution_domain_id
+        or until is None
+        or until <= normalise_timestamp(clock.now())
+    ):
+        raise ClaimAccessRejected("stale")
+    return ClaimReplayAuthority(receipt, target, incarnation, until)
+
+
+async def claim_policy_current(
+    connection: AsyncConnection, namespace_id: str, revision: int | None
+) -> bool:
+    fields = namespace.c
+    statement = select(fields.policy_revision).where(fields.id == namespace_id)
+    return revision is None or await connection.scalar(statement) == revision
 
 
 def _delivery(
@@ -146,6 +222,42 @@ def _delivery(
     ) & ClaimSystem.model_fields.keys():
         raise ClaimSourcesRejected()
     return ClaimDelivery(snapshot.material.immutable, snapshot.policy, system)
+
+
+def deliver_claim_replay(
+    query: ClaimQuery, authority: ClaimReplayAuthority, prepared: SelectedClaim
+) -> ClaimDelivery:
+    if not isinstance(prepared.deadline, RecordedDeadlineBinding):
+        raise ClaimSourcesRejected()
+    receipt, target = authority.receipt, authority.target
+    grant = GrantBinding(
+        dispatcher_id=receipt.id,
+        worker_id=query.worker_id,
+        incarnation_id=query.incarnation_id,
+        lease_epoch=receipt.lease_epoch,
+        execution_domain_id=receipt.execution_domain_id,
+        process=authority.incarnation.process,
+    )
+    history = GrantHistorySnapshot(
+        version=1,
+        namespace_id=target.run.namespace_id,
+        attempt_id=receipt.attempt_id,
+        execution_domain_id=receipt.execution_domain_id,
+        upper_epoch=receipt.lease_epoch,
+        count=receipt.prefix_count,
+        digest=receipt.prefix_digest,
+    )
+    delivery = _delivery(
+        target,
+        prepared,
+        grant,
+        history,
+        receipt.mode,
+        authority.lease_until,
+        prepared.deadline,
+    )
+    _record_claim_decision(ClaimOutcome.REPLAYED)
+    return delivery
 
 
 async def _reconcile(
@@ -223,6 +335,7 @@ async def _grant(
     recovery_limit = maximum - int(first_expires)
     if saved.recovery_version >= recovery_limit:
         raise ClaimSourcesRejected()
+    source_revision = None
     if first:
         values = {
             "deadline_binding": deadline_document(
@@ -233,7 +346,7 @@ async def _grant(
             "deadline_binding"
         ]
         sources = prepare_claim_sources(values, {"deadline_binding": allowance})
-        await update_claim_sources(
+        source_revision = await update_claim_sources(
             connection,
             context.locks,
             target.binding(),
@@ -281,6 +394,19 @@ async def _grant(
             claim_digest=query.digest(),
         )
     )
+    if source_revision is not None:
+        try:
+            if await first_claim_basis_available(connection):
+                if mode != "execute" or history.count != 1:
+                    raise ClaimSourcesRejected()
+                await insert_first_claim_basis(
+                    connection,
+                    grant.dispatcher_id,
+                    source_revision,
+                    prepared.snapshot.material.configured_stall_us,
+                )
+        except ClaimSourcesRejected:
+            raise_safe(ClaimWriterFailed())
     if first:
         await connection.execute(
             insert(event).values(
@@ -332,33 +458,18 @@ async def _claim(
     registered, incarnation = await claim_worker(
         connection, query, principal, worker_bytes, lock=True
     )
-    receipt = await claim_record(
-        connection,
-        ClaimReceipt,
-        attempt_dispatcher,
-        and_(
-            attempt_dispatcher.c.worker_id == query.worker_id,
-            attempt_dispatcher.c.incarnation_id == query.incarnation_id,
-            attempt_dispatcher.c.claim_id == query.claim_id,
-        ),
-        history_limits.dispatcher_row,
-    )
+    receipt = await claim_receipt(connection, query, history_limits.dispatcher_row)
     if receipt is not None:
-        if receipt.claim_digest != query.digest():
-            raise ClaimAccessRejected("conflict")
-        if receipt.attempt_id != attempt_id:
-            return ClaimDecision(ClaimOutcome.REDIRECT, redirect=receipt.attempt_id)
+        return ClaimDecision(ClaimOutcome.REDIRECT, redirect=receipt.attempt_id)
     target = await claim_target(
         connection,
         attempt_id,
         limits,
         lock=True,
         run_id=context.run_id,
-        skip_locked=receipt is None,
+        skip_locked=True,
     )
     if target is None:
-        if receipt is not None:
-            raise ClaimAccessRejected("stale")
         return ClaimDecision(ClaimOutcome.INELIGIBLE)
     saved, node, parent = target.attempt, target.node, target.run
     if (parent.id, parent.namespace_id, parent.graph_id, parent.graph_version_id) != (
@@ -369,90 +480,25 @@ async def _claim(
     ) or parent.namespace_id not in {
         entry.namespace_id for entry in principal.namespaces
     }:
-        if receipt is not None:
-            raise ClaimAccessRejected("forbidden")
         return ClaimDecision(ClaimOutcome.INELIGIBLE)
     now = normalise_timestamp(context.clock())
     if (
-        receipt is None
-        and saved.worker_id == query.worker_id
+        saved.worker_id == query.worker_id
         and saved.current_dispatcher_open is None
         and saved.lease_until is not None
         and saved.lease_until > now
     ):
         return await _reconcile(context, target, history_limits.dispatcher_row, now)
-    if receipt is not None:
-        if (
-            (
-                saved.worker_id,
-                saved.lease_owner,
-                saved.lease_epoch,
-                saved.execution_domain_id,
-            )
-            != (
-                query.worker_id,
-                query.worker_id,
-                receipt.lease_epoch,
-                receipt.execution_domain_id,
-            )
-            or receipt.execution_domain_id != query.execution_domain_id
-            or saved.lease_until is None
-            or saved.lease_until <= now
-        ):
-            raise ClaimAccessRejected("stale")
     if prepared is None:
-        return ClaimDecision(
-            ClaimOutcome.INELIGIBLE if receipt is None else ClaimOutcome.REDIRECT,
-            redirect=None if receipt is None else receipt.attempt_id,
-        )
+        return ClaimDecision(ClaimOutcome.INELIGIBLE)
     if prepared.snapshot.sources.binding != target.binding():
         raise ClaimSourcesRejected()
     if not await recheck_claim_sources(
         connection, context.locks, prepared.snapshot.sources, limits
+    ) or not await claim_policy_current(
+        connection, parent.namespace_id, prepared.snapshot.policy_revision
     ):
         raise ClaimSourcesRejected()
-    if (
-        prepared.snapshot.policy_revision is not None
-        and await connection.scalar(
-            select(namespace.c.policy_revision).where(
-                namespace.c.id == parent.namespace_id
-            )
-        )
-        != prepared.snapshot.policy_revision
-    ):
-        raise ClaimSourcesRejected()
-    if receipt is not None:
-        if not isinstance(prepared.deadline, RecordedDeadlineBinding):
-            raise ClaimSourcesRejected()
-        grant = GrantBinding(
-            dispatcher_id=receipt.id,
-            worker_id=query.worker_id,
-            incarnation_id=query.incarnation_id,
-            lease_epoch=receipt.lease_epoch,
-            execution_domain_id=receipt.execution_domain_id,
-            process=incarnation.process,
-        )
-        history = GrantHistorySnapshot(
-            version=1,
-            namespace_id=parent.namespace_id,
-            attempt_id=saved.id,
-            execution_domain_id=receipt.execution_domain_id,
-            upper_epoch=receipt.lease_epoch,
-            count=receipt.prefix_count,
-            digest=receipt.prefix_digest,
-        )
-        return ClaimDecision(
-            ClaimOutcome.REPLAYED,
-            _delivery(
-                target,
-                prepared,
-                grant,
-                history,
-                receipt.mode,
-                cast(datetime, saved.lease_until),
-                prepared.deadline,
-            ),
-        )
     if (
         saved.runtime != query.runtime
         or (saved.status not in ACTIVE_ATTEMPT_STATUSES and not saved.recovery_required)
@@ -622,7 +668,11 @@ async def claim_attempt(
         raise_safe(ClaimWriterFailed())
     finally:
         del context, query, principal, prepared
+    _record_claim_decision(result.outcome)
+    return result
+
+
+def _record_claim_decision(outcome: ClaimOutcome) -> None:
     diagnostics = current_diagnostics()
     if diagnostics is not None:
-        diagnostics.logger(COMPONENT).emit(PREPARED, outcome=result.outcome.value)
-    return result
+        diagnostics.logger(COMPONENT).emit(PREPARED, outcome=outcome.value)

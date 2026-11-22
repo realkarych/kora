@@ -190,6 +190,12 @@ async def test_claim_material_uses_exact_saved_sources(database: Database) -> No
         ({}, {}, timedelta(seconds=3, microseconds=7), "3000007"),
         ({}, {}, timedelta.max, str(duration_us(timedelta.max))),
         ({"stall_after": "0s"}, {}, timedelta(seconds=4), "0"),
+        (
+            {},
+            {"stall_after": "999999999999999999999999999999d"},
+            timedelta(seconds=4),
+            str((10**30 - 1) * 86_400_000_000),
+        ),
     ],
 )
 async def test_claim_limits_keep_exact_stall_precedence(

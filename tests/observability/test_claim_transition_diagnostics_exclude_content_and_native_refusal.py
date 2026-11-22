@@ -37,6 +37,7 @@ async def test_claim_transition_diagnostics_exclude_content_and_native_refusal(
     replay = await case.claim(database)
     prepared = await case.prepare(database)
     async with database.transaction() as writer:
+        await writer.exec_driver_sql("DROP TABLE attempt_first_claim_basis")
         await writer.exec_driver_sql("DROP TABLE attempt_dispatcher")
 
     async def refused() -> None:

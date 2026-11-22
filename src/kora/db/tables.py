@@ -32,6 +32,8 @@ from kora.db.bootstrap_initialization_v1 import (
 from kora.db.claim_sources_v1 import LOCATORS, SQLITE_KEY, claim_source_elements
 from kora.db.claim_sources_v1 import TABLE_NAME as CLAIM_SOURCE_TABLE
 from kora.db.deadline_discovery_v1 import INDEXES as DEADLINE_INDEXES
+from kora.db.first_claim_basis_v1 import TABLE_NAME as FIRST_CLAIM_BASIS_TABLE
+from kora.db.first_claim_basis_v1 import first_claim_basis_elements
 from kora.db.grant_history_v1 import (
     attempt_history_columns,
     dispatcher_history_columns,
@@ -650,6 +652,10 @@ attempt_dispatcher: Table = Table(
     *dispatcher_history_columns(),
     UniqueConstraint("attempt_id", "lease_epoch"),
     *dispatcher_history_indexes(),
+)
+
+attempt_first_claim_basis: Table = Table(
+    FIRST_CLAIM_BASIS_TABLE, metadata, *first_claim_basis_elements()
 )
 
 for owner_name, claim_field in claim_columns():

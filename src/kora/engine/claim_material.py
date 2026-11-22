@@ -5,6 +5,7 @@ from hashlib import sha256
 from typing import cast
 
 from kora.cel_eval.errors import raise_safe
+from kora.db.first_claim_basis import FirstClaimBasis
 from kora.db.run_input_reads import RunInputBinding, RunInputField
 from kora.engine.deadline_records import duration_us
 from kora.engine.graph_execution_contract import CheckedExecutionContract
@@ -66,6 +67,7 @@ class PreparedClaimMaterial:
     node_policy: bytes
     attempt_timeout: str | None
     run_timeout: str | None
+    configured_stall_us: int | None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -151,18 +153,32 @@ def select_claim_node(
     )
 
 
-def effective_claim_limits(
-    node: SelectedClaimNode, selection: ClaimRuntimeSelection
-) -> JsonObject:
+def _claim_limits(
+    node: SelectedClaimNode,
+    selection: ClaimRuntimeSelection,
+    basis: FirstClaimBasis | None,
+) -> tuple[JsonObject, int | None]:
     if (
         node.context["runtime"] != selection.runtime
         or node.context["vcs"] != selection.vcs
-        or selection.default_stall_after <= timedelta(0)
+        or (basis is None and selection.default_stall_after <= timedelta(0))
     ):
         raise ClaimWireRejected()
     duration = node.limits.get("stall_after", node.runtime.get("stall_after"))
-    if duration is None:
-        microseconds = duration_us(selection.default_stall_after)
+    if basis is None:
+        configured = (
+            duration_us(selection.default_stall_after) if duration is None else None
+        )
+    else:
+        configured = basis.configured_stall_us
+        if (duration is None) != (configured is not None) or (
+            basis.renderer_behavior_sha256 is not None
+            and (basis.harness_selection_id is not None)
+            != (node.context["kind"] == "agent")
+        ):
+            raise ClaimWireRejected()
+    if configured is not None:
+        microseconds = configured
     else:
         duration = cast(str, duration)
         unit = "ms" if duration.endswith("ms") else duration[-1]
@@ -177,7 +193,7 @@ def effective_claim_limits(
     return {
         **{name: value for name, value in node.limits.items() if name != "stall_after"},
         "stall_after_us": scalar_text(microseconds, TextBudget(MAX_IMMUTABLE_BYTES)),
-    }
+    }, configured
 
 
 def _prepare(
@@ -187,6 +203,7 @@ def _prepare(
     input_bindings: JsonObject,
     price: PriceRevision,
     selection: RuntimeSelector,
+    basis: FirstClaimBasis | None,
 ) -> PreparedClaimMaterial:
     scope = checked.scope
     binding = params.binding
@@ -209,6 +226,7 @@ def _prepare(
     price_text = render_object(
         price_value, TextBudget(PriceRevision.byte_limit, ascii_only=False)
     )
+    limits, configured_stall_us = _claim_limits(node, selected_runtime, basis)
     immutable = prepare_claim_part(
         ClaimPartition.IMMUTABLE,
         {
@@ -217,7 +235,7 @@ def _prepare(
             "execution_context": node.context,
             "input_bindings": input_bindings,
             "output_contract": node.outputs,
-            "limits": effective_claim_limits(node, selected_runtime),
+            "limits": limits,
             "secret_aliases": node.secret_aliases,
             "resources": node.resources,
             "price_table_id": price.id,
@@ -245,6 +263,7 @@ def _prepare(
         cast(
             str | None, cast(JsonObject, node.runtime.get("limits", {})).get("timeout")
         ),
+        configured_stall_us,
     )
 
 
@@ -255,9 +274,12 @@ def prepare_claim_material(
     input_bindings: JsonObject,
     price: PriceRevision,
     selection: RuntimeSelector,
+    basis: FirstClaimBasis | None = None,
 ) -> PreparedClaimMaterial:
     try:
-        result = _prepare(checked, params, node_name, input_bindings, price, selection)
+        result = _prepare(
+            checked, params, node_name, input_bindings, price, selection, basis
+        )
     except ValueError:
         del checked, params, node_name, input_bindings, price, selection
         raise_safe(ClaimWireRejected())

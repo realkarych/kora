@@ -82,11 +82,11 @@ async def test_admission_discovery_migration_preserves_history_and_resumes(
 
         assert (upgraded.from_revision, upgraded.to_revision, upgraded.steps) == (
             "0029",
-            "0032",
-            3,
+            "0033",
+            4,
         )
         assert repeated.steps == 0
-        assert revision == "0032"
+        assert revision == "0033"
         assert before == after
         assert len(page.node_ids) == 2
         assert await migration_lock_count(database) == 0

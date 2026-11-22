@@ -21,6 +21,12 @@ from kora.db.connection import (
     complete,
 )
 from kora.db.deadline_discovery import RunningRunSweep
+from kora.db.first_claim_basis import (
+    FirstClaimBasis,
+    first_claim_basis_available,
+    read_first_claim_basis,
+)
+from kora.db.first_claim_basis_v1 import FIRST_CLAIM_BASIS_SQLITE_BYTES
 from kora.db.grant_history import (
     GrantHistoryRejected,
     HistoryReadLimits,
@@ -28,15 +34,19 @@ from kora.db.grant_history import (
     HistoryWriterFailed,
 )
 from kora.db.identifiers import IdentifierGenerator
-from kora.db.tables import attempt_dispatcher, run, worker
+from kora.db.tables import run, worker
 from kora.db.types import POSTGRESQL, normalise_timestamp
 from kora.db.worker_claim_poll import advance_claim_cursor, claim_candidates
 from kora.db.worker_claims import unknown_worker_slot
 from kora.engine.attempt_claims import (
     ClaimDecision,
     ClaimOutcome,
-    ClaimReceipt,
+    ClaimReplayAuthority,
     claim_attempt,
+    claim_policy_current,
+    claim_receipt,
+    claim_replay_authority,
+    deliver_claim_replay,
 )
 from kora.engine.claim_context import (
     ClaimAccessRejected,
@@ -54,10 +64,15 @@ from kora.engine.claim_selection import (
     prepare_selected_claim,
 )
 from kora.engine.claim_snapshot import (
+    AcquiredClaimSnapshot,
     ClaimSnapshotLimits,
+    PreparedClaimSnapshot,
     acquire_claim_snapshot,
+    acquire_claim_snapshot_sources,
+    observe_claim_snapshot,
     prepare_claim_snapshot,
 )
+from kora.engine.claim_sources import claim_sources_current
 from kora.engine.expiry import finish_run_expiry
 from kora.engine.expiry_context import ExpiryContext, ExpiryFailed
 from kora.engine.grant_history import acquire_history, prepare_history
@@ -118,6 +133,19 @@ class ClaimPollLimits:
         if self.worker_bytes <= 0 or not 0 < self.read_seconds < math.inf:
             raise ValueError("worker Claim read admission must be finite and positive")
 
+    @property
+    def replay_bytes(self) -> int:
+        sources = self.snapshot.sources
+        basis = 96 * FIRST_CLAIM_BASIS_SQLITE_BYTES + 4096
+        authority = (
+            2 * self.worker_bytes
+            + self.history.dispatcher_row
+            + sources.run_row
+            + sources.node_row
+            + sources.attempt_row
+        )
+        return 2 * (basis + authority)
+
 
 class WorkerClaimPoll:
     def __init__(
@@ -149,24 +177,6 @@ class WorkerClaimPoll:
         await claim_worker(
             connection, query, principal, self.limits.worker_bytes, lock=True
         )
-
-    async def _receipt(
-        self, connection: AsyncConnection, query: ClaimQuery
-    ) -> ClaimReceipt | None:
-        receipt = await claim_record(
-            connection,
-            ClaimReceipt,
-            attempt_dispatcher,
-            and_(
-                attempt_dispatcher.c.worker_id == query.worker_id,
-                attempt_dispatcher.c.incarnation_id == query.incarnation_id,
-                attempt_dispatcher.c.claim_id == query.claim_id,
-            ),
-            self.limits.history.dispatcher_row,
-        )
-        if receipt is not None and receipt.claim_digest != query.digest():
-            raise ClaimAccessRejected("conflict")
-        return receipt
 
     async def _cursor(
         self, connection: AsyncConnection, query: ClaimQuery
@@ -233,17 +243,7 @@ class WorkerClaimPoll:
             self.limits.snapshot,
             deadline=deadline,
         )
-        pin = GraphVersionPin(
-            target.run.graph_id,
-            target.run.graph_version_id,
-            acquired.graph.digests[1].decode(acquired.graph.encoding),
-        )
-        snapshot = prepare_claim_snapshot(
-            acquired,
-            pin,
-            lambda selected: self._runtime(selected, target.attempt.runtime),
-            self.limits.snapshot,
-        )
+        snapshot = self._prepare_snapshot(target, acquired)
         del acquired
         domain = target.attempt.execution_domain_id
         history = (
@@ -265,6 +265,25 @@ class WorkerClaimPoll:
             )
         )
         return prepare_selected_claim(snapshot, history, target.attempt.deadline)
+
+    def _prepare_snapshot(
+        self,
+        target: ClaimTarget,
+        acquired: AcquiredClaimSnapshot,
+        basis: FirstClaimBasis | None = None,
+    ) -> PreparedClaimSnapshot:
+        pin = GraphVersionPin(
+            target.run.graph_id,
+            target.run.graph_version_id,
+            acquired.graph.digests[1].decode(acquired.graph.encoding),
+        )
+        return prepare_claim_snapshot(
+            acquired,
+            pin,
+            lambda selected: self._runtime(selected, target.attempt.runtime),
+            self.limits.snapshot,
+            basis,
+        )
 
     def _context(
         self, connection: AsyncConnection, locks: TransitionLocks, parent: ClaimRun
@@ -350,56 +369,29 @@ class WorkerClaimPoll:
         query: ClaimQuery,
         principal: Principal,
         cursor: ClaimCursor,
-        replay: ClaimReceipt | None = None,
     ) -> ClaimDecision:
         async with self.database.read_transaction() as reader:
             target = await claim_target(
                 reader, attempt_id, self.limits.snapshot.sources
             )
         if target is None:
-            if replay is not None:
-                raise ClaimAccessRejected("stale")
             return ClaimDecision(ClaimOutcome.INELIGIBLE)
         if target.run.namespace_id not in {
             grant.namespace_id for grant in principal.namespaces
         }:
-            if replay is not None:
-                raise ClaimAccessRejected("forbidden")
             return ClaimDecision(ClaimOutcome.INELIGIBLE)
         saved = target.attempt
         now = normalise_timestamp(self.clock.now())
-        if replay is not None and (
-            (
-                saved.worker_id,
-                saved.lease_owner,
-                saved.lease_epoch,
-                saved.execution_domain_id,
-            )
-            != (
-                query.worker_id,
-                query.worker_id,
-                replay.lease_epoch,
-                query.execution_domain_id,
-            )
-            or saved.lease_until is None
-            or saved.lease_until <= now
-        ):
-            raise ClaimAccessRejected("stale")
         legacy = (
-            replay is None
-            and saved.worker_id == query.worker_id
+            saved.worker_id == query.worker_id
             and saved.current_dispatcher_open is None
             and saved.lease_until is not None
             and saved.lease_until > now
         )
-        if (
-            replay is None
-            and not legacy
-            and (
-                saved.runtime != query.runtime
-                or (saved.lease_until is not None and saved.lease_until > now)
-                or saved.execution_domain_id not in (None, query.execution_domain_id)
-            )
+        if not legacy and (
+            saved.runtime != query.runtime
+            or (saved.lease_until is not None and saved.lease_until > now)
+            or saved.execution_domain_id not in (None, query.execution_domain_id)
         ):
             return ClaimDecision(ClaimOutcome.INELIGIBLE)
         prepared = None if legacy else await self._prepare(target)
@@ -407,7 +399,7 @@ class WorkerClaimPoll:
         try:
             async with self.database.transaction() as writer:
                 locks = TransitionLocks(writer)
-                if not await locks.acquire_run(target.run.id, wait=replay is not None):
+                if not await locks.acquire_run(target.run.id, wait=False):
                     return ClaimDecision(ClaimOutcome.INELIGIBLE)
                 decision = await claim_attempt(
                     self._context(writer, locks, target.run),
@@ -420,6 +412,8 @@ class WorkerClaimPoll:
                     self.limits.worker_bytes,
                     self.uncertainty,
                 )
+                if decision.outcome is ClaimOutcome.REDIRECT:
+                    await complete(writer.rollback())
                 if decision.outcome is ClaimOutcome.GRANTED:
                     await self._advance(writer, query, cursor, attempt_id)
                 if decision.outcome in (
@@ -449,29 +443,76 @@ class WorkerClaimPoll:
     ) -> ClaimDecision:
         async with self.database.transaction() as writer:
             await self._guard(writer, query, principal)
-            receipt = await self._receipt(writer, query)
+            receipt = await claim_receipt(
+                writer, query, self.limits.history.dispatcher_row
+            )
             if receipt is not None:
+                await complete(writer.rollback())
                 return ClaimDecision(ClaimOutcome.REDIRECT, redirect=receipt.attempt_id)
             await self._advance(writer, query, cursor, position)
             await self._seen(writer, query)
         return ClaimDecision(ClaimOutcome.INELIGIBLE)
 
-    async def _replay(
-        self,
-        query: ClaimQuery,
-        principal: Principal,
-        cursor: ClaimCursor,
-    ) -> ClaimDelivery | None:
-        async with self.database.read_transaction() as reader:
-            receipt = await self._receipt(reader, query)
-        if receipt is None:
-            raise ClaimSourcesRejected()
-        result = await self._selected(
-            receipt.attempt_id, query, principal, cursor, receipt
+    async def _replay_facts(
+        self, reader: AsyncConnection, query: ClaimQuery, principal: Principal
+    ) -> tuple[ClaimReplayAuthority, FirstClaimBasis | None]:
+        authority = await claim_replay_authority(
+            reader,
+            query,
+            principal,
+            self.limits.worker_bytes,
+            self.limits.history.dispatcher_row,
+            self.limits.snapshot.sources,
+            self.clock,
         )
-        if result.outcome is not ClaimOutcome.REPLAYED:
+        available = await first_claim_basis_available(reader)
+        receipt = authority.receipt
+        basis = await read_first_claim_basis(reader, receipt.id) if available else None
+        if basis is not None and (
+            receipt.mode != "execute" or receipt.prefix_count != 1
+        ):
             raise ClaimSourcesRejected()
-        return result.delivery
+        return authority, basis
+
+    async def replay(self, query: ClaimQuery, principal: Principal) -> ClaimDelivery:
+        self.limits.snapshot.admit(extra_bytes=self.limits.replay_bytes)
+        deadline = asyncio.get_running_loop().time() + self.limits.read_seconds
+        with observe_claim_snapshot():
+            async with self.database.read_snapshot(deadline=deadline) as reader:
+                initial, basis = await self._replay_facts(reader, query, principal)
+                acquired = await acquire_claim_snapshot_sources(
+                    reader,
+                    initial.target.binding(),
+                    self.limits.snapshot,
+                    deadline=deadline,
+                )
+                if (
+                    basis is not None
+                    and basis.source_revision > acquired.sources.revision
+                ):
+                    raise ClaimSourcesRejected()
+        snapshot = self._prepare_snapshot(initial.target, acquired, basis)
+        del acquired
+        original_deadline = initial.target.attempt.deadline
+        prepared = prepare_selected_claim(snapshot, None, original_deadline)
+        deadline = asyncio.get_running_loop().time() + self.limits.read_seconds
+        async with self.database.read_snapshot(deadline=deadline) as reader:
+            final, final_basis = await self._replay_facts(reader, query, principal)
+            if (
+                final.receipt != initial.receipt
+                or final.incarnation != initial.incarnation
+                or final_basis != basis
+                or final.target.attempt.deadline != original_deadline
+                or final.target.binding() != snapshot.sources.binding
+                or not await claim_sources_current(
+                    reader, snapshot.sources, self.limits.snapshot.sources
+                )
+                or not await claim_policy_current(
+                    reader, final.target.run.namespace_id, snapshot.policy_revision
+                )
+            ):
+                raise ClaimSourcesRejected()
+        return deliver_claim_replay(query, final, prepared)
 
     async def _poll(
         self, query: ClaimQuery, principal: Principal
@@ -481,7 +522,11 @@ class WorkerClaimPoll:
         async with self.database.read_transaction() as reader:
             await claim_worker(reader, query, principal, self.limits.worker_bytes)
             cursor = await self._cursor(reader, query)
-            receipt = await self._receipt(reader, query)
+            receipt = await claim_receipt(
+                reader, query, self.limits.history.dispatcher_row
+            )
+            if receipt is None:
+                await first_claim_basis_available(reader)
             unknown = (
                 None
                 if receipt is not None
@@ -503,7 +548,7 @@ class WorkerClaimPoll:
                 )
             )
         if receipt is not None:
-            return await self._replay(query, principal, cursor)
+            return await self.replay(query, principal)
         position = cursor.claim_cursor if unknown is not None else None
         for attempt_id in candidates:
             if unknown is None:
@@ -512,21 +557,24 @@ class WorkerClaimPoll:
                 result = await self._selected(attempt_id, query, principal, cursor)
             except (ClaimWriterFailed, HistoryWriterFailed):
                 raise
-            except (ClaimSourcesRejected, GrantHistoryRejected):
+            except (ClaimSourcesRejected, GrantHistoryRejected) as error:
+                clear_snapshot_error(error)
+                result = None
+            if result is None:
                 try:
                     terminal = await self._empty(query, principal, cursor, position)
                 except ClaimCursorChanged:
                     raise_safe(ClaimSourcesRejected())
                 if terminal.outcome is ClaimOutcome.REDIRECT:
-                    return await self._replay(query, principal, cursor)
+                    return await self.replay(query, principal)
                 raise_safe(ClaimSourcesRejected())
             if result.outcome is ClaimOutcome.REDIRECT:
-                return await self._replay(query, principal, cursor)
+                return await self.replay(query, principal)
             if result.outcome is not ClaimOutcome.INELIGIBLE:
                 return result.delivery
         result = await self._empty(query, principal, cursor, position)
         if result.outcome is ClaimOutcome.REDIRECT:
-            return await self._replay(query, principal, cursor)
+            return await self.replay(query, principal)
         return None
 
     async def poll(
@@ -541,7 +589,14 @@ class WorkerClaimPoll:
         except asyncio.CancelledError as error:
             clear_snapshot_error(error)
             raise
-        except (SQLAlchemyError, OSError, ValueError, TypeError, OverflowError):
+        except (
+            DatabaseSnapshotRejected,
+            SQLAlchemyError,
+            OSError,
+            ValueError,
+            TypeError,
+            OverflowError,
+        ):
             raise_safe(ClaimSourcesRejected())
         finally:
             del query, principal

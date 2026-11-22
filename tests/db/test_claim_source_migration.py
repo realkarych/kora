@@ -123,7 +123,7 @@ async def test_claim_source_revision_refuses_downgrade(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("predecessor", "steps"), [("0025", 7), ("0026", 6)])
+@pytest.mark.parametrize(("predecessor", "steps"), [("0025", 8), ("0026", 7)])
 async def test_claim_source_migration_preserves_legacy_without_admission(
     empty_database_settings: DatabaseSettings, predecessor: str, steps: int
 ) -> None:
@@ -166,7 +166,7 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
             schema_after = await reader.run_sync(attempt_schema_objects)
         async with database.migration_connection() as writer:
             with pytest.raises(
-                RuntimeError, match="worker Claim polling cannot be downgraded"
+                RuntimeError, match="first-Claim basis cannot be downgraded"
             ):
                 await writer.run_sync(downgrade)
         async with database.read_transaction() as reader:
@@ -176,14 +176,14 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
 
     assert (report.from_revision, report.to_revision, report.steps) == (
         predecessor,
-        "0032",
+        "0033",
         steps,
     )
     assert after == before
     assert offset is None
     assert admitted == []
     assert differences == []
-    assert version == "0032"
+    assert version == "0033"
     if predecessor == "0026":
         assert_attempt_schema_extension(
             schema_before, schema_after, database.dialect, worker_slots=True

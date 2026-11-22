@@ -70,6 +70,7 @@ async def test_claim_http_diagnostics_exclude_payload_and_native_failure(
         granted = await client.claim_worker(case.query.worker_id, request(case))
         replayed = await client.claim_worker(case.query.worker_id, request(case))
         async with database.transaction() as writer:
+            await writer.exec_driver_sql("DROP TABLE attempt_first_claim_basis")
             await writer.exec_driver_sql("DROP TABLE attempt_dispatcher")
         with pytest.raises(ApiError) as refusal:
             await client.claim_worker(case.query.worker_id, request(case, "refused"))

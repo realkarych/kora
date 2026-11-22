@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import AsyncGenerator
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest_asyncio
 from sqlalchemy import insert, select, update
@@ -28,6 +29,7 @@ from kora.engine.worker_claim_poll import ClaimPollLimits, WorkerClaimPoll
 from kora.models.worker_claims import WorkerClaimRequest
 from kora.observability import Level, LoggingSettings
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
+from kora.protocols.time import Clock
 from tests.api.support import RequestIds
 from tests.api.worker_support import CAPABILITIES
 from tests.db.seed import Seeder
@@ -46,13 +48,44 @@ BEARER: str = "claim-worker-token"
 LIMITS = ClaimPollLimits(SNAPSHOT_LIMITS, HISTORY_LIMITS, READ_LIMITS, WORKER_BYTES, 10)
 
 
-def poller(database: Database, clock: AuthorityClock) -> WorkerClaimPoll:
+def poller(
+    database: Database, clock: Clock, default_stall: timedelta = UNCERTAINTY
+) -> WorkerClaimPoll:
     return WorkerClaimPoll(
         database,
-        {"local": replace(CAPABILITIES, default_stall_after=UNCERTAINTY)},
+        {"local": replace(CAPABILITIES, default_stall_after=default_stall)},
         clock,
         LIMITS,
         UNCERTAINTY,
+    )
+
+
+async def authorize_claim_worker(database: Database, case: ClaimCase) -> None:
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(api_token)
+            .where(api_token.c.id == case.principal.token_id)
+            .values(digest=hashlib.sha256(BEARER.encode()).hexdigest(), kind="service")
+        )
+
+
+def claim_application(
+    database: Database,
+    capture: Capture,
+    clock: Clock,
+    history: WorkerHistoryRoute | None = None,
+    *,
+    heartbeat: WorkerHeartbeatRoute | None = None,
+    default_stall: timedelta = UNCERTAINTY,
+) -> ApiExchange:
+    return create_application(
+        StaticTokenAuthenticator({}, database),
+        capture.diagnostics,
+        clock,
+        RequestIds(),
+        worker_claims=WorkerClaimsRoute(poller(database, clock, default_stall)),
+        worker_history=history,
+        worker_heartbeat=heartbeat,
     )
 
 
@@ -65,21 +98,8 @@ async def application(
     *,
     heartbeat: WorkerHeartbeatRoute | None = None,
 ) -> ApiExchange:
-    async with database.transaction() as writer:
-        await writer.execute(
-            update(api_token)
-            .where(api_token.c.id == case.principal.token_id)
-            .values(digest=hashlib.sha256(BEARER.encode()).hexdigest(), kind="service")
-        )
-    return create_application(
-        StaticTokenAuthenticator({}, database),
-        capture.diagnostics,
-        clock,
-        RequestIds(),
-        worker_claims=WorkerClaimsRoute(poller(database, clock)),
-        worker_history=history,
-        worker_heartbeat=heartbeat,
-    )
+    await authorize_claim_worker(database, case)
+    return claim_application(database, capture, clock, history, heartbeat=heartbeat)
 
 
 def request(case: ClaimCase, claim_id: str | None = None) -> WorkerClaimRequest:

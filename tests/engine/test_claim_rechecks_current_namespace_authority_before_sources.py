@@ -29,6 +29,8 @@ async def test_claim_rechecks_current_namespace_authority_before_sources(
     before = await state(database)
 
     async def invoke() -> ClaimOutcome:
+        if replay:
+            return (await denied.replay(database)).outcome
         async with database.transaction() as writer:
             return (await denied.apply(writer, None)).outcome
 

@@ -1,8 +1,11 @@
+from collections.abc import Generator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import cast
 
 from sqlalchemy import event
 from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.claim_snapshot_reads import (
@@ -26,6 +29,7 @@ from kora.db.connection import (
     DatabaseSnapshotRejected,
     require_snapshot_time,
 )
+from kora.db.first_claim_basis import FirstClaimBasis
 from kora.db.graph_resource_owner_reads import AcquiredGraphResourceOwners
 from kora.db.graph_version_reads import AcquiredGraphVersion
 from kora.db.run_input_reads import (
@@ -83,7 +87,7 @@ class ClaimSnapshotLimits:
     native_bytes: int
     raw_bytes: int
 
-    def admit(self) -> None:
+    def admit(self, *, extra_bytes: int = 0) -> None:
         if any(
             type(value) is not int or not 0 < value <= maximum
             for value, maximum in (
@@ -123,7 +127,11 @@ class ClaimSnapshotLimits:
             + self.inputs.params
             + sum(field.transport for field in self.sources.fields)
         )
-        if native > self.native_bytes or raw > self.raw_bytes:
+        if (
+            extra_bytes < 0
+            or native + extra_bytes > self.native_bytes
+            or raw + extra_bytes > self.raw_bytes
+        ):
             raise ClaimSourcesRejected()
 
 
@@ -146,8 +154,8 @@ class PreparedClaimSnapshot:
     policy_revision: int | None
 
 
-async def _acquire_claim_snapshot(
-    database: Database,
+async def acquire_claim_snapshot_sources(
+    owner: Database | AsyncConnection,
     binding: ClaimSourceBinding,
     limits: ClaimSnapshotLimits,
     *,
@@ -156,8 +164,12 @@ async def _acquire_claim_snapshot(
     def before_statement(connection: Connection, *arguments: object) -> None:
         require_snapshot_time(deadline)
 
-    limits.admit()
-    async with database.read_snapshot(deadline=deadline) as connection:
+    checkout = (
+        owner.read_snapshot(deadline=deadline)
+        if isinstance(owner, Database)
+        else nullcontext(owner)
+    )
+    async with checkout as connection:
         event.listen(
             connection.sync_connection, "before_cursor_execute", before_statement
         )
@@ -215,16 +227,23 @@ async def acquire_claim_snapshot(
     *,
     deadline: float,
 ) -> AcquiredClaimSnapshot:
-    acquired = False
     try:
-        result = await _acquire_claim_snapshot(
-            database, binding, limits, deadline=deadline
-        )
-        acquired = True
-        return result
+        with observe_claim_snapshot():
+            limits.admit()
+            return await acquire_claim_snapshot_sources(
+                database, binding, limits, deadline=deadline
+            )
     except (ValueError, DatabaseSnapshotRejected, *SNAPSHOT_NATIVE_ERRORS):
         del database, binding, limits
         raise_safe(ClaimSourcesRejected())
+
+
+@contextmanager
+def observe_claim_snapshot() -> Generator[None]:
+    acquired = False
+    try:
+        yield
+        acquired = True
     finally:
         diagnostics = current_diagnostics()
         if diagnostics is not None:
@@ -243,6 +262,7 @@ def _prepare_claim_snapshot(
     pin: GraphVersionPin,
     selection: RuntimeSelector,
     limits: ClaimSnapshotLimits,
+    basis: FirstClaimBasis | None,
 ) -> PreparedClaimSnapshot:
     binding = acquired.sources.binding
     scope = binding.run
@@ -280,7 +300,7 @@ def _prepare_claim_snapshot(
         sources.values["input_bindings"], cast(JsonObject, node.get("inputs", {}))
     )
     material = prepare_claim_material(
-        checked, params, binding.node_path, inputs.claim_map(), price, selection
+        checked, params, binding.node_path, inputs.claim_map(), price, selection, basis
     )
     if acquired.policy is not None:
         policy_revision = acquired.policy.revision
@@ -322,9 +342,10 @@ def prepare_claim_snapshot(
     pin: GraphVersionPin,
     selection: RuntimeSelector,
     limits: ClaimSnapshotLimits,
+    basis: FirstClaimBasis | None = None,
 ) -> PreparedClaimSnapshot:
     try:
-        return _prepare_claim_snapshot(acquired, pin, selection, limits)
+        return _prepare_claim_snapshot(acquired, pin, selection, limits, basis)
     except (ValueError, KeyError, TypeError):
         del acquired, pin, selection, limits
         raise_safe(ClaimSourcesRejected())
