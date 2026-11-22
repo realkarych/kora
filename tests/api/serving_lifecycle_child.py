@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import sys
+import threading
 from asyncio.trsock import TransportSocket
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -15,10 +16,15 @@ import aiosqlite
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from kora.__main__ import serving_deployment_preparer
 from kora.api.exchange import COMPONENT
+from kora.api.graph_deployment_worker import THREAD_NAME, DeploymentPreparer
 from kora.api.serving import serve_sqlite
+from kora.cel_eval.evaluate import PatternCompilation
+from kora.cel_eval.thread import PROCESS, Evaluator
 from kora.db.connection import Database, DatabaseClosedError, read_database_settings
 from kora.observability import configure_process, read_logging_settings
+from kora.protocols.time import SystemClock
 
 PRIVATE_LIFESPAN_REASON: str = "private-lifespan-startup-reason"
 SLOW_RESPONSE_BYTES: int = 4 * 1024 * 1024
@@ -96,6 +102,43 @@ def held_request_app(database: Database, release: int | None = None) -> ASGIApp:
     return application
 
 
+async def hold_preparation(release: int, evaluator: Evaluator) -> None:
+    assert threading.current_thread().name == THREAD_NAME
+    assert evaluator.snapshot().handles == 1
+    os.write(1, b"preparation_held\n")
+    assert await asyncio.to_thread(os.read, release, 1) == b"r"
+    assert await evaluator.validate_pattern("^ready$") is PatternCompilation.ACCEPTED
+    os.write(1, b"retained_cel_settled\n")
+
+
+def held_preparation_app(
+    database: Database, preparer: DeploymentPreparer, release: int
+) -> ASGIApp:
+    async def application(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "lifespan":
+            await lifecycle(receive, send)
+            return
+        async with preparer.reserve() as reservation:
+            assert reservation is not None
+            preparation = asyncio.create_task(
+                reservation.run(partial(hold_preparation, release))
+            )
+            try:
+                while (await receive())["type"] != "http.disconnect":
+                    continue
+                async with database.transaction() as connection:
+                    with await connection.exec_driver_sql("SELECT 42") as result:
+                        assert result.scalar_one() == 42
+            finally:
+                assert preparation.cancel()
+                (cancelled,) = await asyncio.gather(preparation, return_exceptions=True)
+                assert isinstance(cancelled, asyncio.CancelledError)
+        assert preparer.busy
+        os.write(1, b"request_sqlite_settled\n")
+
+    return application
+
+
 def buffered_response(database: Database) -> ASGIApp:
     async def application(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -145,22 +188,41 @@ def launch() -> int:
     diagnostics = configure_process(
         COMPONENT, read_logging_settings(os.environ, (COMPONENT,)), "api-lifecycle", now
     )
+    preparer = None
     try:
         match sys.argv[1:]:
             case ["refuse_lifespan"]:
                 make_application = refused_lifespan
             case ["hold_native", release]:
                 make_application = partial(held_request_app, release=int(release))
+            case ["hold_preparation", release]:
+                preparer = serving_deployment_preparer(SystemClock())
+                make_application = partial(
+                    held_preparation_app, preparer=preparer, release=int(release)
+                )
             case ["buffered_response"]:
                 make_application = buffered_response
             case _:
                 make_application = held_request_app
         result = serve_sqlite(
-            settings, 0, diagnostics.logger(COMPONENT), make_application
+            settings,
+            0,
+            diagnostics.logger(COMPONENT),
+            make_application,
+            preparer=preparer,
         )
         if sys.argv[1:2] == ["hold_native"]:
             assert not owns_sqlite_descriptor(settings.sqlite_path)
             os.write(1, b"native_sqlite_file_closed\n")
+        if preparer is not None:
+            owner = PROCESS.thread
+            assert owner is not None
+            snapshot = owner.snapshot()
+            assert snapshot.handles == snapshot.outstanding == snapshot.bytes == 0
+            assert all(thread.name != THREAD_NAME for thread in threading.enumerate())
+            assert not preparer.busy
+            assert not owns_sqlite_descriptor(settings.sqlite_path)
+            os.write(1, b"domain_owners_settled\n")
         return result
     finally:
         diagnostics.shutdown()
