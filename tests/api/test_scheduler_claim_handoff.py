@@ -1,4 +1,3 @@
-from contextlib import AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,6 +12,9 @@ from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun
 from tests.api.claim_support import BEARER, claim_application
 from tests.api.deployment_cases import GRAPH, NAMESPACE, preparer
+from tests.api.first_claim_deadline_support import (
+    admit_after_first_claim_deadline_crossing,
+)
 from tests.api.scheduler_claim_support import (
     PARAMS,
     promote_and_admit_agent,
@@ -40,48 +42,48 @@ async def test_real_scheduler_admission_hands_pinned_attempt_to_worker_claim(
     transport: str,
 ) -> None:
     ledger = ConnectionLedger(database)
-    case = await scheduler_claim_case(database, preparer, api_capture)
-    clock = case.clock
+    setup = await scheduler_claim_setup(database, preparer, api_capture)
+    clock = setup.clock
     expected_deadline = clock.now() + timedelta(hours=1)
     async with database.read_transaction() as reader:
         price = await read_latest_price(reader, None, clock.now())
 
-    before_claim = await state(database)
-    clock.advance(1)
-    claim_at = clock.now()
-    async with AsyncExitStack() as resources:
-        origin = (
-            await resources.enter_async_context(running_app(case.app))
-            if transport == "http"
-            else "http://127.0.0.1"
+    async with (
+        running_app(setup.app) as origin,
+        KoraClient(
+            origin if transport == "http" else "http://127.0.0.1",
+            BEARER,
+            asgi_app=setup.app if transport == "asgi" else None,
+        ) as client,
+    ):
+        worker_id = (await client.register_worker(setup.registration)).worker_id
+        safe = await admit_after_first_claim_deadline_crossing(
+            origin, setup, client, worker_id, ledger, transport=transport
         )
-        client = await resources.enter_async_context(
-            KoraClient(
-                origin, BEARER, asgi_app=case.app if transport == "asgi" else None
-            )
-        )
-        await client.register_worker(case.registration)
-        first = await client.claim_worker(case.registration.name, case.request)
+        before_claim = await state(database)
+        clock.advance(1)
+        claim_at = clock.now()
+        first = await client.claim_worker(worker_id, setup.request)
         before_replay = await state(database)
         clock.advance(20)
-        replay = await client.claim_worker(case.registration.name, case.request)
+        replay = await client.claim_worker(worker_id, setup.request)
     after = await state(database)
 
-    assert len(before_claim["attempt"]) == len(after["attempt"]) == 1
-    assert before_claim["attempt"][0]["status"] == "created"
-    assert before_claim["attempt"][0]["started_at"] is None
-    assert before_claim["attempt"][0]["deadline"] is None
+    assert len(before_claim["attempt"]) == len(after["attempt"]) == 2
+    (original,) = [row for row in before_claim["attempt"] if row["status"] == "created"]
+    (claimed,) = [row for row in after["attempt"] if row["id"] == original["id"]]
+    assert (original["started_at"], original["deadline"]) == (None, None)
     assert before_claim["attempt_dispatcher"] == []
     assert len(after["attempt_dispatcher"]) == 1
     assert first.claim is not None
-    assert first.claim.attempt_id == before_claim["attempt"][0]["id"]
+    assert first.claim.attempt_id == original["id"]
     assert (
         first.claim.execution_context.graph_version_id
-        == case.promotion.scope.version_id
+        == safe.promotion.scope.version_id
     )
     assert (
         first.claim.execution_context.execution_contract_digest
-        == case.deployed.execution_contract_digest
+        == safe.deployed.execution_contract_digest
     )
     assert first.claim.params == PARAMS
     assert first.claim.input_bindings == {}
@@ -89,18 +91,18 @@ async def test_real_scheduler_admission_hands_pinned_attempt_to_worker_claim(
     assert first.claim.price_table == price
     assert first.claim.acknowledged_segment_offset == 0
     assert first.claim.permitted_actions == ("seal_request",)
-    assert first.claim.lease_epoch == after["attempt"][0]["lease_epoch"] == 1
+    assert first.claim.lease_epoch == claimed["lease_epoch"] == 1
     lease_until = claim_at + timedelta(seconds=120)
-    assert first.claim.lease_until == after["attempt"][0]["lease_until"] == lease_until
+    assert first.claim.lease_until == claimed["lease_until"] == lease_until
     assert first.claim.dispatcher_id == after["attempt_dispatcher"][0]["id"]
-    assert first.claim.execution_domain_id == case.registration.execution_domain_id
-    assert after["attempt"][0]["execution_state"] == "unknown"
-    assert after["attempt"][0]["started_at"] == claim_at
+    assert first.claim.execution_domain_id == setup.registration.execution_domain_id
+    assert claimed["execution_state"] == "unknown"
+    assert claimed["started_at"] == claim_at
     deadline_record = first.claim.deadline.value
     assert deadline_record is not None
     deadline = deadline_record.deadline()
-    assert (deadline.scope_kind, deadline.scope_id) == ("run", case.promotion.run_id)
-    assert deadline.at == after["attempt"][0]["deadline"] == expected_deadline
+    assert (deadline.scope_kind, deadline.scope_id) == ("run", safe.run_id)
+    assert deadline.at == claimed["deadline"] == expected_deadline
     assert replay == first
     assert before_replay == after
     assert ledger.outstanding == database.units_in_flight() == 0

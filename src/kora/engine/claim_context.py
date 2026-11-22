@@ -93,6 +93,7 @@ class ClaimAttempt(BoundaryModel):
     lease_epoch: Count
     lease_until: datetime | None
     current_dispatcher_open: StrictBool | None
+    created_at: datetime
     started_at: datetime | None
     deadline: datetime | None
     deadline_expired_at: datetime | None

@@ -17,6 +17,7 @@ from kora.db.connection import (
     WRITER_ENTRY_NATIVE_ERRORS,
     Database,
     DatabaseSnapshotRejected,
+    DatabaseWriterRejected,
     clear_snapshot_error,
     complete,
 )
@@ -367,6 +368,51 @@ class WorkerClaimPoll:
             raise_safe(ExpiryFailed())
         logger.emit(RECOVERY_FINISHED)
 
+    async def _settle_deadline_refusal(
+        self,
+        target: ClaimTarget,
+        query: ClaimQuery,
+        principal: Principal,
+        prepared: SelectedClaim | None,
+    ) -> ClaimDecision:
+        deadline = asyncio.get_running_loop().time() + self.limits.read_seconds
+        try:
+            async with (
+                asyncio.timeout_at(deadline),
+                self.database.transaction(admission_deadline=deadline) as writer,
+            ):
+                locks = TransitionLocks(writer)
+                if not await locks.acquire_run(target.run.id, wait=False):
+                    raise ClaimWriterFailed()
+                context = self._context(writer, locks, target.run)
+                await locks.acquire_scopes(
+                    context.capacity_scopes(target.attempt.runtime), deadline=deadline
+                )
+                decision = await claim_attempt(
+                    context,
+                    target.attempt.id,
+                    query,
+                    principal,
+                    prepared,
+                    self.limits.snapshot.sources,
+                    self.limits.history,
+                    self.limits.worker_bytes,
+                    self.uncertainty,
+                    settle_deadline_refusal=True,
+                )
+                if decision.outcome is not ClaimOutcome.DEADLINE_CROSSED:
+                    await complete(writer.rollback())
+        except (
+            *WRITER_ENTRY_NATIVE_ERRORS,
+            ClaimSourcesRejected,
+            DatabaseWriterRejected,
+            LockError,
+        ):
+            raise_safe(ClaimWriterFailed())
+        if decision.outcome is ClaimOutcome.REDIRECT:
+            return decision
+        raise_safe(ClaimWriterFailed())
+
     async def _selected(
         self,
         attempt_id: str,
@@ -416,7 +462,10 @@ class WorkerClaimPoll:
                     self.limits.worker_bytes,
                     self.uncertainty,
                 )
-                if decision.outcome is ClaimOutcome.REDIRECT:
+                if decision.outcome in (
+                    ClaimOutcome.REDIRECT,
+                    ClaimOutcome.DEADLINE_CROSSED,
+                ):
                     await complete(writer.rollback())
                 if decision.outcome is ClaimOutcome.GRANTED:
                     await self._advance(writer, query, cursor, attempt_id)
@@ -436,6 +485,10 @@ class WorkerClaimPoll:
             raise
         if run_expiry:
             await complete(self._finish_expiry(target.run))
+        if decision.outcome is ClaimOutcome.DEADLINE_CROSSED:
+            return await self._settle_deadline_refusal(
+                target, query, principal, prepared
+            )
         return decision
 
     async def _empty(

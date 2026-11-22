@@ -41,7 +41,7 @@ from kora.engine.claim_context import (
 )
 from kora.engine.claim_selection import ClaimDelivery, SelectedClaim
 from kora.engine.claim_sources import recheck_claim_sources, update_claim_sources
-from kora.engine.claim_timing import first_claim_deadline
+from kora.engine.claim_timing import ClaimDeadlineCrossed, first_claim_deadline
 from kora.engine.deadline_records import (
     DeadlineRecordRejected,
     RecordedDeadlineBinding,
@@ -61,6 +61,7 @@ from kora.engine.expiry_context import (
 from kora.engine.grant_history import append_grant, save_history_batch
 from kora.engine.lease_recovery import (
     LeaseState,
+    close_undispatched_attempt,
     closed_reporting_lease,
     recover_expired_lease,
 )
@@ -89,6 +90,7 @@ class ClaimOutcome(StrEnum):
     INELIGIBLE = "ineligible"
     REDIRECT = "redirect"
     EXPIRE = "expire"
+    DEADLINE_CROSSED = "deadline_crossed"
     MAINTAINED = "maintained"
     GRANTED = "granted"
     REPLAYED = "replayed"
@@ -446,6 +448,8 @@ async def _claim(
     history_limits: HistoryReadLimits,
     worker_bytes: int,
     uncertainty: timedelta,
+    *,
+    settle_deadline_refusal: bool,
 ) -> ClaimDecision:
     connection = context.connection
     context.locks.require_connection(connection)
@@ -483,7 +487,8 @@ async def _claim(
         return ClaimDecision(ClaimOutcome.INELIGIBLE)
     now = normalise_timestamp(context.clock())
     if (
-        saved.worker_id == query.worker_id
+        not settle_deadline_refusal
+        and saved.worker_id == query.worker_id
         and saved.current_dispatcher_open is None
         and saved.lease_until is not None
         and saved.lease_until > now
@@ -524,6 +529,8 @@ async def _claim(
             )
         )
     )
+    if settle_deadline_refusal and not first:
+        return ClaimDecision(ClaimOutcome.INELIGIBLE)
     if (
         parent.status == "running"
         and parent.deadline_expired_at is None
@@ -532,6 +539,8 @@ async def _claim(
         and (now - parent.started_at) // timedelta(microseconds=1)
         >= prepared.run_timeout
     ):
+        if settle_deadline_refusal:
+            return ClaimDecision(ClaimOutcome.INELIGIBLE)
         await record_run_expiry(context, now)
         return ClaimDecision(ClaimOutcome.EXPIRE, run_expiry=True)
     if first:
@@ -546,17 +555,30 @@ async def _claim(
         )
         if exists:
             raise ClaimSourcesRejected()
-        binding = RecordedDeadlineBinding(
-            first_claim_deadline(
-                parent.id,
-                saved.id,
-                parent.started_at,
-                now,
-                prepared.run_timeout,
-                prepared.attempt_timeout,
-                uncertainty,
+        try:
+            binding = RecordedDeadlineBinding(
+                first_claim_deadline(
+                    parent.id,
+                    saved.id,
+                    parent.started_at,
+                    now,
+                    prepared.run_timeout,
+                    prepared.attempt_timeout,
+                    uncertainty,
+                    admitted_at=saved.created_at,
+                )
             )
-        )
+        except ClaimDeadlineCrossed:
+            if settle_deadline_refusal:
+                if not await worker_slot_available(
+                    connection, query.worker_id, registered.capacity, now
+                ) or not await close_undispatched_attempt(
+                    context, saved.id, deadline_refused_at=now
+                ):
+                    return ClaimDecision(ClaimOutcome.INELIGIBLE)
+            return ClaimDecision(ClaimOutcome.DEADLINE_CROSSED)
+        if settle_deadline_refusal:
+            return ClaimDecision(ClaimOutcome.INELIGIBLE)
     else:
         if (
             saved.execution_domain_id != query.execution_domain_id
@@ -637,6 +659,8 @@ async def claim_attempt(
     history_limits: HistoryReadLimits,
     worker_bytes: int,
     uncertainty: timedelta,
+    *,
+    settle_deadline_refusal: bool = False,
 ) -> ClaimDecision:
     try:
         result = await _claim(
@@ -649,6 +673,7 @@ async def claim_attempt(
             history_limits,
             worker_bytes,
             uncertainty,
+            settle_deadline_refusal=settle_deadline_refusal,
         )
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)
