@@ -25,10 +25,12 @@ from kora.db.claim_snapshot_reads import (
 from kora.db.connection import (
     SNAPSHOT_NATIVE_ERRORS,
     Database,
+    DatabaseSnapshotFailure,
     DatabaseSnapshotRejected,
     require_snapshot_time,
 )
 from kora.db.graph_resource_owner_reads import MAX_OWNER_ROWS
+from kora.db.graph_value_json import GraphValueRejected
 from kora.db.graph_version_reads import transport_limit
 from kora.db.identifiers import is_identifier
 from kora.db.run_input_reads import (
@@ -70,6 +72,10 @@ SCALAR_FIXED_BYTES: int = (
 class AdmissionSnapshotRejected(ValueError):
     def __init__(self) -> None:
         super().__init__("admission sources are unavailable or invalid")
+
+
+class AdmissionCandidateUnavailable(AdmissionSnapshotRejected):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,10 +160,10 @@ async def _wait_owner(
         rows = result.all()
     if candidate.status != "waiting":
         if rows:
-            raise AdmissionSnapshotRejected()
+            raise AdmissionCandidateUnavailable()
         return None
     if len(rows) != 1:
-        raise AdmissionSnapshotRejected()
+        raise AdmissionCandidateUnavailable()
     identity, kind, attempt_id = rows[0]
     if (
         type(identity) is not str
@@ -165,14 +171,14 @@ async def _wait_owner(
         or kind != "admission"
         or attempt_id is not None
     ):
-        raise AdmissionSnapshotRejected()
+        raise AdmissionCandidateUnavailable()
     if periodic_recheck:
         with await connection.execute(
             select(wait.c.wake_at).where(wait.c.id == identity)
         ) as result:
             wake = result.scalar_one_or_none()
         if wake is None or wake > observed_at:
-            raise AdmissionSnapshotRejected()
+            raise AdmissionCandidateUnavailable()
     return identity
 
 
@@ -213,7 +219,7 @@ async def _acquire_admission_snapshot(
                 run_row=limits.inputs.parent,
             )
             if candidate is None:
-                raise AdmissionSnapshotRejected()
+                raise AdmissionCandidateUnavailable()
             wait_id = await _wait_owner(
                 connection, candidate, observed_at, periodic_recheck
             )
@@ -254,7 +260,7 @@ async def _acquire_admission_snapshot(
                 connection, scope, RunInputField.PARAMS, limits.inputs
             )
             if params is None:
-                raise AdmissionSnapshotRejected()
+                raise AdmissionCandidateUnavailable()
             price = await acquire_claim_price(connection, scope.namespace_id, price_id)
             policy = await acquire_claim_policy(connection, scope.namespace_id)
             snapshot = AcquiredAdmissionSnapshot(
@@ -295,7 +301,15 @@ async def acquire_admission_snapshot(
         )
         acquired = True
         return result
-    except (ValueError, DatabaseSnapshotRejected, *SNAPSHOT_NATIVE_ERRORS):
+    except AdmissionCandidateUnavailable:
+        raise
+    except DatabaseSnapshotRejected as error:
+        if error.reason is DatabaseSnapshotFailure.DEADLINE:
+            raise_safe(AdmissionCandidateUnavailable())
+        raise_safe(AdmissionSnapshotRejected())
+    except GraphValueRejected:
+        raise_safe(AdmissionCandidateUnavailable())
+    except (ValueError, *SNAPSHOT_NATIVE_ERRORS):
         del database, node_id, limits, observed_at
         raise_safe(AdmissionSnapshotRejected())
     finally:

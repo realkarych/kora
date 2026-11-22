@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -8,13 +9,16 @@ from kora.db.connection import (
     WRITER_ENTRY_NATIVE_ERRORS,
     Database,
     DatabaseSnapshotRejected,
+    DatabaseWriterFailure,
     DatabaseWriterRejected,
     clear_snapshot_error,
     require_snapshot_time,
 )
 from kora.db.identifiers import Clock, IdentifierGenerator
+from kora.db.run_input_parent import verify_run_input_parent
 from kora.engine.admission_preparation import (
     AdmissionPreparationLimits,
+    AdmissionPreparationUnavailable,
     PreparedAdmissionSnapshot,
     prepare_admission_snapshot,
 )
@@ -28,10 +32,19 @@ from kora.engine.attempt_preparation import prepare_attempt_admission
 from kora.engine.attempt_preparation_budget import AttemptPreparationLimits
 from kora.engine.claim_material import ClaimRuntimeSelection
 from kora.engine.expiry_context import ExpiryContext
-from kora.engine.locks import COMPONENT, LockError, Scope, ScopeKind, TransitionLocks
+from kora.engine.locks import (
+    COMPONENT,
+    LockError,
+    Scope,
+    ScopeDeadlineExpired,
+    ScopeKind,
+    TransitionLocks,
+)
 from kora.engine.run_promotion_read import PromotionReadLimits
+from kora.engine.staging_maintenance import admit_staging_inventory
 from kora.ir.deployment_checks import DeploymentSelection
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
+from kora.protocols.worker_claim_wire import ClaimWireRejected
 
 COMPLETED: EventSpec = CATALOG.register(
     EventSpec(
@@ -68,9 +81,14 @@ class AdmissionProcessor:
     global_limit: int | None
     runtime_limit: int | None
     interval: timedelta
+    initial_root_only: bool = False
 
     async def _process(
-        self, node_id: str, periodic_recheck: bool, deadline: float
+        self,
+        node_id: str,
+        periodic_recheck: bool,
+        deadline: float,
+        stopped: Callable[[], bool] | None,
     ) -> AttemptAdmissionState:
         source: PreparedAdmissionSnapshot | None = None
         binding: ClaimSourceBinding | None = None
@@ -87,6 +105,14 @@ class AdmissionProcessor:
                 periodic_recheck=periodic_recheck,
                 deadline=deadline,
             )
+            if self.initial_root_only and not any(
+                node.path == source.acquired.candidate.node_path
+                and node.kind == "agent"
+                and not node.predecessors
+                and not node.inputs
+                for node in source.readiness.nodes
+            ):
+                return AttemptAdmissionState.REFUSED
             binding = ClaimSourceBinding(
                 source.acquired.candidate.run,
                 node_id,
@@ -112,6 +138,8 @@ class AdmissionProcessor:
                 ),
             )
             await asyncio.sleep(0)
+            if stopped is not None and stopped():
+                return AttemptAdmissionState.REFUSED
             require_snapshot_time(deadline)
             async with asyncio.timeout_at(deadline):
                 async with self.database.transaction(
@@ -129,6 +157,21 @@ class AdmissionProcessor:
                         ),
                         deadline=deadline,
                     )
+                    if stopped is not None and stopped():
+                        return AttemptAdmissionState.REFUSED
+                    run = binding.run
+                    if self.initial_root_only and (
+                        not await verify_run_input_parent(
+                            connection,
+                            run.namespace_id,
+                            run.graph_id,
+                            run.version_id,
+                            run.run_id,
+                            max_parent_bytes=limits.preparation.snapshot.inputs.parent,
+                        )
+                        or not await admit_staging_inventory(connection, run.run_id)
+                    ):
+                        return AttemptAdmissionState.REFUSED
                     outcome = await admit_attempt(
                         ExpiryContext(
                             connection,
@@ -154,11 +197,16 @@ class AdmissionProcessor:
             del source, prepared, binding
 
     async def process(
-        self, node_id: str, *, periodic_recheck: bool, deadline: float
+        self,
+        node_id: str,
+        *,
+        periodic_recheck: bool,
+        deadline: float,
+        stopped: Callable[[], bool] | None = None,
     ) -> AttemptAdmissionState:
         outcome = "failed"
         try:
-            result = await self._process(node_id, periodic_recheck, deadline)
+            result = await self._process(node_id, periodic_recheck, deadline, stopped)
             outcome = result.value
             return result
         except asyncio.CancelledError as error:
@@ -166,13 +214,29 @@ class AdmissionProcessor:
             clear_snapshot_error(error)
             raise
         except (
+            AdmissionPreparationUnavailable,
+            ClaimWireRejected,
+            ScopeDeadlineExpired,
+            TimeoutError,
+        ):
+            if self.initial_root_only:
+                outcome = AttemptAdmissionState.REFUSED.value
+                return AttemptAdmissionState.REFUSED
+            raise_safe(AdmissionProcessingFailed())
+        except DatabaseWriterRejected as error:
+            if (
+                self.initial_root_only
+                and error.reason is DatabaseWriterFailure.DEADLINE
+            ):
+                outcome = AttemptAdmissionState.REFUSED.value
+                return AttemptAdmissionState.REFUSED
+            raise_safe(AdmissionProcessingFailed())
+        except (
             ValueError,
             TypeError,
             RecursionError,
             OverflowError,
-            TimeoutError,
             DatabaseSnapshotRejected,
-            DatabaseWriterRejected,
             LockError,
             AttemptAdmissionFailed,
             *WRITER_ENTRY_NATIVE_ERRORS,

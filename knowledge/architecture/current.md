@@ -81,9 +81,11 @@ No runtime, approval-channel, sensor or observability-exporter provider is regis
 
 ### Absent packages
 
-The [package layer table](detailed.md#package-layers) lists packages that do not exist yet: `scheduler`, `worker`, `dsl`, `plugins.approval`, `plugins.sensor` and `plugins.exporter`, and the composition root `kora.standalone`. There is therefore no `kora standalone`, `kora compile`, `kora test`, `kora approve` or HTTP-mounted MCP server. `kora doctor` checks the kora version, the CEL binding, the metadata database and the state root ([#1420](https://github.com/realkarych/kora/issues/1420)); it also reads the runner installation and checks configured harness binaries and versions, with an optional `--state-root` override ([#1419](https://github.com/realkarych/kora/issues/1419)).
+The [package layer table](detailed.md#package-layers) lists packages that do not exist yet: `worker`, `dsl`, `plugins.approval`, `plugins.sensor` and `plugins.exporter`, and the composition root `kora.standalone`. There is therefore no `kora standalone`, `kora compile`, `kora test`, `kora approve` or HTTP-mounted MCP server. `kora doctor` checks the kora version, the CEL binding, the metadata database and the state root ([#1420](https://github.com/realkarych/kora/issues/1420)); it also reads the runner installation and checks configured harness binaries and versions, with an optional `--state-root` override ([#1419](https://github.com/realkarych/kora/issues/1419)).
 
 ### Testing composition
+
+The bounded first-Claim Scheduler composes real pending promotion, initial admission, deadline and lease work. SQLite and PostgreSQL tests drive a saved HTTP run through actual Scheduler restart, original Worker Claim and replay. Installed activation belongs to #1780.
 
 `kora.testing.runner` composes the production local supervisor with the fake harness, an admitted private script and `allow_deny`. `kora.testing.local` constructs agent and command workloads against a temporary bare Git repository using the runner's system Git. These modules are built for tests; no production setting selects them. Script receipt and pre-start integrity checks belong to the local agent session. Virtual time, the fake runtime, scenarios and command overrides remain deferred under #265.
 

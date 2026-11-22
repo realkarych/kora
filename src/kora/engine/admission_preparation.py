@@ -16,6 +16,7 @@ from kora.db.native_values import NAMESPACE_POLICY_NATIVE_LIMIT
 from kora.db.types import DIGEST_LENGTH
 from kora.engine.admission_snapshot import (
     AcquiredAdmissionSnapshot,
+    AdmissionCandidateUnavailable,
     AdmissionSnapshotLimits,
     acquire_admission_snapshot,
 )
@@ -50,6 +51,10 @@ PREPARED: EventSpec = CATALOG.register(
 class AdmissionPreparationRejected(ValueError):
     def __init__(self) -> None:
         super().__init__("admission sources cannot be prepared")
+
+
+class AdmissionPreparationUnavailable(AdmissionPreparationRejected):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +246,8 @@ async def prepare_admission_snapshot(
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)
         raise
+    except AdmissionCandidateUnavailable:
+        raise_safe(AdmissionPreparationUnavailable())
     except (
         ValueError,
         TypeError,
