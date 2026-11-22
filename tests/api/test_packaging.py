@@ -714,7 +714,7 @@ def installed_site_packages(python: Path) -> Path:
         "cel-metadata-encoding",
         "cel-record-encoding",
         "cel-record-field",
-        "harness-entry-encoding",
+        "harness-entry-unavailable",
     ],
 )
 async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
@@ -732,7 +732,7 @@ async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
             site / "kora" / "ir" / "artifact_schemas" / "StructuredOutput.schema.json"
         )
         schema.write_bytes(schema.read_bytes() + b"\n")
-    elif damage in {"harness", "harness-entry-encoding"}:
+    elif damage in {"harness", "harness-entry-unavailable"}:
         [entry_points] = site.glob("kora-*.dist-info/entry_points.txt")
         if damage == "harness":
             lines = entry_points.read_text().splitlines()
@@ -742,7 +742,17 @@ async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
             assert len(remaining) == len(lines) - 1
             entry_points.write_text("\n".join(remaining) + "\n")
         else:
-            entry_points.write_bytes(entry_points.read_bytes() + b"\xff")
+            entries = entry_points.read_text()
+            selected = (
+                "harness.claude = kora.plugins.harness.claude.adapter:provider_metadata"
+            )
+            assert entries.count(selected) == 1
+            entry_points.write_text(
+                entries.replace(
+                    selected,
+                    selected.removesuffix("provider_metadata") + "unavailable_provider",
+                )
+            )
     elif damage == "cel-record-field":
         record = metadata / "RECORD"
         record.write_bytes(record.read_bytes() + b"a" * (csv.field_size_limit() + 1))
