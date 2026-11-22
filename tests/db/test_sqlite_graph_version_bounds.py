@@ -35,7 +35,7 @@ from tests.api.test_graph_publication_values import (
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
 from tests.db.test_graph_read_admission import executed_queries
-from tests.db.test_sqlite_graph_version_layout import PROBE_STATEMENTS
+from tests.db.test_sqlite_graph_version_layout import GEOMETRY_STATEMENTS
 from tests.support.databases import encoded_sqlite_settings
 
 SMALL_WIDTHS = SQLiteGraphVersionWidths(2, 2, 2, 2, 0)
@@ -296,8 +296,7 @@ async def test_sqlite_graph_record_bound_covers_actual_migrated_file(
     assert checkpoint[0] == 0
     assert saved_page == (page_size,)
     assert saved_encoding == (encoding,)
-    assert len(queries) == 6
-    assert queries[:-1] == [(statement.text, ()) for statement in PROBE_STATEMENTS]
+    assert queries[:-1] == [(statement, ()) for statement in GEOMETRY_STATEMENTS]
     measurement_sql, measurement_args = queries[-1]
     assert measurement_sql == str(compiled_measurement)
     bind_names = compiled_measurement.positiontup
