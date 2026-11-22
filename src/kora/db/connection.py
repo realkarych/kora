@@ -16,6 +16,7 @@ from collections.abc import (
 from contextlib import AsyncExitStack, asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Protocol, TypeVar, cast
 from weakref import ReferenceType, ref
 
@@ -388,29 +389,83 @@ class SqliteDriverConnection(aiosqlite.Connection):
         self._thread.daemon = True
 
 
-def open_sqlite_file(path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(
+class _SqliteServingLifetime:
+    def __init__(self) -> None:
+        self._guard = Lock()
+        self._native_open: int = 0
+        self._loop = asyncio.get_running_loop()
+        self._native_closed = asyncio.Event()
+        self.disposed = asyncio.Event()
+
+    def opened(self) -> None:
+        with self._guard:
+            self._native_open += 1
+
+    def closed(self) -> None:
+        with self._guard:
+            self._native_open -= 1
+            if self._native_open == 0:
+                self._loop.call_soon_threadsafe(self._native_closed.set)
+
+    def _all_native_closed(self) -> bool:
+        with self._guard:
+            return self._native_open == 0
+
+    async def wait_settled(self) -> None:
+        await self.disposed.wait()
+        while not self._all_native_closed():
+            await self._native_closed.wait()
+            self._native_closed.clear()
+
+
+class _ServingSqliteConnection(sqlite3.Connection):
+    _lifetime: _SqliteServingLifetime | None = None
+
+    def track(self, lifetime: _SqliteServingLifetime) -> None:
+        self._lifetime = lifetime
+        lifetime.opened()
+
+    def close(self) -> None:
+        lifetime = self._lifetime
+        self._lifetime = None
+        super().close()
+        if lifetime is not None:
+            lifetime.closed()
+
+
+def open_sqlite_file(
+    path: Path, lifetime: _SqliteServingLifetime | None = None
+) -> sqlite3.Connection:
+    connection = sqlite3.connect(
         path,
         timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
         isolation_level=None,
         check_same_thread=False,
+        factory=sqlite3.Connection if lifetime is None else _ServingSqliteConnection,
     )
+    if lifetime is not None and isinstance(connection, _ServingSqliteConnection):
+        connection.track(lifetime)
+    return connection
 
 
 def sqlite_connector(
-    path: Path,
+    path: Path, lifetime: _SqliteServingLifetime | None = None
 ) -> Callable[[], Awaitable[aiosqlite.Connection]]:
     async def connect() -> aiosqlite.Connection:
-        opened = await asyncio.to_thread(open_sqlite_file, path)
+        opened = await asyncio.to_thread(open_sqlite_file, path, lifetime)
         return await SqliteDriverConnection(opened)
 
     return connect
 
 
 def sqlite_engine(
-    settings: DatabaseSettings, writer: bool, *, require_full_sync: bool = False
+    settings: DatabaseSettings,
+    writer: bool,
+    *,
+    require_full_sync: bool = False,
+    serving_lifetime: _SqliteServingLifetime | None = None,
 ) -> AsyncEngine:
-    connector = sqlite_connector(settings.sqlite_path.absolute())
+    connector = sqlite_connector(settings.sqlite_path.absolute(), serving_lifetime)
     if writer:
         engine = create_async_engine(
             settings.url, poolclass=StaticPool, async_creator=connector
@@ -720,6 +775,7 @@ class Database:
         *,
         require_sqlite_full_sync: bool = False,
         require_postgresql_wal_settings: bool = False,
+        observe_sqlite_serving: bool = False,
     ) -> None:
         if require_sqlite_full_sync and settings.dialect is not Dialect.SQLITE:
             raise ValueError("the SQLite writer mode requires SQLite")
@@ -730,16 +786,27 @@ class Database:
             raise ValueError("the PostgreSQL writer mode requires PostgreSQL")
         self.settings = settings
         self.dialect = settings.dialect
+        if observe_sqlite_serving and self.dialect is not Dialect.SQLITE:
+            raise DatabaseConfigurationError("the serving observer requires SQLite")
+        self._sqlite_serving = (
+            _SqliteServingLifetime() if observe_sqlite_serving else None
+        )
         self._require_postgresql_wal_settings = require_postgresql_wal_settings
         self._writer_lock = asyncio.Lock()
         self._sqlite_writer_usable = True
         if settings.dialect is Dialect.SQLITE:
             create_private_file(settings.sqlite_path)
             self._writer = sqlite_engine(
-                settings, writer=True, require_full_sync=require_sqlite_full_sync
+                settings,
+                writer=True,
+                require_full_sync=require_sqlite_full_sync,
+                serving_lifetime=self._sqlite_serving,
             )
             self._reader = sqlite_engine(
-                settings, writer=False, require_full_sync=require_sqlite_full_sync
+                settings,
+                writer=False,
+                require_full_sync=require_sqlite_full_sync,
+                serving_lifetime=self._sqlite_serving,
             )
         else:
             self._writer = postgresql_engine(settings)
@@ -759,7 +826,6 @@ class Database:
         self._lifecycle = Lifecycle.OPEN
         self._closing: asyncio.Future[None] | None = None
         self._disposed = False
-        self._disposal_completed = False
         self._in_flight = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -1497,11 +1563,13 @@ class Database:
 
     async def close_sqlite_serving(
         self, deadline_seconds: float = DEFAULT_CLOSE_DEADLINE_SECONDS
-    ) -> bool:
-        if self.dialect is not Dialect.SQLITE:
-            raise DatabaseConfigurationError("the serving close requires SQLite")
-        await self.close(deadline_seconds)
-        return self._disposal_completed
+    ) -> None:
+        if self._sqlite_serving is None:
+            raise DatabaseConfigurationError("the serving observer was not installed")
+        try:
+            await self.close(deadline_seconds)
+        finally:
+            await self._sqlite_serving.wait_settled()
 
     def _mark_closed(self, closing: asyncio.Future[None]) -> None:
         self._lifecycle = Lifecycle.CLOSED
@@ -1535,4 +1603,5 @@ class Database:
         finally:
             if self._reader is not self._writer:
                 await self._reader.dispose()
-        self._disposal_completed = True
+        if self._sqlite_serving is not None:
+            self._sqlite_serving.disposed.set()

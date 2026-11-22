@@ -705,9 +705,12 @@ def postgres_serving_candidate(
 ) -> bool:
     query = settings.url.query
     certificate = query.get("sslrootcert")
+    port = settings.url.port
     return (
         installed_versions({"asyncpg": "0.32.0", "SQLAlchemy": "2.1.5"})
         and settings.url.host == "127.0.0.1"
+        and port is not None
+        and 1 <= port <= 65535
         and query.keys() <= {"sslmode", "sslrootcert", "target_session_attrs"}
         and query.get("sslmode") == "verify-full"
         and query.get("target_session_attrs", "any") == "any"

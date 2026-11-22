@@ -89,7 +89,7 @@ The [package layer table](detailed.md#package-layers) lists packages that do not
 
 ### Size
 
-`src/kora` holds 617 Python modules and about 127,841 lines. The metadata schema has 42 tables and 32 migrations. Loading the commands above at run time reaches none of `kora.api` or `kora.engine`. `kora doctor` loads `kora.cel_eval.binding`, which loads `kora.cel`, for its CEL binding check; it loads the configured runner providers and the Claude SDK when `claude` is configured. `kora plugins list` reaches the Claude adapter module without the Claude SDK. `kora conformance harness claude` reaches that adapter and imports the Claude SDK when it builds a session. `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
+`src/kora` holds 617 Python modules and about 127,841 lines. The metadata schema has 42 tables and 32 migrations. The installed `kora api` command reaches the two-route API composition. Engine domain operations require their separately configured services. `kora doctor` loads `kora.cel_eval.binding`, which loads `kora.cel`, for its CEL binding check; it loads the configured runner providers and the Claude SDK when `claude` is configured. `kora plugins list` reaches the Claude adapter module without the Claude SDK. `kora conformance harness claude` reaches that adapter and imports the Claude SDK when it builds a session. `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
 
 ## 3. How the existing pieces connect
 
@@ -98,7 +98,7 @@ Solid arrows outside the dashed box are calls made by installed commands. The da
 ```mermaid
 flowchart LR
     accTitle: Callers of the existing packages
-    accDescr: The kora CLI reaches the database migrations, provider listing and the conformance command, and starts gated child processes with the runner primitives. Conformance constructs the registered providers and the plan executor. Provider listing loads the claude harness metadata. The API, engine, CEL, client, models, the local runtime with its runner processes, and harness sessions are reached only from tests.
+    accDescr: The kora CLI reaches the database migrations, provider listing and the conformance command, and starts gated child processes with the runner primitives. Conformance constructs the registered providers and the plan executor. Provider listing loads the claude harness metadata. The installed API serves health and protected schema. The client commands use the shared client. Engine domain operation wiring, the local runtime with its runner processes, and harness sessions are exercised by separate tests.
     CLI["kora CLI"] -->|db upgrade| DB[("db: schema and migrations")]
     CLI -->|plugins list| LOAD["protocols: provider loading"]
     CLI -->|conformance| CONF["conformance"]
@@ -107,11 +107,12 @@ flowchart LR
     PROV -->|static_token| DB
     CLI -->|gated children| PRIM["runner primitives"]
     LOAD -->|harness.claude| CLAUDE["claude harness metadata"]
+    CLI -->|api| API["api: health and protected schema"]
+    CLI -->|deploy, trigger, mcp| CLIENT["client and models"]
+    API -->|static token reads| DB
     subgraph unused ["Built, not called"]
-        API["api"]
         ENGINE["engine"]
         CEL["cel and cel_eval"]
-        CLIENT["client and models"]
         LOCAL["LocalRuntime"] -->|starts| RUNNER["kora-runner process"]
         HARNESS["claude sessions and codex harness code"]
     end

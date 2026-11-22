@@ -18,6 +18,7 @@ import pytest
 from kora.db.connection import Database
 from kora.ir.json import JsonObject, parse_json_object
 from kora.models.errors import ApiErrorEnvelope
+from tests.api.test_linux_serving_barrier import native_probe_required_here
 from tests.client.support import tls_pair
 from tests.plugins.authentication.support import seed_case
 from tests.support.databases import copy_sqlite_template
@@ -124,6 +125,18 @@ def serving_installation(
     )
 
 
+@pytest.fixture(scope="module")
+def postgres_serving_installation(
+    core_wheel: Path, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    return installed_core(
+        core_wheel,
+        tmp_path_factory.mktemp("installed-api-postgres-serving"),
+        serve=True,
+        postgres=True,
+    )
+
+
 def test_installed_api_application_uses_only_runtime_dependencies(
     core_wheel: Path, bare_installation: Path, tmp_path: Path
 ) -> None:
@@ -186,12 +199,20 @@ def api_command(python: Path, port: int) -> list[str]:
 
 
 def api_startup_result(
-    python: Path, directory: Path, database_url: str | None, port: int
+    python: Path,
+    directory: Path,
+    database_url: str | None,
+    port: int,
+    *,
+    ssl_keylog: Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    environment = api_environment(database_url)
+    if ssl_keylog is not None:
+        environment["SSLKEYLOGFILE"] = str(ssl_keylog)
     return subprocess.run(
         api_command(python, port),
         cwd=directory,
-        env=api_environment(database_url),
+        env=environment,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
@@ -255,6 +276,43 @@ async def terminate_installed_api(
         raise
 
 
+async def read_raw_head(port: int, authorization: str | None = None) -> bytes:
+    fields = [
+        f"HEAD {SCHEMA} HTTP/1.1",
+        f"Host: {LOOPBACK}:{port}",
+        "Connection: close",
+    ]
+    if authorization is not None:
+        fields.append(f"Authorization: {authorization}")
+    request = "\r\n".join([*fields, "", ""]).encode("ascii")
+    async with asyncio.timeout(SERVE_TIMEOUT):
+        reader, writer = await asyncio.open_connection(LOOPBACK, port)
+        try:
+            writer.write(request)
+            await writer.drain()
+            return await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
+def head_headers(response: bytes, status: int) -> dict[bytes, bytes]:
+    header_block, delimiter, trailing = response.partition(b"\r\n\r\n")
+    assert delimiter == b"\r\n\r\n"
+    assert trailing == b""
+    status_line, *raw_headers = header_block.split(b"\r\n")
+    assert status_line.startswith(f"HTTP/1.1 {status} ".encode("ascii"))
+    headers: dict[bytes, bytes] = {}
+    for line in raw_headers:
+        name, separator, value = line.partition(b":")
+        assert separator == b":"
+        headers[name.lower()] = value.strip()
+    assert b"content-length" not in headers
+    assert headers.get(b"transfer-encoding") in (None, b"chunked")
+    assert headers[b"x-request-id"]
+    return headers
+
+
 @pytest.mark.asyncio
 async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
     serving_installation: Path, tmp_path: Path, sqlite_template: Path
@@ -292,6 +350,9 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
             )
             denied = await client.get(SCHEMA, headers={"Authorization": service_token})
             schema = await client.get(SCHEMA, headers={"Authorization": personal_token})
+        head_missing = await read_raw_head(port)
+        head_denied = await read_raw_head(port, service_token)
+        head_wrong_method = await read_raw_head(port, personal_token)
     finally:
         stdout, trailing = await terminate_installed_api(process)
 
@@ -323,7 +384,20 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
         item.headers["x-request-id"]
         for item in (health, missing, invalid, denied, schema)
     }
-    assert len(request_ids) == 5
+    missing_headers = head_headers(head_missing, 401)
+    denied_headers = head_headers(head_denied, 403)
+    wrong_method_headers = head_headers(head_wrong_method, 405)
+    assert missing_headers[b"www-authenticate"] == b"Bearer"
+    assert b"allow" not in missing_headers
+    assert b"www-authenticate" not in denied_headers
+    assert b"allow" not in denied_headers
+    assert b"www-authenticate" not in wrong_method_headers
+    assert wrong_method_headers[b"allow"] == b"GET"
+    request_ids.update(
+        headers[b"x-request-id"].decode("ascii")
+        for headers in (missing_headers, denied_headers, wrong_method_headers)
+    )
+    assert len(request_ids) == 8
     records = diagnostics(stderr)
     assert [record["event"] for record in records].count("api.serving_stopped") == 1
     assert any(
@@ -389,11 +463,19 @@ def test_installed_api_refuses_unprepared_sqlite_before_bind(
         assert not database_file.exists()
 
 
+@pytest.mark.parametrize(
+    "profile", ["candidate", "zero-port", "out-of-range-port", "key-log"]
+)
 def test_installed_api_refuses_before_bind_or_postgresql_dial(
-    core_wheel: Path, tmp_path: Path
+    postgres_serving_installation: Path, tmp_path: Path, profile: str
 ) -> None:
-    python = installed_core(core_wheel, tmp_path, serve=True, postgres=True)
     _, authority = tls_pair(tmp_path)
+    keylog = tmp_path / "refused-keylog"
+    expected = (
+        "postgresql_activation_unavailable"
+        if profile == "candidate" and native_probe_required_here()
+        else "postgresql_profile_unavailable"
+    )
     settings = urlencode(
         {
             "sslmode": "verify-full",
@@ -409,24 +491,28 @@ def test_installed_api_refuses_before_bind_or_postgresql_dial(
         backend.listen()
         backend.setblocking(False)
         reserved_api.bind((LOOPBACK, 0))
+        port = {"zero-port": 0, "out-of-range-port": 65536}.get(
+            profile, socket_port(backend)
+        )
         database_url = (
             f"postgresql+asyncpg://local:{PRIVATE_MARKER}@{LOOPBACK}:"
-            f"{socket_port(backend)}/metadata?{settings}"
+            f"{port}/metadata?{settings}"
         )
 
         result = api_startup_result(
-            python, tmp_path, database_url, socket_port(reserved_api)
+            postgres_serving_installation,
+            tmp_path,
+            database_url,
+            socket_port(reserved_api),
+            ssl_keylog=keylog if profile == "key-log" else None,
         )
 
         with pytest.raises(BlockingIOError):
             backend.accept()[0].close()
     assert result.returncode == 78, result.stderr
     assert result.stdout == b""
-    assert refusal_reason(result) in {
-        "postgresql_profile_unavailable",
-        "postgresql_barrier_unavailable",
-        "postgresql_activation_unavailable",
-    }
+    assert refusal_reason(result) == expected
+    assert not keylog.exists()
     records = diagnostics(result.stderr)
     assert all(
         record["event"] != "protocols.loading.provider_loaded"

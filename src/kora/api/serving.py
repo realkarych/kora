@@ -9,6 +9,7 @@ from types import FrameType
 
 from starlette.types import ASGIApp
 from uvicorn import Config, Server
+from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from kora.api.exchange import COMPONENT
 from kora.db.connection import (
@@ -37,6 +38,15 @@ BOUND: EventSpec = CATALOG.register(
 )
 STOPPED: EventSpec = CATALOG.register(
     EventSpec("api.serving_stopped", COMPONENT, Level.INFO, "the API owner settled", {})
+)
+DRAINING: EventSpec = CATALOG.register(
+    EventSpec(
+        "api.serving_draining",
+        COMPONENT,
+        Level.INFO,
+        "the API listener stopped accepting",
+        {},
+    )
 )
 REFUSED: EventSpec = CATALOG.register(
     EventSpec(
@@ -106,8 +116,24 @@ def own_server_logs() -> Generator[None]:
             logger.disabled = previous
 
 
+class _ServingHttpConnection(H11Protocol):
+    _released: asyncio.Event
+
+    def connection_made(self, transport: asyncio.Transport) -> None:
+        self._released = asyncio.Event()
+        super().connection_made(transport)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        super().connection_lost(exc)
+        self._released.set()
+
+    async def wait_released(self) -> None:
+        await self._released.wait()
+
+
 class ApiServer(Server):
     log: ComponentLogger
+    _force_requested: asyncio.Event
 
     def __init__(self, app: ASGIApp, port: int, log: ComponentLogger) -> None:
         super().__init__(
@@ -119,18 +145,23 @@ class ApiServer(Server):
                 reload=False,
                 lifespan="on",
                 interface="asgi3",
-                http="h11",
+                http=_ServingHttpConnection,
                 ws="none",
                 proxy_headers=False,
                 forwarded_allow_ips=[],
                 access_log=False,
                 log_config=None,
                 use_colors=False,
-                timeout_graceful_shutdown=int(DEFAULT_CLOSE_DEADLINE_SECONDS),
             )
         )
         self.log = log
         self.servers = []
+        self._force_requested = asyncio.Event()
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        super().handle_exit(sig, frame)
+        if self.force_exit:
+            self._force_requested.set()
 
     async def startup(self, sockets: list[socket.socket] | None = None) -> None:
         if sockets is not None:
@@ -158,30 +189,75 @@ class ApiServer(Server):
             case _:
                 raise ServingFailure(ServingRefusal.BIND_FAILED)
 
-    async def drain(self, deadline: float) -> bool:
-        self.should_exit = True
+    def stop_accepting(self) -> None:
         for listener in self.servers:
             listener.close()
+
+    async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        self.stop_accepting()
+        self.log.emit(DRAINING)
         for connection in tuple(self.server_state.connections):
             connection.shutdown()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + DEFAULT_CLOSE_DEADLINE_SECONDS
+        pending = self.server_state.tasks.copy()
+        if pending:
+            forced = asyncio.create_task(self._force_requested.wait())
+            try:
+                while pending and not self.force_exit:
+                    done, _ = await asyncio.wait(
+                        {*pending, forced},
+                        timeout=max(0.0, deadline - loop.time()),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not done:
+                        break
+                    pending.difference_update(done)
+            finally:
+                forced.cancel()
+        if not pending and not self.force_exit:
+            await self.lifespan.shutdown()
+
+    async def drain(self) -> None:
+        self.should_exit = True
+        self.stop_accepting()
+        connections: list[_ServingHttpConnection] = []
+        for connection in self.server_state.connections:
+            if not isinstance(connection, _ServingHttpConnection):
+                raise ServingFailure(ServingRefusal.STARTUP_FAILED)
+            connections.append(connection)
+        for connection in connections:
+            connection.transport.abort()
         tasks = tuple(self.server_state.tasks)
         for task in tasks:
             if not task.cancelling():
                 task.cancel()
-        try:
-            async with asyncio.timeout_at(deadline):
-                if tasks:
-                    await asyncio.wait(tasks)
-                for listener in self.servers:
-                    await listener.wait_closed()
-        except TimeoutError:
-            return False
-        return not self.server_state.connections and not self.server_state.tasks
+        for connection in connections:
+            await connection.wait_released()
+        if tasks:
+            await asyncio.wait(tasks)
+        for listener in self.servers:
+            await listener.wait_closed()
 
 
 def refuse(log: ComponentLogger, reason: ServingRefusal, code: int) -> int:
     log.emit(REFUSED, reason=reason.value)
     return code
+
+
+async def settle_serving(
+    database: Database, server: ApiServer | None, log: ComponentLogger
+) -> bool:
+    owners = {asyncio.create_task(database.close_sqlite_serving())}
+    if server is not None:
+        owners.add(asyncio.create_task(server.drain()))
+    _, pending = await asyncio.wait(owners, timeout=DEFAULT_CLOSE_DEADLINE_SECONDS)
+    if pending:
+        log.emit(REFUSED, reason=ServingRefusal.DRAIN_UNFINISHED.value)
+        await asyncio.wait(pending)
+    for owner in owners:
+        owner.result()
+    return not pending
 
 
 async def serve_on_loop(
@@ -191,7 +267,7 @@ async def serve_on_loop(
     signals: ServingSignals,
     make_application: Callable[[Database], ASGIApp],
 ) -> int:
-    database = Database(settings)
+    database = Database(settings, observe_sqlite_serving=True)
     server: ApiServer | None = None
     failure: ServingRefusal | None = None
     try:
@@ -206,18 +282,8 @@ async def serve_on_loop(
     except SystemExit:
         failure = ServingRefusal.STARTUP_FAILED
     finally:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + DEFAULT_CLOSE_DEADLINE_SECONDS
-        server_closed = False
-        try:
-            server_closed = server is None or await server.drain(deadline)
-        finally:
-            database_closed = await database.close_sqlite_serving(
-                max(0.0, deadline - loop.time())
-            )
-            if not server_closed or not database_closed:
-                log.emit(REFUSED, reason=ServingRefusal.DRAIN_UNFINISHED.value)
-    if not server_closed or not database_closed:
+        in_time = await settle_serving(database, server, log)
+    if not in_time:
         return 70
     if failure is not None:
         return refuse(

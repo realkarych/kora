@@ -14,7 +14,7 @@ Kora has an ASGI application and an installed CLI. The installed API command nee
 
 The single `kora` distribution exposes the optional `serve` extra. It selects the pinned Uvicorn server and the existing CEL extra required by ADR-0013. The base wheel retains its existing dependency requirements. The stack table and lockfile record the selected dependency versions.
 
-The installed `kora api` command runs one foreground process, one selector event loop and one IPv4 loopback HTTP listener. Kora supplies the ASGI instance and requires lifespan startup. It owns signal handling and database settlement on that same event loop. The process reports unfinished settlement when it lacks evidence that the original database owner closed.
+The installed `kora api` command runs one foreground process, one selector event loop and one IPv4 loopback HTTP listener. Kora supplies the ASGI instance and requires lifespan startup. It owns signal handling and database settlement on that same event loop. If the drain deadline expires, the process records unfinished settlement and holds the same loop and original resource ownership until the work settles. It returns exit 70 only after that settlement.
 
 Ordinary serving checks the operator-prepared SQLite schema before binding. It serves the public health route and protects the OpenAPI route with the installed static-token provider. Migration and token provisioning remain explicit setup. This SQLite path applies on supported Linux and macOS without a native process barrier.
 
