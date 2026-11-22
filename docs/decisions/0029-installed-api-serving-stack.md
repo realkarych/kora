@@ -20,6 +20,14 @@ Ordinary serving checks the operator-prepared SQLite schema before binding. It s
 
 The PostgreSQL preflight has a separate native Linux x86_64 process boundary under the [qualified PostgreSQL launch profile](../../knowledge/specs/execution-custody-recovery-priority.md#qualified-postgresql-api-launch-profile). It checks the supported profile before using the standard library to install the kernel barrier. This preflight refuses before any database connection or HTTP bind. The shared pool, boot and recovery authority, original-writer evidence and deployment qualification independently gate future PostgreSQL serving.
 
+### Private Unix HTTP for installed selection evidence
+
+The [catalog architecture approved under #1640](https://github.com/realkarych/kora/issues/1640#issuecomment-7082305733) specifies one additional private Unix-domain HTTP listener for future SQLite installed selection evidence. Ordinary SQLite serving binds only the existing IPv4 loopback listener and retains its behavior. A trusted, explicitly provisioned installation may also bind the private path after separate activation approval and startup verification. The original foreground serving owner owns both paths on the same selector loop. The private listener uses the same Worker HTTP operations and service authorization, with one request per accepted connection. The API binds the native peer observation on that connection to the independently verified original Worker launch and to the exact request.
+
+The [installed selection specification](../../knowledge/specs/installed-execution-selection.md#bind-the-actual-worker-and-the-original-claim) governs the bounded private connection, proof before payload and actual closure. Implementation and activation of the private listener require separate approval. The original Writer and physical qualification keep their existing gates.
+
+The project owner reviewed this amendment line by line and accepted its wording on 2026-11-22 at `dc47762381846cd777a25a9b3f71de03df605961`. [Owner acceptance](https://github.com/realkarych/kora/issues/1774#issuecomment-7082460790)
+
 ## Alternatives considered
 
 - A mandatory Uvicorn dependency would add the server to every CLI and client installation.
