@@ -3,25 +3,32 @@ import json
 import os
 import signal
 import subprocess
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
 import pytest
 
+from kora.api.graph_deployment_worker import DeploymentPreparer
+from kora.api.installed_scheduler import initial_admission_limits
+from kora.api.installed_worker import installed_worker_profile
 from kora.client.transport import KoraClient
+from kora.conformance.capture import Capture
 from kora.db.connection import Database
+from kora.engine.admission_snapshot import AdmissionSnapshotRejected
 from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun
 from kora.models.worker_claims import WorkerClaim, WorkerClaimRequest
 from kora.observability.settings import COMPONENT_LEVELS_VARIABLE, LEVEL_VARIABLE
-from tests.api.deployment_cases import GRAPH, NAMESPACE
+from tests.api.deployment_cases import GRAPH, NAMESPACE, preparer, skeleton_ir
 from tests.api.scheduler_claim_support import (
     PARAMS,
     scheduler_claim_ir,
     service_identity,
 )
 from tests.api.serving_lifecycle_child import serving_event
+from tests.api.support import api_capture
 from tests.api.test_installed_workers import (
     ENABLED,
     WORKER_SETTINGS,
@@ -47,6 +54,8 @@ from tests.api.test_packaging import (
     terminate_installed_api,
 )
 from tests.api.worker_support import bearer, registration
+from tests.db.closing import ConnectionLedger
+from tests.engine.admission_snapshot_support import acquire, snapshot_case
 from tests.engine.claim_support import state
 from tests.engine.graph_output_cases import child as ir_child
 from tests.engine.start_cases import start_rows
@@ -54,7 +63,7 @@ from tests.plugins.authentication.support import seed_case
 from tests.support.databases import copy_sqlite_template, sqlite_settings
 from tests.support.observability import ProcessResult
 
-__all__ = ["serving_installation"]
+__all__ = ["api_capture", "preparer", "serving_installation"]
 
 SCHEDULER_SETTING = "KORA_API_SCHEDULER"
 FIRST_CLAIM = {**ENABLED, SCHEDULER_SETTING: "first-claim"}
@@ -567,3 +576,33 @@ async def test_installed_scheduler_forced_drain_joins_reader_without_asgi_shutdo
     [created] = restarted["attempt"]
     assert created["status"] == "created"
     assert restarted["attempt_dispatcher"] == []
+
+
+@pytest.mark.asyncio
+async def test_installed_scheduler_derives_exact_two_graph_reservations(
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+) -> None:
+    pending = await snapshot_case(database, preparer, api_capture)
+    newer = skeleton_ir()
+    ir_child(newer, "runtime")["concurrency"] = {"max_running_nodes": 2}
+    await pending.publish(newer)
+    worker = installed_worker_profile("2000")
+    assert worker is not None
+    installed = initial_admission_limits(worker.limits).preparation.snapshot
+    before = ConnectionLedger(database)
+
+    for short in (
+        replace(installed, native_bytes=installed.native_bytes - 1),
+        replace(installed, raw_bytes=installed.raw_bytes - 1),
+    ):
+        with pytest.raises(AdmissionSnapshotRejected):
+            await acquire(database, pending, limits=short)
+    refused_checkouts = before.checkouts
+    accepted = await acquire(database, pending, limits=installed)
+
+    assert installed.inputs == worker.limits.snapshot.inputs
+    assert (installed.native_bytes, installed.raw_bytes) == (214_847_700, 144_867_812)
+    assert refused_checkouts == 0
+    assert accepted.graph is not accepted.cap_graph
+    assert before.checkouts == 1
+    assert before.outstanding == database.units_in_flight() == 0
