@@ -29,6 +29,7 @@ from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import (
     DispatcherClosure,
+    DispatcherQuiescence,
     EvidenceScope,
     NormalCompletionQuiescence,
     TerminationReceipt,
@@ -344,6 +345,28 @@ class AttemptKey:
     def name(self) -> str:
         return attempt_name(self.execution_domain_id, self.attempt_id)
 
+    def matches_closure(self, ack: DispatcherQuiescence, grant: GrantBinding) -> bool:
+        return (
+            ack.attempt_id == self.attempt_id
+            and ack.execution_domain_id == self.execution_domain_id
+            and ack.dispatcher_id == grant.dispatcher_id
+            and ack.worker_incarnation_id == grant.incarnation_id
+            and ack.lease_generation == grant.lease_epoch
+        )
+
+    def matches_history(
+        self, snapshot: GrantHistorySnapshot, grant: GrantBinding
+    ) -> bool:
+        return (
+            snapshot.attempt_id == self.attempt_id
+            and snapshot.execution_domain_id
+            == grant.execution_domain_id
+            == self.execution_domain_id
+            and snapshot.count == 1
+            and snapshot.upper_epoch == grant.lease_epoch
+            and snapshot.digest == chain_step(snapshot.seed(), model_bytes(grant))
+        )
+
     def handle(self) -> Handle:
         return Handle(
             runtime=RUNTIME_NAME,
@@ -352,6 +375,14 @@ class AttemptKey:
             host_hint=None,
             data=JsonObjectField({"format": HANDLE_FORMAT}),
         )
+
+
+def original_submitter(grant: GrantBinding, submitter: Submitter) -> bool:
+    return (
+        grant.process is not None
+        and grant.dispatcher_id == submitter.dispatcher_id
+        and model_bytes(grant.process) == model_bytes(submitter.process)
+    )
 
 
 def runner_argv(
@@ -752,17 +783,14 @@ class Registry:
     def synchronize_evidence(self, key: AttemptKey, leaf: str) -> None:
         try:
             for name in (f"{key.name}.{leaf}.v1.json", f"{key.name}.json"):
-                self.sync_file(name)
+                descriptor = open_private_file(self.directory, name, os.O_RDONLY)
+                try:
+                    synchronize(descriptor)
+                finally:
+                    os.close(descriptor)
             synchronize(self.directory.descriptor)
         except (OSError, FilesystemError) as error:
             raise refusal("registry_unavailable") from error
-
-    def sync_file(self, name: str) -> None:
-        descriptor = open_private_file(self.directory, name, os.O_RDONLY)
-        try:
-            synchronize(descriptor)
-        finally:
-            os.close(descriptor)
 
     def retained_record(
         self, name: str, reference: RetainedReference, model: type[Record]
@@ -782,14 +810,8 @@ class Registry:
         record = self.retained_record(
             f"{key.name}.first-grant.v1.json", head.first_grant.grant, FirstGrantRecord
         )
-        grant, snapshot = record.grant, record.snapshot
-        if (
-            grant.execution_domain_id != key.execution_domain_id
-            or grant.process is None
-            or (snapshot.attempt_id, snapshot.execution_domain_id)
-            != (key.attempt_id, key.execution_domain_id)
-            or (snapshot.count, snapshot.upper_epoch) != (1, grant.lease_epoch)
-            or snapshot.digest != chain_step(snapshot.seed(), model_bytes(grant))
+        if record.grant.process is None or not key.matches_history(
+            record.snapshot, record.grant
         ):
             raise refusal("lineage_unavailable")
         return record
@@ -803,13 +825,9 @@ class Registry:
         record = self.retained_record(
             f"{key.name}.first-closure.v1.json", reference, FirstClosureRecord
         )
-        ack = record.closure.quiescence
         if (
             record.closure.provenance != "registry_acknowledgement"
-            or (ack.attempt_id, ack.execution_domain_id)
-            != (key.attempt_id, key.execution_domain_id)
-            or (ack.dispatcher_id, ack.worker_incarnation_id, ack.lease_generation)
-            != (grant.dispatcher_id, grant.incarnation_id, grant.lease_epoch)
+            or not key.matches_closure(record.closure.quiescence, grant)
         ):
             raise refusal("lineage_unavailable")
         return record
@@ -820,36 +838,53 @@ class Registry:
         decide: Callable[[Entry | None], Transition],
         check: Callable[[LifecycleHead | None], object] | None = None,
     ) -> Applied:
-        name = f"{key.name}.json"
+        if self.first_grant:
+            return self.locked_first(key, decide, check)
         try:
-            if not self.first_grant:
-                sweep_temporaries(self.directory, name)
+            sweep_temporaries(self.directory, f"{key.name}.json")
+        except OSError:
+            raise refusal("registry_unavailable") from None
+        head = self.read(key)
+        transition = decide(None if head is None else head.entry)
+        if transition.entry is None:
+            return Applied(head, transition)
+        encoded = with_entry(key, transition.entry)
+        try:
+            write_atomically(
+                self.directory,
+                f"{key.name}.json",
+                encoded,
+                self.new_nonce(),
+                replace=True,
+            )
+        except (OSError, FilesystemError):
+            raise refusal("registry_unavailable") from None
+        return Applied(RegistryHead.model_validate_json(encoded), transition)
+
+    def locked_first(
+        self,
+        key: AttemptKey,
+        decide: Callable[[Entry | None], Transition],
+        check: Callable[[LifecycleHead | None], object] | None,
+    ) -> Applied:
+        try:
             head = self.read(key)
             if isinstance(head, FirstGrantHead):
-                grant = self.linked_grant(key, head)
-                self.linked_closure(key, head, grant.grant)
+                self.linked_closure(key, head, self.linked_grant(key, head).grant)
             if check is not None:
                 check(head)
             transition = decide(None if head is None else head.entry)
             if transition.entry is None:
                 return Applied(head, transition)
-            if self.first_grant:
-                if not isinstance(head, FirstGrantHead):
-                    raise refusal("lineage_unavailable")
-                updated = FirstGrantHead.model_validate(
-                    {**head.model_dump(), "entry": transition.entry}
-                )
-                self.write_first(name, model_bytes(updated), replace=True)
-                return Applied(updated, transition)
-            encoded = with_entry(key, transition.entry)
-            write_atomically(
-                self.directory, name, encoded, self.new_nonce(), replace=True
+            if not isinstance(head, FirstGrantHead):
+                raise refusal("lineage_unavailable")
+            updated = FirstGrantHead.model_validate(
+                {**head.model_dump(), "entry": transition.entry}
             )
-            return Applied(RegistryHead.model_validate_json(encoded), transition)
+            self.write_first(f"{key.name}.json", model_bytes(updated), replace=True)
+            return Applied(updated, transition)
         except (OSError, FilesystemError, ValueError) as error:
-            raise refusal("registry_unavailable") from (
-                error if self.first_grant else None
-            )
+            raise refusal("registry_unavailable") from error
 
 
 DOMAIN_LIMIT: Final[int] = 1048576

@@ -4,14 +4,17 @@ import signal
 import stat
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
+from hashlib import sha256
 from pathlib import Path
 from typing import Final
 
 from kora.executor.launcher import ExitWatch
 from kora.plugins.runtime.local.child_owner import ChildOwner
 from kora.protocols.deadlines import ExecutionDeadline, thresholds
+from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock
 from kora.runner.channels import (
     ChannelError,
@@ -30,6 +33,9 @@ from kora.runner.registry import (
     READY,
     SOCKET_NAME_LENGTH,
     SOCKET_PATH_LENGTH,
+    AttemptKey,
+    FirstGrantHead,
+    model_bytes,
     refusal,
     socket_path,
 )
@@ -214,6 +220,36 @@ class Launcher:
                     self.closed = True
 
 
+def completion_frame(nonce: str, head: FirstGrantHead) -> bytes:
+    return b"C" + sha256(nonce.encode("ascii") + model_bytes(head)).digest()
+
+
+@dataclass
+class CompletionPipe:
+    key: AttemptKey
+    nonce: str
+    runner: ProcessIdentity | None = None
+    reader: int | None = None
+    frame: bytes = b""
+
+    def close(self) -> None:
+        reader, self.reader = self.reader, None
+        if reader is not None:
+            os.close(reader)
+
+    def collect(self) -> bytes:
+        if self.reader is not None:
+            try:
+                frame = os.read(self.reader, 34)
+                if len(frame) == 33 and os.read(self.reader, 1) == b"":
+                    self.frame = frame
+            except BlockingIOError:
+                pass
+            finally:
+                self.close()
+        return self.frame
+
+
 class Launchers:
     def __init__(self, bound_ns: int = LAUNCHER_EXIT_NS) -> None:
         self.bound_ns = bound_ns
@@ -278,6 +314,7 @@ async def spawn_runner(
     launchers: Launchers,
     *,
     deadline_ns: int | None = None,
+    completion: CompletionPipe | None = None,
 ) -> Readiness:
     if launchers.closed:
         raise refusal("runtime_closed")
@@ -291,6 +328,8 @@ async def spawn_runner(
         if clock.monotonic_ns() >= cutoff:
             return Readiness.TIMEOUT
         read_end, write_end = readiness_pipe()
+        if completion is not None:
+            completion.reader = read_end
         launcher: Launcher | None = None
         outcome = Readiness.TIMEOUT
         try:
@@ -307,7 +346,6 @@ async def spawn_runner(
             finally:
                 os.close(write_end)
             outcome = await read_readiness(read_end, clock, cutoff)
-            return outcome
         finally:
             try:
                 if launcher is not None:
@@ -318,7 +356,11 @@ async def spawn_runner(
                             launcher, clock, kill=outcome is Readiness.TIMEOUT
                         )
             finally:
-                os.close(read_end)
+                if completion is None:
+                    os.close(read_end)
+        if completion is not None and (launcher is None or not launcher.closed):
+            return Readiness.TIMEOUT
+        return outcome
     finally:
         launchers.spawning.discard(spawning)
         spawning.set_result(None)

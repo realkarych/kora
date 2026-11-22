@@ -43,6 +43,7 @@ from kora.plugins.runtime.local.serving import (
     ControlServer,
     bound_socket,
 )
+from kora.plugins.runtime.local.spawn import completion_frame
 from kora.plugins.runtime.local.workload_session import WorkloadSession
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
@@ -75,6 +76,7 @@ from kora.runner.registry import (
     Registry,
     Starting,
     model_bytes,
+    original_submitter,
     read_domain,
     register_cell,
     registry_exists,
@@ -238,13 +240,14 @@ async def register(
         await clock.sleep_until(clock.monotonic_ns() + LOCK_RETRY_NS)
 
 
-def signal_ready() -> None:
+def signal_pipe(frame: bytes, *, close: bool = False) -> None:
     try:
-        os.write(READINESS_DESCRIPTOR, READY)
+        os.write(READINESS_DESCRIPTOR, frame)
     except BrokenPipeError:
         pass
     finally:
-        os.close(READINESS_DESCRIPTOR)
+        if close:
+            os.close(READINESS_DESCRIPTOR)
 
 
 @dataclass
@@ -339,10 +342,7 @@ def registration_head(
     ):
         raise RunnerRefused("fenced")
     original = registry.linked_grant(key, head).grant
-    if original.process is None or (
-        original.dispatcher_id,
-        model_bytes(original.process),
-    ) != (entry.submitter.dispatcher_id, model_bytes(entry.submitter.process)):
+    if original.process is None or not original_submitter(original, entry.submitter):
         raise RunnerRefused("fenced")
     try:
         same_process(NativeIdentityReader(), original.process)
@@ -406,7 +406,7 @@ async def supervise(
         try:
             await prepared.register(identity, clock)
             log.emit(REGISTERED)
-            signal_ready()
+            signal_pipe(READY, close=not arguments.first_grant)
             key = AttemptKey(arguments.execution_domain_id, arguments.attempt_id)
             candidate = str(arguments.state_root / "attempts" / key.name / "candidate")
             command = CommandSession(
@@ -436,6 +436,10 @@ async def supervise(
     finally:
         if server is None or server.resources_settled:
             attempt.close()
+    if server is not None and server.resources_settled:
+        head = server.completion_head
+        if head is not None:
+            signal_pipe(completion_frame(arguments.nonce, head), close=True)
 
 
 def attempt_directory(arguments: RunnerArguments) -> DirectoryAnchor:
@@ -458,6 +462,9 @@ def run(
     harden()
     try:
         arguments = parsed_arguments(argv)
+        if arguments.first_grant:
+            os.set_inheritable(READINESS_DESCRIPTOR, False)
+            os.set_blocking(READINESS_DESCRIPTOR, False)
         with ExitStack() as resources:
             root = open_local_directory(arguments.state_root)
             resources.callback(root.close)

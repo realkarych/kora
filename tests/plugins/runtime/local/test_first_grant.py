@@ -25,11 +25,12 @@ from kora.plugins.runtime.local.channel import (
     DispatcherQuiescenceRequest,
     read_delivery,
     read_dispatcher_quiescence,
+    read_quiescence,
 )
 from kora.plugins.runtime.local.completed import recorded_exited
 from kora.plugins.runtime.local.control import attached_request
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
-from kora.plugins.runtime.local.spawn import runner_command
+from kora.plugins.runtime.local.spawn import CompletionPipe, runner_command
 from kora.plugins.runtime.local.supervisor import EXIT_FAILED
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
@@ -98,7 +99,7 @@ ATTEMPT = "attempt-1"
 
 
 def binding(
-    runtime: LocalRuntime, ctx: ProtocolContext
+    runtime: LocalRuntime, ctx: ProtocolContext, attempt_id: str = ATTEMPT
 ) -> tuple[GrantBinding, GrantHistoryPage, DispatcherQuiescence]:
     grant = GrantBinding(
         dispatcher_id="original-dispatcher",
@@ -109,12 +110,12 @@ def binding(
         process=identity_of(os.getpid()),
     )
     seed = chain_seed(
-        GRANT_HISTORY_LABEL, ctx.namespace_id, ATTEMPT, runtime.execution_domain_id
+        GRANT_HISTORY_LABEL, ctx.namespace_id, attempt_id, runtime.execution_domain_id
     )
     snapshot = GrantHistorySnapshot(
         version=1,
         namespace_id=ctx.namespace_id,
-        attempt_id=ATTEMPT,
+        attempt_id=attempt_id,
         execution_domain_id=runtime.execution_domain_id,
         upper_epoch=grant.lease_epoch,
         count=1,
@@ -130,7 +131,7 @@ def binding(
         complete=True,
     )
     ack = DispatcherQuiescence(
-        attempt_id=ATTEMPT,
+        attempt_id=attempt_id,
         execution_domain_id=runtime.execution_domain_id,
         dispatcher_id=grant.dispatcher_id,
         worker_incarnation_id=grant.incarnation_id,
@@ -274,7 +275,12 @@ async def closure_storage_full(
 
 
 async def exercise(
-    runtime: LocalRuntime, ctx: ProtocolContext, root: Path, *, discard: bool
+    runtime: LocalRuntime,
+    ctx: ProtocolContext,
+    root: Path,
+    *,
+    discard: bool,
+    discard_completion: bool = False,
 ) -> None:
     grant, page, ack = binding(runtime, ctx)
     key = runtime.registry.key(ATTEMPT)
@@ -386,8 +392,67 @@ async def exercise(
     assert leaf.closure.quiescence == ack
     assert leaf.closure.provenance == "registry_acknowledgement"
 
-    record = await unless_busy(lambda: runtime.quiescence(handle, ctx))
-    await until(lambda: recorded_exited(NativeIdentityReader(), running.runner))
+    if discard_completion:
+        competing = "other-attempt"
+        other_grant, other_history, _ = binding(runtime, ctx, competing)
+        await runtime.accept_grant_history(competing, other_grant, other_history, ctx)
+        other = runtime.registry.key(competing)
+        other_head = runtime.registry.read(other)
+        other_attempt = attempt_directory(root, runtime, competing)
+        other_workload = command_workload(
+            runtime,
+            competing,
+            (sys.executable, "-I", "-c", "pass"),
+            dispatcher_id=grant.dispatcher_id,
+        )
+
+        await expect_refusal("runner_starting", runtime.submit(other_workload, ctx))
+
+        assert runtime.registry.read(other) == other_head
+        assert isinstance(runtime.registry.entry(other), Unsubmitted)
+        assert not other_attempt.exists()
+
+        request_id = "lost-normal-completion"
+        answer = await attached_request(
+            running.socket_path,
+            running.runner,
+            grant.dispatcher_id,
+            kernel_source(NativeIdentityReader()),
+            runtime.executor,
+            ctx.clock,
+            request_id,
+            "quiescence",
+            ENVELOPE_BYTES,
+        )
+        confirmed = read_quiescence(answer, request_id)
+        await until(lambda: recorded_exited(NativeIdentityReader(), running.runner))
+        await expect_refusal("lineage_unavailable", runtime.release(handle, ctx))
+        assert attempt.exists()
+        original = runtime.registry.read(key)
+        assert isinstance(original, FirstGrantHead)
+        assert isinstance(original.entry, Completed)
+        completed_bytes = head_path.read_bytes()
+        altered_entry = original.entry.model_copy(
+            update={"gate_closed": not original.entry.gate_closed}
+        )
+        altered_head = original.model_copy(update={"entry": altered_entry})
+        head_path.write_bytes(model_bytes(altered_head))
+        try:
+            await expect_refusal("lineage_unavailable", runtime.quiescence(handle, ctx))
+            await expect_refusal("lineage_unavailable", runtime.release(handle, ctx))
+
+            assert head_path.read_bytes() == model_bytes(altered_head)
+            assert attempt.exists()
+        finally:
+            head_path.write_bytes(completed_bytes)
+
+        record = await runtime.quiescence(handle, ctx)
+
+        assert record == confirmed
+        assert head_path.read_bytes() == completed_bytes
+    else:
+        record = await unless_busy(lambda: runtime.quiescence(handle, ctx))
+        await until(lambda: recorded_exited(NativeIdentityReader(), running.runner))
     await runtime.release(handle, ctx)
     completed = runtime.registry.entry(key)
 
@@ -588,7 +653,13 @@ async def original_worker(root: Path, sockets: Path, case: str) -> None:
             elif case == "shutdown":
                 await close_during_attach(runtime, ctx, root)
             else:
-                await exercise(runtime, ctx, root, discard=case == "lost")
+                await exercise(
+                    runtime,
+                    ctx,
+                    root,
+                    discard=case == "lost",
+                    discard_completion=case == "completion-lost",
+                )
         finally:
             await runtime.close()
         events = [
@@ -612,7 +683,7 @@ async def original_worker(root: Path, sockets: Path, case: str) -> None:
             for event in events
         ]
         assert ("intake", "confirmed", True) in outcomes
-        if case in {"normal", "lost"}:
+        if case in {"normal", "lost", "completion-lost"}:
             assert ("closure", "confirmed", True) in outcomes
         if case not in {"launch", "observer"}:
             assert ("closure", "refused", True) in outcomes
@@ -711,6 +782,43 @@ def test_first_local_grant_closure_replays_after_lost_reply(tmp_path: Path) -> N
     result = run_worker(root, "lost")
 
     assert result.returncode == 0, result.stderr
+
+
+def test_first_local_grant_releases_after_lost_normal_completion(
+    tmp_path: Path,
+) -> None:
+    root = state_root(tmp_path)
+
+    result = run_worker(root, "completion-lost")
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [(b"", b""), (b"C", b""), (b"C" * 34, b""), (b"C" * 33, b"C" * 33)],
+)
+def test_first_local_grant_completion_pipe_requires_exact_frame_and_eof(
+    payload: bytes, expected: bytes
+) -> None:
+    reader, writer = os.pipe()
+    pipe = CompletionPipe(AttemptKey("local-domain", ATTEMPT), "f" * 32, reader=reader)
+    try:
+        os.set_blocking(reader, False)
+        try:
+            os.write(writer, payload)
+        finally:
+            os.close(writer)
+
+        first = pipe.collect()
+        held = pipe.collect()
+
+        assert first == held == expected
+        with pytest.raises(OSError, match=os.strerror(errno.EBADF)) as closed:
+            os.fstat(reader)
+        assert closed.value.errno == errno.EBADF
+    finally:
+        pipe.close()
 
 
 def test_first_local_grant_runner_refuses_mismatched_startup(tmp_path: Path) -> None:

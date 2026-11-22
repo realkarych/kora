@@ -115,6 +115,7 @@ from kora.runner.registry import (
     TransitionExecutor,
     completed_cell,
     model_bytes,
+    original_submitter,
     refusal,
     takeover_cell,
 )
@@ -385,6 +386,7 @@ class ControlServer:
         self._first_intent: RetainedReference | None = None
         self._first_confirmed = False
         self._record: NormalCompletionQuiescence | None = None
+        self.completion_head: FirstGrantHead | None = None
         self._completed_at = 0
 
     @property
@@ -993,24 +995,12 @@ class ControlServer:
             ):
                 raise delivery_error("submitter_superseded")
             grant = registry.linked_grant(key, head).grant
-            if grant.process is None or grant.dispatcher_id != submitter.dispatcher_id:
-                raise delivery_error("submitter_superseded")
-            if model_bytes(grant.process) != model_bytes(submitter.process):
+            if not original_submitter(grant, submitter):
                 raise delivery_error("submitter_superseded")
             ack = request.acknowledgement
-            if model_bytes(request.grant) != model_bytes(grant) or (
-                ack.attempt_id,
-                ack.execution_domain_id,
-                ack.dispatcher_id,
-                ack.worker_incarnation_id,
-                ack.lease_generation,
-            ) != (
-                key.attempt_id,
-                key.execution_domain_id,
-                grant.dispatcher_id,
-                grant.incarnation_id,
-                grant.lease_epoch,
-            ):
+            if model_bytes(request.grant) != model_bytes(
+                grant
+            ) or not key.matches_closure(ack, grant):
                 raise delivery_error("workload_conflict")
             record = model_bytes(
                 FirstClosureRecord(
@@ -1094,10 +1084,7 @@ class ControlServer:
         try:
             if observational:
                 raise delivery_error("execution_unauthorized")
-            try:
-                await self._executor.run(lambda: self._current_submitter(submitter))
-            except PeerRefused:
-                raise delivery_error("submitter_superseded") from None
+            await self._executor.run(lambda: self._current_submitter(submitter))
             if session is None or self._closing is not None:
                 raise delivery_error("workload_busy")
             async with self._completing:
@@ -1107,12 +1094,20 @@ class ControlServer:
                         if isinstance(session, CommandSession):
                             session.first_closure_ready(retry=True)
                         raise delivery_error("workload_busy")
+                    if self._registry.first_grant:
+                        await self._executor.run(
+                            lambda: self._current_submitter(submitter)
+                        )
                     if session.completion() is not Completion.COMPLETE:
                         raise delivery_error("workload_busy")
                     record = await self._complete(session, submitter)
                     self._record = record
-        except KoraProtocolError as error:
-            error = self._first_storage_error(error)
+        except (KoraProtocolError, PeerRefused) as refused:
+            error = (
+                delivery_error("submitter_superseded")
+                if isinstance(refused, PeerRefused)
+                else self._first_storage_error(refused)
+            )
             if error.code == "registry_busy":
                 error = delivery_error("workload_busy")
             if error.code != "workload_busy":
@@ -1177,6 +1172,10 @@ class ControlServer:
         entry = applied.head.entry
         if not isinstance(entry, Completed):
             raise delivery_error("submitter_superseded")
+        if isinstance(applied.head, FirstGrantHead):
+            if applied.transition.entry is None:
+                raise delivery_error("submitter_superseded")
+            self.completion_head = applied.head
         return entry.quiescence
 
     def _emit_quiescence(self, outcome: str, started: int) -> None:
