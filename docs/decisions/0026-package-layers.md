@@ -9,6 +9,7 @@
 - Related: [ADR-0002](0002-ai-first-api-and-thin-clients.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md), [ADR-0016](0016-trusted-execution-and-publication.md)
 
 - First-slice amendment dated 2026-10-23: dry-run import activation is deferred under #140; scope and plan approved, wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
+- Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). Wording awaits owner line-by-line review.
 
 ## Context
 
@@ -68,7 +69,7 @@ Fake modules (amended 2026-10-21, [issue #136](https://github.com/realkarych/kor
 Layering is a maintainability and packaging rule, with defence in depth for trusted processes. It is not an isolation control.
 
 - **The ADR-0016 boundary does not rest on it.** That boundary rests on runtime authority, not on which modules a process imports. One distribution installs all server code and its dependencies wherever `kora-runner` is installed (ADR-0004, ADR-0013).
-- **Process placement.** On both reference runtimes the supervisor runs on the host ([protocols.md section 2](../../knowledge/specs/protocols.md#2-runtime-fr-81)). The plan executor runs in `runner` or `worker_host`. Kora code that runs inside the candidate domain includes the Codex `kora-runner policy-hook` ([protocols.md section 12](../../knowledge/specs/protocols.md#12-policy-dd-29)) and the candidate-side steps of a publish plan ([protocols.md section 4](../../knowledge/specs/protocols.md#4-vcs-fr-52)); whatever those import is reachable from the candidate.
+- **Process placement.** On both reference runtimes the supervisor runs on the host ([protocols.md section 2](../../knowledge/specs/protocols.md#2-runtime-fr-81)). The plan executor runs in `runner` or `worker_host`. Kora code that runs inside the candidate domain includes the candidate-side steps of a publish plan ([protocols.md section 4](../../knowledge/specs/protocols.md#4-vcs-fr-52)). The legacy Codex hook fixtures also run `kora-runner policy-hook` there. Whatever those entry points import is reachable from the candidate. The [native approval policy](../../knowledge/specs/protocols.md#12-policy-dd-29) runs on the supervisor side.
 - **What it gives.** Trusted processes that parse candidate-controlled data load less code. `runner` has no code path to `client`, matching "the supervisor has no API credential" in the [threat model's actor table](../threat-model.md#assets-actors-and-assumptions).
 
 It does not guarantee:

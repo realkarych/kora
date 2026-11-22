@@ -7,6 +7,7 @@
 - Absorbs: DD-27, DD-14, DD-20, DD-23, DD-30; requirements decision 11; the harness part of requirements decisions 18 and 19
 - Related: [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0009](0009-target-repository-trust-boundary.md), [ADR-0010](0010-cost-accounting-and-limits.md)
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
+- Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). Wording awaits owner line-by-line review.
 
 ## Context
 
@@ -38,7 +39,7 @@ An agent node runs one full coding-agent session on a harness, Claude Code or Co
 ## Consequences
 
 - Adapters must be importable inside runtime images; harness binaries and `kora-runner` belong to the runtime installation, not to the graph.
-- Adding a harness means implementing one protocol and passing its conformance suite (recorded SDK streams, `max_events` termination at the exact count, hermetic behaviour, the policy hook reached for every call kind the adapter declares covered, version checked). A harness upgrade is an installation change; running attempts keep the version they ran with.
+- Adding a harness means implementing one protocol and passing its conformance suite (recorded SDK streams, `max_events` termination at the exact count, hermetic behaviour, before-effect policy enforcement for every call kind the adapter declares covered under [ADR-0009](0009-target-repository-trust-boundary.md), version checked). A harness upgrade is an installation change; running attempts keep the version they ran with.
 - Soft USD limits remain best-effort (NFR-8.2); until the proxy ships, a session can read its API key from its environment, with network policy and tool policy as compensating controls.
 
 ## Where it is applied
