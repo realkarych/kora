@@ -54,35 +54,16 @@ def attempt_preparation_reservation(
     *,
     reconstruct_params: bool = False,
 ) -> AttemptPreparationReservation:
+    count = len(inputs)
+    input_work = 32 * (count + 1) ** 2 if count else 0
+    if input_work > limits.work_units:
+        raise ClaimWireRejected()
     execution_contract_read_reservation(limits.graph)
     ir, contract = len(checked.canonical_ir), len(checked.canonical_contract)
     if (
         ir + contract > limits.graph.identity.max_encoded_bytes
         or ir > limits.graph.resources.logical.ir_bytes
     ):
-        raise ClaimWireRejected()
-    return _reservation(ir, contract, limits, inputs, reconstruct_params)
-
-
-def initial_root_preparation_reservation(
-    limits: AttemptPreparationLimits,
-) -> AttemptPreparationReservation:
-    execution_contract_read_reservation(limits.graph)
-    canonical = limits.graph.identity.max_encoded_bytes
-    ir = min(canonical, limits.graph.resources.logical.ir_bytes)
-    return _reservation(ir, canonical, limits, (), True)
-
-
-def _reservation(
-    ir: int,
-    contract: int,
-    limits: AttemptPreparationLimits,
-    inputs: tuple[ReadinessInput, ...],
-    reconstruct_params: bool,
-) -> AttemptPreparationReservation:
-    count = len(inputs)
-    input_work = 32 * (count + 1) ** 2 if count else 0
-    if input_work > limits.work_units:
         raise ClaimWireRejected()
     namespace = NAMESPACE_POLICY_NATIVE_LIMIT
     node = MAX_NODE_POLICY_BYTES

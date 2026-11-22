@@ -8,6 +8,7 @@ from kora.db.claim_sources import ClaimSourceBinding, ClaimSourceReadLimits
 from kora.db.connection import (
     WRITER_ENTRY_NATIVE_ERRORS,
     Database,
+    DatabaseSnapshotFailure,
     DatabaseSnapshotRejected,
     DatabaseWriterFailure,
     DatabaseWriterRejected,
@@ -24,6 +25,7 @@ from kora.engine.admission_preparation import (
 )
 from kora.engine.attempt_admission import (
     AttemptAdmissionFailed,
+    AttemptAdmissionStale,
     AttemptAdmissionState,
     PreparedAttemptAdmission,
     admit_attempt,
@@ -31,7 +33,10 @@ from kora.engine.attempt_admission import (
 from kora.engine.attempt_preparation import prepare_attempt_admission
 from kora.engine.attempt_preparation_budget import AttemptPreparationLimits
 from kora.engine.claim_material import ClaimRuntimeSelection
+from kora.engine.claim_timing import first_claim_deadline
+from kora.engine.deadline_records import DeadlineRecordRejected
 from kora.engine.expiry_context import ExpiryContext
+from kora.engine.expiry_reads import read_expiry_run
 from kora.engine.locks import (
     COMPONENT,
     LockError,
@@ -83,6 +88,36 @@ class AdmissionProcessor:
     interval: timedelta
     initial_root_only: bool = False
 
+    async def _root_source_ready(
+        self, context: ExpiryContext, prepared: PreparedAttemptAdmission
+    ) -> bool:
+        run = prepared.binding.run
+        if not await verify_run_input_parent(
+            context.connection,
+            run.namespace_id,
+            run.graph_id,
+            run.version_id,
+            run.run_id,
+            max_parent_bytes=self.limits.preparation.snapshot.inputs.parent,
+        ) or not await admit_staging_inventory(context.connection, run.run_id):
+            return False
+        saved = await read_expiry_run(context)
+        if saved is None or saved.started_at is None:
+            return False
+        try:
+            first_claim_deadline(
+                run.run_id,
+                prepared.binding.attempt_id,
+                saved.started_at,
+                self.clock(),
+                prepared.run_timeout,
+                prepared.attempt_timeout,
+                timedelta(0),
+            )
+        except DeadlineRecordRejected:
+            return False
+        return True
+
     async def _process(
         self,
         node_id: str,
@@ -93,6 +128,7 @@ class AdmissionProcessor:
         source: PreparedAdmissionSnapshot | None = None
         binding: ClaimSourceBinding | None = None
         prepared: PreparedAttemptAdmission | None = None
+        timer = asyncio.timeout_at(deadline)
         try:
             limits = self.limits
             if type(limits.claim_work) is not int or limits.claim_work <= 0:
@@ -141,7 +177,7 @@ class AdmissionProcessor:
             if stopped is not None and stopped():
                 return AttemptAdmissionState.REFUSED
             require_snapshot_time(deadline)
-            async with asyncio.timeout_at(deadline):
+            async with timer:
                 async with self.database.transaction(
                     admission_deadline=deadline
                 ) as connection:
@@ -159,30 +195,22 @@ class AdmissionProcessor:
                     )
                     if stopped is not None and stopped():
                         return AttemptAdmissionState.REFUSED
-                    run = binding.run
-                    if self.initial_root_only and (
-                        not await verify_run_input_parent(
-                            connection,
-                            run.namespace_id,
-                            run.graph_id,
-                            run.version_id,
-                            run.run_id,
-                            max_parent_bytes=limits.preparation.snapshot.inputs.parent,
-                        )
-                        or not await admit_staging_inventory(connection, run.run_id)
+                    context = ExpiryContext(
+                        connection,
+                        locks,
+                        source.checked.scope,
+                        binding.run.run_id,
+                        self.clock,
+                        self.identifiers,
+                        limits.promotion,
+                        limits.sources.attempt_row,
+                    )
+                    if self.initial_root_only and not await self._root_source_ready(
+                        context, prepared
                     ):
                         return AttemptAdmissionState.REFUSED
                     outcome = await admit_attempt(
-                        ExpiryContext(
-                            connection,
-                            locks,
-                            source.checked.scope,
-                            binding.run.run_id,
-                            self.clock,
-                            self.identifiers,
-                            limits.promotion,
-                            limits.sources.attempt_row,
-                        ),
+                        context,
                         prepared,
                         limits.sources,
                         source.caps,
@@ -193,6 +221,10 @@ class AdmissionProcessor:
                         periodic_recheck=periodic_recheck,
                     )
             return outcome
+        except TimeoutError:
+            if self.initial_root_only and timer.expired():
+                return AttemptAdmissionState.REFUSED
+            raise
         finally:
             del source, prepared, binding
 
@@ -215,18 +247,18 @@ class AdmissionProcessor:
             raise
         except (
             AdmissionPreparationUnavailable,
+            AttemptAdmissionStale,
             ClaimWireRejected,
             ScopeDeadlineExpired,
-            TimeoutError,
         ):
             if self.initial_root_only:
                 outcome = AttemptAdmissionState.REFUSED.value
                 return AttemptAdmissionState.REFUSED
             raise_safe(AdmissionProcessingFailed())
-        except DatabaseWriterRejected as error:
-            if (
-                self.initial_root_only
-                and error.reason is DatabaseWriterFailure.DEADLINE
+        except (DatabaseSnapshotRejected, DatabaseWriterRejected) as error:
+            if self.initial_root_only and error.reason in (
+                DatabaseSnapshotFailure.DEADLINE,
+                DatabaseWriterFailure.DEADLINE,
             ):
                 outcome = AttemptAdmissionState.REFUSED.value
                 return AttemptAdmissionState.REFUSED
@@ -236,7 +268,7 @@ class AdmissionProcessor:
             TypeError,
             RecursionError,
             OverflowError,
-            DatabaseSnapshotRejected,
+            TimeoutError,
             LockError,
             AttemptAdmissionFailed,
             *WRITER_ENTRY_NATIVE_ERRORS,

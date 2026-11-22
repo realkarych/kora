@@ -22,6 +22,7 @@ from kora.db.claim_snapshot_reads import (
     acquire_claim_policy,
     acquire_claim_price,
 )
+from kora.db.claim_source_values import ClaimSourcesRejected
 from kora.db.connection import (
     SNAPSHOT_NATIVE_ERRORS,
     Database,
@@ -234,7 +235,7 @@ async def _acquire_admission_snapshot(
                 or type(cap_source.number) is not int
                 or not 0 < cap_source.number < 2**31
             ):
-                raise AdmissionSnapshotRejected()
+                raise AdmissionCandidateUnavailable()
             graph_limits = GraphSnapshotLimits(
                 limits.graph, limits.graph_native_bytes, limits.owner_text_bytes
             )
@@ -307,7 +308,7 @@ async def acquire_admission_snapshot(
         if error.reason is DatabaseSnapshotFailure.DEADLINE:
             raise_safe(AdmissionCandidateUnavailable())
         raise_safe(AdmissionSnapshotRejected())
-    except GraphValueRejected:
+    except (ClaimSourcesRejected, GraphValueRejected):
         raise_safe(AdmissionCandidateUnavailable())
     except (ValueError, *SNAPSHOT_NATIVE_ERRORS):
         del database, node_id, limits, observed_at

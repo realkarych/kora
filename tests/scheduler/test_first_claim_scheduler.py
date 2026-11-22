@@ -1,21 +1,21 @@
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from datetime import timedelta
+from typing import cast
 
 import httpx
 import pytest
 from sqlalchemy import event
-from sqlalchemy.engine import ExecutionContext
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.util.concurrency import await_
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
-from kora.api.installed_worker import installed_worker_profile
 from kora.client import KoraClient
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
 from kora.db.identifiers import IdentifierGenerator
+from kora.engine.admission_processing import AdmissionProcessor
 from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun
 from kora.scheduler.loop import Scheduler, first_claim_scheduler
@@ -28,10 +28,10 @@ from tests.api.scheduler_claim_support import (
     scheduler_claim_setup,
 )
 from tests.api.support import api_capture
-from tests.api.worker_support import CAPABILITIES
 from tests.client.support import running_app
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import FakeClock, fixed_randomness
+from tests.engine.admission_processing_support import LIMITS as ADMISSION_LIMITS
 from tests.engine.attempt_admission_support import SELECTION
 from tests.engine.claim_support import state
 from tests.engine.lock_support import lock_inventory
@@ -46,36 +46,36 @@ RELEASE_CYCLES = 1_000
 def scheduler(
     database: Database, clock: FakeClock, seed: int, *, page_size: int = 100
 ) -> Scheduler:
-    profile = installed_worker_profile("2000")
-    assert profile is not None
-    capabilities = replace(
-        CAPABILITIES, default_stall_after=SELECTION.default_stall_after
-    )
     return first_claim_scheduler(
-        database,
-        profile.limits,
-        clock.now,
-        IdentifierGenerator(clock.now, fixed_randomness(seed)),
-        INSTALLATION,
-        capabilities,
+        AdmissionProcessor(
+            database,
+            ADMISSION_LIMITS,
+            SELECTION,
+            INSTALLATION,
+            clock.now,
+            IdentifierGenerator(clock.now, fixed_randomness(seed)),
+            1,
+            None,
+            timedelta(seconds=1),
+            initial_root_only=True,
+        ),
         page_size=page_size,
     )
 
 
-def pending_page(statement: str, context: ExecutionContext) -> bool:
+def pending_page(statement: str, parameters: object) -> bool:
     return (
         statement.startswith("SELECT run.id")
         and "run.status =" in statement
-        and any(
-            binds.get("status_1") == "pending" for binds in context.compiled_parameters
-        )
+        and isinstance(parameters, tuple)
+        and "pending" in cast("tuple[object, ...]", parameters)
     )
 
 
 @asynccontextmanager
 async def held_sql(
     engine: AsyncEngine,
-    matches: Callable[[str, ExecutionContext], bool],
+    matches: Callable[[str, object], bool],
 ) -> AsyncGenerator[tuple[asyncio.Event, asyncio.Event]]:
     reached, release = asyncio.Event(), asyncio.Event()
 
@@ -84,10 +84,10 @@ async def held_sql(
         cursor: object,
         statement: str,
         parameters: object,
-        context: ExecutionContext,
+        context: object,
         executemany: bool,
     ) -> None:
-        if not reached.is_set() and matches(statement, context):
+        if not reached.is_set() and matches(statement, parameters):
             reached.set()
             await_(release.wait())
 
@@ -102,7 +102,7 @@ async def held_sql(
 async def stop_on_sql(
     owner: Scheduler,
     engine: AsyncEngine,
-    matches: Callable[[str, ExecutionContext], bool],
+    matches: Callable[[str, object], bool],
 ) -> None:
     async with held_sql(engine, matches) as (reached, release):
         task = asyncio.create_task(owner.run())

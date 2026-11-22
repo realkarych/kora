@@ -1,30 +1,17 @@
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 
 from kora.db.deadline_discovery import DueAttemptSweep
 from kora.db.identifiers import Clock
 from kora.db.pending_runs import RunStatusSweep
 from kora.db.reads import MarkedRunSweep
-from kora.engine.admission_preparation import (
-    AdmissionPreparationLimits,
-    admission_preparation_reservation,
-)
-from kora.engine.admission_processing import (
-    AdmissionProcessingLimits,
-    AdmissionProcessor,
-)
-from kora.engine.admission_snapshot import AdmissionSnapshotLimits
+from kora.engine.admission_processing import AdmissionProcessor
 from kora.engine.attempt_admission import AttemptAdmissionState
-from kora.engine.attempt_preparation_budget import (
-    AttemptPreparationLimits,
-    initial_root_preparation_reservation,
-)
 from kora.engine.pending_promotion import PendingPromotion
 from kora.engine.run_promotion import PromotionOutcome
 from kora.engine.staging_maintenance import StagingMaintenance
-from kora.engine.worker_claim_poll import ClaimPollLimits
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 from kora.protocols.scheduler_lifecycle import SchedulerFailure
 from kora.scheduler.discovery import Discovery
@@ -54,40 +41,6 @@ def emit(event: EventSpec, outcome: str) -> None:
     diagnostics = current_diagnostics()
     if diagnostics is not None:
         diagnostics.logger(COMPONENT).emit(event, outcome=outcome)
-
-
-def initial_admission_limits(claim: ClaimPollLimits) -> AdmissionProcessingLimits:
-    source = claim.snapshot
-    snapshot = AdmissionSnapshotLimits(
-        source.graph,
-        source.inputs,
-        source.sources.node_row,
-        source.graph_native_bytes,
-        source.owner_text_bytes,
-        1,
-        1,
-    )
-    native, raw = snapshot.reservation()
-    preparation = AdmissionPreparationLimits(
-        replace(snapshot, native_bytes=native, raw_bytes=raw), 1, 1
-    )
-    owned = admission_preparation_reservation(preparation)
-    max_claim = initial_root_preparation_reservation(
-        AttemptPreparationLimits(source.graph, owned.retained_units, 1, 1)
-    )
-    return AdmissionProcessingLimits(
-        replace(
-            preparation,
-            retained_units=max_claim.retained_units,
-            work_units=owned.work_units,
-        ),
-        source.sources,
-        claim.expiry,
-        max_claim.work_units,
-    )
-
-
-RunPage = RunStatusSweep | MarkedRunSweep
 
 
 @dataclass(frozen=True)
@@ -140,7 +93,9 @@ class Tick:
                 return
             await asyncio.sleep(0)
 
-    async def run_page(self, sweep: RunPage, stopped: Callable[[], bool]) -> bool:
+    async def run_page(
+        self, sweep: RunStatusSweep | MarkedRunSweep, stopped: Callable[[], bool]
+    ) -> bool:
         page = await self.discovery.read(sweep.next_page, self.deadline())
         if page is None:
             return False
@@ -185,8 +140,7 @@ class Tick:
             if outcome is AttemptAdmissionState.QUEUED:
                 emit(TRANSITION, "admitted")
                 changed = True
-            elif outcome is AttemptAdmissionState.EXPIRED:
-                changed = True
+            changed |= outcome is AttemptAdmissionState.EXPIRED
         return changed
 
     async def __call__(self, stopped: Callable[[], bool]) -> bool:

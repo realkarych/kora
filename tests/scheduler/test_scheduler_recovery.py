@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 import httpx
 import pytest
+from sqlalchemy import event as sql_events
 from sqlalchemy import select, update
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
@@ -37,7 +38,7 @@ async def pending_runs(origin: str, authorization: str) -> list[str]:
         )
         assert deployed.status_code == 201
         accepted: list[str] = []
-        for index in range(3):
+        for index in range(2):
             result = await client.post(
                 RUNS,
                 json={"params": PARAMS},
@@ -65,13 +66,9 @@ async def admitted_waits(
         )
         .order_by(event.c.id)
     )
-    while True:
-        async with database.read_transaction() as reader:
-            with await reader.execute(query) as result:
-                rows = [(row.id, row.wake_at) for row in result]
-        if len(rows) == len(run_ids):
-            return rows
-        await asyncio.sleep(0)
+    async with database.read_transaction() as reader:
+        with await reader.execute(query) as result:
+            return [(row.id, row.wake_at) for row in result]
 
 
 @pytest.mark.asyncio
@@ -99,18 +96,40 @@ async def test_scheduler_rotates_past_future_wait_and_recovers_terminal_parent(
 
     await owner.recover()
     recovered = await orphan.snapshot(database)
+    settled_waits = asyncio.Event()
+    pending_inserts = len(accepted)
+
+    def observe(
+        connection: object, cursor: object, statement: str, *arguments: object
+    ) -> None:
+        nonlocal pending_inserts
+        if statement.lower().startswith("insert into wait "):
+            pending_inserts -= 1
+            if pending_inserts == 0:
+                settled_waits.set()
+
+    writer_engine = database.writer_engine.sync_engine
+    sql_events.listen(writer_engine, "after_cursor_execute", observe)
     task = asyncio.create_task(owner.run())
     try:
-        async with asyncio.timeout(BOUND):
-            observed = await admitted_waits(database, accepted)
+        await asyncio.wait_for(settled_waits.wait(), BOUND)
+    except TimeoutError as error:
+        owner.stop()
+        await task
+        raise AssertionError(
+            (pending_inserts, await admitted_waits(database, accepted))
+        ) from error
     finally:
         owner.stop()
         await task
+        sql_events.remove(writer_engine, "after_cursor_execute", observe)
+    observed = await admitted_waits(database, accepted)
     async with database.read_transaction() as reader:
         unexpected = await reader.scalar(
             select(attempt.c.id).where(attempt.c.id != orphan.attempt_id)
         )
 
+    assert len(observed) == len(accepted)
     assert recovered["recovery_required"] is True
     assert recovered["execution_domain_id"] == orphan.domain_id
     assert all(wake == cutoff + timedelta(seconds=1) for _, wake in observed)

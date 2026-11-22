@@ -305,7 +305,6 @@ Manual retry (FR-6.8) first checks availability of required input/feedback sourc
 - Actions are idempotent on `(run id, node path, attempt id)` (NFR-2.2): re-running a pass after a crash re-derives the same decisions from rows; side effects are guarded by the attempt id as submission key, `approval_request.id`, `inbound_event` idempotency per `(namespace, name)` and the `idempotency_record` table.
 - On restart the scheduler performs a **recovery pass** first: expired leases on `claimed`/`submitted`/`running`/`finishing` attempts are marked reclaimable under the domain rule of section 3; lookup and adoption are performed by the workers that claim them. Then ordinary marked-run discovery resumes from a fresh sweep alongside all independent due-work scans; neither pre-crash timestamps nor in-memory notifications are needed.
 
-
 ### Bounded first-Claim Scheduler (#1794)
 
 The composable initial Scheduler discovers accepted pending runs independently of the marker, acquires the original graph and receipt admission, and promotes the immutable pinned run through the original writer. It admits a single initial root through current capacity, pricing and exact first-Claim source constraints. Readiness of a dependent node remains with #1446 and the accepted-result producers. The HTTP Worker transition owns the first grant and code-execution clock.

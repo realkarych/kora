@@ -8,6 +8,7 @@ from kora.db.claim_source_values import decode_claim_source
 from kora.db.connection import (
     SNAPSHOT_NATIVE_ERRORS,
     Database,
+    DatabaseSnapshotFailure,
     DatabaseSnapshotRejected,
     clear_snapshot_error,
     require_snapshot_time,
@@ -246,8 +247,6 @@ async def prepare_admission_snapshot(
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)
         raise
-    except AdmissionCandidateUnavailable:
-        raise_safe(AdmissionPreparationUnavailable())
     except (
         ValueError,
         TypeError,
@@ -255,7 +254,14 @@ async def prepare_admission_snapshot(
         OverflowError,
         DatabaseSnapshotRejected,
         *SNAPSHOT_NATIVE_ERRORS,
-    ):
+    ) as error:
+        if (
+            isinstance(error, AdmissionCandidateUnavailable)
+            or (acquired is not None and isinstance(error, ValueError))
+            or isinstance(error, DatabaseSnapshotRejected)
+            and error.reason is DatabaseSnapshotFailure.DEADLINE
+        ):
+            raise_safe(AdmissionPreparationUnavailable())
         raise_safe(AdmissionPreparationRejected())
     finally:
         del acquired, prepared, database, node_id, limits

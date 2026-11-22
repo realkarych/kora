@@ -18,10 +18,11 @@ from kora.db.tables import (
     run_inputs,
     run_promotion_admission,
 )
-from kora.db.types import IDENTIFIER_LENGTH, SQLITE
+from kora.db.types import IDENTIFIER_LENGTH, POSTGRESQL, SQLITE
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.engine.run_materialization import PreparedRunMaterialization
+from kora.engine.run_queue import POSTGRES_QUEUE_PROBE, SQLITE_QUEUE_PROBE
 from kora.engine.start_capacity import Overlap
 from kora.engine.start_records import (
     MAX_RECEIPT_BYTES,
@@ -124,11 +125,32 @@ async def read_pending_promotion_scope(
             column("deadline_expired_at").is_(None),
         )
     )
-    return (
-        GraphResourceScope(namespace_id, graph_id, version_id)
-        if matched is True
-        else None
+    if matched is not True:
+        return None
+    overlap = await connection.scalar(
+        select(
+            case(
+                (
+                    func.octet_length(cast(run.c.trigger, Text()))
+                    <= limits.parent_bytes,
+                    run.c.trigger["overlap"].as_string(),
+                )
+            )
+        ).where(run.c.id == run_id)
     )
+    if overlap == "queue":
+        probe = (
+            POSTGRES_QUEUE_PROBE
+            if connection.dialect.name == POSTGRESQL
+            else SQLITE_QUEUE_PROBE
+        )
+        with await connection.execute(
+            probe,
+            {"namespace_id": namespace_id, "graph_id": graph_id, "run_id": run_id},
+        ) as result:
+            if any(result.one()):
+                return None
+    return GraphResourceScope(namespace_id, graph_id, version_id)
 
 
 async def admitted_promotion_receipt(

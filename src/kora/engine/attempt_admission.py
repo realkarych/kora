@@ -25,8 +25,13 @@ from kora.engine.admission_wait import (
     AdmissionWaitState,
     save_admission_wait,
 )
-from kora.engine.attempt_capacity import PreparedGraphCaps, check_attempt_capacity
+from kora.engine.attempt_capacity import (
+    AttemptCapSourceChanged,
+    PreparedGraphCaps,
+    check_attempt_capacity,
+)
 from kora.engine.claim_sources import insert_claim_attempt
+from kora.engine.claim_timing import ClaimTimeout
 from kora.engine.dependency_rules import (
     FAILURES,
     DependencyOutcome,
@@ -63,6 +68,8 @@ class PreparedAttemptAdmission:
     sources: PreparedClaimSources
     predecessors: tuple[ReadinessNode, ...]
     absent_producers: tuple[str, ...]
+    run_timeout: ClaimTimeout
+    attempt_timeout: ClaimTimeout
 
 
 class AttemptAdmissionState(StrEnum):
@@ -75,6 +82,10 @@ class AttemptAdmissionState(StrEnum):
 class AttemptAdmissionFailed(RuntimeError):
     def __init__(self) -> None:
         super().__init__("attempt admission failed")
+
+
+class AttemptAdmissionStale(AttemptAdmissionFailed):
+    pass
 
 
 def _latest_price(namespace_id: str | None, at: datetime) -> ColumnElement[str]:
@@ -356,6 +367,9 @@ async def admit_attempt(
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)
         raise
+    except AttemptCapSourceChanged:
+        del context, prepared, limits, caps
+        raise_private_metadata_error(AttemptAdmissionStale())
     except (
         SQLAlchemyError,
         ValueError,

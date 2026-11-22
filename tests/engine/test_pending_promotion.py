@@ -1,8 +1,12 @@
 import asyncio
+from collections.abc import Generator
+from contextlib import contextmanager
 
 import httpx
 import pytest
 from sqlalchemy import delete, select, update
+from sqlalchemy import event as sqlalchemy_event
+from sqlalchemy.engine import Connection
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.api.installed_worker import installed_worker_profile
@@ -16,9 +20,11 @@ from kora.db.tables import (
     run,
     run_promotion_admission,
 )
+from kora.db.transactions import WRITER_LEASE
 from kora.engine.graph_snapshot import GraphSnapshotLimits
 from kora.engine.pending_promotion import PendingPromotion
 from kora.engine.run_promotion import PromotionOutcome
+from kora.engine.start_capacity import Overlap
 from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun
 from tests.api.deployment_cases import GRAPH, HARNESS, NAMESPACE, preparer, skeleton_ir
@@ -26,7 +32,7 @@ from tests.api.support import api_capture, application, client_for, deployment_s
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import FakeClock, fixed_randomness
 from tests.engine.graph_output_cases import child
-from tests.engine.test_http_trigger_admission import KEY, RUNS, VERSIONS
+from tests.engine.test_http_trigger_admission import KEY
 from tests.plugins.authentication.support import seed_case
 
 __all__ = ["api_capture", "preparer"]
@@ -48,21 +54,42 @@ def pending_promotion(database: Database) -> PendingPromotion:
     )
 
 
+def graph_path(graph: str) -> str:
+    return f"/api/v1/namespaces/{NAMESPACE}/graphs/{graph}"
+
+
 async def deploy(
-    client: httpx.AsyncClient, headers: dict[str, str], timeout: str
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    timeout: str,
+    *,
+    graph: str = GRAPH,
+    overlap: Overlap | None = None,
 ) -> DeployResponse:
-    ir = skeleton_ir()
+    ir = skeleton_ir(graph=graph)
     child(ir, "runtime")["limits"] = {"timeout": timeout}
+    if overlap is not None:
+        child(ir, "graph")["overlap"] = overlap
     response = await client.post(
-        VERSIONS, json={"graph": GRAPH, "ir": ir, "resources": []}, headers=headers
+        f"{graph_path(graph)}/versions",
+        json={"graph": graph, "ir": ir, "resources": []},
+        headers=headers,
     )
     assert response.status_code == 201
     return DeployResponse.model_validate(response.json())
 
 
-async def trigger(client: httpx.AsyncClient, headers: dict[str, str]) -> AcceptedRun:
+async def trigger(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    *,
+    graph: str = GRAPH,
+    key: str = KEY,
+) -> AcceptedRun:
     response = await client.post(
-        RUNS, json={"params": {}}, headers=headers | {"Idempotency-Key": KEY}
+        f"{graph_path(graph)}/runs",
+        json={"params": {}},
+        headers=headers | {"Idempotency-Key": key},
     )
     assert response.status_code == 201
     return AcceptedRun.model_validate(response.json())
@@ -174,3 +201,120 @@ async def test_scheduler_refuses_unadmitted_or_overwidth_source(
     assert started is None
     assert ledger.outstanding == database.units_in_flight() == 0
     assert database.writer_is_free()
+
+
+@contextmanager
+def promotion_statements(
+    database: Database,
+) -> Generator[list[tuple[str, bool]], None, None]:
+    statements: list[tuple[str, bool]] = []
+    engines = {database.reader_engine.sync_engine, database.writer_engine.sync_engine}
+
+    def capture(
+        connection: Connection, cursor: object, statement: str, *args: object
+    ) -> None:
+        statements.append((statement.lower(), WRITER_LEASE in connection.info))
+
+    for engine in engines:
+        sqlalchemy_event.listen(engine, "before_cursor_execute", capture)
+    try:
+        yield statements
+    finally:
+        for engine in engines:
+            sqlalchemy_event.remove(engine, "before_cursor_execute", capture)
+
+
+async def admitted_runs(
+    database: Database, run_ids: tuple[str, ...]
+) -> dict[str, tuple[object, ...]]:
+    statement = (
+        select(
+            run_promotion_admission.c.run_id,
+            run_promotion_admission.c.receipt_id,
+            run_promotion_admission.c.run_bytes,
+            run_promotion_admission.c.receipt_bytes,
+            run_promotion_admission.c.graph_version_id,
+            run.c.status,
+        )
+        .join(run, run.c.id == run_promotion_admission.c.run_id)
+        .where(run.c.id.in_(run_ids))
+    )
+    async with database.read_transaction() as reader:
+        with await reader.execute(statement) as result:
+            return {row[0]: tuple(row[1:]) for row in result}
+
+
+@pytest.mark.asyncio
+async def test_pending_promotion_skips_blocked_queue_before_payload_or_writer(
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+) -> None:
+    user = await seed_case(database, NAMESPACE)
+    headers = {"Authorization": str(user.request.authorization)}
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+    promotion = pending_promotion(database)
+    independent_graph = "independent"
+
+    async def process(accepted: AcceptedRun) -> PromotionOutcome:
+        deadline = asyncio.get_running_loop().time() + 10.0
+        return await promotion.process(
+            accepted.run_id.removeprefix("run_"),
+            deadline=deadline,
+            stopped=lambda: False,
+        )
+
+    async with client_for(app) as client:
+        await deploy(client, headers, "01h", overlap="queue")
+        await deploy(client, headers, "01h", graph=independent_graph)
+        running = await trigger(client, headers, key="queue-running")
+        assert await process(running) is PromotionOutcome.APPLIED
+        older = await trigger(client, headers, key="queue-older")
+        younger = await trigger(client, headers, key="queue-younger")
+        independent = await trigger(
+            client, headers, graph=independent_graph, key="queue-independent"
+        )
+    blocked_ids = tuple(
+        candidate.run_id.removeprefix("run_") for candidate in (older, younger)
+    )
+    running_id = running.run_id.removeprefix("run_")
+    independent_id = independent.run_id.removeprefix("run_")
+    all_ids = (running_id, *blocked_ids, independent_id)
+    before = await admitted_runs(database, all_ids)
+    ledger = ConnectionLedger(database)
+
+    with promotion_statements(database) as blocked:
+        for candidate in (younger, older):
+            await process(candidate)
+    blocked_checkouts = ledger.checkouts
+    with promotion_statements(database) as available:
+        outcome = await process(independent)
+    after = await admitted_runs(database, all_ids)
+    async with database.read_transaction() as reader:
+        with await reader.execute(
+            select(event.c.run_id).where(
+                event.c.run_id.in_(all_ids), event.c.kind == "run.started"
+            )
+        ) as result:
+            started = set(result.scalars())
+
+    assert set(before) == set(after) == set(all_ids)
+    assert blocked_checkouts == len(blocked_ids)
+    assert any("run_promotion_admission" in sql for sql, _ in blocked)
+    assert all(
+        "graph_version_read_admission" not in sql and "v.ir" not in sql and not writer
+        for sql, writer in blocked
+    )
+    assert all(
+        after[run_id] == before[run_id] and after[run_id][-1] == "pending"
+        for run_id in blocked_ids
+    )
+    assert after[running_id] == before[running_id]
+    assert after[running_id][-1] == "running"
+    assert outcome is PromotionOutcome.APPLIED
+    assert any("graph_version_read_admission" in sql for sql, _ in available)
+    assert any(writer for _, writer in available)
+    assert after[independent_id][:-1] == before[independent_id][:-1]
+    assert after[independent_id][-1] == "running"
+    assert started == {running_id, independent_id}
+    assert ledger.outstanding == database.units_in_flight() == 0

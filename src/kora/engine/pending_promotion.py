@@ -9,12 +9,9 @@ from kora.db.connection import (
     DatabaseWriterFailure,
     DatabaseWriterRejected,
 )
-from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
+from kora.db.graph_value_json import GraphValueRejected
 from kora.db.identifiers import Clock, IdentifierGenerator, is_identifier
-from kora.engine.graph_execution_contract import (
-    check_detached_execution_contract,
-    execution_contract_read_reservation,
-)
+from kora.engine.graph_execution_contract import check_detached_execution_contract
 from kora.engine.graph_snapshot import GraphSnapshotLimits, acquire_graph_snapshot
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.engine.locks import ScopeDeadlineExpired, TransitionLocks
@@ -42,11 +39,6 @@ class PendingPromotion:
     limits: PromotionReadLimits
     clock: Clock
     identifiers: IdentifierGenerator
-
-    def __post_init__(self) -> None:
-        if min(self.graph.native_bytes, self.graph.owner_text_bytes) <= 0:
-            raise GraphValueRejected(GraphValueFailure.BUDGET)
-        execution_contract_read_reservation(self.graph.graph)
 
     async def process(
         self, run_id: str, *, deadline: float, stopped: Callable[[], bool]
