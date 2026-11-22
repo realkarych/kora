@@ -21,7 +21,7 @@ Bounded-read amendment dated 2026-10-23: the project owner approved the contract
 
 - Staged-storage amendment dated 2026-10-23: the [plan for #229](https://github.com/realkarych/kora/issues/229#issuecomment-6368221981) was [approved by the project owner](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832). The operation inventory and lifecycle below replace the four-method storage boundary; exact wording [reviewed line by line and approved by the project owner](https://github.com/realkarych/kora/pull/245#issuecomment-6369119893) on 2026-10-23. Runtime implementation and evidence remain separate.
 
-- Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). Wording awaits owner line-by-line review.
+- Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/issues/1360#issuecomment-7082919105) on 2026-11-22.
 
 ## Context
 

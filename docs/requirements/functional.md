@@ -14,7 +14,7 @@ Navigation amendment dated 2026-10-17: scope and implementation plan approved un
 
 Tool-policy amendment dated 2026-10-21 (FR-8b.1): the namespace and node policies are evaluated per layer, approved by the project owner under [issue #134](https://github.com/realkarych/kora/issues/134); wording pending line-by-line owner review.
 
-Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). Wording awaits owner line-by-line review.
+Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/issues/1360#issuecomment-7082919105) on 2026-11-22.
 
 Branch-routing amendment dated 2026-10-17: direction, implementation plan and final wording accepted by the project owner on 2026-10-17. See [ADR-0006](../decisions/0006-graph-definition-dsl-and-yaml-representation.md).
 

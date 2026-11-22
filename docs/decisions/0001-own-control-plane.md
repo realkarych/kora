@@ -8,7 +8,7 @@
 - Acceptance-location amendment dated 2026-10-18: the checks adopted by this record now live in the scheduler specification; scope approved under issue #95, wording pending owner review.
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
-- Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). Wording awaits owner line-by-line review.
+- Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/issues/1360#issuecomment-7082919105) on 2026-11-22.
 - Evidence-consolidation amendment dated 2026-10-18: scope approved under issue #95; wording pending owner review.
 - Slice-scope amendment dated 2026-10-19: scope decided by the project owner under [issue #122](https://github.com/realkarych/kora/issues/122); wording pending line-by-line owner review.
 - Harness-scope amendment dated 2026-10-21: scope and implementation plan approved by the project owner under [issue #172](https://github.com/realkarych/kora/issues/172); wording pending line-by-line owner review.

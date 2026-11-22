@@ -152,6 +152,8 @@ The page's own content is the order of work: when each shared contract freezes, 
 
 Harness-scope amendment dated 2026-10-21: both Claude and Codex are required in the first slice; scope and implementation plan approved by the project owner under [issue #172](https://github.com/realkarych/kora/issues/172); wording pending line-by-line owner review.
 
+The project owner [reviewed and approved the Codex native approval wording for #1360 line by line](https://github.com/realkarych/kora/issues/1360#issuecomment-7082919105) on 2026-11-22.
+
 Token separation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #141](https://github.com/realkarych/kora/issues/141) on 2026-10-23.
 
 Diagnostic value foundation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #219](https://github.com/realkarych/kora/issues/219) on 2026-10-23.
