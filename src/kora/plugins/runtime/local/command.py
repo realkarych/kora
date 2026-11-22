@@ -897,6 +897,14 @@ class CommandSession:
     def _halted(self) -> bool:
         return self._stop.is_set() or self._fenced.is_set()
 
+    def first_closure_ready(self) -> None:
+        if self._journal.closed:
+            raise delivery_error("journal_unavailable")
+        with self._lock:
+            transferring = self._transferring
+        if transferring or self.completion() is not Completion.COMPLETE:
+            raise delivery_error("workload_busy")
+
     def result_work_settled(self) -> bool:
         return True
 

@@ -28,16 +28,20 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import (
+    DispatcherClosure,
     EvidenceScope,
     NormalCompletionQuiescence,
     TerminationReceipt,
 )
+from kora.protocols.history import GrantHistorySnapshot, chain_step
 from kora.protocols.identity import (
     Count,
+    GrantBinding,
     Handle,
     Identifier,
     Instant,
     ProcessIdentity,
+    Sha256,
 )
 from kora.protocols.runtime import (
     MAX_EXIT_CODE,
@@ -59,6 +63,8 @@ from kora.runner.identity import IdentityReader
 from kora.runner.native_io import NativeExecutor, NativeIOBusy, NativeIOClosed
 
 HEAD_LIMIT: Final[int] = 65536
+RETAINED_LIMIT: Final[int] = 16384
+FIRST_GRANT_ARGUMENT: Final[str] = "--closure-profile=local/2"
 PREFIX_ARGUMENTS: Final[int] = 64
 PREFIX_BYTES: Final[int] = 16384
 SOCKET_PATH_LENGTH: Final[int] = 103
@@ -76,6 +82,7 @@ RESULT_RECORD_BYTES: Final[int] = 1_048_576
 RESULT_FILE_BYTES: Final[int] = 16_777_216
 ADMITTED_JOBS: Final[int] = 64
 Result = TypeVar("Result")
+Record = TypeVar("Record", bound=BoundaryModel)
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local")
 LOCK_TIMEOUT: Final[EventSpec] = CATALOG.register(
     EventSpec(
@@ -257,8 +264,7 @@ Entry = Annotated[
 Bound = Unsubmitted | Starting | Running | Completed
 
 
-class RegistryHead(BoundaryModel):
-    format: Literal["local/1"]
+class LifecycleHead(BoundaryModel):
     execution_domain_id: Identifier
     attempt_id: Identifier
     entry: Entry
@@ -268,6 +274,56 @@ class RegistryHead(BoundaryModel):
         if len(model_bytes(self)) > HEAD_LIMIT:
             raise ValueError("the registry head exceeds its bound")
         return self
+
+
+class RegistryHead(LifecycleHead):
+    format: Literal["local/1"]
+
+
+class RetainedReference(BoundaryModel):
+    size: Annotated[StrictInt, Field(gt=0, le=RETAINED_LIMIT)]
+    digest: Sha256
+
+    @classmethod
+    def describe(cls, content: bytes) -> Self:
+        return cls(size=len(content), digest=hashlib.sha256(content).hexdigest())
+
+
+class FirstGrantLinks(BoundaryModel):
+    grant: RetainedReference
+    closure: RetainedReference | None
+
+    @model_validator(mode="after")
+    def bounded(self) -> Self:
+        closure_size = 0 if self.closure is None else self.closure.size
+        if (
+            self.grant.size
+            + closure_size
+            + len(
+                canonical_bytes(
+                    {"first_grant": parse_json_object(self.model_dump(mode="json"))}
+                )
+            )
+            > RETAINED_LIMIT
+        ):
+            raise ValueError("retained records exceed their bound")
+        return self
+
+
+class FirstGrantHead(LifecycleHead):
+    format: Literal["local/2"]
+    first_grant: FirstGrantLinks
+
+
+class FirstGrantRecord(BoundaryModel):
+    format: Literal["local-first-grant/1"]
+    snapshot: GrantHistorySnapshot
+    grant: GrantBinding
+
+
+class FirstClosureRecord(BoundaryModel):
+    format: Literal["local-first-closure/1"]
+    closure: DispatcherClosure
 
 
 def model_bytes(model: BoundaryModel) -> bytes:
@@ -600,7 +656,7 @@ class LockOutcome(Enum):
 
 @dataclass(frozen=True)
 class Applied:
-    head: RegistryHead | None
+    head: LifecycleHead | None
     transition: Transition
 
 
@@ -610,15 +666,18 @@ class Registry:
         directory: DirectoryAnchor,
         execution_domain_id: str,
         new_nonce: Callable[[], str],
+        *,
+        first_grant: bool = False,
     ) -> None:
         self.directory = directory
         self.execution_domain_id = execution_domain_id
         self.new_nonce = new_nonce
+        self.first_grant = first_grant
 
     def key(self, attempt_id: str) -> AttemptKey:
         return AttemptKey(self.execution_domain_id, attempt_id)
 
-    def read(self, key: AttemptKey) -> RegistryHead | None:
+    def read(self, key: AttemptKey) -> RegistryHead | FirstGrantHead | None:
         try:
             encoded = read_private_file(self.directory, f"{key.name}.json", HEAD_LIMIT)
         except FileNotFoundError:
@@ -626,7 +685,8 @@ class Registry:
         except (OSError, FilesystemError):
             raise refusal("lineage_unavailable") from None
         try:
-            head = RegistryHead.model_validate_json(encoded)
+            model = FirstGrantHead if self.first_grant else RegistryHead
+            head = model.model_validate_json(encoded)
         except ValueError:
             raise refusal("lineage_unavailable") from None
         if (head.execution_domain_id, head.attempt_id) != (
@@ -640,13 +700,12 @@ class Registry:
         head = self.read(key)
         return None if head is None else head.entry
 
-    def try_transition(
-        self, key: AttemptKey, decide: Callable[[Entry | None], Transition]
-    ) -> Applied | LockOutcome:
+    def under_lock(
+        self, key: AttemptKey, operation: Callable[[], Result], *, create: bool = False
+    ) -> Result | LockOutcome:
+        flags = os.O_RDWR | (os.O_CREAT if create else 0)
         try:
-            lock = open_private_file(
-                self.directory, f"{key.name}.lock", os.O_RDWR | os.O_CREAT
-            )
+            lock = open_private_file(self.directory, f"{key.name}.lock", flags)
         except (OSError, FilesystemError):
             raise refusal("registry_unavailable") from None
         try:
@@ -654,33 +713,158 @@ class Registry:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return LockOutcome.BUSY
-            return self.locked_transition(key, decide)
+            return operation()
         finally:
             os.close(lock)
 
-    def locked_transition(
-        self, key: AttemptKey, decide: Callable[[Entry | None], Transition]
-    ) -> Applied:
+    def try_transition(
+        self,
+        key: AttemptKey,
+        decide: Callable[[Entry | None], Transition],
+        check: Callable[[LifecycleHead | None], object] | None = None,
+    ) -> Applied | LockOutcome:
+        return self.under_lock(
+            key,
+            lambda: self.locked_transition(key, decide, check),
+            create=not self.first_grant,
+        )
+
+    def write_first(self, name: str, encoded: bytes, *, replace: bool) -> bool:
+        temporary = f"{name}.tmp-local2"
         try:
-            sweep_temporaries(self.directory, f"{key.name}.json")
-        except OSError:
-            raise refusal("registry_unavailable") from None
-        head = self.read(key)
-        transition = decide(None if head is None else head.entry)
-        if transition.entry is None:
-            return Applied(head, transition)
-        encoded = with_entry(key, transition.entry)
+            descriptor = open_private_file(self.directory, temporary, os.O_RDONLY)
+        except FileNotFoundError:
+            pass
+        else:
+            os.close(descriptor)
+            unlink_if_present(self.directory, temporary)
+        return write_atomically(
+            self.directory, name, encoded, "local2", replace=replace
+        )
+
+    def put_evidence(
+        self,
+        key: AttemptKey,
+        head: FirstGrantHead,
+        leaf: str,
+        record: bytes,
+        *,
+        resuming: bool,
+    ) -> None:
+        encoded = model_bytes(head)
+        name = f"{key.name}.{leaf}.v1.json"
         try:
-            write_atomically(
-                self.directory,
-                f"{key.name}.json",
-                encoded,
-                self.new_nonce(),
-                replace=True,
-            )
+            if not self.write_first(name, record, replace=False):
+                if (
+                    not resuming
+                    or read_private_file(self.directory, name, len(record)) != record
+                ):
+                    raise refusal("workload_conflict")
+                self.sync_file(name)
+                synchronize(self.directory.descriptor)
+            self.write_first(f"{key.name}.json", encoded, replace=True)
         except (OSError, FilesystemError):
             raise refusal("registry_unavailable") from None
-        return Applied(RegistryHead.model_validate_json(encoded), transition)
+
+    def synchronize_evidence(self, key: AttemptKey, leaf: str) -> None:
+        try:
+            for name in (f"{key.name}.{leaf}.v1.json", f"{key.name}.json"):
+                self.sync_file(name)
+            synchronize(self.directory.descriptor)
+        except (OSError, FilesystemError):
+            raise refusal("registry_unavailable") from None
+
+    def sync_file(self, name: str) -> None:
+        descriptor = open_private_file(self.directory, name, os.O_RDONLY)
+        try:
+            synchronize(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def retained_record(
+        self, name: str, reference: RetainedReference, model: type[Record]
+    ) -> Record:
+        try:
+            data = read_private_file(self.directory, name, reference.size)
+            if reference != RetainedReference.describe(data):
+                raise ValueError
+            record = model.model_validate_json(data)
+            if model_bytes(record) != data:
+                raise ValueError
+        except (OSError, FilesystemError, ValueError):
+            raise refusal("lineage_unavailable") from None
+        return record
+
+    def linked_grant(self, key: AttemptKey, head: FirstGrantHead) -> FirstGrantRecord:
+        record = self.retained_record(
+            f"{key.name}.first-grant.v1.json", head.first_grant.grant, FirstGrantRecord
+        )
+        grant, snapshot = record.grant, record.snapshot
+        if (
+            grant.execution_domain_id != key.execution_domain_id
+            or grant.process is None
+            or (snapshot.attempt_id, snapshot.execution_domain_id)
+            != (key.attempt_id, key.execution_domain_id)
+            or (snapshot.count, snapshot.upper_epoch) != (1, grant.lease_epoch)
+            or snapshot.digest != chain_step(snapshot.seed(), model_bytes(grant))
+        ):
+            raise refusal("lineage_unavailable")
+        return record
+
+    def linked_closure(
+        self, key: AttemptKey, head: FirstGrantHead, grant: GrantBinding
+    ) -> FirstClosureRecord | None:
+        reference = head.first_grant.closure
+        if reference is None:
+            return None
+        record = self.retained_record(
+            f"{key.name}.first-closure.v1.json", reference, FirstClosureRecord
+        )
+        ack = record.closure.quiescence
+        if (
+            record.closure.provenance != "registry_acknowledgement"
+            or (ack.attempt_id, ack.execution_domain_id)
+            != (key.attempt_id, key.execution_domain_id)
+            or (ack.dispatcher_id, ack.worker_incarnation_id, ack.lease_generation)
+            != (grant.dispatcher_id, grant.incarnation_id, grant.lease_epoch)
+        ):
+            raise refusal("lineage_unavailable")
+        return record
+
+    def locked_transition(
+        self,
+        key: AttemptKey,
+        decide: Callable[[Entry | None], Transition],
+        check: Callable[[LifecycleHead | None], object] | None = None,
+    ) -> Applied:
+        name = f"{key.name}.json"
+        try:
+            if not self.first_grant:
+                sweep_temporaries(self.directory, name)
+            head = self.read(key)
+            if isinstance(head, FirstGrantHead):
+                grant = self.linked_grant(key, head)
+                self.linked_closure(key, head, grant.grant)
+            if check is not None:
+                check(head)
+            transition = decide(None if head is None else head.entry)
+            if transition.entry is None:
+                return Applied(head, transition)
+            if self.first_grant:
+                if not isinstance(head, FirstGrantHead):
+                    raise refusal("lineage_unavailable")
+                updated = FirstGrantHead.model_validate(
+                    {**head.model_dump(), "entry": transition.entry}
+                )
+                self.write_first(name, model_bytes(updated), replace=True)
+                return Applied(updated, transition)
+            encoded = with_entry(key, transition.entry)
+            write_atomically(
+                self.directory, name, encoded, self.new_nonce(), replace=True
+            )
+            return Applied(RegistryHead.model_validate_json(encoded), transition)
+        except (OSError, FilesystemError, ValueError):
+            raise refusal("registry_unavailable") from None
 
 
 DOMAIN_LIMIT: Final[int] = 1048576

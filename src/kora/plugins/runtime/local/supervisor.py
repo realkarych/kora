@@ -60,17 +60,21 @@ from kora.runner.identity import (
     NativeIdentityReader,
     complete_identity,
 )
-from kora.runner.peers import kernel_source
+from kora.runner.peers import PeerRefused, kernel_source, same_process
 from kora.runner.registry import (
+    FIRST_GRANT_ARGUMENT,
     LOCK_DEADLINE_NS,
     LOCK_RETRY_NS,
     READINESS_DESCRIPTOR,
     READY,
     SOCKET_NAME_LENGTH,
     AttemptKey,
+    FirstGrantHead,
+    LifecycleHead,
     LockOutcome,
     Registry,
     Starting,
+    model_bytes,
     read_domain,
     register_cell,
     socket_path,
@@ -128,9 +132,13 @@ class RunnerArguments:
     attempt_id: str
     execution_domain_id: str
     nonce: str
+    first_grant: bool = False
 
 
 def parsed_arguments(argv: Sequence[str]) -> RunnerArguments:
+    first_grant = len(argv) == 5 and argv[0] == FIRST_GRANT_ARGUMENT
+    if first_grant:
+        argv = argv[1:]
     if len(argv) != 4:
         raise RunnerRefused("arguments")
     root, attempt, domain, nonce = argv
@@ -141,7 +149,7 @@ def parsed_arguments(argv: Sequence[str]) -> RunnerArguments:
         or not NONCE.fullmatch(nonce)
     ):
         raise RunnerRefused("arguments")
-    return RunnerArguments(Path(root), attempt, domain, nonce)
+    return RunnerArguments(Path(root), attempt, domain, nonce, first_grant)
 
 
 def harden() -> None:
@@ -209,11 +217,16 @@ async def register(
     identity: ProcessIdentity,
     path: str,
     clock: Clock,
+    expected: bytes | None = None,
 ) -> None:
+    def check(head: LifecycleHead | None) -> None:
+        if expected is not None and (head is None or model_bytes(head) != expected):
+            raise RunnerRefused("fenced")
+
     deadline = clock.monotonic_ns() + LOCK_DEADLINE_NS
     while True:
         applied = registry.try_transition(
-            key, lambda entry: register_cell(entry, nonce, identity, path)
+            key, lambda entry: register_cell(entry, nonce, identity, path), check
         )
         if not isinstance(applied, LockOutcome):
             if applied.transition.refusal is not None:
@@ -241,6 +254,7 @@ class PreparedRegistration:
     name: str
     bound: BoundSocket | None
     resources: ExitStack
+    expected: bytes | None = None
 
     @property
     def path(self) -> str:
@@ -252,7 +266,13 @@ class PreparedRegistration:
             raise RunnerRefused("ownership")
         try:
             await register(
-                self.registry, self.key, self.entry.nonce, identity, self.path, clock
+                self.registry,
+                self.key,
+                self.entry.nonce,
+                identity,
+                self.path,
+                clock,
+                self.expected,
             )
         except BaseException:
             bound.listener.close()
@@ -300,30 +320,56 @@ class PreparedRegistration:
             self.resources.close()
 
 
+def registration_head(
+    registry: Registry, key: AttemptKey, arguments: RunnerArguments
+) -> tuple[Starting, bytes | None]:
+    head = registry.read(key)
+    if head is None or not isinstance(head.entry, Starting):
+        raise RunnerRefused("fenced")
+    entry = head.entry
+    if entry.nonce != arguments.nonce or entry.fence:
+        raise RunnerRefused("fenced")
+    if not arguments.first_grant:
+        return entry, None
+    if (
+        not isinstance(head, FirstGrantHead)
+        or head.first_grant.closure is not None
+        or entry.runner_prefix[-2:] != (FIRST_GRANT_ARGUMENT, str(arguments.state_root))
+    ):
+        raise RunnerRefused("fenced")
+    original = registry.linked_grant(key, head).grant
+    if original.process is None or (
+        original.dispatcher_id,
+        model_bytes(original.process),
+    ) != (entry.submitter.dispatcher_id, model_bytes(entry.submitter.process)):
+        raise RunnerRefused("fenced")
+    try:
+        same_process(NativeIdentityReader(), original.process)
+    except PeerRefused:
+        raise RunnerRefused("fenced") from None
+    return entry, model_bytes(head)
+
+
+def startup_registry(root: DirectoryAnchor, arguments: RunnerArguments) -> Registry:
+    domain = read_domain(root)
+    if domain is None or domain.execution_domain_id != arguments.execution_domain_id:
+        raise RunnerRefused("domain")
+    return Registry(
+        open_private_directory(root, "registry"),
+        domain.execution_domain_id,
+        lambda: secrets.token_hex(16),
+        first_grant=arguments.first_grant,
+    )
+
+
 def prepare_registration(arguments: RunnerArguments) -> PreparedRegistration:
     with ExitStack() as resources:
         root = open_local_directory(arguments.state_root)
         resources.callback(root.close)
-        domain = read_domain(root)
-        if (
-            domain is None
-            or domain.execution_domain_id != arguments.execution_domain_id
-        ):
-            raise RunnerRefused("domain")
-        registry = Registry(
-            open_private_directory(root, "registry"),
-            arguments.execution_domain_id,
-            lambda: secrets.token_hex(16),
-        )
+        registry = startup_registry(root, arguments)
         resources.callback(registry.directory.close)
         key = registry.key(arguments.attempt_id)
-        entry = registry.entry(key)
-        if (
-            not isinstance(entry, Starting)
-            or entry.nonce != arguments.nonce
-            or entry.fence
-        ):
-            raise RunnerRefused("fenced")
+        entry, expected = registration_head(registry, key, arguments)
         name = key.name[:SOCKET_NAME_LENGTH]
         with ExitStack() as binding:
             directory = open_local_directory(Path(entry.socket_directory))
@@ -337,7 +383,7 @@ def prepare_registration(arguments: RunnerArguments) -> PreparedRegistration:
                 os.unlink(name, dir_fd=directory.descriptor)
                 raise
             prepared = PreparedRegistration(
-                registry, key, entry, name, bound, resources.pop_all()
+                registry, key, entry, name, bound, resources.pop_all(), expected
             )
             binding.pop_all()
             return prepared
@@ -412,13 +458,22 @@ def run(
     harden()
     try:
         arguments = parsed_arguments(argv)
+        if arguments.first_grant:
+            with ExitStack() as resources:
+                root = open_local_directory(arguments.state_root)
+                resources.callback(root.close)
+                registry = startup_registry(root, arguments)
+                resources.callback(registry.directory.close)
+                registration_head(
+                    registry, registry.key(arguments.attempt_id), arguments
+                )
         attempt = attempt_directory(arguments)
         try:
             faulthandler.enable(append_only(attempt, "runner.crash"))
             log_descriptor = append_only(attempt, "runner.log")
         finally:
             attempt.close()
-    except (RunnerRefused, OSError, FilesystemError):
+    except (RunnerRefused, OSError, FilesystemError, KoraProtocolError):
         return EXIT_FAILED
     diagnostics = configure_process(
         COMPONENT,

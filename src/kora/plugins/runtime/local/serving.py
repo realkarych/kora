@@ -28,6 +28,7 @@ from kora.plugins.runtime.local.channel import (
     PRE_ATTACH_BYTES,
     SECTION_FRAME_BYTES,
     AttachRequest,
+    DispatcherQuiescenceRequest,
     FrameType,
     LaunchSpecRequest,
     LogRequest,
@@ -44,6 +45,7 @@ from kora.plugins.runtime.local.channel import (
     output_trailer,
     parse_header,
     quiescence_envelope,
+    read_dispatcher_quiescence,
     read_log_request,
     read_output,
     read_request,
@@ -56,6 +58,7 @@ from kora.plugins.runtime.local.channel import (
     workload_digest,
     write_transfer_bytes,
 )
+from kora.plugins.runtime.local.command import CommandSession
 from kora.plugins.runtime.local.launch import LocalLaunches
 from kora.plugins.runtime.local.spawn import open_socket_directory
 from kora.plugins.runtime.local.workload_session import (
@@ -65,7 +68,11 @@ from kora.plugins.runtime.local.workload_session import (
     WorkloadSession,
 )
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.evidence import EvidenceScope, NormalCompletionQuiescence
+from kora.protocols.evidence import (
+    DispatcherClosure,
+    EvidenceScope,
+    NormalCompletionQuiescence,
+)
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.runtime import (
     CommandObservation,
@@ -95,13 +102,19 @@ from kora.runner.registry import (
     Completed,
     CompletedResult,
     ControlFileRef,
+    FirstClosureRecord,
+    FirstGrantHead,
+    FirstGrantLinks,
     JournalRecordRef,
+    LifecycleHead,
     LockOutcome,
     Registry,
+    RetainedReference,
     Running,
     Submitter,
     TransitionExecutor,
     completed_cell,
+    model_bytes,
     refusal,
     takeover_cell,
 )
@@ -369,6 +382,8 @@ class ControlServer:
         self._closing: asyncio.Task[None] | None = None
         self._completed = asyncio.Event()
         self._completing = asyncio.Lock()
+        self._first_intent: RetainedReference | None = None
+        self._first_confirmed = False
         self._record: NormalCompletionQuiescence | None = None
         self._completed_at = 0
 
@@ -550,6 +565,8 @@ class ControlServer:
             if isinstance(applied, LockOutcome):
                 raise refusal("registry_busy")
             raise delivery_error("deadline_expired")
+        if self._first_intent is not None:
+            raise delivery_error("workload_conflict")
         return entry
 
     async def _answer(self, channel: BoundedChannel, payload: bytes) -> None:
@@ -606,6 +623,14 @@ class ControlServer:
                     answer = error_envelope(request.request_id, operation_unknown())
                 await self._answer(channel, answer)
                 continue
+            if self._registry.first_grant:
+                closure = read_dispatcher_quiescence(payload)
+                if closure is not None:
+                    answer = await self._record_first_closure(
+                        closure, submitter, observational
+                    )
+                    await self._answer(channel, answer)
+                    return
             transfer = read_transfer(payload)
             if transfer is not None:
                 await self._receive_transfer(
@@ -626,7 +651,11 @@ class ControlServer:
             try:
                 await self._executor.run(lambda: self._authorized(submitter))
             except KoraProtocolError as error:
-                if error.code not in {"submitter_superseded", "deadline_expired"}:
+                if error.code not in {
+                    "submitter_superseded",
+                    "deadline_expired",
+                    "workload_conflict",
+                }:
                     raise
                 refusal = error
             repeated = declaration.sha256 == self._workload_sha256
@@ -949,6 +978,103 @@ class ControlServer:
             raise delivery_error("submitter_superseded")
         same_process(self._identities, submitter.process)
 
+    async def _record_first_closure(
+        self,
+        request: DispatcherQuiescenceRequest,
+        submitter: Submitter,
+        observational: bool,
+    ) -> bytes:
+        def write() -> None:
+            registry, key = self._registry, self._key
+            self._current_submitter(submitter)
+            head = registry.read(key)
+            if not isinstance(head, FirstGrantHead) or not isinstance(
+                head.entry, Running
+            ):
+                raise delivery_error("submitter_superseded")
+            grant = registry.linked_grant(key, head).grant
+            if grant.process is None or grant.dispatcher_id != submitter.dispatcher_id:
+                raise delivery_error("submitter_superseded")
+            if model_bytes(grant.process) != model_bytes(submitter.process):
+                raise delivery_error("submitter_superseded")
+            ack = request.acknowledgement
+            if model_bytes(request.grant) != model_bytes(grant) or (
+                ack.attempt_id,
+                ack.execution_domain_id,
+                ack.dispatcher_id,
+                ack.worker_incarnation_id,
+                ack.lease_generation,
+            ) != (
+                key.attempt_id,
+                key.execution_domain_id,
+                grant.dispatcher_id,
+                grant.incarnation_id,
+                grant.lease_epoch,
+            ):
+                raise delivery_error("workload_conflict")
+            record = model_bytes(
+                FirstClosureRecord(
+                    format="local-first-closure/1",
+                    closure=DispatcherClosure(
+                        quiescence=ack,
+                        provenance="registry_acknowledgement",
+                        process=None,
+                    ),
+                )
+            )
+            ref = RetainedReference.describe(record)
+            saved = registry.linked_closure(key, head, grant)
+            if self._first_intent is not None and self._first_intent != ref:
+                raise delivery_error("workload_conflict")
+            if saved is not None:
+                if self._first_intent != ref or model_bytes(saved) != record:
+                    raise delivery_error("workload_conflict")
+                if not self._first_confirmed:
+                    registry.synchronize_evidence(key, "first-closure")
+            else:
+                if (
+                    not isinstance(self._session, CommandSession)
+                    or self._admitted
+                    or self._closing is not None
+                ):
+                    raise delivery_error("workload_busy")
+                self._session.first_closure_ready()
+                links = FirstGrantLinks(grant=head.first_grant.grant, closure=ref)
+                updated = FirstGrantHead.model_validate(
+                    {**head.model_dump(), "first_grant": links}
+                )
+                resuming = self._first_intent is not None
+                self._first_intent = ref
+                registry.put_evidence(
+                    key, updated, "first-closure", record, resuming=resuming
+                )
+            self._first_confirmed = True
+
+        try:
+            if observational:
+                raise delivery_error("execution_unauthorized")
+            async with self._completing:
+                applied = await self._executor.run(
+                    lambda: self._registry.under_lock(self._key, write)
+                )
+                if isinstance(applied, LockOutcome):
+                    raise delivery_error("workload_busy")
+        except (AuthenticationRefused, PeerRefused):
+            return self._transfer_answer(
+                request.request_id, delivery_error("submitter_superseded")
+            )
+        except KoraProtocolError as error:
+            return self._transfer_answer(request.request_id, error)
+        return delivery_envelope(request.request_id, "dispatcher_quiescence_recorded")
+
+    def check_first_completion(self, head: LifecycleHead | None) -> None:
+        if self._registry.first_grant and (
+            not self._first_confirmed
+            or not isinstance(head, FirstGrantHead)
+            or head.first_grant.closure != self._first_intent
+        ):
+            raise delivery_error("workload_busy")
+
     async def _quiesce(
         self, submitter: Submitter, observational: bool, request_id: str
     ) -> bytes:
@@ -966,6 +1092,8 @@ class ControlServer:
             async with self._completing:
                 record = self._record
                 if record is None:
+                    if self._registry.first_grant and not self._first_confirmed:
+                        raise delivery_error("workload_busy")
                     if session.completion() is not Completion.COMPLETE:
                         raise delivery_error("workload_busy")
                     record = await self._complete(session, submitter)
@@ -1025,6 +1153,7 @@ class ControlServer:
                     exit_code,
                     retirement,
                 ),
+                self.check_first_completion,
             )
         )
         if isinstance(applied, LockOutcome):
