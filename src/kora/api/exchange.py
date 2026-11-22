@@ -68,6 +68,7 @@ class Exchange:
     code: str = "none"
     failed: bool = False
     principal: Principal | None = None
+    admit_claim: Callable[[], None] | None = None
 
     def failure(self, error: Exception) -> None:
         if not self.failed:

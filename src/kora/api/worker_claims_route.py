@@ -1,10 +1,14 @@
 from starlette.responses import Response
 
-from kora.api.errors import definitive_error
+from kora.api.errors import (
+    DependencyRetryContext,
+    definitive_error,
+    dependency_unavailable,
+)
 from kora.api.exchange import current_exchange
 from kora.api.responses import error_response
 from kora.engine.claim_context import ClaimAccessRejected, ClaimQuery
-from kora.engine.worker_claim_poll import WorkerClaimPoll
+from kora.engine.worker_claim_poll import ClaimOverloaded, WorkerClaimPoll
 from kora.models.errors import ApiErrorCode
 from kora.models.worker_claims import WorkerClaimRequest
 from kora.models.workers import WorkerName
@@ -27,7 +31,17 @@ class WorkerClaimsRoute:
             raise RuntimeError("worker authentication is required")
         query = ClaimQuery(worker_id=worker_id, **body.model_dump(exclude={"max"}))
         try:
-            delivery = await self.poll.poll(query, principal)
+            delivery = await self.poll.poll(
+                query, principal, admit=exchange.admit_claim
+            )
+        except ClaimOverloaded:
+            return error_response(
+                dependency_unavailable(
+                    DependencyRetryContext.PROVEN_PRE_EFFECT,
+                    request_id=exchange.request_id,
+                ),
+                method="POST",
+            )
         except ClaimAccessRejected as error:
             code = {
                 "forbidden": ApiErrorCode.FORBIDDEN,

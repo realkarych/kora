@@ -42,6 +42,19 @@ def changed(body: WorkerRegistration, **values: object) -> WorkerRegistration:
     return WorkerRegistration.model_validate({**body.model_dump(mode="json"), **values})
 
 
+async def registry_state(
+    database: Database,
+) -> dict[str, list[dict[str, object]]]:
+    async with database.read_transaction() as reader:
+        snapshot: dict[str, list[dict[str, object]]] = {}
+        for table in (worker, worker_execution_domain, worker_incarnation, event):
+            result = await reader.execute(
+                select(table).order_by(*table.primary_key.columns)
+            )
+            snapshot[table.name] = [dict(row) for row in result.mappings()]
+    return snapshot
+
+
 class DisconnectedWorkerBody(HttpCall):
     async def receive(self) -> Message:
         self.receives += 1
@@ -201,7 +214,9 @@ async def test_registration_restart_preserves_old_replay_and_process_uniqueness(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mismatch", ["owner", "runtime", "token", "domain"])
+@pytest.mark.parametrize(
+    "mismatch", ["owner", "runtime", "token", "domain", "token_and_domain"]
+)
 async def test_worker_registration_refuses_foreign_token_runtime_or_domain(
     database: Database,
     api_capture: Capture,
@@ -225,7 +240,19 @@ async def test_worker_registration_refuses_foreign_token_runtime_or_domain(
         other = changed(other, name=second.principal.owner, runtime="other")
     elif mismatch == "domain":
         other = changed(other, name=second.principal.owner)
-    elif mismatch == "token":
+    elif mismatch in ("token", "token_and_domain"):
+        if mismatch == "token_and_domain":
+            foreign = await seed_case(database, "registered-alternate", "service")
+            foreign_body = changed(
+                registration(foreign),
+                execution_domain_id="foreign-owned-domain",
+                process={**body.process.model_dump(mode="json"), "pid": 1236},
+            )
+            async with KoraClient(
+                "http://127.0.0.1", bearer(foreign), asgi_app=app
+            ) as foreign_client:
+                await foreign_client.register_worker(foreign_body)
+            other = changed(other, execution_domain_id=foreign_body.execution_domain_id)
         async with database.transaction() as connection:
             await connection.execute(
                 update(api_token)
@@ -233,15 +260,22 @@ async def test_worker_registration_refuses_foreign_token_runtime_or_domain(
                 .values(owner=first.principal.owner)
             )
 
+    before = await registry_state(database)
     async with KoraClient("http://127.0.0.1", bearer(second), asgi_app=app) as client:
         with pytest.raises(ApiError) as refusal:
             await client.register_worker(other)
     async with database.read_transaction() as connection:
-        current = (await connection.execute(select(worker))).mappings().one()
+        current = (
+            (await connection.execute(select(worker).where(worker.c.id == body.name)))
+            .mappings()
+            .one()
+        )
+    after = await registry_state(database)
 
     assert refusal.value.code == ("API002" if mismatch == "domain" else "API005")
     assert current["token_id"] == first.principal.token_id
     assert current["incarnation_id"] == body.incarnation_id
+    assert after == before
 
 
 @pytest.mark.asyncio
