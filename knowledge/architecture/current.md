@@ -221,7 +221,8 @@ Further owner decisions of 2026-11-11 reach the slice through their own sub-issu
 | Decision | Sub-issue |
 |---|---|
 | Codex's fail-closed tool-policy decision point becomes native app-server approval requests under an untrusted project. | [#1360](https://github.com/realkarych/kora/issues/1360) |
-| A second slice showing the outer loop, then the pilot, come before the scheduler-prototype milestone and the second runtime and VCS pair. | [#1359](https://github.com/realkarych/kora/issues/1359) |
+
+The [milestone-order amendment](../../docs/decisions/0001-own-control-plane.md#milestone-order-amendment-of-2026-11-11) records [#1359](https://github.com/realkarych/kora/issues/1359): the second slice and Git pilot precede the scheduler-prototype milestone and MVP acceptance on the second runtime/VCS pair.
 
 ## 6. Trust boundaries as currently specified
 

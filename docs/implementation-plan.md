@@ -234,8 +234,8 @@ Implemented foundations include logging, database tables/migrations/reads, CEL p
 
 **What it does not owe.**
 
-- The ten checks of the [scheduler-prototype milestone](../knowledge/specs/scheduler.md#18-scheduler-prototype-milestone-acceptance) belong to roadmap step 5.
-- The MVP acceptance on a second runtime and VCS pair belongs to roadmap step 6.
+- The ten checks belong to the [scheduler-prototype milestone](../knowledge/specs/scheduler.md#18-scheduler-prototype-milestone-acceptance), which follows the pilot in the [roadmap](roadmap.md#next-steps-in-order).
+- [MVP acceptance](requirements/functional.md) on a second runtime and VCS pair follows that milestone.
 - The Docker and protected-runtime evidence that roadmap item 1 requires is needed before a protected runtime ships.
 
 The component gates of the specifications stay with the slice that implements each component, as the ADR-0001 amendment states. [First-slice.md](../knowledge/specs/first-slice.md) assigns every further exclusion an implementation trigger, without weakening active checks.
