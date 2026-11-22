@@ -1105,7 +1105,7 @@ class ControlServer:
                 if record is None:
                     if self._registry.first_grant and not self._first_confirmed:
                         if isinstance(session, CommandSession):
-                            session.first_closure_ready()
+                            session.first_closure_ready(retry=True)
                         raise delivery_error("workload_busy")
                     if session.completion() is not Completion.COMPLETE:
                         raise delivery_error("workload_busy")

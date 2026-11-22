@@ -1,17 +1,20 @@
 import asyncio
+import errno
 import fcntl
 import json
 import os
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
-import time
 from collections.abc import Awaitable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from kora.conformance.capture import captured
 from kora.conformance.common import CONFORMANCE_COMPONENT, utc_now
@@ -19,14 +22,12 @@ from kora.observability import LoggingSettings
 from kora.plugins.runtime.local.channel import (
     ENVELOPE_BYTES,
     PRE_ATTACH_BYTES,
-    AttachRequest,
     DispatcherQuiescenceRequest,
-    FrameType,
     read_delivery,
     read_dispatcher_quiescence,
 )
 from kora.plugins.runtime.local.completed import recorded_exited
-from kora.plugins.runtime.local.control import attached_request, attested, connected
+from kora.plugins.runtime.local.control import attached_request
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
 from kora.plugins.runtime.local.spawn import runner_command
 from kora.plugins.runtime.local.supervisor import EXIT_FAILED
@@ -44,10 +45,11 @@ from kora.protocols.history import (
 )
 from kora.protocols.identity import MAX_COUNT, MAX_PID, GrantBinding, ProcessIdentity
 from kora.protocols.time import SystemClock
-from kora.runner.channels import BoundedChannel, ChannelError
+from kora.runner.channels import ChannelError
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.peers import kernel_source
 from kora.runner.registry import (
+    ADMITTED_JOBS,
     FIRST_GRANT_ARGUMENT,
     HEAD_LIMIT,
     PREFIX_BYTES,
@@ -73,10 +75,8 @@ from tests.plugins.runtime.local.test_command import (
     release_commands,
 )
 from tests.plugins.runtime.local.test_command_observation import unless_busy
+from tests.plugins.runtime.local.test_transfer import live_descriptors
 from tests.support.local_peers import (
-    CONDITION_SECONDS,
-    FAR_NS,
-    POLL_SECONDS,
     identity_of,
     until,
 )
@@ -165,50 +165,27 @@ def lock_is_free(path: Path) -> None:
         os.close(descriptor)
 
 
-async def discard_reply(
+async def discard_confirmed_reply(
     runtime: LocalRuntime,
     running: Running,
     request: DispatcherQuiescenceRequest,
     ctx: ProtocolContext,
-    closure_path: Path,
 ) -> None:
-    source = kernel_source(NativeIdentityReader())
-    cutoff = time.monotonic() + CONDITION_SECONDS
-    while not closure_path.exists():
-        assert time.monotonic() < cutoff
-        deadline = ctx.clock.monotonic_ns() + FAR_NS
-        endpoint = await connected(running.socket_path, ctx.clock, deadline)
-        channel = BoundedChannel(endpoint, ctx.clock)
-        try:
-            await attested(endpoint, running.runner, source, runtime.executor)
-            attach = AttachRequest(
-                op="attach",
-                request_id=request.request_id,
-                dispatcher_id=running.submitter.dispatcher_id,
-            )
-            await channel.write_typed_frame(
-                FrameType.JSON, model_bytes(attach), deadline
-            )
-            _, payload = await channel.read_typed_frame(
-                deadline, {FrameType.JSON.value: ENVELOPE_BYTES}
-            )
-            read_delivery(payload, request.request_id, "attached")
-            await channel.write_typed_frame(
-                FrameType.JSON, model_bytes(request), deadline
-            )
-        finally:
-            channel.close()
-        await asyncio.sleep(POLL_SECONDS)
-    key = runtime.registry.key(ATTEMPT)
-    await until(lambda: current_closure(runtime, key) is not None)
+    payload = await attached_request(
+        running.socket_path,
+        running.runner,
+        running.submitter.dispatcher_id,
+        kernel_source(NativeIdentityReader()),
+        runtime.executor,
+        ctx.clock,
+        request.request_id,
+        model_bytes(request),
+        ENVELOPE_BYTES,
+    )
+    read_delivery(payload, request.request_id, "dispatcher_quiescence_recorded")
 
 
-def current_closure(runtime: LocalRuntime, key: AttemptKey) -> RetainedReference | None:
-    head = runtime.registry.read(key)
-    return head.first_grant.closure if isinstance(head, FirstGrantHead) else None
-
-
-async def cancel_while_waiting_for_lock(
+async def cancel_admitted_replays(
     runtime: LocalRuntime,
     ctx: ProtocolContext,
     grant: GrantBinding,
@@ -216,23 +193,29 @@ async def cancel_while_waiting_for_lock(
     lock_path: Path,
 ) -> None:
     descriptor = os.open(lock_path, os.O_RDWR)
+    clock = StepClock()
+    blocked = replace(ctx, clock=clock)
+
+    def retry() -> Awaitable[None]:
+        return runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, blocked)
+
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        clock = StepClock()
-        pending = asyncio.create_task(
-            runtime.record_dispatcher_quiescence(
-                ATTEMPT, ack, grant, replace(ctx, clock=clock)
+        pending = [
+            asyncio.create_task(
+                runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, blocked)
             )
-        )
+            for _ in range(ADMITTED_JOBS)
+        ]
         try:
-            await asyncio.wait_for(clock.waiting.wait(), CONDITION_SECONDS)
-            pending.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await pending
+            await until(lambda: len(clock.sleepers) == ADMITTED_JOBS)
+            await expect_refusal("registry_busy", retry())
         finally:
-            if not pending.done():
-                pending.cancel()
-                await asyncio.gather(pending, return_exceptions=True)
+            for task in pending:
+                task.cancel()
+            outcomes = await asyncio.gather(*pending, return_exceptions=True)
+
+        assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
         assert not runtime.executor.jobs
     finally:
         os.close(descriptor)
@@ -365,12 +348,14 @@ async def exercise(
             runtime.executor,
             ctx.clock,
             request.request_id,
-            request,
+            model_bytes(request),
             ENVELOPE_BYTES,
         )
     assert not closure_path.exists()
     if discard:
-        await discard_reply(runtime, running, request, ctx, closure_path)
+        await unless_busy(
+            lambda: discard_confirmed_reply(runtime, running, request, ctx)
+        )
     else:
         await unless_busy(
             lambda: runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
@@ -417,7 +402,7 @@ async def exercise(
     sentinel.touch(mode=0o600)
     descriptors = open_descriptors()
 
-    await cancel_while_waiting_for_lock(runtime, ctx, grant, ack, lock_path)
+    await cancel_admitted_replays(runtime, ctx, grant, ack, lock_path)
     await runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
     await expect_refusal(
         "workload_conflict",
@@ -521,6 +506,67 @@ async def leave_running(
     (root / "observer-running").write_bytes(model_bytes(running))
 
 
+def sockets_open() -> set[int]:
+    sockets: set[int] = set()
+    for descriptor in live_descriptors():
+        try:
+            mode = os.fstat(descriptor).st_mode
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            if stat.S_ISSOCK(mode):
+                sockets.add(descriptor)
+    return sockets
+
+
+async def close_during_attach(
+    runtime: LocalRuntime, ctx: ProtocolContext, root: Path
+) -> None:
+    grant, page, ack = binding(runtime, ctx)
+    await runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    await runtime.submit(
+        command_workload(
+            runtime,
+            ATTEMPT,
+            (sys.executable, "-I", "-c", "pass"),
+            dispatcher_id=grant.dispatcher_id,
+        ),
+        ctx,
+    )
+    key = runtime.registry.key(ATTEMPT)
+    running = runtime.registry.entry(key)
+    assert isinstance(running, Running)
+    identities = NativeIdentityReader()
+    assert identity_of(running.runner.pid) == running.runner
+    before = sockets_open()
+
+    os.kill(running.runner.pid, signal.SIGSTOP)
+    try:
+        pending = asyncio.create_task(
+            runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
+        )
+        try:
+            await until(lambda: bool(sockets_open() - before))
+            attached = sockets_open() - before
+            await runtime.close()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+
+            assert sockets_open().isdisjoint(attached)
+            assert runtime.executor.joined
+            assert not (
+                root / "registry" / f"{key.name}.first-closure.v1.json"
+            ).exists()
+        finally:
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+    finally:
+        if not recorded_exited(identities, running.runner):
+            os.kill(running.runner.pid, signal.SIGCONT)
+
+
 async def original_worker(root: Path, sockets: Path, case: str) -> None:
     with captured(
         CONFORMANCE_COMPONENT, LoggingSettings(), "first-grant-test", utc_now
@@ -539,6 +585,8 @@ async def original_worker(root: Path, sockets: Path, case: str) -> None:
                 await closure_storage_full(runtime, ctx, root)
             elif case == "observer":
                 await leave_running(runtime, ctx, root)
+            elif case == "shutdown":
+                await close_during_attach(runtime, ctx, root)
             else:
                 await exercise(runtime, ctx, root, discard=case == "lost")
         finally:
@@ -630,7 +678,7 @@ async def test_first_local_grant_runner_refuses_native_observer(tmp_path: Path) 
                 executor,
                 SystemClock(),
                 request.request_id,
-                request,
+                model_bytes(request),
                 ENVELOPE_BYTES,
             )
 
@@ -669,6 +717,14 @@ def test_first_local_grant_runner_refuses_mismatched_startup(tmp_path: Path) -> 
     root = state_root(tmp_path)
 
     result = run_worker(root, "launch")
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_first_local_grant_runtime_close_joins_attached_socket(tmp_path: Path) -> None:
+    root = state_root(tmp_path)
+
+    result = run_worker(root, "shutdown")
 
     assert result.returncode == 0, result.stderr
 
@@ -776,6 +832,13 @@ def test_first_local_grant_codec_holds_legally_maximal_records() -> None:
     )
     assert len(head_bytes) <= HEAD_LIMIT
     assert model_bytes(FirstGrantHead.model_validate_json(head_bytes)) == head_bytes
+
+    expanded = type(entry).model_validate(
+        {**entry.model_dump(), "runner_prefix": ("\x01" * (PREFIX_BYTES - 3), "/")}
+    )
+
+    with pytest.raises(ValidationError, match="the registry head exceeds its bound"):
+        FirstGrantHead.model_validate({**head.model_dump(), "entry": expanded})
 
 
 if __name__ == "__main__":

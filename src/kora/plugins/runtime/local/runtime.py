@@ -148,6 +148,7 @@ from kora.runner.native_io import NativeIOSubmissionUncertain, observed
 from kora.runner.peers import PeerRefused, PeerSource, kernel_source, same_process
 from kora.runner.processes import ExitAnchor, SignalResult, wait_member_change
 from kora.runner.registry import (
+    ADMITTED_JOBS,
     COMPONENT,
     FIRST_GRANT_ARGUMENT,
     RUNTIME_NAME,
@@ -848,7 +849,7 @@ class LocalRuntime:
             raise refusal("lineage_unavailable") from None
 
     def checked_first(
-        self, key: AttemptKey, head: LifecycleHead | None, ctx: ProtocolContext
+        self, key: AttemptKey, ctx: ProtocolContext, head: LifecycleHead | None
     ) -> FirstGrantState:
         owner = self._first_grants.get(key)
         if (
@@ -878,14 +879,15 @@ class LocalRuntime:
     def first_effect(
         self,
         key: AttemptKey,
-        head: LifecycleHead | None,
         ctx: ProtocolContext,
+        head: LifecycleHead | None,
         dispatcher: str | None = None,
     ) -> None:
-        first, record, _, closure = self.checked_first(key, head, ctx)
-        entry = first.entry
-        if closure is not None and isinstance(entry, Running):
-            if entry.gate_closed or expired(entry.deadline, ctx.clock.now()):
+        first, record, _, closure = self.checked_first(key, ctx, head)
+        if closure is not None and isinstance(first.entry, Running):
+            if first.entry.gate_closed or expired(
+                first.entry.deadline, ctx.clock.now()
+            ):
                 raise refusal("deadline_expired")
             raise refusal("workload_conflict")
         if dispatcher not in (None, record.grant.dispatcher_id):
@@ -908,15 +910,11 @@ class LocalRuntime:
     async def first_state(
         self, key: AttemptKey, ctx: ProtocolContext
     ) -> FirstGrantState:
-        return await self.locked_head(
-            key, ctx, lambda head: self.checked_first(key, head, ctx)
-        )
+        return await self.locked_head(key, ctx, partial(self.checked_first, key, ctx))
 
     async def check_first_effect(self, key: AttemptKey, ctx: ProtocolContext) -> None:
         if self._launch.first_grant:
-            await self.locked_head(
-                key, ctx, lambda head: self.first_effect(key, head, ctx)
-            )
+            await self.locked_head(key, ctx, partial(self.first_effect, key, ctx))
 
     def singleton(
         self,
@@ -960,7 +958,7 @@ class LocalRuntime:
             return self.registry.under_lock(key, settled)
 
         def settled() -> GrantHistoryProgress:
-            head, record, _, _ = self.checked_first(key, self.registry.read(key), ctx)
+            head, record, _, _ = self.checked_first(key, ctx, self.registry.read(key))
             if isinstance(head.entry, Retiring | Retired) or released(head.entry):
                 raise refusal("attempt_retired")
             if record.snapshot != snapshot or model_bytes(record.grant) != model_bytes(
@@ -1061,9 +1059,7 @@ class LocalRuntime:
             ),
             ctx,
             "workspace_target",
-            (lambda head: self.first_effect(key, head, ctx))
-            if self._launch.first_grant
-            else None,
+            partial(self.first_effect, key, ctx) if self._launch.first_grant else None,
         )
         target = str(self._root_path / "workspaces" / key.name)
         return WorkspaceTarget(root=target, host_path=target)
@@ -1250,7 +1246,11 @@ class LocalRuntime:
                 ctx.clock,
                 self._new_identifier(),
             )
-            if owner is not None and closure is not None:
+            if owner is not None:
+                if closure is None:
+                    closure = (await self.first_state(key, ctx))[0].first_grant.closure
+                if closure is None:
+                    raise refusal("lineage_unavailable")
                 owner.completed = record, closure
             return record
         except (ListenerRefused, ChannelError, OSError):
@@ -1276,6 +1276,8 @@ class LocalRuntime:
             raise refusal("runtime_closed")
 
         with report_first_grant(ctx, "closure"):
+            if len(self._deliveries) >= ADMITTED_JOBS:
+                raise refusal("registry_busy")
             task = asyncio.create_task(
                 self._record_dispatcher_quiescence(key, acknowledgement, grant, ctx)
             )
@@ -1291,7 +1293,7 @@ class LocalRuntime:
         ctx: ProtocolContext,
     ) -> None:
         def checked(head: LifecycleHead | None) -> Running | None:
-            head, retained, owner, saved = self.checked_first(key, head, ctx)
+            head, retained, owner, saved = self.checked_first(key, ctx, head)
             if model_bytes(retained.grant) != model_bytes(grant):
                 raise refusal("workload_conflict")
             if isinstance(head.entry, Running):
@@ -1329,7 +1331,7 @@ class LocalRuntime:
                 self.executor,
                 ctx.clock,
                 request.request_id,
-                request,
+                model_bytes(request),
                 ENVELOPE_BYTES,
             )
         except (ListenerRefused, ChannelError, OSError):
@@ -1917,7 +1919,7 @@ class LocalRuntime:
             ),
             ctx,
             "submit",
-            (lambda head: self.first_effect(key, head, ctx, workload.dispatcher_id))
+            partial(self.first_effect, key, ctx, dispatcher=workload.dispatcher_id)
             if self._launch.first_grant
             else None,
         )
@@ -2113,9 +2115,7 @@ class LocalRuntime:
                 lambda current: released_cell(current, runner, now),
                 ctx,
                 "release",
-                (lambda head: self.checked_first(key, head, ctx))
-                if owner is not None
-                else None,
+                partial(self.checked_first, key, ctx) if owner is not None else None,
                 confirmed,
             )
         except KoraProtocolError:

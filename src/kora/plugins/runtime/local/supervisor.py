@@ -77,6 +77,7 @@ from kora.runner.registry import (
     model_bytes,
     read_domain,
     register_cell,
+    registry_exists,
     socket_path,
 )
 
@@ -350,23 +351,22 @@ def registration_head(
     return entry, model_bytes(head)
 
 
-def startup_registry(root: DirectoryAnchor, arguments: RunnerArguments) -> Registry:
-    domain = read_domain(root)
-    if domain is None or domain.execution_domain_id != arguments.execution_domain_id:
-        raise RunnerRefused("domain")
-    return Registry(
-        open_private_directory(root, "registry"),
-        domain.execution_domain_id,
-        lambda: secrets.token_hex(16),
-        first_grant=arguments.first_grant,
-    )
-
-
 def prepare_registration(arguments: RunnerArguments) -> PreparedRegistration:
     with ExitStack() as resources:
         root = open_local_directory(arguments.state_root)
         resources.callback(root.close)
-        registry = startup_registry(root, arguments)
+        domain = read_domain(root)
+        if (
+            domain is None
+            or domain.execution_domain_id != arguments.execution_domain_id
+        ):
+            raise RunnerRefused("domain")
+        registry = Registry(
+            open_private_directory(root, "registry"),
+            domain.execution_domain_id,
+            lambda: secrets.token_hex(16),
+            first_grant=arguments.first_grant,
+        )
         resources.callback(registry.directory.close)
         key = registry.key(arguments.attempt_id)
         entry, expected = registration_head(registry, key, arguments)
@@ -461,13 +461,25 @@ def run(
         with ExitStack() as resources:
             root = open_local_directory(arguments.state_root)
             resources.callback(root.close)
-            registry = startup_registry(root, arguments)
-            resources.callback(registry.directory.close)
-            key = registry.key(arguments.attempt_id)
-            if arguments.first_grant:
-                registration_head(registry, key, arguments)
-            else:
-                registry.read(key)
+            if arguments.first_grant or registry_exists(root):
+                registry = Registry(
+                    open_private_directory(root, "registry"),
+                    arguments.execution_domain_id,
+                    lambda: secrets.token_hex(16),
+                    first_grant=arguments.first_grant,
+                )
+                resources.callback(registry.directory.close)
+                key = registry.key(arguments.attempt_id)
+                if arguments.first_grant:
+                    domain = read_domain(root)
+                    if (
+                        domain is None
+                        or domain.execution_domain_id != key.execution_domain_id
+                    ):
+                        raise RunnerRefused("domain")
+                    registration_head(registry, key, arguments)
+                else:
+                    registry.read(key)
         attempt = attempt_directory(arguments)
         try:
             faulthandler.enable(append_only(attempt, "runner.crash"))

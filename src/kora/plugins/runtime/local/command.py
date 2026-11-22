@@ -897,12 +897,12 @@ class CommandSession:
     def _halted(self) -> bool:
         return self._stop.is_set() or self._fenced.is_set()
 
-    def first_closure_ready(self) -> None:
+    def first_closure_ready(self, *, retry: bool = False) -> None:
         if self._journal.closed:
             raise delivery_error("journal_unavailable")
         with self._lock:
             transferring = self._transferring
-        if transferring or self.completion() is not Completion.COMPLETE:
+        if transferring or self.completion(retry=retry) is not Completion.COMPLETE:
             raise delivery_error("workload_busy")
 
     def result_work_settled(self) -> bool:
@@ -915,7 +915,7 @@ class CommandSession:
         self._begin_domain_stop(self._clock.monotonic_ns())
         self._workspace.cancel()
 
-    def completion(self) -> Completion:
+    def completion(self, *, retry: bool = True) -> Completion:
         domain_stop = self._domain_stop
         if domain_stop is None or not domain_stop.done():
             return Completion.PENDING
@@ -924,7 +924,8 @@ class CommandSession:
             or domain_stop.exception() is not None
             or domain_stop.result() is not StopOutcome.CONFIRMED
         ):
-            self._retry_domain_stop()
+            if retry:
+                self._retry_domain_stop()
             return Completion.UNRESOLVED
         with self._lock:
             unattached = self._observing and self._capture_seal is None

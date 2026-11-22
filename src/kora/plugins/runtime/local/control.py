@@ -15,7 +15,6 @@ from kora.plugins.runtime.local.channel import (
     SECTION_FRAME_BYTES,
     START_PROGRESS_NS,
     AttachRequest,
-    DispatcherQuiescenceRequest,
     FrameType,
     LogRequest,
     MessageRefusal,
@@ -158,7 +157,7 @@ async def attached_request(
     executor: TransitionExecutor,
     clock: Clock,
     request_id: str,
-    op: str | DispatcherQuiescenceRequest,
+    op: str | bytes,
     reservation: int,
 ) -> bytes:
     deadline = clock.monotonic_ns() + FRAME_PROGRESS_NS
@@ -176,11 +175,7 @@ async def attached_request(
         _, payload = await channel.read_typed_frame(deadline, reservations)
         read_delivery(payload, request_id, "attached")
         answered = clock.monotonic_ns() + START_PROGRESS_NS
-        prepared = (
-            control_request(op, request_id)
-            if isinstance(op, str)
-            else canonical_bytes(op.model_dump(mode="json"))
-        )
+        prepared = control_request(op, request_id) if isinstance(op, str) else op
         await channel.write_typed_frame(FrameType.JSON, prepared, answered)
         _, payload = await channel.read_typed_frame(
             answered, {FrameType.JSON.value: reservation}
