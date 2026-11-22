@@ -59,6 +59,16 @@ class SchedulerClaimClock(FakeClock, SystemClock):
 
 
 @dataclass(frozen=True)
+class SchedulerClaimSetup:
+    app: ApiExchange
+    user: AuthenticationCase
+    clock: SchedulerClaimClock
+    processor: AdmissionProcessor
+    registration: WorkerRegistration
+    request: WorkerClaimRequest
+
+
+@dataclass(frozen=True)
 class SchedulerClaimCase:
     app: ApiExchange
     clock: SchedulerClaimClock
@@ -109,13 +119,13 @@ async def node_id(database: Database, run_id: str, path: str) -> str:
     return value
 
 
-async def scheduler_claim_case(
+async def scheduler_claim_setup(
     database: Database,
     preparer: DeploymentPreparer,
     api_capture: Capture,
     *,
     with_heartbeat: bool = False,
-) -> SchedulerClaimCase:
+) -> SchedulerClaimSetup:
     user = await seed_case(database, NAMESPACE)
     namespace_id = user.principal.namespaces[0].namespace_id
     worker = await service_identity(database, namespace_id)
@@ -176,6 +186,12 @@ async def scheduler_claim_case(
         1,
         INTERVAL,
     )
+    return SchedulerClaimSetup(
+        app, user, clock, processor, worker_registration, request
+    )
+
+
+def scheduler_claim_ir() -> JsonObject:
     ir = skeleton_ir()
     cast(JsonObject, ir["runtime"])["limits"] = {"timeout": "1h"}
     cast(JsonObject, ir["graph"])["params"] = {
@@ -184,10 +200,48 @@ async def scheduler_claim_case(
         "required": ["quantity"],
         "additionalProperties": False,
     }
-    headers = {"Authorization": str(user.request.authorization)}
-    async with client_for(app) as deployment_client:
+    return ir
+
+
+async def promote_and_admit_agent(
+    setup: SchedulerClaimSetup, accepted: AcceptedRun, deployed: DeployResponse
+) -> PromotionCase:
+    database = setup.processor.database
+    namespace_id = setup.user.principal.namespaces[0].namespace_id
+    setup.clock.advance(1)
+    promotion, _ = await promotion_from_http(
+        database,
+        namespace_id,
+        accepted,
+        deployed,
+        setup.clock,
+        setup.processor.identifiers,
+    )
+    assert await promotion.promote(database) is PromotionOutcome.APPLIED
+    agent = await node_id(database, promotion.run_id, "agent")
+    assert (
+        await process(setup.processor, agent, periodic=False)
+        is AttemptAdmissionState.QUEUED
+    )
+    return promotion
+
+
+async def scheduler_claim_case(
+    database: Database,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+    *,
+    with_heartbeat: bool = False,
+) -> SchedulerClaimCase:
+    setup = await scheduler_claim_setup(
+        database, preparer, api_capture, with_heartbeat=with_heartbeat
+    )
+    headers = {"Authorization": str(setup.user.request.authorization)}
+    async with client_for(setup.app) as deployment_client:
         publication = await deployment_client.post(
-            VERSIONS, json={"graph": GRAPH, "ir": ir, "resources": []}, headers=headers
+            VERSIONS,
+            json={"graph": GRAPH, "ir": scheduler_claim_ir(), "resources": []},
+            headers=headers,
         )
         start = await deployment_client.post(
             RUNS,
@@ -197,15 +251,13 @@ async def scheduler_claim_case(
     assert publication.status_code == start.status_code == 201
     deployed = DeployResponse.model_validate(publication.json())
     accepted = AcceptedRun.model_validate(start.json())
-    clock.advance(1)
-    promotion, _ = await promotion_from_http(
-        database, namespace_id, accepted, deployed, clock, identifiers
-    )
-    assert await promotion.promote(database) is PromotionOutcome.APPLIED
-    agent = await node_id(database, promotion.run_id, "agent")
-    assert (
-        await process(processor, agent, periodic=False) is AttemptAdmissionState.QUEUED
-    )
+    promotion = await promote_and_admit_agent(setup, accepted, deployed)
     return SchedulerClaimCase(
-        app, clock, promotion, processor, deployed, worker_registration, request
+        setup.app,
+        setup.clock,
+        promotion,
+        setup.processor,
+        deployed,
+        setup.registration,
+        setup.request,
     )

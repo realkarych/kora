@@ -1,13 +1,13 @@
 import sqlite3
 from datetime import UTC, datetime
-from typing import Final, Protocol, cast
+from typing import Final
 
 from sqlalchemy import Integer, literal_column, or_, select, update
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as DatabaseTimeout
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from kora.db.connection import Database, DatabaseClosedError, Dialect
+from kora.db.connection import Database, DatabaseClosedError
 from kora.db.identifiers import is_identifier
 from kora.db.tables import api_token
 from kora.db.transactions import raise_private_metadata_error, writer_transaction
@@ -24,14 +24,6 @@ UNAVAILABLE_SQLITE: Final[frozenset[int]] = frozenset(
         sqlite3.SQLITE_PROTOCOL,
     )
 )
-
-
-class PostgresDriver(Protocol):
-    PostgresError: type[Exception]
-
-
-class PostgresAdapter(Protocol):
-    asyncpg: PostgresDriver
 
 
 class GraphCredentialGuardRejected(RuntimeError):
@@ -74,10 +66,8 @@ def authentication_errors(database: Database) -> tuple[type[Exception], ...]:
         DatabaseClosedError,
         ValueError,
     )
-    if database.dialect is Dialect.POSTGRESQL:
-        adapter = cast("PostgresAdapter", database.writer_engine.dialect.loaded_dbapi)
-        return (*errors, adapter.asyncpg.PostgresError)
-    return errors
+    native_error = database.postgresql_driver_error()
+    return errors if native_error is None else (*errors, native_error)
 
 
 def authentication_unavailable(error: Exception) -> bool:
