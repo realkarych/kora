@@ -90,7 +90,7 @@ async def test_a_refused_commit_records_failure_and_never_finished(
     report = await upgrade_database(empty_database_settings)
     finished_output(diagnostics, pipe)
 
-    assert report.steps == 32
+    assert report.steps == 33
     assert db_events(pipe) == [
         "db.transaction.failed",
         "db.migration.started",
