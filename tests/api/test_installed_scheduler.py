@@ -11,17 +11,30 @@ import httpx
 import pytest
 
 from kora.api.graph_deployment_worker import DeploymentPreparer
-from kora.api.installed_scheduler import initial_admission_limits
+from kora.api.installed_scheduler import (
+    initial_admission_limits,
+    installed_root_admission,
+)
 from kora.api.installed_worker import installed_worker_profile
 from kora.client.transport import KoraClient
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
+from kora.engine.admission_preparation import (
+    AdmissionPreparationRejected,
+    prepare_admission_snapshot,
+)
 from kora.engine.admission_snapshot import AdmissionSnapshotRejected
+from kora.engine.attempt_admission import AttemptAdmissionState
+from kora.engine.attempt_preparation_budget import (
+    AttemptPreparationLimits,
+    attempt_preparation_reservation,
+)
 from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun
 from kora.models.worker_claims import WorkerClaim, WorkerClaimRequest
 from kora.observability.settings import COMPONENT_LEVELS_VARIABLE, LEVEL_VARIABLE
 from tests.api.deployment_cases import GRAPH, NAMESPACE, preparer, skeleton_ir
+from tests.api.deployment_cases import SELECTION as INSTALLATION
 from tests.api.scheduler_claim_support import (
     PARAMS,
     scheduler_claim_ir,
@@ -53,8 +66,9 @@ from tests.api.test_packaging import (
     serving_installation,
     terminate_installed_api,
 )
-from tests.api.worker_support import bearer, registration
+from tests.api.worker_support import CAPABILITIES, bearer, registration
 from tests.db.closing import ConnectionLedger
+from tests.engine.admission_processing_support import process
 from tests.engine.admission_snapshot_support import acquire, snapshot_case
 from tests.engine.claim_support import state
 from tests.engine.graph_output_cases import child as ir_child
@@ -606,3 +620,72 @@ async def test_installed_scheduler_derives_exact_two_graph_reservations(
     assert accepted.graph is not accepted.cap_graph
     assert before.checkouts == 1
     assert before.outstanding == database.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_installed_scheduler_bounds_detached_and_claim_preparation(
+    database: Database, preparer: DeploymentPreparer, api_capture: Capture
+) -> None:
+    pending = await snapshot_case(database, preparer, api_capture)
+    worker = installed_worker_profile("2000")
+    assert worker is not None
+    owner = installed_root_admission(
+        database,
+        worker.limits,
+        pending.promotion.clock.now,
+        pending.promotion.identifiers,
+        INSTALLATION,
+        CAPABILITIES,
+    )
+    preparation = owner.limits.preparation
+    deadline = asyncio.get_running_loop().time() + worker.limits.read_seconds
+    ledger = ConnectionLedger(database)
+
+    with pytest.raises(AdmissionPreparationRejected):
+        await prepare_admission_snapshot(
+            database,
+            pending.node_id,
+            replace(preparation, work_units=preparation.work_units - 1),
+            observed_at=owner.clock(),
+            periodic_recheck=True,
+            deadline=deadline,
+        )
+    rejected_checkouts = ledger.checkouts
+    prepared = await prepare_admission_snapshot(
+        database,
+        pending.node_id,
+        preparation,
+        observed_at=owner.clock(),
+        periodic_recheck=True,
+        deadline=deadline,
+    )
+    exact = attempt_preparation_reservation(
+        prepared.checked,
+        AttemptPreparationLimits(
+            preparation.snapshot.graph,
+            prepared.reservation.retained_units,
+            preparation.retained_units,
+            owner.limits.claim_work,
+        ),
+        reconstruct_params=True,
+    )
+    short_retained = replace(
+        owner.limits,
+        preparation=replace(preparation, retained_units=exact.retained_units - 1),
+    )
+    short_work = replace(owner.limits, claim_work=exact.work_units - 1)
+    refused = [
+        await process(replace(owner, limits=limits), pending.node_id)
+        for limits in (short_retained, short_work)
+    ]
+    intermediate = await state(database)
+    admitted = await process(owner, pending.node_id)
+    final = await state(database)
+
+    assert rejected_checkouts == 0
+    assert refused == [AttemptAdmissionState.REFUSED] * 2
+    assert not intermediate["attempt"]
+    assert admitted is AttemptAdmissionState.QUEUED
+    assert len(final["attempt"]) == 1
+    assert not final["attempt_dispatcher"]
+    assert ledger.outstanding == database.units_in_flight() == 0
