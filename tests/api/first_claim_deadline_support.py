@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
-import httpx
 import pytest
 from sqlalchemy import Connection, delete, event, insert, text, update
 from sqlalchemy.util import await_
@@ -34,7 +33,8 @@ from tests.api.scheduler_claim_support import (
     scheduler_claim_ir,
     service_identity,
 )
-from tests.api.worker_support import bearer, registration
+from tests.api.support import client_for
+from tests.api.worker_support import registration
 from tests.db.closing import ConnectionLedger
 from tests.engine.admission_processing_support import process
 from tests.engine.claim_support import state
@@ -59,7 +59,6 @@ class Candidate:
 
 
 async def promote_candidate(
-    origin: str,
     setup: SchedulerClaimSetup,
     key: str,
     *,
@@ -71,14 +70,13 @@ async def promote_candidate(
         agent = cast(JsonObject, cast(JsonObject, graph["nodes"])["agent"])
         agent["limits"] = {"timeout": attempt_timeout}
         cast(JsonObject, ir["runtime"]).pop("limits")
-    async with httpx.AsyncClient(
-        base_url=origin, headers={"Authorization": "Bearer " + bearer(setup.user)}
-    ) as client:
+    headers = {"Authorization": str(setup.user.request.authorization)}
+    async with client_for(setup.app) as client:
         deployment = await client.post(
-            VERSIONS, json={"graph": GRAPH, "ir": ir, "resources": []}
+            VERSIONS, json={"graph": GRAPH, "ir": ir, "resources": []}, headers=headers
         )
         accepted = await client.post(
-            RUNS, json={"params": PARAMS}, headers={"Idempotency-Key": key}
+            RUNS, json={"params": PARAMS}, headers=headers | {"Idempotency-Key": key}
         )
     assert deployment.status_code == accepted.status_code == 201
     database = setup.processor.database
@@ -104,13 +102,11 @@ async def promote_candidate(
     )
 
 
-async def reserve_crossing_candidate(
-    origin: str, setup: SchedulerClaimSetup
-) -> Candidate:
+async def reserve_crossing_candidate(setup: SchedulerClaimSetup) -> Candidate:
     now = setup.clock.now()
     millis = (MAX_UTC - now) // timedelta(milliseconds=1) - 1000
     target = await promote_candidate(
-        origin, setup, "crossing-cutoff", attempt_timeout=f"{millis}ms"
+        setup, "crossing-cutoff", attempt_timeout=f"{millis}ms"
     )
     assert (
         first_claim_deadline(
@@ -573,8 +569,8 @@ async def admit_after_first_claim_deadline_crossing(
     transport: str,
 ) -> Candidate:
     database = setup.processor.database
-    original = await reserve_crossing_candidate(origin, setup)
-    safe = await promote_candidate(origin, setup, "representable-cutoff")
+    original = await reserve_crossing_candidate(setup)
+    safe = await promote_candidate(setup, "representable-cutoff")
     waiting = await process(setup.processor, safe.node_id, periodic=False)
     await clear_scheduling_mark(database, original)
     setup.clock.advance(1)
