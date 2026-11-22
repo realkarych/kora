@@ -21,13 +21,15 @@ from kora.db.types import POSTGRESQL, SQLITE
 from kora.db.worker_claim_poll_v1 import CANDIDATE_INDEX, CANDIDATE_ROWS
 
 SQLITE_DDL: str = str(CreateTable(basis).compile(dialect=sqlite_dialect())).strip()
-REVISION_QUERY: str = (
-    "SELECT CASE WHEN version_num IN ('0032', '0033') THEN version_num END "
-    "FROM {relation} LIMIT 2"
-)
 MIGRATION_REVISION = {
-    SQLITE: text(REVISION_QUERY.format(relation="main.alembic_version")),
-    POSTGRESQL: text(REVISION_QUERY.format(relation="alembic_version")),
+    SQLITE: text(
+        "SELECT CASE WHEN version_num IN ('0032', '0033') THEN version_num END "
+        "FROM main.alembic_version LIMIT 2"
+    ),
+    POSTGRESQL: text(
+        "SELECT CASE WHEN version_num IN ('0032', '0033') THEN version_num END "
+        "FROM alembic_version LIMIT 2"
+    ),
 }
 SQLITE_SCHEMA = text("""
     SELECT count(*) = 0,
