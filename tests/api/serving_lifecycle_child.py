@@ -24,6 +24,7 @@ from kora.api.application import create_application
 from kora.api.exchange import COMPONENT
 from kora.api.graph_deployment_worker import THREAD_NAME, DeploymentPreparer
 from kora.api.graph_services import deployment_selection
+from kora.api.installed_scheduler import installed_root_admission
 from kora.api.installed_worker import installed_worker_profile
 from kora.api.serving import serve_sqlite
 from kora.api.worker_claims_route import WorkerClaimsRoute
@@ -112,7 +113,9 @@ async def lifecycle(receive: Receive, send: Send) -> None:
     await send({"type": "lifespan.shutdown.complete"})
 
 
-def held_request_app(database: Database, release: int | None = None) -> ASGIApp:
+def held_request_app(
+    database: Database, release: int | None = None, *, scheduler_retained: bool = False
+) -> ASGIApp:
     async def application(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
             await lifecycle(receive, send)
@@ -126,12 +129,18 @@ def held_request_app(database: Database, release: int | None = None) -> ASGIApp:
                 else:
                     with await connection.exec_driver_sql("SELECT 1") as result:
                         result.scalar_one()
+                    if scheduler_retained:
+                        assert database.units_in_flight() == 2
                     os.write(1, b"request_holds_sqlite\n")
                 while (await receive())["type"] != "http.disconnect":
                     continue
         except DatabaseClosedError:
             if release is None:
                 raise
+        if scheduler_retained:
+            assert database.units_in_flight() == 1
+            assert database.lifecycle is Lifecycle.OPEN
+            assert owns_sqlite_descriptor(database.settings.sqlite_path)
         os.write(1, b"request_settled\n")
 
     return application
@@ -247,6 +256,7 @@ def worker_lifecycle_app(
     release: int,
     recovery: bool,
     native_sigterm: bool,
+    scheduler_http_hold: bool = False,
 ) -> ASGIApp:
     profile = installed_worker_profile("2000")
     assert profile is not None
@@ -276,8 +286,16 @@ def worker_lifecycle_app(
         single_claim=True,
     )
     held = False
+    held_http = (
+        held_request_app(database, scheduler_retained=True)
+        if scheduler_http_hold
+        else None
+    )
 
     async def exercise(scope: Scope, receive: Receive, send: Send) -> None:
+        if held_http is not None and scope["type"] == "http":
+            await held_http(scope, receive, send)
+            return
         claim = (
             scope["type"] == "http"
             and scope["method"] == "POST"
@@ -307,7 +325,13 @@ def worker_lifecycle_app(
                     pass
             await send(message)
 
-        await application(scope, receive, observe)
+        async def observe_receive() -> Message:
+            message = await receive()
+            if scheduler_http_hold and message["type"] == "lifespan.shutdown":
+                os.write(1, b"lifespan_shutdown_received\n")
+            return message
+
+        await application(scope, observe_receive, observe)
         if original is not None:
             assert original.get_write_buffer_size() > 1024 * 1024
             assert owns_sqlite_descriptor(database.settings.sqlite_path)
@@ -317,8 +341,13 @@ def worker_lifecycle_app(
 
 
 def scheduler_lifecycle_owner(
-    database: Database, release: int, native_sigterm: bool
+    database: Database,
+    release: int,
+    native_sigterm: bool,
+    forced_owners: list[Database] | None = None,
 ) -> Scheduler:
+    if forced_owners is not None:
+        forced_owners.append(database)
     profile = installed_worker_profile("2000")
     assert profile is not None
     clock = SystemClock()
@@ -352,7 +381,7 @@ def scheduler_lifecycle_owner(
             adapter.run_async(trace)
 
     event.listen(database.reader_engine.sync_engine, "before_cursor_execute", attach)
-    return first_claim_scheduler(
+    admission = installed_root_admission(
         database,
         profile.limits,
         clock.now,
@@ -360,6 +389,7 @@ def scheduler_lifecycle_owner(
         selected,
         capabilities,
     )
+    return first_claim_scheduler(admission, read_seconds=profile.limits.read_seconds)
 
 
 def now() -> datetime:
@@ -375,6 +405,7 @@ def launch() -> int:
     port = 0
     worker_startup = False
     make_scheduler: Callable[[Database], Scheduler] | None = None
+    forced_owners: list[Database] = []
     try:
         match sys.argv[1:]:
             case ["refuse_lifespan"]:
@@ -406,7 +437,11 @@ def launch() -> int:
                 port = int(requested_port)
                 worker_startup = True
             case [
-                ("hold_scheduler_poll" | "hold_scheduler_poll_native_term") as mode,
+                (
+                    "hold_scheduler_poll"
+                    | "hold_scheduler_poll_native_term"
+                    | "hold_scheduler_poll_forced"
+                ) as mode,
                 requested_port,
                 release,
             ]:
@@ -417,11 +452,15 @@ def launch() -> int:
                     release=int(release),
                     recovery=False,
                     native_sigterm=False,
+                    scheduler_http_hold=mode == "hold_scheduler_poll_forced",
                 )
                 make_scheduler = partial(
                     scheduler_lifecycle_owner,
                     release=int(release),
                     native_sigterm=mode == "hold_scheduler_poll_native_term",
+                    forced_owners=(
+                        forced_owners if mode == "hold_scheduler_poll_forced" else None
+                    ),
                 )
                 port = int(requested_port)
                 worker_startup = True
@@ -441,6 +480,13 @@ def launch() -> int:
         if sys.argv[1:2] == ["hold_native"]:
             assert not owns_sqlite_descriptor(settings.sqlite_path)
             os.write(1, b"native_sqlite_file_closed\n")
+        if sys.argv[1:2] == ["hold_scheduler_poll_forced"]:
+            [database] = forced_owners
+            assert database.lifecycle is Lifecycle.CLOSED
+            assert database.units_in_flight() == 0
+            assert database.writer_is_free()
+            assert not owns_sqlite_descriptor(settings.sqlite_path)
+            os.write(1, b"scheduler_database_settled\n")
         if preparer is not None:
             owner = PROCESS.thread
             assert owner is not None

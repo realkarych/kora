@@ -14,6 +14,7 @@ from kora.db.connection import Database
 from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun
 from kora.models.worker_claims import WorkerClaim, WorkerClaimRequest
+from kora.observability.settings import COMPONENT_LEVELS_VARIABLE, LEVEL_VARIABLE
 from tests.api.deployment_cases import GRAPH, NAMESPACE
 from tests.api.scheduler_claim_support import (
     PARAMS,
@@ -34,6 +35,7 @@ from tests.api.test_installed_workers import (
 from tests.api.test_packaging import (
     DOMAIN_HARNESS,
     DRAIN_RECEIPT_TIMEOUT,
+    LOOPBACK,
     SERVE_TIMEOUT,
     api_command,
     api_environment,
@@ -50,11 +52,16 @@ from tests.engine.graph_output_cases import child as ir_child
 from tests.engine.start_cases import start_rows
 from tests.plugins.authentication.support import seed_case
 from tests.support.databases import copy_sqlite_template, sqlite_settings
+from tests.support.observability import ProcessResult
 
 __all__ = ["serving_installation"]
 
 SCHEDULER_SETTING = "KORA_API_SCHEDULER"
 FIRST_CLAIM = {**ENABLED, SCHEDULER_SETTING: "first-claim"}
+FIRST_CLAIM_DEBUG = FIRST_CLAIM | {
+    LEVEL_VARIABLE: "INFO",
+    COMPONENT_LEVELS_VARIABLE: "scheduler=DEBUG",
+}
 TRIGGER_KEY = "installed-scheduler-start"
 SCHEDULER_LIFECYCLE = "scheduler.lifecycle"
 SCHEDULER_TRANSITION = "scheduler.transition"
@@ -126,9 +133,35 @@ async def test_installed_scheduler_selection_refuses_before_database_open(
     )
 
 
+async def trigger_installed(
+    python: Path,
+    directory: Path,
+    environment: dict[str, str],
+    graph_version_id: str,
+) -> ProcessResult:
+    trigger = await installed_cli(
+        python,
+        directory,
+        environment,
+        [
+            "trigger",
+            GRAPH,
+            "--json",
+            "--graph-version",
+            graph_version_id,
+            "--idempotency-key",
+            TRIGGER_KEY,
+            "--param",
+            f"quantity={PARAMS['quantity']}",
+        ],
+    )
+    assert trigger.code == 0, trigger.stderr
+    return trigger
+
+
 async def deploy_then_trigger(
     python: Path, directory: Path, origin: str, token: str
-) -> tuple[DeployResponse, AcceptedRun]:
+) -> tuple[DeployResponse, ProcessResult]:
     ir = scheduler_claim_ir()
     ir_child(ir, "graph", "nodes", "agent", "config")["harness"] = "claude"
     graph_file = directory / "installed-scheduler.ir.json"
@@ -139,24 +172,10 @@ async def deploy_then_trigger(
     )
     assert deployment.code == 0, deployment.stderr
     deployed = DeployResponse.model_validate_json(deployment.stdout)
-    trigger = await installed_cli(
-        python,
-        directory,
-        environment,
-        [
-            "trigger",
-            GRAPH,
-            "--json",
-            "--graph-version",
-            deployed.graph_version_id,
-            "--idempotency-key",
-            TRIGGER_KEY,
-            "--param",
-            f"quantity={PARAMS['quantity']}",
-        ],
+    trigger = await trigger_installed(
+        python, directory, environment, deployed.graph_version_id
     )
-    assert trigger.code == 0, trigger.stderr
-    return deployed, AcceptedRun.model_validate_json(trigger.stdout)
+    return deployed, trigger
 
 
 async def run_installed_scheduler_until_queued(
@@ -165,7 +184,7 @@ async def run_installed_scheduler_until_queued(
     process = await asyncio.create_subprocess_exec(
         *api_command(python, 0),
         cwd=directory,
-        env=api_environment(database_url) | FIRST_CLAIM,
+        env=api_environment(database_url) | FIRST_CLAIM_DEBUG,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -268,21 +287,32 @@ async def test_installed_scheduler_restart_reaches_one_first_http_claim(
             origin,
             _,
         ):
-            deployed, accepted = await deploy_then_trigger(
+            deployed, original_trigger = await deploy_then_trigger(
                 serving_installation, tmp_path, origin, bearer(personal)
             )
+            accepted = AcceptedRun.model_validate_json(original_trigger.stdout)
             pending = await start_rows(database)
             before_scheduler = await state(database)
         await run_installed_scheduler_until_queued(serving_installation, tmp_path, url)
         queued = await state(database)
         async with (
-            installed_server(serving_installation, tmp_path, url, FIRST_CLAIM) as (
-                origin,
-                _,
-            ),
+            installed_server(
+                serving_installation, tmp_path, url, FIRST_CLAIM_DEBUG
+            ) as (origin, _),
             KoraClient(origin, bearer(service)) as worker,
             httpx.AsyncClient(base_url=origin, trust_env=False, timeout=5) as client,
         ):
+            trigger_replay = await trigger_installed(
+                serving_installation,
+                tmp_path,
+                {
+                    "KORA_URL": origin,
+                    "KORA_TOKEN": bearer(personal),
+                    "KORA_NAMESPACE": NAMESPACE,
+                },
+                deployed.graph_version_id,
+            )
+            after_trigger_replay = await state(database)
             denied = await client.post(
                 WORKERS,
                 json=identity.model_dump(mode="json"),
@@ -307,6 +337,8 @@ async def test_installed_scheduler_restart_reaches_one_first_http_claim(
     assert pending_receipt["idempotency_key"] == TRIGGER_KEY
     assert pending_receipt["id"] == pending_admission["receipt_id"]
     assert before_scheduler["node_instance"] == before_scheduler["attempt"] == []
+    assert trigger_replay.stdout == original_trigger.stdout
+    assert queued == after_trigger_replay
     assert pending["receipt"] == saved_start["receipt"]
     assert pending["run_inputs"] == saved_start["run_inputs"]
     assert pending["admission"] == saved_start["admission"]
@@ -462,3 +494,76 @@ async def test_installed_scheduler_refuses_startup_when_recovery_source_is_unrea
     assert b"no such table" not in result.stderr
     assert b"private_scheduler_recovery_attempt" not in result.stderr
     assert persisted == pending
+
+
+@pytest.mark.asyncio
+async def test_installed_scheduler_forced_drain_joins_reader_without_asgi_shutdown(
+    serving_installation: Path, tmp_path: Path, sqlite_template: Path
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "metadata.sqlite")
+    database = Database(settings)
+    url = str(settings.url)
+    try:
+        personal = await seed_case(database, NAMESPACE)
+        async with installed_server(serving_installation, tmp_path, url, ENABLED) as (
+            origin,
+            _,
+        ):
+            await deploy_then_trigger(
+                serving_installation, tmp_path, origin, bearer(personal)
+            )
+        pending = await start_rows(database)
+        port = available_port()
+
+        async with observed_worker_process(
+            serving_installation, tmp_path, url, "hold_scheduler_poll_forced", port
+        ) as (child, release):
+            assert child.stdout is not None
+            assert child.stderr is not None
+            bound, _ = await read_bound_port(child)
+            assert await child.stdout.readline() == b"native_sqlite_held\n"
+            reader, writer = await asyncio.open_connection(LOOPBACK, port)
+            try:
+                writer.write(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                await writer.drain()
+                assert await child.stdout.readline() == b"request_holds_sqlite\n"
+                child.send_signal(signal.SIGINT)
+                await serving_event(child.stderr, "api.serving_draining")
+                child.send_signal(signal.SIGINT)
+                async with asyncio.timeout(DRAIN_RECEIPT_TIMEOUT):
+                    wire = await reader.read()
+                    assert await child.stdout.readline() == b"request_settled\n"
+                retained = child.returncode is None
+                await assert_port_closed(port)
+                before_release = await start_rows(database)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            os.write(release, b"r")
+            output, trailing = await child.communicate()
+        stopped = await start_rows(database)
+        stopped_attempts = (await state(database))["attempt"]
+        await run_installed_scheduler_until_queued(serving_installation, tmp_path, url)
+        restarted = await state(database)
+    finally:
+        await database.close()
+
+    assert bound == port
+    assert wire == b""
+    assert retained
+    assert stopped == before_release == pending
+    assert stopped_attempts == []
+    assert child.returncode == 130, trailing
+    assert output == (
+        b"native_sqlite_returned\nscheduler_database_settled\ndomain_owners_settled\n"
+    )
+    assert b"drain_unfinished" not in trailing
+    assert SCHEDULER_TRANSITION.encode() not in trailing
+    assert [
+        row["outcome"]
+        for row in diagnostics(trailing)
+        if row["event"] == SCHEDULER_LIFECYCLE
+    ] == ["stopped"]
+    [created] = restarted["attempt"]
+    assert created["status"] == "created"
+    assert restarted["attempt_dispatcher"] == []

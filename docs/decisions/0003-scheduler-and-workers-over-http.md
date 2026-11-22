@@ -46,7 +46,7 @@ Timed waits/admission rechecks, pending promotion, observations/delivery, deadli
 ## Alternatives considered
 
 - **Workers with direct database access.** Rejected: an adopter's worker in a closed network would need database credentials and an inbound route, and two write paths double the fencing surface.
-- **A single process.** Rejected for the platform: the scheduler must be stateless and replaceable (NFR-1.2) and workers must scale per runtime and sit in other networks. It survives only as `kora standalone`.
+- **A single process.** Rejected for the platform: the scheduler must be stateless and replaceable (NFR-1.2) and workers must scale per runtime and sit in other networks. The same-process layouts are `kora standalone` and the installed SQLite staging exception in this [decision](#decision).
 - **Timestamp or sequence watermarks as the sole discovery mechanism.** Rejected: a transaction may commit after a scan with a timestamp or allocated sequence behind its cursor. A notification is not durable continuation.
 - **Recurring sweeps of all active runs.** Not selected: a durable marker avoids repeated evaluation of unchanged waiting runs; its complete transactional marking and acknowledgement obligations are explicit in the specifications.
 - **Leases without an epoch.** Rejected: a worker that lost its lease could still write.

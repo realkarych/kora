@@ -518,7 +518,8 @@ async def serve_on_loop(
                     scheduler=scheduler,
                 )
                 signals.server = server
-                await server.serve()
+                if signals.received is None:
+                    await server.serve()
     except ServingFailure as error:
         failure = error.reason
     except SystemExit:

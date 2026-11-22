@@ -860,6 +860,7 @@ def serve_sqlite_api(
     from kora.api.application import create_application
     from kora.api.exchange import ApiExchange
     from kora.api.graph_services import GraphServices, deployment_selection
+    from kora.api.installed_scheduler import installed_root_admission
     from kora.api.installed_worker import installed_worker_profile
     from kora.api.serving import (
         ServingFailure,
@@ -956,7 +957,7 @@ def serve_sqlite_api(
     def scheduler(database: "Database") -> ServingScheduler:
         if worker is None or selection is None:
             raise ServingFailure(ServingRefusal.SCHEDULER_CONFIGURATION)
-        return first_claim_scheduler(
+        admission = installed_root_admission(
             database,
             worker.limits,
             clock.now,
@@ -964,6 +965,7 @@ def serve_sqlite_api(
             selection,
             capabilities,
         )
+        return first_claim_scheduler(admission, read_seconds=worker.limits.read_seconds)
 
     return serve_sqlite(
         settings,
@@ -1322,6 +1324,7 @@ def main(
         "conformance.lifetime",
         "engine",
         "mcp",
+        "scheduler",
     ):
         CATALOG.register_component(component)
     try:

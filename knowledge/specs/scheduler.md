@@ -305,7 +305,6 @@ Manual retry (FR-6.8) first checks availability of required input/feedback sourc
 - Actions are idempotent on `(run id, node path, attempt id)` (NFR-2.2): re-running a pass after a crash re-derives the same decisions from rows; side effects are guarded by the attempt id as submission key, `approval_request.id`, `inbound_event` idempotency per `(namespace, name)` and the `idempotency_record` table.
 - On restart the scheduler performs a **recovery pass** first: expired leases on `claimed`/`submitted`/`running`/`finishing` attempts are marked reclaimable under the domain rule of section 3; lookup and adoption are performed by the workers that claim them. Then ordinary marked-run discovery resumes from a fresh sweep alongside all independent due-work scans; neither pre-crash timestamps nor in-memory notifications are needed.
 
-
 ### Installed SQLite first-Claim staging (#1780)
 
 The [installed selector](api-and-agent-surface.md#installed-sqlite-scheduler-staging) runs the bounded initial Scheduler in the same process and selector loop as the API. It holds at most one Scheduler candidate at a time. The serving owner completes the Worker startup expiry pass and the Scheduler lease-recovery pass before binding. An expired lease is rechecked on the original attempt under the owning run lock, including for a terminal parent. It retains the original execution domain and any unsettled reservation.
