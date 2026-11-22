@@ -4,6 +4,7 @@ import signal
 import socket
 from collections.abc import Callable, Generator
 from contextlib import AsyncExitStack, contextmanager
+from csv import Error as CsvError
 from enum import StrEnum
 from types import FrameType
 
@@ -349,7 +350,12 @@ async def serve_on_loop(
                 domain = AsyncExitStack()
                 try:
                     await domain.enter_async_context(preparer)
-                except (BindingUnavailable, OSError, UnicodeDecodeError) as error:
+                except (
+                    BindingUnavailable,
+                    CsvError,
+                    OSError,
+                    UnicodeDecodeError,
+                ) as error:
                     raise ServingFailure(ServingRefusal.DOMAIN_CONFIGURATION) from error
             if signals.received is None:
                 server = ApiServer(make_application(database), port, log)

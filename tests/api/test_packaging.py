@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import json
 import os
 import selectors
@@ -99,7 +100,12 @@ def observe_build_tree(
 
 
 def installed_core(
-    core_wheel: Path, root: Path, *, serve: bool = False, postgres: bool = False
+    core_wheel: Path,
+    root: Path,
+    *,
+    serve: bool = False,
+    postgres: bool = False,
+    copy_payload: bool = False,
 ) -> Path:
     wheelhouse = root / "dependencies"
     wheelhouse.mkdir()
@@ -109,11 +115,13 @@ def installed_core(
     extras = ",".join(
         name for name, enabled in (("serve", serve), ("postgres", postgres)) if enabled
     )
+    file_isolation = ["--link-mode", "copy"] if copy_payload else []
     run_setup(
         [
             "uv",
             "pip",
             "install",
+            *file_isolation,
             "--offline",
             "--no-index",
             "--find-links",
@@ -705,6 +713,7 @@ def installed_site_packages(python: Path) -> Path:
         "schema",
         "cel-metadata-encoding",
         "cel-record-encoding",
+        "cel-record-field",
         "harness-entry-encoding",
     ],
 )
@@ -715,7 +724,7 @@ async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
     damage: str,
 ) -> None:
     settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
-    python = installed_core(core_wheel, tmp_path, serve=True)
+    python = installed_core(core_wheel, tmp_path, serve=True, copy_payload=True)
     site = installed_site_packages(python)
     [metadata] = site.glob("common_expression_language-*.dist-info")
     if damage == "schema":
@@ -734,6 +743,9 @@ async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
             entry_points.write_text("\n".join(remaining) + "\n")
         else:
             entry_points.write_bytes(entry_points.read_bytes() + b"\xff")
+    elif damage == "cel-record-field":
+        record = metadata / "RECORD"
+        record.write_bytes(record.read_bytes() + b"a" * (csv.field_size_limit() + 1))
     elif damage in {"cel-metadata-encoding", "cel-record-encoding"}:
         damaged = metadata / (
             "METADATA" if damage == "cel-metadata-encoding" else "RECORD"
