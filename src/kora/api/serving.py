@@ -195,12 +195,20 @@ class ApiServer(Server):
             case _:
                 raise ServingFailure(ServingRefusal.BIND_FAILED)
 
-    async def seal_connections(self) -> tuple[_ServingHttpConnection, ...]:
+    def disarm_listeners(self) -> None:
         for listener in self.servers:
             for bound_socket in listener.sockets:
                 self._loop.remove_reader(bound_socket.fileno())
+
+    async def seal_connections(self) -> tuple[_ServingHttpConnection, ...]:
+        self.disarm_listeners()
         accepted: asyncio.Future[None] = self._loop.create_future()
-        self._loop.call_soon(accepted.set_result, None)
+
+        def enrolled() -> None:
+            self.disarm_listeners()
+            accepted.set_result(None)
+
+        self._loop.call_soon(enrolled)
         await accepted
         for listener in self.servers:
             listener.close()

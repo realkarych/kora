@@ -2,7 +2,9 @@ import asyncio
 import errno
 import json
 import os
+import socket
 import sys
+from asyncio.trsock import TransportSocket
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from functools import partial
@@ -99,14 +101,6 @@ def buffered_response(database: Database) -> ASGIApp:
         if scope["type"] == "lifespan":
             await lifecycle(receive, send)
             return
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [(b"content-length", str(SLOW_RESPONSE_BYTES).encode())],
-            }
-        )
-        await send({"type": "http.response.body", "body": b"x" * SLOW_RESPONSE_BYTES})
         installed_transports: object = vars(asyncio.get_running_loop())["_transports"]
         assert isinstance(installed_transports, Mapping)
         inventory = cast("Mapping[int, object]", installed_transports)
@@ -116,7 +110,20 @@ def buffered_response(database: Database) -> ASGIApp:
             if isinstance(active, asyncio.Transport)
             and active.get_extra_info("peername") == scope["client"]
         )
-        assert original.get_write_buffer_size() > 0
+        original_socket: object = original.get_extra_info("socket")
+        assert isinstance(original_socket, TransportSocket)
+        with socket.socket(fileno=os.dup(original_socket.fileno())) as control:
+            control.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+            assert control.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) <= 65536
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-length", str(SLOW_RESPONSE_BYTES).encode())],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"x" * SLOW_RESPONSE_BYTES})
+        assert original.get_write_buffer_size() > 1024 * 1024
         os.write(1, b"response_buffered\n")
 
     return application

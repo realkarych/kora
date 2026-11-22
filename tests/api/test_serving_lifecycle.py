@@ -1,16 +1,68 @@
 import asyncio
 import os
 import signal
+import socket
 import sys
 from pathlib import Path
 
 import pytest
+from starlette.types import Receive, Scope, Send
 
+from kora.api.exchange import COMPONENT
+from kora.api.serving import LOOPBACK, ApiServer
+from kora.conformance.capture import Capture
 from kora.db.connection import Database, Lifecycle, parse_database_url
 from kora.db.migrations import upgrade_database
 from tests.api.serving_lifecycle_child import PRIVATE_LIFESPAN_REASON, serving_event
+from tests.api.support import api_capture
+
+__all__ = ["api_capture"]
 
 SERVER_WAIT: float = 20.0
+
+
+@pytest.mark.asyncio
+async def test_listener_seal_disarms_a_queued_selector_rearm(
+    api_capture: Capture,
+) -> None:
+    loop = asyncio.get_running_loop()
+    accepted_after_seal = False
+
+    async def unused_app(scope: Scope, receive: Receive, send: Send) -> None:
+        raise AssertionError("the selector rearm fixture has no HTTP request")
+
+    with (
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener,
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client,
+    ):
+        listener.bind((LOOPBACK, 0))
+        listener.listen()
+        client.setblocking(False)
+        await loop.sock_connect(client, listener.getsockname())
+        owner = ApiServer(unused_app, 0, api_capture.diagnostics.logger(COMPONENT))
+        bound = await loop.create_server(
+            asyncio.Protocol, sock=listener, start_serving=False
+        )
+        owner.servers = [bound]
+
+        def read_rearmed_listener() -> None:
+            nonlocal accepted_after_seal
+            accepted, _ = listener.accept()
+            accepted.close()
+            accepted_after_seal = True
+
+        try:
+            async with asyncio.timeout(SERVER_WAIT):
+                sealing = asyncio.create_task(owner.seal_connections())
+                loop.call_soon(
+                    loop.add_reader, listener.fileno(), read_rearmed_listener
+                )
+                connections = await sealing
+        finally:
+            bound.close()
+
+    assert not accepted_after_seal
+    assert not connections
 
 
 @pytest.mark.asyncio
