@@ -1,9 +1,11 @@
 import asyncio
+import json
 import os
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
-from typing import cast
+from typing import Protocol, cast
 
 import aiosqlite
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -11,11 +13,16 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from kora.api.exchange import COMPONENT
 from kora.api.serving import serve_sqlite
-from kora.db.connection import Database, read_database_settings
+from kora.db.connection import Database, DatabaseClosedError, read_database_settings
 from kora.observability import configure_process, read_logging_settings
-from tests.db.native_read_support import SqliteTraceControl
 
 PRIVATE_LIFESPAN_REASON: str = "private-lifespan-startup-reason"
+
+
+class SqliteTraceControl(Protocol):
+    async def set_trace_callback(
+        self, handler: Callable[[str], None] | None
+    ) -> None: ...
 
 
 async def hold_native_query(connection: AsyncConnection, release: int) -> None:
@@ -30,6 +37,7 @@ async def hold_native_query(connection: AsyncConnection, release: int) -> None:
     await cast(SqliteTraceControl, driver).set_trace_callback(observe)
     with await connection.exec_driver_sql("SELECT 42") as result:
         result.scalar_one()
+    os.write(1, b"native_sqlite_result_closed\n")
 
 
 def held_request_app(database: Database, release: int | None = None) -> ASGIApp:
@@ -46,12 +54,15 @@ def held_request_app(database: Database, release: int | None = None) -> ASGIApp:
                 if release is not None:
                     await hold_native_query(connection, release)
                 else:
-                    await connection.exec_driver_sql("SELECT 1")
+                    with await connection.exec_driver_sql("SELECT 1") as result:
+                        result.scalar_one()
                     os.write(1, b"request_holds_sqlite\n")
-                    await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            os.write(1, b"request_cancelled\n")
-            raise
+                while (await receive())["type"] != "http.disconnect":
+                    continue
+        except DatabaseClosedError:
+            if release is None:
+                raise
+        os.write(1, b"request_settled\n")
 
     return application
 
@@ -85,6 +96,18 @@ def launch() -> int:
         )
     finally:
         diagnostics.shutdown()
+
+
+async def serving_event(
+    stderr: asyncio.StreamReader, event_name: str
+) -> dict[object, object]:
+    while line := await stderr.readline():
+        event: object = json.loads(line)
+        if isinstance(event, dict):
+            fields = cast("dict[object, object]", event)
+            if fields.get("event") == event_name:
+                return fields
+    raise AssertionError(f"the child exited before {event_name}")
 
 
 if __name__ == "__main__":

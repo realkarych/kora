@@ -18,6 +18,7 @@ import pytest
 from kora.db.connection import Database
 from kora.ir.json import JsonObject, parse_json_object
 from kora.models.errors import ApiErrorEnvelope
+from tests.api.serving_lifecycle_child import serving_event
 from tests.api.test_linux_serving_barrier import native_probe_required_here
 from tests.client.support import tls_pair
 from tests.plugins.authentication.support import seed_case
@@ -412,6 +413,81 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
         probe.settimeout(2)
         with pytest.raises(ConnectionRefusedError):
             probe.connect((LOOPBACK, port))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forced", [False, True])
+async def test_serving_keeps_the_original_process_until_held_native_work_settles(
+    serving_installation: Path,
+    tmp_path: Path,
+    sqlite_template: Path,
+    forced: bool,
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
+    fixture = Path(__file__).with_name("serving_lifecycle_child.py")
+    environment = api_environment(str(settings.url))
+    release_read, release_write = os.pipe()
+    request_writer: asyncio.StreamWriter | None = None
+
+    try:
+        try:
+            child = await asyncio.create_subprocess_exec(
+                str(serving_installation),
+                "-I",
+                str(fixture),
+                "hold_native",
+                str(release_read),
+                pass_fds=(release_read,),
+                cwd=tmp_path,
+                env=environment,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        finally:
+            os.close(release_read)
+        assert child.stdout is not None
+        assert child.stderr is not None
+        try:
+            async with asyncio.timeout(SERVE_TIMEOUT):
+                bound = await serving_event(child.stderr, "api.serving_bound")
+                port = bound.get("port")
+                assert type(port) is int
+                reader, request_writer = await asyncio.open_connection(
+                    "127.0.0.1", port
+                )
+                request_writer.write(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                await request_writer.drain()
+                held = await child.stdout.readline()
+                assert held == b"native_sqlite_held\n"
+                child.send_signal(signal.SIGTERM)
+                await serving_event(child.stderr, "api.serving_draining")
+                if forced:
+                    child.send_signal(signal.SIGINT)
+                original_wire = await reader.read()
+                refusal = await serving_event(child.stderr, "api.serving_refused")
+                still_owns_work = child.returncode is None
+                with pytest.raises(ConnectionRefusedError):
+                    await asyncio.open_connection("127.0.0.1", port)
+                os.write(release_write, b"r")
+                output, diagnostics = await child.communicate()
+        finally:
+            if request_writer is not None:
+                request_writer.close()
+                await request_writer.wait_closed()
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+    finally:
+        os.close(release_write)
+
+    assert original_wire == b""
+    assert refusal["reason"] == "drain_unfinished"
+    assert still_owns_work
+    assert child.returncode == 70
+    assert output == (
+        b"native_sqlite_returned\nnative_sqlite_result_closed\nrequest_settled\n"
+    )
+    assert b"api.serving_stopped" not in diagnostics
 
 
 def test_installed_core_refuses_api_without_its_extra(
