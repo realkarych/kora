@@ -20,6 +20,8 @@ First-slice boundary amendment dated 2026-10-23: scope and implementation plan a
 
 Walking-skeleton amendment dated 2026-11-11: the status of 2026-11-11 and the walking skeleton of the first slice; substance decided by the project owner under [issue #1356](https://github.com/realkarych/kora/issues/1356) and [issue #1357](https://github.com/realkarych/kora/issues/1357); wording pending line-by-line owner review.
 
+The project owner [reviewed and approved the roadmap changes for #1359 line by line](https://github.com/realkarych/kora/issues/1359#issuecomment-7082791471) on 2026-11-22.
+
 ## Where the project stands
 
 - Positioning, requirements and the design are written, went through two design-review cycles, and on 2026-10-16 the project owner reviewed every statement in `docs/`; that review established the initial design baseline. Open design corrections are tracked in GitHub issues; ADR-0016 records the publication-boundary correction and ADR-0017 preserves execution uncertainty through recovery. Deferred work is tagged `[post-MVP]` in the requirements or written up in [proposals/](proposals/README.md).

@@ -2,6 +2,8 @@
 
 Status: Reviewed by the project owner on 2026-10-16. Decisions in this document were taken by the project owner; research backing is in `knowledge/research/`, which also holds the dated figures behind every statement about competitors here (versions, popularity, release dates).
 
+The project owner [reviewed and approved the external-demand test timing for #1359 line by line](https://github.com/realkarych/kora/issues/1359#issuecomment-7082791471) on 2026-11-22.
+
 ## One-liner
 
 **kora is an open-source platform for running graphs of coding-agent sessions at organisation scale.** The unit of work is a full Claude Code or Codex session with its own skills, subagents, hooks and MCP servers. The platform adds what neither a single session nor a single-repo workflow engine provides: a scheduler-grade control plane (cron, sensors, namespaces, hundreds of concurrent sessions), attempts and artifacts as first-class objects with lineage, approvals bound to content, and protocols that let it run on an organisation's own runtime, VCS and secrets infrastructure.

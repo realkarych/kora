@@ -2,6 +2,8 @@
 
 Walking-skeleton amendment dated 2026-11-11: the walking skeleton, the pause on deepening and the narrowed first-slice depth; substance decided by the project owner under [issue #1356](https://github.com/realkarych/kora/issues/1356) and [issue #1357](https://github.com/realkarych/kora/issues/1357); wording pending line-by-line owner review.
 
+The project owner [reviewed and approved the milestone references for #1359 line by line](https://github.com/realkarych/kora/issues/1359#issuecomment-7082791471) on 2026-11-22.
+
 Command-input amendment dated 2026-11-11: step 5a records the command-input specification of [issue #106](https://github.com/realkarych/kora/issues/106). The project owner [decided](https://github.com/realkarych/kora/issues/106#issuecomment-6776723836) the input content encoding, the stored request-input copy and the 256 MiB per-attempt budget on 2026-11-10 and answered the remaining questions of the plan on 2026-11-11 ([answers](https://github.com/realkarych/kora/issues/106#issuecomment-6784178589)); the project owner [approved](https://github.com/realkarych/kora/issues/106#issuecomment-6803062727) the [plan](https://github.com/realkarych/kora/issues/106#issuecomment-6779253038) on 2026-11-11. Co-owner `klukashka` reviewed this wording line by line on 2026-11-12.
 
 Startup I/O-helper amendment dated 2026-11-04: the project owner reviewed and approved the foundation-status and separate-helper wording for issue #615 line by line.

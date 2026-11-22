@@ -77,6 +77,8 @@ The same decision narrows the depth of the first slice:
 
 ## Milestone-order amendment of 2026-11-11
 
+The project owner [reviewed and approved the wording of this amendment line by line](https://github.com/realkarych/kora/issues/1359#issuecomment-7082791471) on 2026-11-22.
+
 The project owners approved this order under [#1356](https://github.com/realkarych/kora/issues/1356) and [#1359](https://github.com/realkarych/kora/issues/1359). First-slice acceptance is followed by a second slice on a real repository, then the pilot, the scheduler-prototype milestone and MVP acceptance on the second runtime/VCS pair.
 
 The second slice demonstrates the outer loop with both Claude and Codex. A subgraph combines an agent node and a command test gate, runs more than one attempt and supplies feedback from the previous attempt. The workflow publishes a GitHub pull request with the diff, gate results and cost of all attempts. CLI approval is bound to the commit SHA and a new push invalidates it.
