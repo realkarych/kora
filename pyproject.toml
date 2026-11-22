@@ -78,6 +78,10 @@ claude = [
 mcp = [
     "mcp==2.3.0",
 ]
+serve = [
+    "kora[cel]",
+    "uvicorn==0.54.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kora"]

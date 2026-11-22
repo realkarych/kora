@@ -42,6 +42,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0024](0024-provider-limits-as-non-agent-failures.md) | Model-provider rate limits and quotas: a non-agent failure that waits for the reset, a pause per quota resource and limit group | accepted, wording pending review |
 | [ADR-0025](0025-notifications.md) | Notifications: requested reviewers, durable outbound JSON, Slack and Telegram webhooks written with the event, subscriptions with a lifecycle | accepted, wording pending review |
 | [ADR-0026](0026-package-layers.md) | Package layers: packages by role under `src/kora`, server-free packages never statically reach server packages, a standard-library test enforces it, one base installation | accepted, wording pending review |
+| [ADR-0029](0029-installed-api-serving-stack.md) | Optional installed API server, ordinary SQLite ownership, and a separate PostgreSQL startup boundary | implementation plan accepted 2026-11-22; wording pending line-by-line owner review |
 
 ## Writing a new record
 

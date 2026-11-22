@@ -759,6 +759,7 @@ class Database:
         self._lifecycle = Lifecycle.OPEN
         self._closing: asyncio.Future[None] | None = None
         self._disposed = False
+        self._disposal_completed = False
         self._in_flight = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -1494,6 +1495,14 @@ class Database:
             self._closing.add_done_callback(self._mark_closed)
         await asyncio.shield(self._closing)
 
+    async def close_sqlite_serving(
+        self, deadline_seconds: float = DEFAULT_CLOSE_DEADLINE_SECONDS
+    ) -> bool:
+        if self.dialect is not Dialect.SQLITE:
+            raise DatabaseConfigurationError("the serving close requires SQLite")
+        await self.close(deadline_seconds)
+        return self._disposal_completed
+
     def _mark_closed(self, closing: asyncio.Future[None]) -> None:
         self._lifecycle = Lifecycle.CLOSED
 
@@ -1526,3 +1535,4 @@ class Database:
         finally:
             if self._reader is not self._writer:
                 await self._reader.dispose()
+        self._disposal_completed = True

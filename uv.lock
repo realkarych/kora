@@ -1232,6 +1232,10 @@ mcp = [
 postgres = [
     { name = "asyncpg" },
 ]
+serve = [
+    { name = "common-expression-language" },
+    { name = "uvicorn" },
+]
 
 [package.dev-dependencies]
 build = [
@@ -1274,6 +1278,7 @@ requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
     { name = "jsonschema", specifier = "==4.26.0" },
     { name = "jsonschema", marker = "extra == 'conformance'", specifier = "==4.26.0" },
+    { name = "kora", extras = ["cel"], marker = "extra == 'serve'" },
     { name = "kora", extras = ["mcp"], marker = "extra == 'claude'" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = "==2.3.0" },
     { name = "opentelemetry-api", specifier = "==1.45.2" },
@@ -1286,8 +1291,9 @@ requires-dist = [
     { name = "starlette", specifier = "==1.10.0" },
     { name = "structlog", specifier = "==26.1.0" },
     { name = "typer", specifier = "==0.27.3" },
+    { name = "uvicorn", marker = "extra == 'serve'", specifier = "==0.54.0" },
 ]
-provides-extras = ["postgres", "cel", "conformance", "claude", "mcp"]
+provides-extras = ["postgres", "cel", "conformance", "claude", "mcp", "serve"]
 
 [package.metadata.requires-dev]
 build = [
