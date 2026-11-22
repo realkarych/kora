@@ -729,7 +729,7 @@ def serving_deployment_preparer(clock: Clock) -> "DeploymentPreparer":
     from kora.engine.graph_output_policy import OutputPublicationBinding
     from kora.engine.graph_parameter_evaluation import ParameterPublicationBinding
     from kora.ir.data import detach_ir_data
-    from kora.ir.schema_catalogue import builtin_schema
+    from kora.ir.schema_catalogue import builtin_schema_definition
     from kora.ir.standard_schema_policy import SchemaDomain, domain_limits
     from kora.ir.structured_output import structured_output_revision_descriptor
     from kora.plugins.artifact_type.structured_output import (
@@ -741,18 +741,19 @@ def serving_deployment_preparer(clock: Clock) -> "DeploymentPreparer":
     from kora.protocols.artifact_type import BuiltinArtifactTypeBinding
 
     try:
-        schema = builtin_schema("StructuredOutput", "1")
+        definition = builtin_schema_definition("StructuredOutput", "1")
     except (OSError, ValueError) as error:
         raise ServingFailure(ServingRefusal.DOMAIN_CONFIGURATION) from error
-    if schema is None:
+    descriptor = structured_output_revision_descriptor()
+    if definition is None or definition.file_digest != descriptor.get("schema_sha256"):
         raise ServingFailure(ServingRefusal.DOMAIN_CONFIGURATION)
     provider = StructuredOutputArtifactType(
         {},
         BuiltinArtifactTypeBinding(
             "StructuredOutput",
-            cast("JsonObject", detach_ir_data(schema)),
+            cast("JsonObject", detach_ir_data(definition.schema)),
             None,
-            structured_output_revision_descriptor(),
+            descriptor,
         ),
     )
     return DeploymentPreparer(

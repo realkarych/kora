@@ -520,6 +520,7 @@ async def test_installed_sqlite_api_deploys_and_replays_manual_trigger(
         client_environment = {
             "KORA_URL": origin,
             "KORA_TOKEN": authorization.removeprefix("Bearer "),
+            "KORA_LOG_LEVEL": "DEBUG",
         }
         async with httpx.AsyncClient(
             base_url=origin, trust_env=False, timeout=10
@@ -559,6 +560,13 @@ async def test_installed_sqlite_api_deploys_and_replays_manual_trigger(
         replay = await installed_cli(
             serving_installation, tmp_path, client_environment, start
         )
+        refused_replay = await installed_cli(
+            serving_installation,
+            tmp_path,
+            client_environment
+            | {"KORA_TOKEN": foreign_authorization.removeprefix("Bearer ")},
+            start,
+        )
     finally:
         stdout, trailing = await terminate_installed_api(process)
     rows, version_id, attempts = await deployment_rows(settings)
@@ -582,6 +590,11 @@ async def test_installed_sqlite_api_deploys_and_replays_manual_trigger(
     assert published.number == 1
     assert accepted.code == replay.code == 0, (accepted.stderr, replay.stderr)
     assert replay.stdout == accepted.stdout
+    assert refused_replay.code == 1
+    assert (
+        ApiErrorEnvelope.model_validate_json(refused_replay.stdout).error.code
+        == "API005"
+    )
     outcome = AcceptedRun.model_validate_json(accepted.stdout)
     [saved] = rows["run"]
     [inputs] = rows["run_inputs"]
@@ -598,11 +611,21 @@ async def test_installed_sqlite_api_deploys_and_replays_manual_trigger(
     assert inputs["cel_projection"] == b'{"name":"ready"}'
     assert receipt["idempotency_key"] == "installed-start"
     assert admission["receipt_id"] == receipt["id"]
-    receipt_outcome = decode_start_receipt(receipt["start_outcome"]).response
+    original_receipt = decode_start_receipt(receipt["start_outcome"])
+    assert original_receipt.namespace_id == saved["namespace_id"]
+    assert original_receipt.graph_id == saved["graph_id"]
+    receipt_outcome = original_receipt.response
     assert isinstance(receipt_outcome, AcceptedStart)
     assert receipt_outcome.run_id == saved["id"]
     assert receipt_outcome.graph_version_id == version_id
     assert saved["needs_scheduling"] is True
+    [created] = [event for event in rows["event"] if event["kind"] == "run.created"]
+    assert created["run_id"] == saved["id"]
+    assert created["actor"] == {
+        "kind": "user",
+        "owner": seeded.principal.owner,
+        "token_id": seeded.principal.token_id,
+    }
     assert not attempts
     records = diagnostics(early + trailing)
     assert any(
@@ -613,13 +636,13 @@ async def test_installed_sqlite_api_deploys_and_replays_manual_trigger(
     assert sum(record["event"] == "api.serving_stopped" for record in records) == 1
     assert sum(record["event"] == "cel.binding.loaded" for record in records) == 1
     for private in (
-        authorization,
-        foreign_authorization,
+        authorization.removeprefix("Bearer "),
+        foreign_authorization.removeprefix("Bearer "),
         "installed-start",
         PRIVATE_PARAMETER,
     ):
-        assert (
-            private.encode() not in early + trailing + accepted.stderr + replay.stderr
+        assert private.encode() not in (
+            early + trailing + accepted.stderr + replay.stderr + refused_replay.stderr
         )
 
 
@@ -672,7 +695,9 @@ def installed_site_packages(python: Path) -> Path:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ["missing", "version", "record", "harness"])
+@pytest.mark.parametrize(
+    "damage", ["missing", "version", "record", "harness", "schema"]
+)
 async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
     core_wheel: Path,
     tmp_path: Path,
@@ -683,7 +708,12 @@ async def test_installed_sqlite_api_refuses_unavailable_domain_binding(
     python = installed_core(core_wheel, tmp_path, serve=True)
     site = installed_site_packages(python)
     [metadata] = site.glob("common_expression_language-*.dist-info")
-    if damage == "harness":
+    if damage == "schema":
+        schema = (
+            site / "kora" / "ir" / "artifact_schemas" / "StructuredOutput.schema.json"
+        )
+        schema.write_bytes(schema.read_bytes() + b"\n")
+    elif damage == "harness":
         [entry_points] = site.glob("kora-*.dist-info/entry_points.txt")
         lines = entry_points.read_text().splitlines()
         remaining = [line for line in lines if not line.startswith("harness.claude ")]

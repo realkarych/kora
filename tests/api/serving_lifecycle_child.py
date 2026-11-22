@@ -22,7 +22,12 @@ from kora.api.graph_deployment_worker import THREAD_NAME, DeploymentPreparer
 from kora.api.serving import serve_sqlite
 from kora.cel_eval.evaluate import PatternCompilation
 from kora.cel_eval.thread import PROCESS, Evaluator
-from kora.db.connection import Database, DatabaseClosedError, read_database_settings
+from kora.db.connection import (
+    Database,
+    DatabaseClosedError,
+    Lifecycle,
+    read_database_settings,
+)
 from kora.observability import configure_process, read_logging_settings
 from kora.protocols.time import SystemClock
 
@@ -102,12 +107,18 @@ def held_request_app(database: Database, release: int | None = None) -> ASGIApp:
     return application
 
 
-async def hold_preparation(release: int, evaluator: Evaluator) -> None:
+async def hold_preparation(
+    database: Database, release: int, evaluator: Evaluator
+) -> None:
     assert threading.current_thread().name == THREAD_NAME
     assert evaluator.snapshot().handles == 1
     os.write(1, b"preparation_held\n")
-    assert await asyncio.to_thread(os.read, release, 1) == b"r"
-    assert await evaluator.validate_pattern("^ready$") is PatternCompilation.ACCEPTED
+    released = await asyncio.to_thread(os.read, release, 1)
+    assert released == b"r"
+    assert database.lifecycle is Lifecycle.OPEN
+    assert owns_sqlite_descriptor(database.settings.sqlite_path)
+    outcome = await evaluator.validate_pattern("^ready$")
+    assert outcome is PatternCompilation.ACCEPTED
     os.write(1, b"retained_cel_settled\n")
 
 
@@ -121,7 +132,7 @@ def held_preparation_app(
         async with preparer.reserve() as reservation:
             assert reservation is not None
             preparation = asyncio.create_task(
-                reservation.run(partial(hold_preparation, release))
+                reservation.run(partial(hold_preparation, database, release))
             )
             try:
                 while (await receive())["type"] != "http.disconnect":
@@ -130,7 +141,8 @@ def held_preparation_app(
                     with await connection.exec_driver_sql("SELECT 42") as result:
                         assert result.scalar_one() == 42
             finally:
-                assert preparation.cancel()
+                cancellation_requested = preparation.cancel()
+                assert cancellation_requested
                 (cancelled,) = await asyncio.gather(preparation, return_exceptions=True)
                 assert isinstance(cancelled, asyncio.CancelledError)
         assert preparer.busy
