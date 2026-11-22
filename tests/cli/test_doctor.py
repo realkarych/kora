@@ -7,7 +7,8 @@ import stat
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from pathlib import Path
@@ -19,9 +20,12 @@ from sqlalchemy.engine import URL
 from kora.__main__ import DoctorSettings, main, run_interruptible
 from kora.cel_eval.binding import PINNED_VERSION
 from kora.db.connection import DatabaseSettings
+from kora.plugins.harness.claude.configuration import CLI_VERSION
 from kora.plugins.runtime.local.runtime import default_state_root
 from kora.plugins.runtime.local.state_probe import PROBE_PREFIX
 from tests.cel_eval.children import isolated_path, isolated_site, run_child
+from tests.observability.test_entry_point_exit_paths import shell
+from tests.plugins.runtime.local.test_production_sources import CLAUDE, file_sections
 from tests.support.databases import DatabaseKind, PostgresServer
 
 SHORT_DEADLINE_SECONDS: float = 0.5
@@ -30,7 +34,14 @@ PROCESS_DEADLINE_SECONDS: float = 60.0
 HIDDEN_MARKER: str = "PASSWORD-MARKER-5513"
 ENVIRONMENT_MARKER: str = "ENVIRONMENT-MARKER-8831"
 UNRELATED_VARIABLE: str = "KORA_DOCTOR_TEST_UNRELATED"
-CHECKS: tuple[str, ...] = ("version", "cel", "database", "state_root")
+CHECKS: tuple[str, ...] = (
+    "version",
+    "cel",
+    "database",
+    "state_root",
+    "installation",
+    "harness:claude",
+)
 UNSAFE: str = "state_root_unsafe"
 
 
@@ -40,6 +51,21 @@ def url_text(url: URL) -> str:
 
 def postgresql_url(port: int, password: str = HIDDEN_MARKER) -> str:
     return f"postgresql+asyncpg://kora:{password}@127.0.0.1:{port}/kora"
+
+
+def configure_installation(root: Path) -> None:
+    (root / "credentials").mkdir(mode=0o700)
+    (root / "runner.json").write_text(
+        json.dumps(
+            {
+                "format": "kora.runner/1",
+                "harness": {"claude": CLAUDE},
+                "policy": {"allow_deny": {}},
+                "secrets": file_sections(root),
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 @dataclass(frozen=True)
@@ -126,19 +152,43 @@ def closed_port() -> int:
         return int(endpoint.getsockname()[1])
 
 
+@contextmanager
+def unchanged_stdout() -> Generator[None]:
+    stdout = sys.stdout
+    descriptor = os.fstat(1)
+    yield
+    assert sys.stdout is stdout
+    assert (os.fstat(1).st_dev, os.fstat(1).st_ino) == (
+        descriptor.st_dev,
+        descriptor.st_ino,
+    )
+
+
 def run_doctor(
     environment: dict[str, str],
     settings: DoctorSettings,
     capfd: pytest.CaptureFixture[str],
+    state_root: Path | None = None,
 ) -> tuple[int, dict[str, object], str]:
-    code = main(["doctor", "--json"], environment, doctor_settings=settings)
+    arguments = ["doctor", "--json"]
+    if state_root is not None:
+        arguments += ["--state-root", str(state_root)]
+    with unchanged_stdout():
+        code = main(arguments, environment, doctor_settings=settings)
     captured = capfd.readouterr()
     return code, cast(dict[str, object], json.loads(captured.out)), captured.err
 
 
 def statuses(report: dict[str, object]) -> dict[str, tuple[object, object]]:
     checks = cast(list[dict[str, object]], report["checks"])
-    return {str(check["check"]): (check["status"], check["reason"]) for check in checks}
+    return {
+        str(check["check"])
+        + (f":{check['harness']}" if check.get("harness") else ""): (
+            check["status"],
+            check["reason"],
+        )
+        for check in checks
+    }
 
 
 def detail(report: dict[str, object], name: str) -> object:
@@ -153,21 +203,25 @@ def test_doctor_reports_local_prerequisites(
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
+    root = (tmp_path / "configured-root").resolve()
+    root.mkdir(mode=0o700)
+    configure_installation(root)
     url = url_text(database_settings.url)
     before = sorted(os.listdir(tmp_path))
+    entries_before = sorted(os.listdir(root))
 
     code, report, _ = run_doctor(
-        {"KORA_DATABASE_URL": url}, installation.settings(), capfd
+        {"KORA_DATABASE_URL": url}, installation.settings(), capfd, root
     )
 
     assert code == 0
     assert report["status"] == "passed"
     assert statuses(report) == {name: ("passed", None) for name in CHECKS}
     assert detail(report, "database") == database_kind.value
-    assert detail(report, "state_root") == str(installation.root)
+    assert detail(report, "state_root") == str(root)
     assert detail(report, "cel") == PINNED_VERSION
     assert sorted(os.listdir(tmp_path)) == before
-    assert installation.entries() == []
+    assert sorted(os.listdir(root)) == entries_before
 
 
 @dataclass(frozen=True)
@@ -310,13 +364,19 @@ def test_doctor_propagates_an_unclassified_driver_failure(
 ) -> None:
     url = postgresql_url(closed_port()) + "?unknown_option=1"
 
-    code = main(
-        ["doctor", "--json"],
-        {"KORA_DATABASE_URL": url, "KORA_LOG_LEVEL": "DEBUG"},
-        doctor_settings=installation.settings(),
-    )
+    descriptors = open_descriptors()
+    threads = threading.active_count()
+
+    with unchanged_stdout():
+        code = main(
+            ["doctor", "--json"],
+            {"KORA_DATABASE_URL": url, "KORA_LOG_LEVEL": "DEBUG"},
+            doctor_settings=installation.settings(),
+        )
 
     captured = capfd.readouterr()
+    assert open_descriptors() == descriptors
+    assert threading.active_count() == threads
     assert code == 70
     assert captured.out == ""
     assert "process.failed" in captured.err
@@ -468,7 +528,9 @@ def test_doctor_reports_unusable_state_root(
     before = root_state(installation)
 
     try:
-        code, report, _ = run_doctor({}, installation.settings(), capfd)
+        code, report, _ = run_doctor(
+            {}, installation.settings(), capfd, installation.root
+        )
         after = root_state(installation)
         entries = installation.entries()
     finally:
@@ -520,6 +582,8 @@ def test_doctor_stdout_is_machine_readable(
     database_settings: DatabaseSettings,
     installation: Installation,
 ) -> None:
+    configure_installation(installation.root)
+    entries_before = installation.entries()
     url = url_text(database_settings.url)
 
     code, out, err = finish(
@@ -534,9 +598,19 @@ def test_doctor_stdout_is_machine_readable(
     assert {"cli.doctor_check_finished", "cli.doctor_finished"} <= {
         record["event"] for record in records
     }
+    assert any(
+        record["event"] == "cli.doctor_check_finished"
+        and record.get("check") == "harness"
+        and record.get("harness") == "claude"
+        for record in records
+    )
+    credentials = cast(dict[str, str], CLAUDE["credentials"])
+    credential_reference = credentials["ANTHROPIC_API_KEY"]
+    assert all(credential_reference not in text for text in (stdout, stderr))
     assert all(ENVIRONMENT_MARKER not in text for text in (stdout, stderr))
     assert all(password_of(database_settings) not in text for text in (stdout, stderr))
     assert str(installation.root) not in stderr
+    assert installation.entries() == entries_before
 
 
 def test_doctor_prints_one_line_per_check(
@@ -544,6 +618,8 @@ def test_doctor_prints_one_line_per_check(
     database_settings: DatabaseSettings,
     installation: Installation,
 ) -> None:
+    configure_installation(installation.root)
+    entries_before = installation.entries()
     url = url_text(database_settings.url)
 
     code, out, err = finish(
@@ -557,8 +633,11 @@ def test_doctor_prints_one_line_per_check(
         f"cel passed {PINNED_VERSION}",
         f"database passed {database_kind.value}",
         f"state_root passed {installation.root}",
+        "installation passed kora.runner/1",
+        f"harness claude passed {CLI_VERSION}",
     ]
     assert all(json.loads(line) for line in stderr.splitlines())
+    assert installation.entries() == entries_before
 
 
 def group_gone(process: subprocess.Popen[bytes]) -> bool:
@@ -592,6 +671,8 @@ def test_doctor_releases_resources(
     installation: Installation,
     silent_listener: Listener,
 ) -> None:
+    configure_installation(installation.root)
+    entries_before = installation.entries()
     url = postgresql_url(silent_listener.port)
     process = kora_process(["doctor"], process_environment(installation, url))
 
@@ -605,7 +686,7 @@ def test_doctor_releases_resources(
     assert [line for line in lines if line.startswith("database")] == case.stdout
     assert (lines == []) is (case.interrupt is not None)
     assert group_gone(process)
-    assert installation.entries() == []
+    assert installation.entries() == entries_before
     assert silent_listener.accepted.is_set()
     assert silent_listener.peer_closed()
 
@@ -637,6 +718,8 @@ def test_doctor_in_process_runs_return_to_baseline(
     sqlite_template: Path,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
+    configure_installation(installation.root)
+    entries_before = installation.entries()
     healthy = tmp_path / "kora.db"
     healthy.write_bytes(sqlite_template.read_bytes())
     environments = [
@@ -656,7 +739,28 @@ def test_doctor_in_process_runs_return_to_baseline(
     assert codes == [0, 1] * 5
     assert open_descriptors() == descriptors
     assert threading.active_count() == threads
-    assert installation.entries() == []
+    assert installation.entries() == entries_before
+
+
+@dataclass
+class SignallingHome:
+    path: Path
+    value: signal.Signals
+    entered: threading.Event = field(default_factory=threading.Event)
+    release: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
+
+    def __call__(self) -> Path:
+        assert threading.current_thread() is not threading.main_thread()
+        self.entered.set()
+        assert self.release.wait(EVENT_DEADLINE_SECONDS)
+        self.finished.set()
+        return self.path
+
+    def interrupt(self) -> None:
+        assert self.entered.wait(EVENT_DEADLINE_SECONDS)
+        os.kill(os.getpid(), self.value)
+        self.release.set()
 
 
 async def signal_without_yielding(value: signal.Signals) -> str:
@@ -674,3 +778,57 @@ def test_signal_during_synchronous_work_interrupts(value: signal.Signals) -> Non
 
     assert outcome == ("finished", True)
     assert signal.getsignal(value) == before
+
+
+@pytest.mark.parametrize(
+    "value", [signal.SIGINT, signal.SIGTERM], ids=["sigint", "sigterm"]
+)
+def test_doctor_interrupt_during_installation_checks_restores_state(
+    value: signal.Signals,
+    installation: Installation,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    configure_installation(installation.root)
+    run_doctor({}, installation.settings(), capfd)
+    before = signal.getsignal(value)
+    descriptors = open_descriptors()
+    threads = threading.active_count()
+    entries = installation.entries()
+    home = SignallingHome(installation.home, value)
+    sender = threading.Thread(target=home.interrupt)
+    sender.start()
+
+    with unchanged_stdout():
+        code = main(["doctor", "--json"], {}, doctor_settings=DoctorSettings(home=home))
+        sender.join(EVENT_DEADLINE_SECONDS)
+
+    captured = capfd.readouterr()
+    assert code == 130, captured.err
+    assert captured.out == ""
+    assert "process.failed" not in captured.err
+    assert home.finished.is_set()
+    assert not sender.is_alive()
+    assert signal.getsignal(value) == before
+    assert open_descriptors() == descriptors
+    assert threading.active_count() == threads
+    assert installation.entries() == entries
+
+
+def test_doctor_keeps_its_exit_code_with_closed_stdout(
+    installation: Installation,
+) -> None:
+    environment = process_environment(installation, "")
+
+    completed = subprocess.run(
+        [shell(), "-c", 'exec "$0" -m kora doctor --json 1>&-', sys.executable],
+        env={"PATH": os.environ["PATH"], **environment},
+        capture_output=True,
+        timeout=PROCESS_DEADLINE_SECONDS,
+        check=False,
+    )
+
+    assert completed.returncode == 1, completed.stderr
+    assert completed.stdout == b""
+    records = [json.loads(line) for line in completed.stderr.splitlines()]
+    assert "process.failed" not in {record["event"] for record in records}
+    assert records[-1]["exit_code"] == 1

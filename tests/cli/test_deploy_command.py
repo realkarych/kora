@@ -1,9 +1,11 @@
 import asyncio
 import json
 import os
+import signal
 import socket
 import sys
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -24,22 +26,151 @@ __all__ = ["api_capture", "preparer"]
 PROCESS_DEADLINE_SECONDS = 60.0
 
 
-async def kora(arguments: list[str], environment: dict[str, str]) -> ProcessResult:
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-I",
-        "-m",
-        "kora",
-        *arguments,
-        env={"PATH": os.environ["PATH"], **environment},
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await asyncio.wait_for(
-        process.communicate(), PROCESS_DEADLINE_SECONDS
-    )
+async def stop_cli(
+    launch: asyncio.Task[asyncio.subprocess.Process],
+    communication: asyncio.Task[tuple[bytes, bytes]] | None,
+) -> None:
+    process = await launch
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        if communication is None:
+            await process.communicate()
+        else:
+            await communication
+    finally:
+        await process.wait()
+
+
+async def collect_cli(
+    launch: asyncio.Task[asyncio.subprocess.Process], timeout: float
+) -> ProcessResult:
+    communication: asyncio.Task[tuple[bytes, bytes]] | None = None
+    try:
+        process = await asyncio.shield(launch)
+        communication = asyncio.create_task(process.communicate())
+        async with asyncio.timeout(timeout):
+            stdout, stderr = await asyncio.shield(communication)
+    except BaseException as original:
+        cleanup = asyncio.create_task(stop_cli(launch, communication))
+        try:
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+        except BaseException as cleanup_error:
+            if cleanup_error is original:
+                raise
+            raise original from cleanup_error
+        raise
     assert process.returncode is not None
     return ProcessResult(process.returncode, stdout, stderr)
+
+
+async def kora(arguments: list[str], environment: dict[str, str]) -> ProcessResult:
+    launch = asyncio.create_task(
+        asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-m",
+            "kora",
+            *arguments,
+            env={"PATH": os.environ["PATH"], **environment},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    )
+    return await collect_cli(launch, PROCESS_DEADLINE_SECONDS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["timeout", "cancel"])
+async def test_cli_collection_reaps_the_child_on_interruption(
+    interruption: Literal["timeout", "cancel"],
+) -> None:
+    child_stdin, release_child = socket.socketpair()
+    collecting = asyncio.Event()
+
+    async def collect() -> ProcessResult:
+        collecting.set()
+        timeout = 0 if interruption == "timeout" else PROCESS_DEADLINE_SECONDS
+        return await collect_cli(launch, timeout)
+
+    with child_stdin, release_child:
+        launch = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                "-c",
+                "import sys; sys.stdin.buffer.read()",
+                stdin=child_stdin.fileno(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        )
+        process = await launch
+        collection = asyncio.create_task(collect())
+        try:
+            await asyncio.wait_for(collecting.wait(), PROCESS_DEADLINE_SECONDS)
+            if interruption == "cancel":
+                collection.cancel("original cancellation")
+                asyncio.get_running_loop().call_soon(
+                    collection.cancel, "cancellation during cleanup"
+                )
+            done, _ = await asyncio.wait({collection}, timeout=PROCESS_DEADLINE_SECONDS)
+            assert collection in done
+            if interruption == "timeout":
+                with pytest.raises(TimeoutError):
+                    await collection
+            else:
+                with pytest.raises(
+                    asyncio.CancelledError, match="original cancellation"
+                ):
+                    await collection
+            returncode = process.returncode
+        finally:
+            release_child.close()
+            await asyncio.gather(collection, return_exceptions=True)
+            await stop_cli(launch, None)
+
+    assert returncode == -signal.SIGKILL
+
+
+@pytest.mark.asyncio
+async def test_cli_cancellation_preserves_a_failed_launch_as_its_cause(
+    tmp_path: Path,
+) -> None:
+    collecting = asyncio.Event()
+    finish_launch = asyncio.Event()
+
+    async def missing_executable() -> asyncio.subprocess.Process:
+        await finish_launch.wait()
+        return await asyncio.create_subprocess_exec(str(tmp_path / "absent-cli"))
+
+    async def collect() -> ProcessResult:
+        collecting.set()
+        return await collect_cli(launch, PROCESS_DEADLINE_SECONDS)
+
+    launch = asyncio.create_task(missing_executable())
+    collection = asyncio.create_task(collect())
+    try:
+        await asyncio.wait_for(collecting.wait(), PROCESS_DEADLINE_SECONDS)
+        collection.cancel("cancelled during launch")
+        finish_launch.set()
+        with pytest.raises(
+            asyncio.CancelledError, match="cancelled during launch"
+        ) as cancelled:
+            await collection
+    finally:
+        finish_launch.set()
+        await asyncio.gather(launch, collection, return_exceptions=True)
+
+    assert isinstance(cancelled.value.__cause__, FileNotFoundError)
 
 
 def written(directory: Path, name: str, document: JsonObject) -> Path:

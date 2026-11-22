@@ -15,6 +15,7 @@ DOCTOR_CHECK_FINISHED: EventSpec = CATALOG.register(
             "check": FieldKind.STRING,
             "status": FieldKind.STRING,
             "reason": FieldKind.STRING,
+            "harness": FieldKind.STRING,
         },
     )
 )
@@ -41,6 +42,8 @@ class CheckName(enum.StrEnum):
     CEL = "cel"
     DATABASE = "database"
     STATE_ROOT = "state_root"
+    INSTALLATION = "installation"
+    HARNESS = "harness"
 
 
 class CheckStatus(enum.StrEnum):
@@ -54,14 +57,19 @@ class CheckResult:
     status: CheckStatus
     reason: str | None
     detail: str | None
+    subject: str | None = None
 
     @classmethod
-    def passed(cls, name: CheckName, detail: str) -> "CheckResult":
-        return cls(name, CheckStatus.PASSED, None, detail)
+    def passed(
+        cls, name: CheckName, detail: str, subject: str | None = None
+    ) -> "CheckResult":
+        return cls(name, CheckStatus.PASSED, None, detail, subject)
 
     @classmethod
-    def failed(cls, name: CheckName, reason: str) -> "CheckResult":
-        return cls(name, CheckStatus.FAILED, reason, None)
+    def failed(
+        cls, name: CheckName, reason: str, subject: str | None = None
+    ) -> "CheckResult":
+        return cls(name, CheckStatus.FAILED, reason, None, subject)
 
     def view(self) -> dict[str, str | None]:
         return {
@@ -69,12 +77,16 @@ class CheckResult:
             "status": self.status.value,
             "reason": self.reason,
             "detail": self.detail,
+            **({"harness": self.subject} if self.name is CheckName.HARNESS else {}),
         }
 
     def line(self) -> str:
+        label = self.name.value
+        if self.name is CheckName.HARNESS and self.subject is not None:
+            label += f" {self.subject}"
         if self.status is CheckStatus.PASSED:
-            return f"{self.name.value} passed {self.detail}"
-        return f"{self.name.value} failed {self.reason}"
+            return f"{label} passed {self.detail}"
+        return f"{label} failed {self.reason}"
 
 
 @dataclass(frozen=True)

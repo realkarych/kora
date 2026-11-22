@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import json
 import os
 import signal
@@ -9,13 +10,14 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import FrameType, TracebackType
-from typing import TYPE_CHECKING, Annotated, TypeVar
+from typing import TYPE_CHECKING, Annotated, TypeVar, cast
 
 import typer
 import typer.main
@@ -69,6 +71,9 @@ from kora.protocols.metadata import parse_config_schema
 from kora.protocols.time import Clock, SystemClock
 
 if TYPE_CHECKING:
+    from kora.db.connection import Database, DatabaseSettings
+    from kora.ir.json import JsonObject
+    from kora.protocols.authentication import Authenticator
     from kora.runner.channels import BoundedChannel
     from kora.runner.filesystem import DirectoryAnchor
     from kora.runner.processes import GatedProcess
@@ -90,6 +95,30 @@ MISSING_COMMAND: str = "a command or --version is required"
 CLIENT_CONFIGURATION_PREFIX: str = "kora: invalid client configuration"
 MCP_EXTRA_REQUIRED: str = "kora: the stdio MCP server requires the kora[mcp] extra"
 MCP_DISTRIBUTIONS: frozenset[str] = frozenset({"mcp", "mcp_types"})
+POSTGRES_SERVING_OVERRIDES: frozenset[str] = frozenset(
+    {
+        "PGDATABASE",
+        "PGGSSLIB",
+        "PGHOST",
+        "PGKRBSRVNAME",
+        "PGPASSFILE",
+        "PGPASSWORD",
+        "PGPORT",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGSSLCERT",
+        "PGSSLCRL",
+        "PGSSLKEY",
+        "PGSSLMAXPROTOCOLVERSION",
+        "PGSSLMINPROTOCOLVERSION",
+        "PGSSLMODE",
+        "PGSSLNEGOTIATION",
+        "PGSSLROOTCERT",
+        "PGTARGETSESSIONATTRS",
+        "PGUSER",
+        "SSLKEYLOGFILE",
+    }
+)
 
 
 class McpServerName(StrEnum):
@@ -664,6 +693,97 @@ def serve_mcp(
     asyncio.run(serve_stdio(server.value, settings, diagnostics))
 
 
+def installed_versions(expected: Mapping[str, str]) -> bool:
+    try:
+        return all(version(name) == required for name, required in expected.items())
+    except PackageNotFoundError:
+        return False
+
+
+def postgres_serving_candidate(
+    settings: "DatabaseSettings", environment: Mapping[str, str]
+) -> bool:
+    query = settings.url.query
+    certificate = query.get("sslrootcert")
+    port = settings.url.port
+    return (
+        installed_versions({"asyncpg": "0.32.0", "SQLAlchemy": "2.1.5"})
+        and settings.url.host == "127.0.0.1"
+        and port is not None
+        and 1 <= port <= 65535
+        and query.keys() <= {"sslmode", "sslrootcert", "target_session_attrs"}
+        and query.get("sslmode") == "verify-full"
+        and query.get("target_session_attrs", "any") == "any"
+        and isinstance(certificate, str)
+        and Path(certificate).is_absolute()
+        and Path(certificate).is_file()
+        and POSTGRES_SERVING_OVERRIDES.isdisjoint(environment)
+    )
+
+
+def serve_api(
+    environment: Mapping[str, str], diagnostics: ProcessDiagnostics, port: int
+) -> int:
+    if not installed_versions(
+        {"uvicorn": "0.54.0", "common-expression-language": "0.10.0"}
+    ):
+        write_stderr("kora: API startup refused (dependency_unavailable)\n")
+        return EXIT_CONFIGURATION
+
+    from kora.api.application import create_application
+    from kora.api.exchange import COMPONENT, ApiExchange
+    from kora.api.serving import ServingRefusal, refuse, serve_sqlite
+    from kora.db.connection import (
+        DatabaseConfigurationError,
+        Dialect,
+        read_database_settings,
+    )
+    from kora.protocols.loading import load_provider
+    from kora.protocols.metadata import ProtocolName
+
+    log = diagnostics.logger(COMPONENT)
+    try:
+        settings = read_database_settings(environment)
+    except DatabaseConfigurationError:
+        return refuse(log, ServingRefusal.DATABASE_CONFIGURATION, EXIT_CONFIGURATION)
+    if settings.dialect is Dialect.POSTGRESQL:
+        from kora.api._linux_serving_barrier import (
+            LinuxServingBarrierError,
+            LinuxServingBarrierRefusal,
+            install_linux_serving_barrier,
+        )
+
+        if not postgres_serving_candidate(settings, environment):
+            return refuse(
+                log, ServingRefusal.POSTGRESQL_PROFILE_UNAVAILABLE, EXIT_CONFIGURATION
+            )
+        try:
+            install_linux_serving_barrier()
+        except LinuxServingBarrierError as error:
+            reason = (
+                ServingRefusal.POSTGRESQL_PROFILE_UNAVAILABLE
+                if error.reason is LinuxServingBarrierRefusal.UNSUPPORTED_PROFILE
+                else ServingRefusal.POSTGRESQL_BARRIER_UNAVAILABLE
+            )
+            return refuse(log, reason, EXIT_CONFIGURATION)
+        return refuse(
+            log, ServingRefusal.POSTGRESQL_ACTIVATION_UNAVAILABLE, EXIT_CONFIGURATION
+        )
+
+    def application(database: "Database") -> ApiExchange:
+        provider = load_provider(
+            ProtocolName.AUTHENTICATION, "static_token", diagnostics
+        )
+        factory = cast(
+            "Callable[[JsonObject, Database], Authenticator]", provider.implementation
+        )
+        return create_application(
+            factory({}, database), diagnostics, SystemClock(), new_instance_id
+        )
+
+    return serve_sqlite(settings, port, log, application)
+
+
 def cel_check() -> CheckResult:
     from kora.cel_eval.binding import BindingUnavailable, load_binding
 
@@ -685,24 +805,64 @@ async def database_check(
     return CheckResult.passed(CheckName.DATABASE, probe.value)
 
 
-def state_root_check(
-    environment: Mapping[str, str], settings: DoctorSettings
-) -> CheckResult:
+def installation_refused(reason: str) -> tuple[CheckResult, CheckResult]:
+    return (
+        CheckResult.failed(CheckName.INSTALLATION, reason),
+        CheckResult.failed(CheckName.HARNESS, "installation_refused"),
+    )
+
+
+def installation_checks(
+    environment: Mapping[str, str],
+    settings: DoctorSettings,
+    diagnostics: ProcessDiagnostics,
+    state_root: str | None,
+) -> tuple[CheckResult, ...]:
+    from kora.plugins.runtime.local.harness_probe import (
+        HarnessPassed,
+        probe_harnesses,
+        probe_installation,
+    )
     from kora.plugins.runtime.local.state_probe import (
         StateRootFailure,
         probe_state_root,
     )
 
-    probe = probe_state_root(environment, settings.home)
+    probe = probe_state_root(state_root, environment, settings.home)
     if isinstance(probe, StateRootFailure):
-        return CheckResult.failed(CheckName.STATE_ROOT, probe.value)
-    return CheckResult.passed(CheckName.STATE_ROOT, str(probe))
+        return (
+            CheckResult.failed(CheckName.STATE_ROOT, probe.value),
+            *installation_refused(StateRootFailure.UNSAFE.value),
+        )
+    try:
+        checks = [
+            CheckResult.passed(CheckName.STATE_ROOT, str(probe.path))
+            if probe.failure is None
+            else CheckResult.failed(CheckName.STATE_ROOT, probe.failure.value)
+        ]
+        installation = probe_installation(probe.anchor, probe.path, diagnostics)
+        if isinstance(installation, str):
+            return (*checks, *installation_refused(installation))
+        checks.append(CheckResult.passed(CheckName.INSTALLATION, installation.detail))
+        if not installation.configuration.harness:
+            checks.append(CheckResult.failed(CheckName.HARNESS, "not_configured"))
+        checks.extend(
+            CheckResult.passed(CheckName.HARNESS, harness.version, harness.name)
+            if isinstance(harness, HarnessPassed)
+            else CheckResult.failed(CheckName.HARNESS, harness.reason, harness.name)
+            for harness in probe_harnesses(diagnostics, installation.configuration)
+        )
+        return tuple(checks)
+    finally:
+        probe.anchor.close()
 
 
 async def doctor_checks(
     environment: Mapping[str, str],
     settings: DoctorSettings,
     log: ComponentLogger,
+    diagnostics: ProcessDiagnostics,
+    state_root: str | None,
 ) -> DoctorReport:
     from kora.cli.app import kora_version
 
@@ -715,12 +875,16 @@ async def doctor_checks(
             check=check.name.value,
             status=check.status.value,
             **({} if check.reason is None else {"reason": check.reason}),
+            **({} if check.subject is None else {"harness": check.subject}),
         )
 
     record(CheckResult.passed(CheckName.VERSION, kora_version()))
     record(cel_check())
     record(await database_check(environment, settings))
-    record(state_root_check(environment, settings))
+    for check in await asyncio.to_thread(
+        installation_checks, environment, settings, diagnostics, state_root
+    ):
+        record(check)
     return DoctorReport(tuple(checks))
 
 
@@ -729,11 +893,43 @@ def doctor(
     environment: Mapping[str, str],
     settings: DoctorSettings,
     as_json: bool,
+    state_root: str | None = None,
 ) -> None:
     log = diagnostics.logger(CLI_COMPONENT)
-    report, interrupted = asyncio.run(
-        run_interruptible(doctor_checks(environment, settings, log))
-    )
+    try:
+        saved_stdout = os.dup(STDOUT_DESCRIPTOR)
+    except OSError as error:
+        if error.errno != errno.EBADF:
+            raise
+        saved_stdout = None
+    original_stdout = sys.stdout
+    redirected = False
+    try:
+        os.dup2(STDERR_DESCRIPTOR, STDOUT_DESCRIPTOR)
+        redirected = True
+        with redirect_stdout(sys.stderr):
+            try:
+                report, interrupted = asyncio.run(
+                    run_interruptible(
+                        doctor_checks(
+                            environment, settings, log, diagnostics, state_root
+                        )
+                    )
+                )
+            finally:
+                if sys.stdout is not None:
+                    sys.stdout.flush()
+                if original_stdout is not None:
+                    original_stdout.flush()
+    finally:
+        if saved_stdout is not None:
+            try:
+                if redirected:
+                    os.dup2(saved_stdout, STDOUT_DESCRIPTOR)
+            finally:
+                os.close(saved_stdout)
+        elif redirected:
+            os.close(STDOUT_DESCRIPTOR)
     if report is None or interrupted:
         raise typer.Exit(EXIT_INTERRUPT)
     log.emit(
@@ -756,6 +952,12 @@ def compose_application(
     app.add_typer(
         build_plugins_app(InstalledPluginDiscovery(diagnostics)), name="plugins"
     )
+
+    @app.command(name="api", help="Serve the configured local SQLite API.")
+    def serve_api_command(
+        port: Annotated[int, typer.Option("--port", min=0, max=65535)] = 8000,
+    ) -> None:
+        raise typer.Exit(serve_api(environment, diagnostics, port))
 
     @app.command(name="deploy", help="Deploy a compiled graph without command files.")
     def deploy(
@@ -823,12 +1025,14 @@ def compose_application(
     @app.command(name="doctor", help="Check the local installation prerequisites.")
     def check_installation(
         as_json: bool = typer.Option(False, "--json"),
+        state_root: str | None = typer.Option(None, "--state-root"),
     ) -> None:
         doctor(
             diagnostics,
             environment,
             doctor_settings if doctor_settings is not None else DoctorSettings(),
             as_json,
+            None if state_root is None else str(Path(state_root).absolute()),
         )
 
     return app
@@ -918,7 +1122,7 @@ def main(
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     environment = os.environ if environ is None else environ
-    for component in ("conformance.lifetime", "client", "mcp"):
+    for component in ("api", "conformance.lifetime", "client", "mcp"):
         CATALOG.register_component(component)
     try:
         settings = read_logging_settings(environment, CATALOG.components())

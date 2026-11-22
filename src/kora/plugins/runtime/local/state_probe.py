@@ -2,7 +2,11 @@ import enum
 import os
 import secrets
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
+
+from pydantic import ValidationError
 
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.plugins.runtime.local.runtime import anchored_root
@@ -51,17 +55,26 @@ def write_probe(anchor: DirectoryAnchor) -> StateRootFailure | None:
     return None
 
 
+@dataclass(frozen=True)
+class StateRootProbe:
+    path: Path
+    anchor: DirectoryAnchor
+    failure: StateRootFailure | None
+
+
 def probe_state_root(
-    environment: Mapping[str, str], home: Callable[[], Path]
-) -> Path | StateRootFailure:
-    anchored = anchored_root(
-        LocalRuntimeConfiguration(state_root=None), environment, home
-    )
+    configured: str | None, environment: Mapping[str, str], home: Callable[[], Path]
+) -> StateRootProbe | StateRootFailure:
+    try:
+        configuration = LocalRuntimeConfiguration(state_root=configured)
+    except ValidationError:
+        return StateRootFailure.UNSAFE
+    anchored = anchored_root(configuration, environment, home)
     if anchored is None:
         return StateRootFailure.UNSAFE
     path, anchor = anchored
-    try:
-        failure = write_probe(anchor)
-    finally:
-        anchor.close()
-    return path if failure is None else failure
+    with ExitStack() as cleanup:
+        cleanup.callback(anchor.close)
+        probe = StateRootProbe(path, anchor, write_probe(anchor))
+        cleanup.pop_all()
+        return probe

@@ -1,7 +1,8 @@
 import asyncio
 import json
 import socket
-from contextlib import AsyncExitStack
+import sqlite3
+from contextlib import AsyncExitStack, closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -15,6 +16,7 @@ from kora.conformance.authentication import authentication_context as context_fo
 from kora.conformance.authentication import kora_capture
 from kora.conformance.capture import Capture
 from kora.db.connection import SQLITE_READERS, Database, DatabaseSettings, Dialect
+from kora.db.migrations import upgrade_database
 from kora.db.tables import api_token, idempotency_record, worker
 from kora.db.tokens import REVOKED
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
@@ -25,6 +27,7 @@ from kora.protocols.metadata import ProtocolName
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import START, Seeder
 from tests.plugins.authentication.support import AuthorityClock, seed_case
+from tests.support.databases import sqlite_settings
 from tests.support.event_loop import turn
 from tests.support.observability import run_python
 
@@ -379,6 +382,67 @@ async def test_real_database_connection_unavailability_is_not_bad_credentials(
 
     assert ledger.outstanding == 0
     assert "private-outage-marker" not in json.dumps(kora_capture.finish())
+
+
+@pytest.mark.asyncio
+async def test_sqlite_revoke_busy_writer_returns_safe_retryable_refusal(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    settings = sqlite_settings(tmp_path / "private-contention-metadata.db")
+    await upgrade_database(settings)
+    database = Database(settings)
+    try:
+        case = await seed_case(database, "contended-revoke")
+        entry = load_provider(
+            ProtocolName.AUTHENTICATION, "static_token", kora_capture.diagnostics
+        )
+        provider = entry.implementation({}, database)
+        assert isinstance(provider, StaticTokenAuthenticator)
+        context = context_for(kora_capture)
+        async with database.transaction() as writer:
+            with await writer.execute(text("PRAGMA busy_timeout=0")):
+                pass
+        ledger = ConnectionLedger(database)
+
+        with closing(
+            sqlite3.connect(settings.sqlite_path, timeout=0, isolation_level=None)
+        ) as competing_writer:
+            with closing(competing_writer.execute("BEGIN IMMEDIATE")):
+                pass
+            with pytest.raises(KoraProtocolError) as busy:
+                await provider.revoke(case.principal.token_id, context)
+            released = ledger.checkouts, ledger.outstanding, database.units_in_flight()
+            writer_is_free = database.writer_is_free()
+            competing_writer_is_active = competing_writer.in_transaction
+            still_valid = await provider.authenticate(case.request, context)
+            competing_writer.rollback()
+        await provider.revoke(case.principal.token_id, context)
+        await provider.revoke(case.principal.token_id, context)
+        with pytest.raises(KoraProtocolError) as revoked:
+            await provider.authenticate(case.request, context)
+        records = kora_capture.finish()
+    finally:
+        await database.close()
+
+    assert_error(busy.value, "authentication_unavailable")
+    assert busy.value.message == "Authentication is unavailable."
+    assert released == (1, 0, 0)
+    assert writer_is_free
+    assert competing_writer_is_active
+    assert still_valid == case.principal
+    assert_error(revoked.value, "authentication_rejected")
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert database.writer_is_free()
+    assert [
+        record["outcome"]
+        for record in records
+        if record["event"] == "authentication.static_token.outcome"
+        and record["operation"] == "revoke"
+    ] == ["authentication_unavailable", "completed", "completed"]
+    serialized_records = json.dumps(records)
+    assert str(settings.sqlite_path) not in serialized_records
+    assert case.principal.token_id not in serialized_records
+    assert "BEGIN IMMEDIATE" not in serialized_records
 
 
 @pytest.mark.asyncio

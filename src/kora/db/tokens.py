@@ -1,6 +1,6 @@
 import sqlite3
 from datetime import UTC, datetime
-from typing import Final, Protocol, cast
+from typing import Final
 
 from sqlalchemy import Integer, literal_column, or_, select, update
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
@@ -24,14 +24,6 @@ UNAVAILABLE_SQLITE: Final[frozenset[int]] = frozenset(
         sqlite3.SQLITE_PROTOCOL,
     )
 )
-
-
-class PostgresDriver(Protocol):
-    PostgresError: type[Exception]
-
-
-class PostgresAdapter(Protocol):
-    asyncpg: PostgresDriver
 
 
 class GraphCredentialGuardRejected(RuntimeError):
@@ -74,10 +66,10 @@ def authentication_errors(database: Database) -> tuple[type[Exception], ...]:
         DatabaseClosedError,
         ValueError,
     )
-    if database.dialect is Dialect.POSTGRESQL:
-        adapter = cast("PostgresAdapter", database.writer_engine.dialect.loaded_dbapi)
-        return (*errors, adapter.asyncpg.PostgresError)
-    return errors
+    if database.dialect is Dialect.SQLITE:
+        return (*errors, sqlite3.Error)
+    native_error = database.postgresql_driver_error()
+    return errors if native_error is None else (*errors, native_error)
 
 
 def authentication_unavailable(error: Exception) -> bool:

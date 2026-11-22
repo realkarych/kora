@@ -58,6 +58,16 @@ def output_diagnostic(output_format: bool, events: ClaudeEvents) -> str | None:
     return "output_missing"
 
 
+def installed_cli_version() -> str:
+    from claude_agent_sdk import __version__
+    from claude_agent_sdk._cli_version import __cli_version__
+
+    from kora.plugins.harness.claude.sdk import require_native_versions
+
+    require_native_versions(__version__, __cli_version__)
+    return __cli_version__
+
+
 class ClaudeHarness:
     name: ClassVar[str] = "claude"
     config_schema: ClassVar[JsonObject] = CONFIG_SCHEMA
@@ -99,13 +109,7 @@ class ClaudeHarness:
         ]
 
     def installed_version(self) -> str:
-        from claude_agent_sdk import __version__
-        from claude_agent_sdk._cli_version import __cli_version__
-
-        from kora.plugins.harness.claude.sdk import require_native_versions
-
-        require_native_versions(__version__, __cli_version__)
-        return __cli_version__
+        return installed_cli_version()
 
     def build_session_spec(
         self,
