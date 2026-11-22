@@ -2,6 +2,8 @@
 
 Status: Reviewed by the project owner on 2026-10-16. Decisions in this document were taken by the project owner; research backing is in `knowledge/research/`, which also holds the dated figures behind every statement about competitors here (versions, popularity, release dates).
 
+The project owner [reviewed and approved the external-demand test timing for #1359 line by line](https://github.com/realkarych/kora/issues/1359#issuecomment-7082791471) on 2026-11-22.
+
 ## One-liner
 
 **kora is an open-source platform for running graphs of coding-agent sessions at organisation scale.** The unit of work is a full Claude Code or Codex session with its own skills, subagents, hooks and MCP servers. The platform adds what neither a single session nor a single-repo workflow engine provides: a scheduler-grade control plane (cron, sensors, namespaces, hundreds of concurrent sessions), attempts and artifacts as first-class objects with lineage, approvals bound to content, and protocols that let it run on an organisation's own runtime, VCS and secrets infrastructure.
@@ -143,7 +145,7 @@ What is backed by evidence today:
 
 What is a hypothesis, not yet validated:
 
-- **Hypothesis "external demand": demand beyond the owner's organisation.** Other platform teams want an organisation-scale orchestration layer with enterprise protocols enough to adopt a new control plane, rather than running Archon per repository. Test: public pilots after MVP; count organisations (not individuals) that implement a protocol or run more than one team on one kora instance. Archon's popularity validates the category; it does not validate the platform layer.
+- **Hypothesis "external demand": demand beyond the owner's organisation.** Other platform teams want an organisation-scale orchestration layer with enterprise protocols enough to adopt a new control plane, rather than running Archon per repository. Test: start conversations with prospective adopters once the second slice runs. Use the earlier pilot to count organisations (not individuals) that implement a protocol or run more than one team on one kora instance. See the [approved milestone order](decisions/0001-own-control-plane.md#milestone-order-amendment-of-2026-11-11). Archon's popularity validates the category; it does not validate the platform layer.
 - **Hypothesis "multi-harness value": mixing harnesses per node has value.** Test: in the pilot, measure how often a graph uses more than one harness and whether it changes outcomes or cost.
 - **Hypothesis "own scheduler is necessary".** The alternative is an existing engine (Temporal, Kestra, Airflow) plus an adapter that runs a whole coding session as one task. A desk analysis ([knowledge/analysis/own-scheduler-vs-existing-engine/verdict.md](../knowledge/analysis/own-scheduler-vs-existing-engine/verdict.md)) found the hypothesis partly confirmed: an own scheduler is not strictly necessary, but no engine removes kora's own state model of attempts, artifacts and content-bound approvals. The resulting decision, an own control plane with run state kept so that a Temporal backend stays possible, is [ADR-0001](decisions/0001-own-control-plane.md).
 - **Hypothesis "outer-loop value": the value is in the outer loop, not in candidate generation.** Harnesses will keep absorbing single-session parallelism (dynamic workflows, Managed Agents, Cursor subagents). Test: pilot metrics below.
