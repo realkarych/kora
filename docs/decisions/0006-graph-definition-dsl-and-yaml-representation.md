@@ -41,13 +41,13 @@ Graphs are authored in Python with decorators and the `>>` operator; `kora compi
 - **Trigger overlap** defaults to `allow` for every trigger kind except webhooks, which default to `queue` so that a burst of events does not start a burst of runs (FR-6.2, aligned on 2026-10-16); `skip` and `queue` are per-graph options in `graph.overlap` (DD-12). [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md) makes starts bounded and canonical: `skip` considers accepted `pending` as well as `running` runs; `queue` promotion selects the oldest pending run under the graph scope lock when no run is running. Accepted delivery/skip replay precedes current-version validation and quota checks.
 - **Presets live in two places** (DD-25): Python objects in graph code and registry presets published by the platform team. `kora presets pull` fetches the latter into `.kora/presets/` beforehand, so compile stays offline; both kinds are snapshotted under `meta.presets`, and the scheduler reads only each node's resolved `config`.
 
-## Proposed automatic CLI approval expiry audit
+## Automatic CLI approval expiry audit
 
-Proposed on 2026-11-21 under [#1737](https://github.com/realkarych/kora/issues/1737). Concrete behavior and wording are pending owner review.
+Amendment under [#1737](https://github.com/realkarych/kora/issues/1737). The project owner reviewed this amendment line by line and accepted its wording on 2026-11-22 at `adb7d9bce5aded0dedba3d9e8e98afec2d5919b4`. [Owner acceptance](https://github.com/realkarych/kora/issues/1737#issuecomment-7081993174)
 
 For a local CLI approval in the walking skeleton, the saved automatic default is a scheduler-originated expiry action. The response uses the saved form and checked predicate. The request remains `expired` and records no approver, including when the default resolves the node successfully. Record one `approval.expired` observation with the scheduler actor when the expiry becomes durable. The node outcome event owns any later resolution. Keep a complete valid evaluated response. An automatic response evaluation error fails the node with `config_error` and preserves the existing content-free CEL error record with that node failure. The request's evaluation-error field stays empty. The ordinary rule for an applied human response still marks the request `failed` on an `approve_when` error and retains its response and request evaluation error.
 
-The [local CLI expiry proposal](../../knowledge/specs/cli-approval-opening.md#3-expiry-and-retained-response) defines the exact retained response, state changes and actor boundary. This exception requires owner approval before activation.
+The [local CLI expiry specification](../../knowledge/specs/cli-approval-opening.md#3-expiry-and-retained-response) defines the exact retained response, state changes and actor boundary. This exception requires owner approval before activation.
 
 ## Alternatives considered
 
