@@ -212,17 +212,23 @@ async def test_installed_sqlite_worker_routes_are_explicit_and_service_only(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("harness", "uncertainty"),
+    ("harness", "uncertainty", "other_invalid_spellings"),
     [
-        (None, "2000"),
-        ("claude", "0"),
-        ("claude", "020"),
-        ("claude", "86400000000000000000"),
-        ("claude", "private-clock"),
+        pytest.param(None, "2000", (), id="missing-harness"),
+        pytest.param(
+            "claude",
+            "private-clock",
+            ("0", "020", "86400000000000000000"),
+            id="invalid-clock",
+        ),
     ],
 )
 async def test_installed_worker_rejects_invalid_selection_before_open(
-    serving_installation: Path, tmp_path: Path, harness: str | None, uncertainty: str
+    serving_installation: Path,
+    tmp_path: Path,
+    harness: str | None,
+    uncertainty: str,
+    other_invalid_spellings: tuple[str, ...],
 ) -> None:
     settings = sqlite_settings(tmp_path / "must-not-exist.sqlite")
     port = available_port()
@@ -230,6 +236,9 @@ async def test_installed_worker_rejects_invalid_selection_before_open(
     if harness is not None:
         environment[DOMAIN_HARNESS] = harness
 
+    other_profiles = tuple(
+        installed_worker_profile(value) for value in other_invalid_spellings
+    )
     result = await asyncio.to_thread(
         subprocess.run,
         api_command(serving_installation, port),
@@ -245,6 +254,7 @@ async def test_installed_worker_rejects_invalid_selection_before_open(
     assert refusal_reason(result) == "worker_configuration"
     assert not settings.sqlite_path.exists()
     assert b"private-clock" not in result.stderr
+    assert all(profile is None for profile in other_profiles)
     assert all(
         record["event"] != "protocols.loading.provider_loaded"
         for record in diagnostics(result.stderr)

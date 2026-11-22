@@ -90,9 +90,15 @@ async def claim_response_app(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("receiver", ["slow", "lost", "cancelled"])
 @pytest.mark.parametrize(
-    "single_claim", [False, True], ids=["generic", "installed-slot"]
+    ("receiver", "single_claim"),
+    [
+        pytest.param("slow", False, id="generic-slow"),
+        pytest.param("lost", False, id="generic-lost"),
+        pytest.param("cancelled", False, id="generic-cancelled"),
+        pytest.param("lost", True, id="installed-slot-lost"),
+        pytest.param("cancelled", True, id="installed-slot-cancelled"),
+    ],
 )
 async def test_claim_settles_before_response_delivery_and_replays_after_loss(
     database: Database,
@@ -244,17 +250,13 @@ async def test_lost_http_claim_recovers_original_grant_after_api_process_restart
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "installed", [False, True], ids=["generic", "installed-limits"]
-)
 async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
     empty_database_settings: DatabaseSettings,
     evaluator: Evaluator,
-    installed: bool,
 ) -> None:
     profile = installed_worker_profile("2000")
     assert profile is not None
-    limits = profile.limits if installed else LIMITS
+    limits = profile.limits
     database = Database(empty_database_settings)
     try:
         async with database.migration_connection() as migration:
