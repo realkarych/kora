@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import json
 import os
 import signal
@@ -9,7 +10,7 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -685,24 +686,64 @@ async def database_check(
     return CheckResult.passed(CheckName.DATABASE, probe.value)
 
 
-def state_root_check(
-    environment: Mapping[str, str], settings: DoctorSettings
-) -> CheckResult:
+def installation_refused(reason: str) -> tuple[CheckResult, CheckResult]:
+    return (
+        CheckResult.failed(CheckName.INSTALLATION, reason),
+        CheckResult.failed(CheckName.HARNESS, "installation_refused"),
+    )
+
+
+def installation_checks(
+    environment: Mapping[str, str],
+    settings: DoctorSettings,
+    diagnostics: ProcessDiagnostics,
+    state_root: str | None,
+) -> tuple[CheckResult, ...]:
+    from kora.plugins.runtime.local.harness_probe import (
+        HarnessPassed,
+        probe_harnesses,
+        probe_installation,
+    )
     from kora.plugins.runtime.local.state_probe import (
         StateRootFailure,
         probe_state_root,
     )
 
-    probe = probe_state_root(environment, settings.home)
+    probe = probe_state_root(state_root, environment, settings.home)
     if isinstance(probe, StateRootFailure):
-        return CheckResult.failed(CheckName.STATE_ROOT, probe.value)
-    return CheckResult.passed(CheckName.STATE_ROOT, str(probe))
+        return (
+            CheckResult.failed(CheckName.STATE_ROOT, probe.value),
+            *installation_refused(StateRootFailure.UNSAFE.value),
+        )
+    try:
+        checks = [
+            CheckResult.passed(CheckName.STATE_ROOT, str(probe.path))
+            if probe.failure is None
+            else CheckResult.failed(CheckName.STATE_ROOT, probe.failure.value)
+        ]
+        installation = probe_installation(probe.anchor, probe.path, diagnostics)
+        if isinstance(installation, str):
+            return (*checks, *installation_refused(installation))
+        checks.append(CheckResult.passed(CheckName.INSTALLATION, installation.detail))
+        if not installation.configuration.harness:
+            checks.append(CheckResult.failed(CheckName.HARNESS, "not_configured"))
+        checks.extend(
+            CheckResult.passed(CheckName.HARNESS, harness.version, harness.name)
+            if isinstance(harness, HarnessPassed)
+            else CheckResult.failed(CheckName.HARNESS, harness.reason, harness.name)
+            for harness in probe_harnesses(diagnostics, installation.configuration)
+        )
+        return tuple(checks)
+    finally:
+        probe.anchor.close()
 
 
 async def doctor_checks(
     environment: Mapping[str, str],
     settings: DoctorSettings,
     log: ComponentLogger,
+    diagnostics: ProcessDiagnostics,
+    state_root: str | None,
 ) -> DoctorReport:
     from kora.cli.app import kora_version
 
@@ -715,12 +756,16 @@ async def doctor_checks(
             check=check.name.value,
             status=check.status.value,
             **({} if check.reason is None else {"reason": check.reason}),
+            **({} if check.subject is None else {"harness": check.subject}),
         )
 
     record(CheckResult.passed(CheckName.VERSION, kora_version()))
     record(cel_check())
     record(await database_check(environment, settings))
-    record(state_root_check(environment, settings))
+    for check in await asyncio.to_thread(
+        installation_checks, environment, settings, diagnostics, state_root
+    ):
+        record(check)
     return DoctorReport(tuple(checks))
 
 
@@ -729,11 +774,43 @@ def doctor(
     environment: Mapping[str, str],
     settings: DoctorSettings,
     as_json: bool,
+    state_root: str | None = None,
 ) -> None:
     log = diagnostics.logger(CLI_COMPONENT)
-    report, interrupted = asyncio.run(
-        run_interruptible(doctor_checks(environment, settings, log))
-    )
+    try:
+        saved_stdout = os.dup(STDOUT_DESCRIPTOR)
+    except OSError as error:
+        if error.errno != errno.EBADF:
+            raise
+        saved_stdout = None
+    original_stdout = sys.stdout
+    redirected = False
+    try:
+        os.dup2(STDERR_DESCRIPTOR, STDOUT_DESCRIPTOR)
+        redirected = True
+        with redirect_stdout(sys.stderr):
+            try:
+                report, interrupted = asyncio.run(
+                    run_interruptible(
+                        doctor_checks(
+                            environment, settings, log, diagnostics, state_root
+                        )
+                    )
+                )
+            finally:
+                if sys.stdout is not None:
+                    sys.stdout.flush()
+                if original_stdout is not None:
+                    original_stdout.flush()
+    finally:
+        if saved_stdout is not None:
+            try:
+                if redirected:
+                    os.dup2(saved_stdout, STDOUT_DESCRIPTOR)
+            finally:
+                os.close(saved_stdout)
+        elif redirected:
+            os.close(STDOUT_DESCRIPTOR)
     if report is None or interrupted:
         raise typer.Exit(EXIT_INTERRUPT)
     log.emit(
@@ -823,12 +900,14 @@ def compose_application(
     @app.command(name="doctor", help="Check the local installation prerequisites.")
     def check_installation(
         as_json: bool = typer.Option(False, "--json"),
+        state_root: str | None = typer.Option(None, "--state-root"),
     ) -> None:
         doctor(
             diagnostics,
             environment,
             doctor_settings if doctor_settings is not None else DoctorSettings(),
             as_json,
+            None if state_root is None else str(Path(state_root).absolute()),
         )
 
     return app

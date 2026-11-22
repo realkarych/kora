@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from kora.ir.json import JsonObject
 from kora.observability import ProcessDiagnostics
-from kora.plugins.harness.claude.adapter import ClaudeHarness
+from kora.plugins.harness.claude.adapter import ClaudeHarness, installed_cli_version
 from kora.plugins.harness.claude.configuration import ClaudeEnvironmentConfiguration
 from kora.plugins.harness.claude.deployment import ClaudeDeployment
 from kora.plugins.harness.claude.record import recorded_binary
@@ -101,6 +101,17 @@ class ClaudeResolver:
             raise RunnerRefused("installation_invalid") from None
         self.diagnostics: ProcessDiagnostics = diagnostics
 
+    @property
+    def tested_versions(self) -> str:
+        return ClaudeHarness.tested_versions
+
+    def expected_binary(self) -> ExpectedBinary:
+        recorded = recorded_binary()
+        return ExpectedBinary(recorded.path, recorded.sha256, recorded.size)
+
+    def installed_version(self) -> str:
+        return installed_cli_version()
+
     def resolve(
         self, execution: AgentExecution, workspace: WorkspaceRef
     ) -> HostedHarness:
@@ -143,23 +154,31 @@ class ClaudeResolver:
         return HostedHarness(cast(HarnessAdapter, adapter), adapter.kill)
 
 
+def production_harnesses(
+    diagnostics: ProcessDiagnostics,
+    installation: InstallationConfiguration,
+) -> Mapping[str, ClaudeResolver]:
+    if "claude" not in installation.harness:
+        return {}
+    return {"claude": ClaudeResolver(installation.harness["claude"], diagnostics)}
+
+
 def production_sources(
     diagnostics: ProcessDiagnostics,
     installation: InstallationConfiguration,
 ) -> AgentSources:
-    hosted: dict[str, HarnessResolver] = {}
+    harnesses = production_harnesses(diagnostics, installation)
+    hosted: dict[str, HarnessResolver] = dict(harnesses)
     binary: ExpectedBinary | None = None
     credentials: HarnessCredentials = EmptyCredentials()
-    if "claude" in installation.harness:
-        resolver = ClaudeResolver(installation.harness["claude"], diagnostics)
-        hosted["claude"] = resolver
+    if "claude" in harnesses:
+        resolver = harnesses["claude"]
         credentials = InstallationCredentials(
             resolver.deployment.credentials.ANTHROPIC_API_KEY,
             installation.secrets,
             diagnostics,
         )
-        recorded = recorded_binary()
-        binary = ExpectedBinary(recorded.path, recorded.sha256, recorded.size)
+        binary = resolver.expected_binary()
     return AgentSources(
         ProductionResolver(hosted),
         ConfiguredPolicies(installation.policy, diagnostics),

@@ -7,7 +7,7 @@ from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as DatabaseTimeout
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from kora.db.connection import Database, DatabaseClosedError
+from kora.db.connection import Database, DatabaseClosedError, Dialect
 from kora.db.identifiers import is_identifier
 from kora.db.tables import api_token
 from kora.db.transactions import raise_private_metadata_error, writer_transaction
@@ -66,6 +66,8 @@ def authentication_errors(database: Database) -> tuple[type[Exception], ...]:
         DatabaseClosedError,
         ValueError,
     )
+    if database.dialect is Dialect.SQLITE:
+        return (*errors, sqlite3.Error)
     native_error = database.postgresql_driver_error()
     return errors if native_error is None else (*errors, native_error)
 

@@ -78,7 +78,7 @@ No runtime, approval-channel, sensor or observability-exporter provider is regis
 
 ### Absent packages
 
-The [package layer table](detailed.md#package-layers) lists packages that do not exist yet: `scheduler`, `worker`, `dsl`, `plugins.approval`, `plugins.sensor` and `plugins.exporter`, and the composition root `kora.standalone`. There is therefore no `kora standalone`, `kora compile`, `kora test`, `kora approve` or HTTP-mounted MCP server. `kora doctor` checks the kora version, the CEL binding, the metadata database and the default state root ([#1420](https://github.com/realkarych/kora/issues/1420)); its harness check is pending [#1419](https://github.com/realkarych/kora/issues/1419).
+The [package layer table](detailed.md#package-layers) lists packages that do not exist yet: `scheduler`, `worker`, `dsl`, `plugins.approval`, `plugins.sensor` and `plugins.exporter`, and the composition root `kora.standalone`. There is therefore no `kora standalone`, `kora compile`, `kora test`, `kora approve` or HTTP-mounted MCP server. `kora doctor` checks the kora version, the CEL binding, the metadata database and the state root ([#1420](https://github.com/realkarych/kora/issues/1420)); it also reads the runner installation and checks configured harness binaries and versions, with an optional `--state-root` override ([#1419](https://github.com/realkarych/kora/issues/1419)).
 
 ### Testing composition
 
@@ -86,7 +86,7 @@ The [package layer table](detailed.md#package-layers) lists packages that do not
 
 ### Size
 
-`src/kora` holds 617 Python modules and about 127,841 lines. The metadata schema has 42 tables and 32 migrations. Loading the commands above at run time reaches none of `kora.api` or `kora.engine`. `kora doctor` loads `kora.cel_eval.binding`, which loads `kora.cel`, for its CEL binding check. `kora plugins list` reaches the Claude adapter module without the Claude SDK. `kora conformance harness claude` reaches that adapter and imports the Claude SDK when it builds a session. `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
+`src/kora` holds 617 Python modules and about 127,841 lines. The metadata schema has 42 tables and 32 migrations. Loading the commands above at run time reaches none of `kora.api` or `kora.engine`. `kora doctor` loads `kora.cel_eval.binding`, which loads `kora.cel`, for its CEL binding check; it loads the configured runner providers and the Claude SDK when `claude` is configured. `kora plugins list` reaches the Claude adapter module without the Claude SDK. `kora conformance harness claude` reaches that adapter and imports the Claude SDK when it builds a session. `kora deploy`, `kora trigger` and `kora mcp` load `kora.client` and `kora.models`.
 
 ## 3. How the existing pieces connect
 
@@ -185,7 +185,7 @@ The internal initial-admission snapshot (#1542) resolves a discovered node's exa
 | Graph and run operations on the API, with CLI and MCP parity | [operations](../specs/api-and-agent-surface.md#2-resources-and-operations), [parity checklist](../specs/api-and-agent-surface.md#7-parity-checklist-fr-03-release-gate) | work items 11, 12, 18, 19 |
 | Python DSL, `kora compile` and `kora test` | [DSL](../specs/dsl.md), [fakes and the testing composition](../specs/fakes.md) | after the first slice |
 | Operating MCP tools and the HTTP-mounted MCP servers | [MCP servers](../specs/api-and-agent-surface.md#4-mcp-servers-fr-01-dd-28) | work items 11 and 12 |
-| `kora standalone` and the `kora doctor` harness check | [first slice](../specs/first-slice.md), [deployment shapes](detailed.md#deployment-shapes) | work item 20, #214, #1419 |
+| `kora standalone` | [first slice](../specs/first-slice.md), [deployment shapes](detailed.md#deployment-shapes) | work item 20, #214 |
 | CLI approval channel, sensors, notifications | [approval channel](../specs/protocols.md#5-approval-channel-fr-71-fr-72a), [sensor](../specs/protocols.md#11-sensor-fr-23-fr-62-dd-2), [ADR-0025](../../docs/decisions/0025-notifications.md) | work items 8 and 16; sensors and notifications later |
 | Docker runtime, S3 storage, code-host integration | [runtime](../specs/protocols.md#2-runtime-fr-81), [storage implementations](../specs/protocols.md#73-implementations-and-activation), [ADR-0023](../../docs/decisions/0023-code-host-identity-and-purpose-scoped-credentials.md) | after the first slice |
 
