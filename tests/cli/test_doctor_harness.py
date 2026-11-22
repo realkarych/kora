@@ -37,6 +37,22 @@ sys.exit(main(
 ))
 """
 
+WITH_MISSING_BINARY: str = """
+from importlib.metadata import distribution
+from pathlib import Path
+from kora.plugins.harness.claude.configuration import SDK_VERSION
+from kora.plugins.harness.claude.record import BINARY_ENTRY, recorded_file
+
+site = Path(sys.argv[4])
+sdk = distribution("claude-agent-sdk")
+assert sdk.version == SDK_VERSION
+assert Path(sdk.locate_file("claude_agent_sdk/__init__.py")).is_file()
+record = recorded_file(sdk, BINARY_ENTRY)
+assert record.path == site / BINARY_ENTRY
+assert record.path.parent.is_dir()
+assert not record.path.exists()
+"""
+
 
 def configure_harness(root: Path, name: str) -> None:
     (root / "runner.json").write_text(
@@ -49,7 +65,7 @@ def sdk_entry(name: str) -> bool:
     return name == "claude_agent_sdk" or name.startswith("claude_agent_sdk-")
 
 
-def altered_sdk(site: Path, marker: Path, *, tampered: bool) -> None:
+def altered_sdk(site: Path, marker: Path, case: str) -> None:
     installed = distribution("claude-agent-sdk")
     shutil.copytree(
         SITE_PACKAGES / "claude_agent_sdk",
@@ -60,15 +76,17 @@ def altered_sdk(site: Path, marker: Path, *, tampered: bool) -> None:
     shutil.copytree(SITE_PACKAGES / metadata_name, site / metadata_name)
     binary = site / BINARY_ENTRY
     binary.parent.mkdir()
+    if case == "missing_binary":
+        return
     binary.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
     binary.chmod(0o700)
     changed_version = site / "claude_agent_sdk" / "_cli_version.py"
-    if not tampered:
+    if case == "version":
         changed_version.write_text('__cli_version__ = "0.0.1"\n', encoding="utf-8")
     record = site / metadata_name / "RECORD"
     rows = list(csv.reader(io.StringIO(record.read_text(encoding="utf-8"))))
     for row in rows:
-        if row[0] == BINARY_ENTRY and tampered:
+        if row[0] == BINARY_ENTRY and case == "tampered":
             continue
         if row[0] in {BINARY_ENTRY, "claude_agent_sdk/_cli_version.py"}:
             content = (site / row[0]).read_bytes()
@@ -119,6 +137,7 @@ def fixture_doctor(python: Path, root: Path, url: str) -> ChildResult:
         ("malformed", "installation_malformed", None, "installation_refused"),
         ("unknown", "installation_provider", None, "installation_refused"),
         ("missing_sdk", "config_error", None, "installation_refused"),
+        ("missing_binary", "config_error", None, "installation_refused"),
         ("tampered", None, "claude", "integrity_error"),
         ("version", None, "claude", "config_error"),
         ("installed", None, "claude", None),
@@ -137,22 +156,24 @@ def test_doctor_reports_harness_installation(
     root.mkdir(mode=0o700)
     marker = tmp_path / "binary-started"
     configuration = root / "runner.json"
+    site = (tmp_path / "site").resolve()
     path = full_path()
+    code = WITH_MISSING_BINARY + DOCTOR if case == "missing_binary" else DOCTOR
     if case != "absent":
         configure_installation(root)
     if case == "malformed":
         configuration.write_text("{", encoding="utf-8")
     if case == "unknown":
         configure_harness(root, "not_installed")
-    if case in {"missing_sdk", "tampered", "version"}:
-        site = isolated_site(tmp_path / "site", sdk_entry)
+    if case in {"missing_sdk", "missing_binary", "tampered", "version"}:
+        isolated_site(site, sdk_entry)
         path = isolated_path(site)
         if case != "missing_sdk":
-            altered_sdk(site, marker, tampered=case == "tampered")
+            altered_sdk(site, marker, case)
     before = sorted(root.iterdir())
     url = url_text(database_settings.url)
 
-    result = run_child(DOCTOR, path, str(root), url)
+    result = run_child(code, path, str(root), url, str(site))
 
     assert result.code == (0 if case == "installed" else 1), result.stderr
     report = cast(dict[str, object], json.loads(result.stdout))

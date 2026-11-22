@@ -97,6 +97,7 @@ CLIENT_CONFIGURATION_PREFIX: str = "kora: invalid client configuration"
 MCP_EXTRA_REQUIRED: str = "kora: the stdio MCP server requires the kora[mcp] extra"
 MCP_DISTRIBUTIONS: frozenset[str] = frozenset({"mcp", "mcp_types"})
 API_HARNESS_VARIABLE: str = "KORA_API_HARNESS"
+API_WORKER_UNCERTAINTY_VARIABLE: str = "KORA_API_WORKER_CLOCK_UNCERTAINTY_US"
 POSTGRES_SERVING_OVERRIDES: frozenset[str] = frozenset(
     {
         "PGDATABASE",
@@ -828,12 +829,20 @@ def serve_api(
             log, ServingRefusal.POSTGRESQL_ACTIVATION_UNAVAILABLE, EXIT_CONFIGURATION
         )
 
-    return serve_sqlite_api(settings, harness, port, diagnostics, log)
+    return serve_sqlite_api(
+        settings,
+        harness,
+        environment.get(API_WORKER_UNCERTAINTY_VARIABLE),
+        port,
+        diagnostics,
+        log,
+    )
 
 
 def serve_sqlite_api(
     settings: "DatabaseSettings",
     harness: str | None,
+    worker_uncertainty: str | None,
     port: int,
     diagnostics: ProcessDiagnostics,
     log: ComponentLogger,
@@ -841,17 +850,28 @@ def serve_sqlite_api(
     from kora.api.application import create_application
     from kora.api.exchange import ApiExchange
     from kora.api.graph_services import GraphServices, deployment_selection
+    from kora.api.installed_worker import installed_worker_profile
     from kora.api.serving import ServingFailure, ServingRefusal, refuse, serve_sqlite
+    from kora.api.worker_claims_route import WorkerClaimsRoute
+    from kora.api.worker_registration_route import WorkerRegistrationRoute
     from kora.db.graph_value_json import GraphValueRejected
     from kora.db.identifiers import IdentifierGenerator
+    from kora.engine.admission_initialization import AdmissionInitialization
+    from kora.engine.worker_claim_poll import WorkerClaimPoll
     from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
     from kora.protocols.errors import KoraProtocolError
     from kora.protocols.loading import load_provider
     from kora.protocols.metadata import ProtocolName
 
     clock = SystemClock()
+    worker = None
+    if worker_uncertainty is not None:
+        worker = installed_worker_profile(worker_uncertainty)
+        if worker is None or harness != "claude":
+            return refuse(log, ServingRefusal.WORKER_CONFIGURATION, EXIT_CONFIGURATION)
     preparer = None
     selection = None
+    capabilities = LocalRuntimeConfiguration(state_root=None).capabilities()
     if harness is not None:
         if harness != "claude":
             return refuse(log, ServingRefusal.DOMAIN_CONFIGURATION, EXIT_CONFIGURATION)
@@ -866,9 +886,7 @@ def serve_sqlite_api(
             UnicodeDecodeError,
         ):
             return refuse(log, ServingRefusal.DOMAIN_CONFIGURATION, EXIT_CONFIGURATION)
-        selection = deployment_selection(
-            harness, LocalRuntimeConfiguration(state_root=None).capabilities()
-        )
+        selection = deployment_selection(harness, capabilities)
 
     def application(database: "Database") -> ApiExchange:
         provider = load_provider(
@@ -877,18 +895,48 @@ def serve_sqlite_api(
         factory = cast(
             "Callable[[JsonObject, Database], Authenticator]", provider.implementation
         )
+        identifiers = IdentifierGenerator(clock.now)
         deployment = (
             None
             if preparer is None or selection is None
-            else GraphServices(
-                database, preparer, selection, IdentifierGenerator(clock.now)
-            )
+            else GraphServices(database, preparer, selection, identifiers)
         )
+        registration = claims = initialization = None
+        if worker is not None:
+            runtimes = {"local": capabilities}
+            registration = WorkerRegistrationRoute(
+                database, runtimes, clock, diagnostics
+            )
+            claims = WorkerClaimsRoute(
+                WorkerClaimPoll(
+                    database,
+                    runtimes,
+                    clock,
+                    worker.limits,
+                    worker.uncertainty,
+                )
+            )
+            initialization = AdmissionInitialization(database, clock, identifiers.new)
         return create_application(
-            factory({}, database), diagnostics, clock, new_instance_id, deployment
+            factory({}, database),
+            diagnostics,
+            clock,
+            new_instance_id,
+            deployment,
+            worker_registration=registration,
+            worker_claims=claims,
+            admission_initialization=initialization,
+            single_claim=worker is not None,
         )
 
-    return serve_sqlite(settings, port, log, application, preparer=preparer)
+    return serve_sqlite(
+        settings,
+        port,
+        log,
+        application,
+        preparer=preparer,
+        worker_startup=worker is not None,
+    )
 
 
 def cel_check() -> CheckResult:

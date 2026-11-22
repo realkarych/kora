@@ -8,6 +8,7 @@ from sqlalchemy import Connection, delete, event, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.util.concurrency import await_
 
+from kora.api.installed_worker import installed_worker_profile
 from kora.cel_eval.thread import Evaluator
 from kora.db.claim_source_values import ClaimSourcesRejected, prepare_claim_sources
 from kora.db.connection import POSTGRESQL_WAL_SETTINGS_QUERY, Database, Dialect
@@ -244,25 +245,34 @@ async def test_same_attempt_replay_uses_winner_and_releases_native_checkout(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("installed", [False, True], ids=["generic", "installed"])
 @pytest.mark.parametrize(
     ("native_shortfall", "raw_shortfall"),
     [(0, 0), (1, 0), (0, 1)],
     ids=["exact", "native-short", "raw-short"],
 )
 async def test_live_replay_admits_exact_aggregate_before_snapshot_checkout(
-    database: Database, evaluator: Evaluator, native_shortfall: int, raw_shortfall: int
+    database: Database,
+    evaluator: Evaluator,
+    native_shortfall: int,
+    raw_shortfall: int,
+    installed: bool,
 ) -> None:
+    profile = installed_worker_profile("2000")
+    assert profile is not None
+    limits = profile.limits if installed else POLL_LIMITS
+    native, raw = (129_790_652, 89_603_964) if installed else (122_612_732, 87_612_156)
     case = await claim_case(database, evaluator)
-    winner = await configured_poller(database, WINNER_DEFAULT).poll(
+    winner = await configured_poller(database, WINNER_DEFAULT, limits=limits).poll(
         case.query, case.principal
     )
     before = await state(database)
     bounded = replace(
-        POLL_LIMITS,
+        limits,
         snapshot=replace(
-            POLL_LIMITS.snapshot,
-            native_bytes=122_612_732 - native_shortfall,
-            raw_bytes=87_612_156 - raw_shortfall,
+            limits.snapshot,
+            native_bytes=native - native_shortfall,
+            raw_bytes=raw - raw_shortfall,
         ),
     )
     replay_database = Database(database.settings)

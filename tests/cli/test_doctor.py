@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import os
 import signal
@@ -7,6 +8,7 @@ import stat
 import subprocess
 import sys
 import threading
+import tracemalloc
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -17,12 +19,15 @@ from typing import cast
 import pytest
 from sqlalchemy.engine import URL
 
-from kora.__main__ import DoctorSettings, main, run_interruptible
+from kora.__main__ import DoctorSettings, doctor_checks, main, run_interruptible
 from kora.cel_eval.binding import PINNED_VERSION
+from kora.cli import CLI_COMPONENT
 from kora.db.connection import DatabaseSettings
+from kora.observability import LoggingSettings, ProcessDiagnostics, configure_process
 from kora.plugins.harness.claude.configuration import CLI_VERSION
 from kora.plugins.runtime.local.runtime import default_state_root
 from kora.plugins.runtime.local.state_probe import PROBE_PREFIX
+from kora.protocols.time import SystemClock
 from tests.cel_eval.children import isolated_path, isolated_site, run_child
 from tests.observability.test_entry_point_exit_paths import shell
 from tests.plugins.runtime.local.test_production_sources import CLAUDE, file_sections
@@ -711,6 +716,30 @@ def open_descriptors() -> int:
     return len(os.listdir("/dev/fd"))
 
 
+@contextmanager
+def doctor_memory_observations(
+    outcome: str, capfd: pytest.CaptureFixture[str]
+) -> Generator[Callable[[], None]]:
+    samples: list[int] = []
+
+    def sample() -> None:
+        gc.collect()
+        retained, _ = tracemalloc.get_traced_memory()
+        samples.append(retained)
+
+    started = not tracemalloc.is_tracing()
+    if started:
+        tracemalloc.start(1)
+    try:
+        yield sample
+    finally:
+        if started:
+            tracemalloc.stop()
+    with capfd.disabled():
+        record = {"outcome": outcome, "post_cleanup_python_bytes": samples}
+        sys.stdout.write(f"\ndoctor memory diagnostic {json.dumps(record)}\n")
+
+
 def test_doctor_in_process_runs_return_to_baseline(
     installation: Installation,
     closing_listener: Listener,
@@ -726,20 +755,106 @@ def test_doctor_in_process_runs_return_to_baseline(
         {"KORA_DATABASE_URL": sqlite_url(healthy)},
         {"KORA_DATABASE_URL": postgresql_url(closing_listener.port)},
     ]
-    run_doctor(environments[0], installation.settings(), capfd)
-    descriptors = open_descriptors()
-    threads = threading.active_count()
+    settings = installation.settings()
+    codes: list[int] = []
 
-    codes = [
-        run_doctor(environment, installation.settings(), capfd)[0]
-        for _ in range(5)
-        for environment in environments
-    ]
+    with doctor_memory_observations("success-and-failure", capfd) as sample:
+        run_doctor(environments[0], settings, capfd)
+        descriptors = open_descriptors()
+        threads = threading.active_count()
+        run_doctor(environments[1], settings, capfd)
+        assert open_descriptors() == descriptors
+        assert threading.active_count() == threads
+        sample()
+        for _ in range(5):
+            for environment in environments:
+                codes.append(run_doctor(environment, settings, capfd)[0])
+                assert open_descriptors() == descriptors
+                assert threading.active_count() == threads
+            sample()
 
     assert codes == [0, 1] * 5
     assert open_descriptors() == descriptors
     assert threading.active_count() == threads
     assert installation.entries() == entries_before
+
+
+def interrupted_doctor_cycle(
+    value: signal.Signals, installation: Installation, diagnostics: ProcessDiagnostics
+) -> None:
+    descriptors = open_descriptors()
+    threads = set(threading.enumerate())
+    release = threading.Event()
+    finished = threading.Event()
+
+    async def interrupt_held_checks() -> None:
+        loop = asyncio.get_running_loop()
+        tasks_before = asyncio.all_tasks()
+
+        def held_home() -> Path:
+            loop.call_soon_threadsafe(os.kill, os.getpid(), value)
+            assert release.wait(EVENT_DEADLINE_SECONDS)
+            finished.set()
+            return installation.home
+
+        try:
+            report, interrupted = await run_interruptible(
+                doctor_checks(
+                    {},
+                    DoctorSettings(home=held_home),
+                    diagnostics.logger(CLI_COMPONENT),
+                    diagnostics,
+                    None,
+                )
+            )
+            assert interrupted
+            assert report is None
+            assert not finished.is_set()
+            assert asyncio.all_tasks() == tasks_before
+        finally:
+            release.set()
+
+    asyncio.run(interrupt_held_checks())
+
+    assert finished.is_set()
+    assert open_descriptors() == descriptors
+    assert set(threading.enumerate()) == threads
+
+
+@pytest.mark.parametrize(
+    "value", [signal.SIGINT, signal.SIGTERM], ids=["sigint", "sigterm"]
+)
+def test_doctor_interrupted_runs_return_to_baseline(
+    value: signal.Signals, installation: Installation, capfd: pytest.CaptureFixture[str]
+) -> None:
+    configure_installation(installation.root)
+    entries = installation.entries()
+    handler = signal.getsignal(value)
+    descriptors = open_descriptors()
+    threads = threading.active_count()
+
+    with open(os.devnull, "wb") as sink:
+        diagnostics = configure_process(
+            CLI_COMPONENT,
+            LoggingSettings(),
+            "doctor-lifecycle",
+            SystemClock().now,
+            sink.fileno(),
+        )
+        try:
+            with doctor_memory_observations(value.name, capfd) as sample:
+                interrupted_doctor_cycle(value, installation, diagnostics)
+                sample()
+                for _ in range(5):
+                    interrupted_doctor_cycle(value, installation, diagnostics)
+                    sample()
+        finally:
+            assert diagnostics.shutdown()
+
+    assert signal.getsignal(value) == handler
+    assert open_descriptors() == descriptors
+    assert threading.active_count() == threads
+    assert installation.entries() == entries
 
 
 @dataclass
