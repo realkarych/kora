@@ -18,7 +18,7 @@ import pytest
 from kora.db.connection import Database
 from kora.ir.json import JsonObject, parse_json_object
 from kora.models.errors import ApiErrorEnvelope
-from tests.api.serving_lifecycle_child import serving_event
+from tests.api.serving_lifecycle_child import SLOW_RESPONSE_BYTES, serving_event
 from tests.api.test_linux_serving_barrier import native_probe_required_here
 from tests.client.support import tls_pair
 from tests.plugins.authentication.support import seed_case
@@ -36,6 +36,7 @@ from tests.support.provider_tooling import (
 LOOPBACK = "127.0.0.1"
 SCHEMA = "/api/v1/openapi.json"
 SERVE_TIMEOUT = 20
+DRAIN_RECEIPT_TIMEOUT = 8
 PRIVATE_MARKER = "private-installed-api-marker"
 
 BUILD_TREE = """
@@ -416,6 +417,60 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
 
 
 @pytest.mark.asyncio
+async def test_installed_sigterm_preserves_buffered_response(
+    serving_installation: Path, tmp_path: Path, sqlite_template: Path
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
+    fixture = Path(__file__).with_name("serving_lifecycle_child.py")
+    child = await asyncio.create_subprocess_exec(
+        str(serving_installation),
+        "-I",
+        str(fixture),
+        "buffered_response",
+        cwd=tmp_path,
+        env=api_environment(str(settings.url)),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert child.stdout is not None
+    assert child.stderr is not None
+
+    try:
+        async with asyncio.timeout(SERVE_TIMEOUT):
+            port, _ = await read_bound_port(child)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32768)
+                client.setblocking(False)
+                await asyncio.get_running_loop().sock_connect(client, (LOOPBACK, port))
+                reader, writer = await asyncio.open_connection(sock=client)
+                try:
+                    writer.write(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                    await writer.drain()
+                    queued = await child.stdout.readline()
+                    assert queued == b"response_queued\n"
+                    child.send_signal(signal.SIGTERM)
+                    await serving_event(child.stderr, "api.serving_draining")
+                    response = await reader.read()
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+            output, trailing = await child.communicate()
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
+
+    headers, separator, body = response.partition(b"\r\n\r\n")
+    assert separator == b"\r\n\r\n"
+    assert headers.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert body == b"x" * SLOW_RESPONSE_BYTES
+    assert output == b"lifespan_shutdown\n"
+    assert child.returncode == 0
+    assert b"api.serving_stopped" in trailing
+    assert b"drain_unfinished" not in trailing
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("forced", [False, True])
 async def test_serving_keeps_the_original_process_until_held_native_work_settles(
     serving_installation: Path,
@@ -463,8 +518,9 @@ async def test_serving_keeps_the_original_process_until_held_native_work_settles
                 await serving_event(child.stderr, "api.serving_draining")
                 if forced:
                     child.send_signal(signal.SIGINT)
-                original_wire = await reader.read()
-                refusal = await serving_event(child.stderr, "api.serving_refused")
+                async with asyncio.timeout(DRAIN_RECEIPT_TIMEOUT):
+                    original_wire = await reader.read()
+                    refusal = await serving_event(child.stderr, "api.serving_refused")
                 still_owns_work = child.returncode is None
                 with pytest.raises(ConnectionRefusedError):
                     await asyncio.open_connection("127.0.0.1", port)
@@ -486,6 +542,7 @@ async def test_serving_keeps_the_original_process_until_held_native_work_settles
     assert child.returncode == 70
     assert output == (
         b"native_sqlite_returned\nnative_sqlite_result_closed\nrequest_settled\n"
+        b"native_sqlite_file_closed\n"
     )
     assert b"api.serving_stopped" not in diagnostics
 

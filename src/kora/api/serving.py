@@ -195,32 +195,53 @@ class ApiServer(Server):
             case _:
                 raise ServingFailure(ServingRefusal.BIND_FAILED)
 
-    def stop_accepting(self) -> None:
+    async def seal_connections(self) -> tuple[_ServingHttpConnection, ...]:
         for listener in self.servers:
             listener.close()
+        accepted: asyncio.Future[None] = self._loop.create_future()
+        self._loop.call_soon(accepted.set_result, None)
+        await accepted
+        connections: list[_ServingHttpConnection] = []
+        for connection in self.server_state.connections:
+            if not isinstance(connection, _ServingHttpConnection):
+                raise ServingFailure(ServingRefusal.STARTUP_FAILED)
+            connections.append(connection)
+        return tuple(connections)
+
+    async def wait_for_requests(
+        self,
+        connections: tuple[_ServingHttpConnection, ...],
+        requests: tuple[asyncio.Task[None], ...],
+    ) -> None:
+        if requests:
+            await asyncio.wait(requests)
+        for connection in connections:
+            await connection.wait_released()
 
     async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + DEFAULT_CLOSE_DEADLINE_SECONDS
         self.drain_deadline = deadline
-        self.stop_accepting()
+        connections = await self.seal_connections()
         self.log.emit(DRAINING)
-        for connection in tuple(self.server_state.connections):
+        for connection in connections:
             connection.shutdown()
         requests = tuple(self.server_state.tasks)
-        if requests:
-            settled = asyncio.create_task(asyncio.wait(requests))
+        completed = not connections and not requests
+        if not completed:
+            settled = asyncio.create_task(self.wait_for_requests(connections, requests))
             forced = asyncio.create_task(self._force_requested.wait())
             try:
-                await asyncio.wait(
+                done, _ = await asyncio.wait(
                     (settled, forced),
                     timeout=max(0.0, deadline - loop.time()),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                completed = settled in done
             finally:
                 settled.cancel()
                 forced.cancel()
-        if not self.force_exit and all(task.done() for task in requests):
+        if completed and not self.force_exit:
             self._lifespan_shutdown = asyncio.create_task(self.lifespan.shutdown())
             await asyncio.wait(
                 (self._lifespan_shutdown,), timeout=max(0.0, deadline - loop.time())
@@ -228,19 +249,10 @@ class ApiServer(Server):
 
     async def drain(self) -> None:
         self.should_exit = True
-        self.stop_accepting()
-        connections: list[_ServingHttpConnection] = []
-        for connection in self.server_state.connections:
-            if not isinstance(connection, _ServingHttpConnection):
-                raise ServingFailure(ServingRefusal.STARTUP_FAILED)
-            connections.append(connection)
+        connections = await self.seal_connections()
         for connection in connections:
             connection.transport.abort()
-        tasks = tuple(self.server_state.tasks)
-        for connection in connections:
-            await connection.wait_released()
-        if tasks:
-            await asyncio.wait(tasks)
+        await self.wait_for_requests(connections, tuple(self.server_state.tasks))
         for listener in self.servers:
             await listener.wait_closed()
         if self._lifespan_shutdown is not None:
@@ -262,7 +274,11 @@ async def settle_serving(
         if observed_deadline is None
         else observed_deadline
     )
-    owners = {asyncio.create_task(database.close_sqlite_serving())}
+    owners = {
+        asyncio.create_task(
+            database.close_sqlite_serving(max(0.0, deadline - loop.time()))
+        )
+    }
     if server is not None:
         owners.add(asyncio.create_task(server.drain()))
     _, pending = await asyncio.wait(owners, timeout=max(0.0, deadline - loop.time()))

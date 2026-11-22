@@ -1,10 +1,12 @@
 import asyncio
+import errno
 import json
 import os
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
 from typing import Protocol, cast
 
 import aiosqlite
@@ -17,6 +19,7 @@ from kora.db.connection import Database, DatabaseClosedError, read_database_sett
 from kora.observability import configure_process, read_logging_settings
 
 PRIVATE_LIFESPAN_REASON: str = "private-lifespan-startup-reason"
+SLOW_RESPONSE_BYTES: int = 2 * 1024 * 1024
 
 
 class SqliteTraceControl(Protocol):
@@ -25,9 +28,27 @@ class SqliteTraceControl(Protocol):
     ) -> None: ...
 
 
-async def hold_native_query(connection: AsyncConnection, release: int) -> None:
+def owns_sqlite_descriptor(path: Path) -> bool:
+    expected = path.stat()
+    inventory = "/dev/fd" if sys.platform == "darwin" else "/proc/self/fd"
+    for name in os.listdir(inventory):
+        try:
+            held = os.fstat(int(name))
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+            continue
+        if (held.st_dev, held.st_ino) == (expected.st_dev, expected.st_ino):
+            return True
+    return False
+
+
+async def hold_native_query(
+    connection: AsyncConnection, release: int, path: Path
+) -> None:
     def observe(statement: str) -> None:
         if statement == "SELECT 42":
+            assert owns_sqlite_descriptor(path)
             os.write(1, b"native_sqlite_held\n")
             if os.read(release, 1) == b"r":
                 os.write(1, b"native_sqlite_returned\n")
@@ -40,19 +61,25 @@ async def hold_native_query(connection: AsyncConnection, release: int) -> None:
     os.write(1, b"native_sqlite_result_closed\n")
 
 
+async def lifecycle(receive: Receive, send: Send) -> None:
+    await receive()
+    await send({"type": "lifespan.startup.complete"})
+    await receive()
+    os.write(1, b"lifespan_shutdown\n")
+    await send({"type": "lifespan.shutdown.complete"})
+
+
 def held_request_app(database: Database, release: int | None = None) -> ASGIApp:
     async def application(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
-            await receive()
-            await send({"type": "lifespan.startup.complete"})
-            await receive()
-            os.write(1, b"lifespan_shutdown\n")
-            await send({"type": "lifespan.shutdown.complete"})
+            await lifecycle(receive, send)
             return
         try:
             async with database.read_transaction() as connection:
                 if release is not None:
-                    await hold_native_query(connection, release)
+                    await hold_native_query(
+                        connection, release, database.settings.sqlite_path
+                    )
                 else:
                     with await connection.exec_driver_sql("SELECT 1") as result:
                         result.scalar_one()
@@ -63,6 +90,24 @@ def held_request_app(database: Database, release: int | None = None) -> ASGIApp:
             if release is None:
                 raise
         os.write(1, b"request_settled\n")
+
+    return application
+
+
+def buffered_response(database: Database) -> ASGIApp:
+    async def application(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "lifespan":
+            await lifecycle(receive, send)
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-length", str(SLOW_RESPONSE_BYTES).encode())],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"x" * SLOW_RESPONSE_BYTES})
+        os.write(1, b"response_queued\n")
 
     return application
 
@@ -89,11 +134,17 @@ def launch() -> int:
                 make_application = refused_lifespan
             case ["hold_native", release]:
                 make_application = partial(held_request_app, release=int(release))
+            case ["buffered_response"]:
+                make_application = buffered_response
             case _:
                 make_application = held_request_app
-        return serve_sqlite(
+        result = serve_sqlite(
             settings, 0, diagnostics.logger(COMPONENT), make_application
         )
+        if sys.argv[1:2] == ["hold_native"]:
+            assert not owns_sqlite_descriptor(settings.sqlite_path)
+            os.write(1, b"native_sqlite_file_closed\n")
+        return result
     finally:
         diagnostics.shutdown()
 
