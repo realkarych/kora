@@ -1,6 +1,5 @@
 import asyncio
 from collections.abc import AsyncGenerator
-from datetime import timedelta
 from pathlib import Path
 from typing import Final
 
@@ -9,7 +8,6 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.ir import ErrorClass
 from kora.plugins.harness.fake.script import Step
-from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.runtime import SessionResultObservation
 from kora.runner.agent import AgentHost
 from kora.runner.journal import SYNC_DEADLINE_NS
@@ -17,7 +15,6 @@ from kora.runner.liveness import WRITER_STALL_NS
 from kora.runner.sink import QUEUE_RECORDS
 from tests.plugins.harness.fake.fake_support import turn
 from tests.runner.agent_support import (
-    FIXED_NOW,
     PAUSE,
     HeldWriter,
     SignalledScript,
@@ -28,35 +25,12 @@ from tests.runner.agent_support import (
 )
 
 SECOND: Final[int] = 1_000_000_000
-STALL: Final[int] = 60 * SECOND
-
-
-def deadline(seconds: int, uncertainty: int = 0) -> ExecutionDeadline:
-    return ExecutionDeadline(
-        at=FIXED_NOW + timedelta(seconds=seconds),
-        scope_kind="run",
-        scope_id="run-1",
-        clock_uncertainty=timedelta(seconds=uncertainty),
-        grace=timedelta(seconds=30),
-    )
 
 
 def observed(host: AgentHost) -> SessionResultObservation:
     observation = host.observation()
     assert isinstance(observation, SessionResultObservation)
     return observation
-
-
-class TimerStartedScript(SignalledScript):
-    def __init__(self, source: SignalledScript, clock: SteppedClock) -> None:
-        super().__init__(source.header, source.listed)
-        self.clock = clock
-
-    async def steps(self) -> AsyncGenerator[Step]:
-        await self.clock.requested(STALL)
-        await self.clock.advance_to(30 * SECOND)
-        async for item in super().steps():
-            yield item
 
 
 class WriterHeldScript(SignalledScript):
