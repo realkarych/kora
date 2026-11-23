@@ -75,6 +75,16 @@ The same decision narrows the depth of the first slice:
 
 [The first-slice contract](../../knowledge/specs/first-slice.md#walking-skeleton-and-narrowed-depth) records these changes and the gates they leave unchanged.
 
+## Milestone-order amendment of 2026-11-11
+
+The project owner [reviewed and approved the wording of this amendment line by line](https://github.com/realkarych/kora/issues/1359#issuecomment-7082791471) on 2026-11-22.
+
+The project owners approved this order under [#1356](https://github.com/realkarych/kora/issues/1356) and [#1359](https://github.com/realkarych/kora/issues/1359). First-slice acceptance is followed by a second slice on a real repository, then the pilot, the scheduler-prototype milestone and MVP acceptance on the second runtime/VCS pair.
+
+The second slice demonstrates the outer loop with both Claude and Codex. A subgraph combines an agent node and a command test gate, runs more than one attempt and supplies feedback from the previous attempt. The workflow publishes a GitHub pull request with the diff, gate results and cost of all attempts. CLI approval is bound to the commit SHA and a new push invalidates it.
+
+The pilot uses the existing Git VCS provider, as the [owner confirmed on 2026-11-11](https://github.com/realkarych/kora/issues/1359#issuecomment-6801963893). The non-Git adapter remains part of MVP acceptance on the second runtime/VCS pair. The [MVP acceptance criteria](../requirements/functional.md) continue to apply.
+
 ## Decision
 
 kora keeps its own control plane for the MVP (requirements decision 12): a scheduler that is a stateless loop over the metadata database, an HTTP API, and workers per runtime (ADR-0003).
