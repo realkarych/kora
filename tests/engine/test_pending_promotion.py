@@ -43,6 +43,7 @@ def pending_promotion(database: Database) -> PendingPromotion:
     assert profile is not None
     snapshot = profile.limits.snapshot
     clock = FakeClock()
+    clock.advance(1)
     return PendingPromotion(
         database,
         GraphSnapshotLimits(
