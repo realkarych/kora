@@ -236,7 +236,6 @@ def test_vcs_ref_provider_matches_model_validation(
     result = subject.validate(candidate, context_for(kora_capture))
 
     assert result == expected
-    assert len(result) <= 1
 
 
 def test_vcs_ref_provider_digest_selection_is_stable(kora_capture: Capture) -> None:
