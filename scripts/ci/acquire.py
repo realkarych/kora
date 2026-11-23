@@ -149,6 +149,14 @@ ARTIFACTS: Mapping[str, Artifact] = {
         37_656_157,
         "69740dcd9b3480b3d53760f2d3b75582adb14fa54434628dea32480ddede542a",
     ),
+    "pnpm-12.14.0-linux-x64": Artifact(
+        "https://github.com/pnpm/pnpm/releases/download/v12.14.0/pnpm-linux-x64.tar.gz",
+        "pnpm-linux-x64.tar.gz",
+        24_713_030,
+        "3910c3852136bed5bc1511b9137a45fd4357ed6b3970d9d08893641e9005867e",
+        ASSET_HOST,
+        30.0,
+    ),
     "lychee-0.24.2-x86_64-unknown-linux-gnu": Artifact(
         LYCHEE_ASSET,
         "lychee-0.24.2-x86_64-unknown-linux-gnu.tar.gz",

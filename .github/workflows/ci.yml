@@ -116,19 +116,31 @@ jobs:
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
         with:
           path: ${{ runner.temp }}/kora-acquisitions
-          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-uv-python-${{ matrix.python }}-${{ hashFiles('scripts/ci/acquire.py') }}
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-uv-python-pnpm-${{ matrix.python }}-${{ hashFiles('scripts/ci/acquire.py') }}
       - name: Prepare verified Scaffold Node cache
         run: bash scripts/ci/setup_scaffold_node.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
+      - name: Prepare verified Scaffold pnpm
+        run: bash scripts/ci/setup_scaffold_pnpm.sh prepare
+      - name: Restore exact Scaffold pnpm store
+        id: pnpm_cache
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          package_json_file: web/package.json
-          run_install: false
-          cache: true
-          cache_dependency_path: web/pnpm-lock.yaml
+          package-manager-cache: false
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Admit the Scaffold pnpm store
+        env:
+          KORA_PNPM_CACHE_OUTCOME: ${{ steps.pnpm_cache.outcome }}
+          KORA_PNPM_CACHE_HIT: ${{ steps.pnpm_cache.outputs.cache-hit }}
+          KORA_PNPM_CACHE_PRIMARY: ${{ steps.pnpm_cache.outputs.cache-primary-key }}
+          KORA_PNPM_CACHE_MATCHED: ${{ steps.pnpm_cache.outputs.cache-matched-key }}
+        run: |
+          bash scripts/ci/setup_scaffold_pnpm.sh check-cache
+          bash scripts/ci/setup_scaffold_pnpm.sh check-selection
       - name: Prepare verified uv and Python
         env:
           KORA_UV_PYTHON: ${{ matrix.python }}
@@ -193,6 +205,7 @@ jobs:
         id: distributions
         if: ${{ matrix.lane == 'local-runtime' }}
         run: |
+          bash scripts/ci/setup_scaffold_pnpm.sh check-selection
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
             --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
@@ -221,7 +234,10 @@ jobs:
           DISTRIBUTIONS_OUTCOME: ${{ steps.distributions.outcome }}
           FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
-        run: bash scripts/ci/require_outcomes.sh scaffold-lane
+          KORA_PNPM_CACHE_OUTCOME: ${{ steps.pnpm_cache.outcome }}
+        run: |
+          bash scripts/ci/require_outcomes.sh scaffold-lane
+          bash scripts/ci/require_outcomes.sh check KORA_PNPM_CACHE_OUTCOME=success
 
   scaffold-tests-macos:
     needs: [change-scope, scaffold-plan]

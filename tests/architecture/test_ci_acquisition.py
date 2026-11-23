@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -59,7 +60,9 @@ PLANTED_CREDENTIAL = "kora-fixture-credential-value"
 NAME = "fixture"
 ROOT = Path(__file__).resolve().parents[2]
 COMMAND_LIMIT = re.compile(r'acquire\.py"? run (\d+) --')
+PNPM_SETUP = "scripts/ci/setup_scaffold_pnpm.sh"
 FETCHING_SCRIPTS = {
+    PNPM_SETUP: ("pnpm-",),
     "scripts/ci/setup_scaffold_node.sh": ("node-",),
     "scripts/ci/setup_uv_cache.sh": ("uv-", "cpython-"),
     "scripts/ci/check_links.sh": ("lychee-",),
@@ -423,6 +426,122 @@ def test_pinned_artifacts_name_exact_sources_and_hosts() -> None:
     assert MAX_COMMAND_SECONDS + COMMAND_RESERVE_SECONDS < JOB_BUDGET_SECONDS
 
 
+def test_linux_scaffold_pnpm_acquisition_matches_the_project_pin() -> None:
+    package = table(json.loads((ROOT / "web/package.json").read_text()))
+    version = str(table(package["engines"])["pnpm"])
+    artifact = ARTIFACTS[f"pnpm-{version}-linux-x64"]
+
+    assert package["packageManager"] == f"pnpm@{version}"
+    assert f"version={version}\n" in (ROOT / PNPM_SETUP).read_text()
+    assert artifact == Artifact(
+        f"https://github.com/pnpm/pnpm/releases/download/v{version}/pnpm-linux-x64.tar.gz",
+        "pnpm-linux-x64.tar.gz",
+        24_713_030,
+        "3910c3852136bed5bc1511b9137a45fd4357ed6b3970d9d08893641e9005867e",
+        "release-assets.githubusercontent.com",
+        30.0,
+    )
+
+
+def run_scaffold_pnpm(
+    runner_temp: Path, phase: str, environment: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/bash", PNPM_SETUP, phase],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "RUNNER_TEMP": str(runner_temp),
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
+            **environment,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+
+def test_corrupt_scaffold_pnpm_archive_refuses_before_publishing(
+    tmp_path: Path,
+) -> None:
+    runner_temp = tmp_path.resolve()
+    cache = runner_temp / "kora-acquisitions"
+    cache.mkdir()
+    (cache / "pnpm-linux-x64.tar.gz").write_bytes(CONTENT)
+    github_env, github_path = runner_temp / "env", runner_temp / "path"
+    github_env.touch()
+    github_path.touch()
+
+    result = run_scaffold_pnpm(
+        runner_temp,
+        "prepare",
+        {"GITHUB_ENV": str(github_env), "GITHUB_PATH": str(github_path)},
+    )
+
+    assert result.returncode == 1
+    assert "failed size or SHA-256 verification" in result.stderr
+    assert github_env.read_bytes() == github_path.read_bytes() == b""
+    assert not tuple(runner_temp.glob("kora-pnpm*"))
+
+
+PNPM_KEY = "node-cache-Linux-x64-pnpm-" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("outcome", "hit", "primary", "matched", "populated", "classification"),
+    [
+        ("success", "true", PNPM_KEY, PNPM_KEY, True, "exact hit"),
+        ("success", "false", PNPM_KEY, "", False, "cold miss"),
+        ("success", "", "", "", False, "cache unavailable"),
+        ("failure", "", "", "", False, None),
+        ("success", "true", PNPM_KEY, "", True, None),
+        ("success", "true", PNPM_KEY, f"{PNPM_KEY}-other", True, None),
+        ("success", "false", PNPM_KEY, PNPM_KEY, False, None),
+        ("success", "false", PNPM_KEY, "", True, None),
+        ("success", "false", "", "", False, None),
+        ("success", "", "", "", True, None),
+        ("success", "", PNPM_KEY, "", False, None),
+        ("success", "true", "malformed", "malformed", True, None),
+        ("success", "maybe", PNPM_KEY, "", False, None),
+    ],
+)
+def test_scaffold_pnpm_cache_requires_exact_hit_or_an_empty_store(
+    tmp_path: Path,
+    outcome: str,
+    hit: str,
+    primary: str,
+    matched: str,
+    populated: bool,
+    classification: str | None,
+) -> None:
+    runner_temp = tmp_path.resolve()
+    store = runner_temp / "kora-pnpm-store"
+    versioned_store = store / "v11"
+    versioned_store.mkdir(parents=True)
+    if populated:
+        (versioned_store / ".partial-cache-content").touch()
+
+    result = run_scaffold_pnpm(
+        runner_temp,
+        "check-cache",
+        {
+            "PNPM_CONFIG_STORE_DIR": str(store),
+            "KORA_SCAFFOLD_PNPM_STORE": str(versioned_store),
+            "KORA_PNPM_CACHE_OUTCOME": outcome,
+            "KORA_PNPM_CACHE_HIT": hit,
+            "KORA_PNPM_CACHE_PRIMARY": primary,
+            "KORA_PNPM_CACHE_MATCHED": matched,
+        },
+    )
+
+    assert result.returncode == (1 if classification is None else 0)
+    assert result.stdout == (
+        "" if classification is None else f"Scaffold pnpm store: {classification}\n"
+    )
+
+
 def test_job_budget_caps_attempts_across_invocations(
     tmp_path: Path, authority: Authority
 ) -> None:
@@ -541,7 +660,8 @@ def fetch_worst_case(prefix: str) -> float:
 def step_worst_cases(run: str) -> list[float]:
     cases = command_worst_cases(run)
     for script, prefixes in FETCHING_SCRIPTS.items():
-        if script in run:
+        invocation = f"{script} prepare" if script == PNPM_SETUP else script
+        if invocation in run:
             cases.extend(fetch_worst_case(prefix) for prefix in prefixes)
     for marker, script in COMMAND_SCRIPTS.items():
         if marker in run:
@@ -760,6 +880,39 @@ def test_every_ci_tool_setup_follows_its_verified_cached_acquisition() -> None:
     violations = unverified_tool_setups(workflows)
 
     assert violations == []
+
+
+def test_only_linux_scaffold_uses_the_verified_pnpm_before_cache_and_build() -> None:
+    workflows = repository_workflows()
+    steps = step_list(job_of(workflows, "ci.yml", "scaffold-tests"))
+    node, cache = [
+        index
+        for index, step in enumerate(steps)
+        if action_of(step) == "actions/setup-node"
+    ]
+    prepare = step_running(steps, f"{PNPM_SETUP} prepare")
+    check_cache = step_running(steps, f"{PNPM_SETUP} check-cache")
+    frozen = step_running(steps, "pnpm --dir web install --frozen-lockfile")
+    build = step_running(steps, "KORA_BUILD_OFFLINE=1 uv build --offline")
+
+    assert [
+        location
+        for location, job in jobs_of(workflows)
+        if any(PNPM_SETUP in str(step.get("run", "")) for step in step_list(job))
+    ] == ["ci.yml:scaffold-tests"]
+    assert "pnpm/action-setup" not in {action_of(step) for step in steps}
+    assert node < prepare < cache < check_cache < frozen < build
+    assert all(
+        "if" not in steps[index] for index in (node, prepare, cache, check_cache)
+    )
+    assert table(steps[node]["with"])["node-version-file"] == "web/.node-version"
+    assert table(steps[cache]["with"]) == {
+        "package-manager-cache": False,
+        "cache": "pnpm",
+        "cache-dependency-path": "web/pnpm-lock.yaml",
+    }
+    for index in (check_cache, build):
+        assert f"{PNPM_SETUP} check-selection" in str(steps[index]["run"])
 
 
 def steps_before_static_checks(job: dict[str, object]) -> list[dict[str, object]]:
