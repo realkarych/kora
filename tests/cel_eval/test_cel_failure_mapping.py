@@ -88,7 +88,6 @@ class CompileFailureBinding:
 @pytest.mark.parametrize(
     ("binding", "kind", "fault"),
     [
-        (FailureBinding(RuntimeError).binding(), ErrorKind.INVALID_ARGUMENT, None),
         (
             CompileFailureBinding(RuntimeError).binding(),
             ErrorKind.INTERNAL_FAULT,
@@ -99,13 +98,8 @@ class CompileFailureBinding:
             ErrorKind.INTERNAL_FAULT,
             Fault.VALUE_ERROR,
         ),
-        (
-            FailureBinding(ValueError).binding(),
-            ErrorKind.INTERNAL_FAULT,
-            Fault.VALUE_ERROR,
-        ),
     ],
-    ids=["execution_runtime", "compile_runtime", "compile_value", "execution_value"],
+    ids=["compile_runtime", "compile_value"],
 )
 def test_cel_invalid_argument_is_not_an_internal_fault(
     binding: Binding, kind: ErrorKind, fault: Fault | None

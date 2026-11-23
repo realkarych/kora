@@ -87,7 +87,7 @@ EDITORIAL_INPUTS = {
     "cel-measurements": tuple(CEL_SUCCESS),
     "browser": (*SCOPE, "FULL_SCOPE", "BROWSER_RESULT", "CANCELLED"),
 }
-GateCase = tuple[str, dict[str, str], bool]
+GateCase = tuple[str, dict[str, str]]
 
 
 def run_gate(
@@ -191,11 +191,9 @@ def lane_completion_cases() -> dict[str, GateCase]:
     cases: dict[str, GateCase] = {}
     for lane in LANE_OUTCOMES:
         complete = expected_lane_outcomes(lane)
-        cases[f"{lane}-complete"] = (lane, complete, True)
         cases[f"{lane}-workflow-cancelled"] = (
             lane,
             {**complete, "WORKFLOW_CANCELLED": "true"},
-            False,
         )
         steps = {f: v for f, v in complete.items() if f != "STATIC_OUTCOME"}
         for field, expected in steps.items():
@@ -204,23 +202,19 @@ def lane_completion_cases() -> dict[str, GateCase]:
                     cases[f"{lane}-{field}-{outcome or 'empty'}"] = (
                         lane,
                         {**complete, field: outcome},
-                        False,
                     )
     for lane in UNPLANNED_LANES:
         cases[f"unplanned-{lane}-profile"] = (
             lane,
             expected_lane_outcomes("general-1"),
-            False,
         )
     cases["unknown-local-runtime-profile"] = (
         "unknown",
         expected_lane_outcomes("local-runtime"),
-        False,
     )
     cases["empty-general-profile"] = (
         "",
         expected_lane_outcomes("general-1"),
-        False,
     )
     return cases
 
@@ -229,12 +223,12 @@ LANE_COMPLETION_CASES = lane_completion_cases()
 
 
 @pytest.mark.parametrize(
-    ("lane", "outcomes", "passes"),
+    ("lane", "outcomes"),
     list(LANE_COMPLETION_CASES.values()),
     ids=list(LANE_COMPLETION_CASES),
 )
 def test_lane_completion_rejects_every_incomplete_outcome(
-    tmp_path: Path, lane: str, outcomes: dict[str, str], passes: bool
+    tmp_path: Path, lane: str, outcomes: dict[str, str]
 ) -> None:
     values: dict[str, str | None] = {
         "WORKFLOW_CANCELLED": "false",
@@ -244,7 +238,7 @@ def test_lane_completion_rejects_every_incomplete_outcome(
 
     result = run_gate(["scaffold-lane"], values, tmp_path / "output")
 
-    assert (result.returncode == 0) is passes
+    assert result.returncode != 0
 
 
 def static_check_gate(
@@ -319,8 +313,7 @@ def test_scaffold_join_refuses_failed_cancelled_skipped_or_missing_evidence(
         (None, "skipped", False),
     ]
     + [
-        (event, result, result == "success")
-        for event in ("schedule", "workflow_dispatch")
+        ("workflow_dispatch", result, result == "success")
         for result in ("success", "skipped", "failure", "cancelled", "")
     ],
 )

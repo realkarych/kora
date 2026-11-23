@@ -35,6 +35,7 @@ from tests.api.test_graph_publication_values import (
 from tests.db.closing import CONDITION_DEADLINE_SECONDS, ConnectionLedger
 from tests.db.seed import FakeClock
 from tests.db.test_graph_read_admission import executed_queries
+from tests.db.test_sqlite_graph_version_layout import GEOMETRY_STATEMENTS
 from tests.db.test_sqlite_writer_entry import writer_driver
 from tests.support.databases import sqlite_settings
 
@@ -44,7 +45,6 @@ METADATA_BYTES = len(canonical_json(dict(RESOLVED)).encode()) + len(ACTOR.encode
 CREATE_CANARY = text("CREATE TABLE publication_canary (value INTEGER)")
 INSERT_CANARY = text("INSERT INTO publication_canary VALUES (7)")
 READ_CANARY = text("SELECT value FROM publication_canary")
-SHADOW_LAYOUT = text("CREATE TABLE pragma_table_xinfo (value INTEGER)")
 
 
 @pytest.fixture(scope="module")
@@ -128,7 +128,7 @@ async def test_sqlite_publication_measurement_refuses_unprepared_metadata_before
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["layout", "measurement", "cancel"])
+@pytest.mark.parametrize("mode", ["geometry", "measurement", "cancel"])
 async def test_sqlite_publication_measurement_refusal_and_cancellation_release_writer(
     tmp_path: Path,
     measurement_binds: PreparedGraphPublicationBinds,
@@ -139,24 +139,39 @@ async def test_sqlite_publication_measurement_refusal_and_cancellation_release_w
     await upgrade_database(settings)
     database = Database(settings)
     ledger = ConnectionLedger(database)
+    geometry: list[str] = []
     dispatched: list[bool] = []
-    denied: list[bool] = []
+    denied: list[str] = []
 
-    def deny_measurement(
+    def deny_native_operation(
         action: int,
         name: str | None,
         argument: str | None,
         schema: str | None,
         source: str | None,
     ) -> int:
-        if action == sqlite3.SQLITE_FUNCTION and argument == "length":
-            denied.append(True)
+        if (
+            mode == "geometry"
+            and action == sqlite3.SQLITE_PRAGMA
+            and name == "encoding"
+            and schema == "main"
+        ):
+            denied.append("encoding")
+            return sqlite3.SQLITE_DENY
+        if (
+            mode == "measurement"
+            and action == sqlite3.SQLITE_FUNCTION
+            and argument == "length"
+        ):
+            denied.append("length")
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
 
-    def observe_measurement_dispatch(
+    def observe_dispatch(
         connection: object, cursor: object, statement: str, *arguments: object
     ) -> None:
+        if statement in GEOMETRY_STATEMENTS:
+            geometry.append(statement)
         if "resolved_digests_native_bytes" in statement:
             dispatched.append(True)
             if mode == "cancel":
@@ -168,14 +183,12 @@ async def test_sqlite_publication_measurement_refusal_and_cancellation_release_w
         async with database.transaction() as writer:
             await writer.execute(INSERT_CANARY)
             driver = await writer_driver(writer)
-            if mode == "layout":
-                await writer.execute(SHADOW_LAYOUT)
-            elif mode == "measurement":
-                await driver.set_authorizer(deny_measurement)
+            if mode != "cancel":
+                await driver.set_authorizer(deny_native_operation)
             event.listen(
                 writer.sync_connection,
                 "before_cursor_execute",
-                observe_measurement_dispatch,
+                observe_dispatch,
             )
             try:
                 await observe_sqlite_graph_publication(
@@ -184,12 +197,12 @@ async def test_sqlite_publication_measurement_refusal_and_cancellation_release_w
                     measurement_metadata,
                 )
             finally:
-                if mode == "measurement":
+                if mode != "cancel":
                     await driver.set_authorizer(None)
                 event.remove(
                     writer.sync_connection,
                     "before_cursor_execute",
-                    observe_measurement_dispatch,
+                    observe_dispatch,
                 )
 
     try:
@@ -230,8 +243,12 @@ async def test_sqlite_publication_measurement_refusal_and_cancellation_release_w
     assert released
     assert canary == []
     assert recovered.resource_transport_bytes > 0
-    assert denied == ([True] if mode == "measurement" else [])
-    assert dispatched == ([] if mode == "layout" else [True])
+    assert geometry == list(GEOMETRY_STATEMENTS)
+    assert (
+        denied
+        == {"geometry": ["encoding"], "measurement": ["length"], "cancel": []}[mode]
+    )
+    assert dispatched == ([] if mode == "geometry" else [True])
     assert refused.value.__cause__ is refused.value.__context__ is None
     for frame, _ in walk_tb(refused.value.__traceback__):
         if frame.f_code.co_name == "observe_sqlite_graph_publication":
