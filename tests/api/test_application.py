@@ -1,4 +1,6 @@
 import json
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import pytest
@@ -28,6 +30,27 @@ from tests.db.seed import START
 from tests.plugins.authentication.support import seed_case
 
 __all__ = ["api_capture", "preparer"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_runs_normal_shutdown_after_body_error() -> None:
+    phases: list[str] = []
+
+    @asynccontextmanager
+    async def owned_lifespan(_: FastAPI) -> AsyncGenerator[None]:
+        phases.append("startup")
+        yield
+        phases.append("shutdown")
+
+    app = FastAPI(lifespan=owned_lifespan)
+    failure = RuntimeError("body failed")
+
+    with pytest.raises(RuntimeError, match="^body failed$") as caught:
+        async with lifespan(app):
+            raise failure
+
+    assert phases == ["startup", "shutdown"]
+    assert caught.value is failure
 
 
 @pytest.mark.asyncio

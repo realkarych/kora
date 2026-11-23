@@ -219,6 +219,13 @@ private native executor stream. It admits one root turn per attempt.
 Identity-preserving live reconnect or attempt failure and actual owner-bounded
 listener/session/descendant closure remain implementing obligations.
 
+The runtime binds the physical Bash executable. The selected route remains
+the baseline until the [built-in executor qualification](codex-execution-profile.md#built-in-executor-qualification)
+proves exact Bash, non-login execution and preserved refusal, stop and
+credential protection for the proposed replacement route. Apply the same
+exact-profile declaration and saved/live validation requirements to that
+route before admission.
+
 The design retains executable activation with the owning issues. #772
 owns protected native controls, exact absence qualification and the
 native declaration. #549 owns its configured acquisition, same-call

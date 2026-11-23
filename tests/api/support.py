@@ -150,12 +150,14 @@ async def lifespan(app: ASGIApp) -> AsyncGenerator[None, None]:
         assert (await asyncio.wait_for(outgoing.get(), 10))[
             "type"
         ] == "lifespan.startup.complete"
-        yield
-        await incoming.put({"type": "lifespan.shutdown"})
-        assert (await asyncio.wait_for(outgoing.get(), 10))[
-            "type"
-        ] == "lifespan.shutdown.complete"
-        await asyncio.wait_for(task, 10)
+        try:
+            yield
+        finally:
+            await incoming.put({"type": "lifespan.shutdown"})
+            assert (await asyncio.wait_for(outgoing.get(), 10))[
+                "type"
+            ] == "lifespan.shutdown.complete"
+            await asyncio.wait_for(task, 10)
     finally:
         if not task.done():
             task.cancel()
