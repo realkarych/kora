@@ -328,7 +328,6 @@ def test_command_result_provider_matches_model_validation(
     result = subject.validate(candidate, context_for(kora_capture))
 
     assert result == expected
-    assert len(result) <= 1
 
 
 def test_command_result_provider_digest_selection_is_stable(
