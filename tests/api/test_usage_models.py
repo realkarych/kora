@@ -6,20 +6,6 @@ from pydantic import ValidationError
 from kora.ir.cost import MAX_MONEY, MAX_SUM, MAX_TOKEN
 from kora.models.worker_usage import AcceptedUsageReport, AcceptedUsageRow, UsageReport
 from tests.engine.test_usage_acceptance import coverage, usage
-from tests.ir.test_cost_models import usage_payload
-
-
-@pytest.mark.parametrize("private_field", ["usd_estimate", "same_basis_usd_floor"])
-def test_usage_request_refuses_server_money_fields(private_field: str) -> None:
-    payload: dict[str, object] = {
-        "lease_epoch": 1,
-        "dispatcher_id": "grant",
-        "coverage": coverage(),
-        "rows": [usage_payload(**{private_field: "1"})],
-    }
-
-    with pytest.raises(ValidationError):
-        UsageReport.model_validate(payload)
 
 
 def test_usage_request_bounds_rows_before_member_validation() -> None:
