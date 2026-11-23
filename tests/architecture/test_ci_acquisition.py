@@ -490,21 +490,25 @@ PNPM_KEY = "node-cache-Linux-x64-pnpm-" + "a" * 64
 
 
 @pytest.mark.parametrize(
-    ("outcome", "hit", "primary", "matched", "populated", "classification"),
+    ("outcome", "hit", "primary", "matched", "contents", "classification"),
     [
-        ("success", "true", PNPM_KEY, PNPM_KEY, True, "exact hit"),
-        ("success", "false", PNPM_KEY, "", False, "cold miss"),
-        ("success", "", "", "", False, "cache unavailable"),
-        ("failure", "", "", "", False, None),
-        ("success", "true", PNPM_KEY, "", True, None),
-        ("success", "true", PNPM_KEY, f"{PNPM_KEY}-other", True, None),
-        ("success", "false", PNPM_KEY, PNPM_KEY, False, None),
-        ("success", "false", PNPM_KEY, "", True, None),
-        ("success", "false", "", "", False, None),
-        ("success", "", "", "", True, None),
-        ("success", "", PNPM_KEY, "", False, None),
-        ("success", "true", "malformed", "malformed", True, None),
-        ("success", "maybe", PNPM_KEY, "", False, None),
+        ("success", "true", PNPM_KEY, PNPM_KEY, "populated", "exact hit"),
+        ("success", "false", PNPM_KEY, "", "empty", "cold miss"),
+        ("success", "", "", "", "empty", "cache unavailable"),
+        ("success", "false", PNPM_KEY, "", "missing", "cold miss"),
+        ("success", "", "", "", "missing", "cache unavailable"),
+        ("success", "false", PNPM_KEY, "", "opaque", None),
+        ("success", "", "", "", "opaque", None),
+        ("failure", "", "", "", "empty", None),
+        ("success", "true", PNPM_KEY, "", "populated", None),
+        ("success", "true", PNPM_KEY, f"{PNPM_KEY}-other", "populated", None),
+        ("success", "false", PNPM_KEY, PNPM_KEY, "empty", None),
+        ("success", "false", PNPM_KEY, "", "populated", None),
+        ("success", "false", "", "", "empty", None),
+        ("success", "", "", "", "populated", None),
+        ("success", "", PNPM_KEY, "", "empty", None),
+        ("success", "true", "malformed", "malformed", "populated", None),
+        ("success", "maybe", PNPM_KEY, "", "empty", None),
     ],
 )
 def test_scaffold_pnpm_cache_requires_exact_hit_or_an_empty_store(
@@ -513,28 +517,36 @@ def test_scaffold_pnpm_cache_requires_exact_hit_or_an_empty_store(
     hit: str,
     primary: str,
     matched: str,
-    populated: bool,
+    contents: str,
     classification: str | None,
 ) -> None:
     runner_temp = tmp_path.resolve()
     store = runner_temp / "kora-pnpm-store"
     versioned_store = store / "v11"
-    versioned_store.mkdir(parents=True)
-    if populated:
+    store.mkdir()
+    if contents != "missing":
+        versioned_store.mkdir()
+    if contents in {"populated", "opaque"}:
         (versioned_store / ".partial-cache-content").touch()
+    if contents == "opaque":
+        versioned_store.chmod(0)
 
-    result = run_scaffold_pnpm(
-        runner_temp,
-        "check-cache",
-        {
-            "PNPM_CONFIG_STORE_DIR": str(store),
-            "KORA_SCAFFOLD_PNPM_STORE": str(versioned_store),
-            "KORA_PNPM_CACHE_OUTCOME": outcome,
-            "KORA_PNPM_CACHE_HIT": hit,
-            "KORA_PNPM_CACHE_PRIMARY": primary,
-            "KORA_PNPM_CACHE_MATCHED": matched,
-        },
-    )
+    try:
+        result = run_scaffold_pnpm(
+            runner_temp,
+            "check-cache",
+            {
+                "PNPM_CONFIG_STORE_DIR": str(store),
+                "KORA_SCAFFOLD_PNPM_STORE": str(versioned_store),
+                "KORA_PNPM_CACHE_OUTCOME": outcome,
+                "KORA_PNPM_CACHE_HIT": hit,
+                "KORA_PNPM_CACHE_PRIMARY": primary,
+                "KORA_PNPM_CACHE_MATCHED": matched,
+            },
+        )
+    finally:
+        if contents == "opaque":
+            versioned_store.chmod(0o700)
 
     assert result.returncode == (1 if classification is None else 0)
     assert result.stdout == (

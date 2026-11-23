@@ -21,10 +21,10 @@ valid_store() {
 }
 
 empty_store() (
-  shopt -s nullglob dotglob
-  for entry in "$store"/* "$versioned_store"/*; do
-    [[ $entry == "$versioned_store" ]] || return 1
-  done
+  cd -- "$store" || return 1
+  local entry
+  entry=$(find . -mindepth 1 ! -path "./${versioned_store##*/}" -print -quit 2>/dev/null) || return 1
+  [[ -z $entry ]]
 )
 
 prepare() {
