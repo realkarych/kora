@@ -311,6 +311,8 @@ The composable initial Scheduler discovers accepted pending runs independently o
 
 Each discovery source has its own finite rotation and reads at most one page before processing. The Scheduler settles the original snapshot before performing another operation. Startup rechecks original expired leases under the run lock even for terminal parents, preserving unsettled execution reservations. The supported staging inventory uses existing deadline and undispatched-attempt closure writers. Deferred or unsupported work keeps its durable marker and original holds.
 
+A settled admission page with an open sweep ceiling requests another full tick. Lease, deadline, running, marked and pending work keep their usual position before the next admission page. A short or empty page exhausts the sweep. An unsuccessful snapshot supplies no continuation. With no committed transition or continuation, the loop takes its usual one-second idle pause before opening a new sweep.
+
 The composable tests restart on the same database without a wake, then use real HTTP Worker Claim and exact replay. Idle polling and an explicit stop own no task per run. Stop seals new work and awaits actual read or write settlement. Installed selection and serving-process ownership follow in #1780. The full accepted-output-to-second-Claim restart proof remains #1448.
 
 ## 9. Scheduling latency (NFR-3.1)

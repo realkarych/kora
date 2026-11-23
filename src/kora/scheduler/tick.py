@@ -141,7 +141,7 @@ class Tick:
                 emit(TRANSITION, "admitted")
                 changed = True
             changed |= outcome is AttemptAdmissionState.EXPIRED
-        return changed
+        return changed or page.ceiling is not None
 
     async def __call__(self, stopped: Callable[[], bool]) -> bool:
         changed = False
