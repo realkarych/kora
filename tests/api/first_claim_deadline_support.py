@@ -1,10 +1,11 @@
 import asyncio
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
 import pytest
-from sqlalchemy import Connection, delete, event, insert, text, update
+from sqlalchemy import Connection, delete, event, insert, select, text, update
 from sqlalchemy.util import await_
 
 from kora.client import KoraClient
@@ -37,7 +38,7 @@ from tests.api.support import client_for
 from tests.api.worker_support import registration
 from tests.db.closing import ConnectionLedger
 from tests.engine.admission_processing_support import process
-from tests.engine.claim_support import state
+from tests.engine.claim_support import read_claim_state, state
 from tests.engine.promotion_support import PromotionCase
 from tests.engine.test_http_trigger_admission import RUNS, VERSIONS, promotion_from_http
 
@@ -510,38 +511,50 @@ async def verify_original_commit_settlement(
             )
 
     before = await state(database)
+    (original,) = before["attempt"]
+    original_status = select(attempt.c.status).where(attempt.c.id == original["id"])
     event.listen(engine, "after_cursor_execute", probe.record_write)
     event.listen(engine, "commit", probe.hold_commit)
     try:
-        async with asyncio.timeout(10):
-            request = asyncio.create_task(
-                refuse_claim(client, worker_id, setup.request)
-            )
-            try:
-                await probe.entered.wait()
-                if commit:
-                    request.cancel("caller left at original commit")
-                    cancellation_turn = asyncio.Event()
-                    asyncio.get_running_loop().call_soon(cancellation_turn.set)
-                    await cancellation_turn.wait()
-                awaiting_original_commit = not request.done()
-                during_commit = await state(database)
-                original_checkouts = ledger.outstanding
-            finally:
-                probe.release.set()
-                if commit:
-                    with pytest.raises(asyncio.CancelledError):
-                        await request
-                else:
-                    refusal = await request
+        async with AsyncExitStack() as snapshot:
+            async with asyncio.timeout(10):
+                request = asyncio.create_task(
+                    refuse_claim(client, worker_id, setup.request)
+                )
+                try:
+                    await probe.entered.wait()
+                    if commit:
+                        request.cancel("caller left at original commit")
+                        cancellation_turn = asyncio.Event()
+                        asyncio.get_running_loop().call_soon(cancellation_turn.set)
+                        await cancellation_turn.wait()
+                    original_checkouts = ledger.outstanding
+                    reader = await snapshot.enter_async_context(
+                        database.read_snapshot()
+                    )
+                    status_during_commit = (
+                        await reader.execute(original_status)
+                    ).scalar_one()
+                    awaiting_original_commit = not request.done()
+                    held_checkouts = ledger.outstanding
+                finally:
+                    probe.release.set()
+                    if commit:
+                        with pytest.raises(asyncio.CancelledError):
+                            await request
+                    else:
+                        refusal = await request
+            observer_checkouts = ledger.outstanding
+            during_commit = await read_claim_state(reader)
     finally:
         event.remove(engine, "commit", probe.hold_commit)
         event.remove(engine, "after_cursor_execute", probe.record_write)
     after = await state(database)
 
     assert awaiting_original_commit
+    assert status_during_commit == "created"
     assert during_commit == before
-    assert original_checkouts == 1
+    assert (original_checkouts, held_checkouts, observer_checkouts) == (1, 2, 1)
     if commit:
         assert_original_discharge(before, after, target, setup.clock.now())
     else:
