@@ -70,11 +70,7 @@ async def observe_sqlite_graph_publication(
         finally:
             del result
         lease.require_active()
-        if (
-            len(sizes) != 6
-            or any(type(size) is not int or size <= 0 for size in sizes)
-            or sizes[2] != sizes[3]
-        ):
+        if len(sizes) != 6 or any(type(size) is not int or size <= 0 for size in sizes):
             raise SQLiteGraphPublicationMeasurementUnavailable()
         ir, execution, resources, transport, resolved, actor = sizes
         footprint = bound_sqlite_graph_version_record(

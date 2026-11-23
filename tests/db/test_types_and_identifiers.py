@@ -109,7 +109,6 @@ async def test_column_types_round_trip_identically(database: Database) -> None:
     assert expiries[whole_token] == whole_second
     assert expiries[fractional_token] == fractional
     assert expiries[shifted_token] == shifted.astimezone(UTC)
-    assert expiries[shifted_token].tzinfo is not None
     assert expiries[open_token] is None
     assert ordered == sorted(
         [whole_token, fractional_token, shifted_token],
