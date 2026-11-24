@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import insert, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.compiler import SQLCompiler
@@ -33,6 +35,12 @@ from tests.support.databases import encoded_sqlite_settings
 
 SYSTEM: JsonObject = {"kind": "system", "component": "scheduler"}
 USER: JsonObject = {"kind": "user", "owner": '"' * 256, "token_id": "\\" * 256}
+
+
+def near_toast_payload(width: int = 1250) -> JsonObject:
+    chunks = (width + 63) // 64
+    noise = "".join(sha256(str(index).encode()).hexdigest() for index in range(chunks))
+    return {"private": noise[:width]}
 
 
 def decode_run_event_page(rows: NativeRunEvents, run: str) -> tuple[RunEvent, ...]:
@@ -75,6 +83,8 @@ async def seed_event(
     *,
     event_id: str | None = None,
     node_id: str | None = None,
+    payload: JsonObject | None = None,
+    kind: str = "run.succeeded",
 ) -> str:
     seeder = Seeder(connection)
     event_id = seeder.new_id() if event_id is None else event_id
@@ -85,9 +95,9 @@ async def seed_event(
             run_id=scope.run_id,
             node_instance_id=scope.node_id if node_id is None else node_id,
             attempt_id=scope.attempt_id,
-            kind="run.succeeded",
+            kind=kind,
             actor=actor,
-            payload={"private": "p" * payload_size},
+            payload={"private": "p" * payload_size} if payload is None else payload,
             at=START,
             **seeder.stamps(),
         )
@@ -334,6 +344,7 @@ async def test_run_event_actor_admission_refuses_wide_saved_documents(
 
     if logical is not None:
         assert logical[0][0] is not None
+        assert logical[0][1] > 576
         assert logical[1][0] is None
         assert logical[1][1] > ACTOR_BYTES
     assert [row.actor for row in rows[:2]] == [None, None]
@@ -466,3 +477,106 @@ async def test_event_native_plan_omits_payload_among_unrelated_history(
             node["Node Type"] == "Limit" and node["Actual Rows"] == 2 for node in nodes
         )
         assert sum(node.get("Join Type") == "Left" for node in nodes) == 3
+
+
+@pytest.mark.asyncio
+async def test_saved_actor_guards_preserve_exact_values_and_refuse_malformed_json(
+    database: Database,
+) -> None:
+    postgres = database.dialect is Dialect.POSTGRESQL
+    service = {**USER, "kind": "service"}
+    async with database.transaction() as writer:
+        scope = await seed_run(writer)
+        user_id = await seed_event(writer, scope, USER, 0, payload=near_toast_payload())
+        wide_raw = await seed_event(writer, scope, {**USER, "owner": "z" * 4096}, 16)
+        long_string = await seed_event(writer, scope, {**USER, "owner": "z" * 257}, 16)
+        extra_key = await seed_event(writer, scope, {**SYSTEM, "private": True}, 16)
+        wrong_type = await seed_event(writer, scope, {**USER, "owner": 42}, 16)
+        escaped_wide = await seed_event(
+            writer,
+            scope,
+            {**USER, "owner": "\x01" * 256, "token_id": "\x02" * 256},
+            16,
+        )
+        wrong_root = await seed_event(writer, scope, SYSTEM, 16)
+        await writer.execute(
+            update(event).where(event.c.id == wrong_root).values(actor=["scheduler"])
+        )
+        if postgres:
+            await writer.exec_driver_sql(
+                "ALTER TABLE event ALTER COLUMN actor SET COMPRESSION lz4"
+            )
+        service_id = await seed_event(
+            writer, scope, service, 0, payload=near_toast_payload()
+        )
+        numeric_id = await seed_event(writer, scope, {**USER, "owner": 42}, 16)
+        if postgres:
+            await writer.execute(
+                text("UPDATE event SET actor = CAST(:actor AS jsonb) WHERE id = :id"),
+                {
+                    "actor": '{"kind":"user","owner":1e10000,'
+                    '"token_id":"large-numeric"}',
+                    "id": numeric_id,
+                },
+            )
+
+    async with database.read_snapshot() as reader:
+        rows = await read_run_event_page(
+            reader, scope.namespace_id, scope.run_id, None, None, 100
+        )
+        representations = {}
+        if postgres:
+            observed = await reader.execute(
+                text("""
+                SELECT id, pg_column_compression(actor) AS codec,
+                       pg_column_size(actor) AS stored_bytes,
+                       pg_column_size(jsonb_set_lax(
+                           actor, ARRAY[]::text[], NULL::jsonb, false, 'return_target'
+                       )) AS raw_bytes,
+                       octet_length(actor::text) AS rendered_bytes
+                FROM event WHERE run_id = :run_id
+                """),
+                {"run_id": scope.run_id},
+            )
+            representations = {row.id: row for row in observed}
+
+    keyed = {row.id: row for row in rows}
+    assert len(keyed) == 9
+    run_id = "run_" + scope.run_id
+    for identifier, actor in ((user_id, USER), (service_id, service)):
+        assert decode_run_event(keyed[identifier], run_id).actor.model_dump() == actor
+    for identifier in (
+        wide_raw,
+        extra_key,
+        wrong_type,
+        wrong_root,
+        numeric_id,
+        long_string,
+        escaped_wide,
+    ):
+        expected_error = (
+            RunEventReadRejected if keyed[identifier].actor is None else ValidationError
+        )
+        with pytest.raises(expected_error):
+            decode_run_event(keyed[identifier], run_id)
+    if postgres:
+        for identifier, codec in ((user_id, "pglz"), (service_id, "lz4")):
+            saved = representations[identifier]
+            assert saved.codec == codec
+            assert 0 < saved.stored_bytes < saved.raw_bytes <= 576
+        compressed = representations[wide_raw]
+        assert compressed.codec == "pglz"
+        assert 0 < compressed.stored_bytes <= 576 < compressed.raw_bytes
+        numeric = representations[numeric_id]
+        assert numeric.codec is None
+        assert 0 < numeric.raw_bytes <= 576
+        assert numeric.rendered_bytes > 10_000
+        escaped = representations[escaped_wide]
+        assert 0 < escaped.raw_bytes <= 576
+        assert escaped.rendered_bytes > ACTOR_BYTES
+        assert keyed[escaped_wide].actor is None
+        assert all(
+            keyed[identity].actor is None
+            for identity in (wide_raw, extra_key, wrong_type, wrong_root, numeric_id)
+        )
+        assert keyed[long_string].actor is not None

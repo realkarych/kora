@@ -33,13 +33,24 @@ SQLITE_FIELDS = {
     for name, field in SQLITE_EVENT_FIELDS.items()
 }
 POSTGRES_FIELDS = {name: column(name, String()) for name in SQLITE_EVENT_FIELDS}
-POSTGRES_FIELDS["actor"] = literal_column(
-    """
-    CASE WHEN pg_catalog.pg_column_compression(actor) IS NULL
-          AND pg_catalog.pg_column_size(actor) <= 2048
-         THEN CAST(actor AS text) END
-    """,
-    String(),
+EXPANDED_ACTOR = (
+    text("""
+    SELECT id, kind, at, node_instance_id, attempt_id,
+           CASE WHEN pg_catalog.pg_column_size(actor) <=
+               CASE
+                   WHEN pg_catalog.pg_column_compression(actor) IS NULL THEN 2048
+                   WHEN pg_catalog.pg_column_compression(actor) IN ('pglz', 'lz4')
+                       THEN 576
+               END
+           THEN pg_catalog.jsonb_set_lax(
+               actor, ARRAY[]::pg_catalog.text[], NULL::pg_catalog.jsonb,
+               false, 'return_target'
+           ) END AS actor
+    FROM candidate
+    """)
+    .columns()
+    .cte("expanded_actor")
+    .prefix_with("MATERIALIZED")
 )
 SQLITE_SCOPE: ColumnElement[bool] = literal_column(SQLITE_EVENT_SCOPE)
 CORRUPT_KEY = (
@@ -71,15 +82,34 @@ SQLITE_PAGE = text("""
     """).columns()
 POSTGRES_PAGE = text("""
     SELECT selected.id, pg_catalog.convert_to(selected.kind, 'UTF8'), selected.at,
-           CASE WHEN pg_catalog.octet_length(selected.actor) <= 1100
-                THEN pg_catalog.convert_to(selected.actor, 'UTF8') END AS actor,
+           CASE WHEN pg_catalog.octet_length(wire.actor) <= 1100
+                THEN wire.actor END AS actor,
            selected.node_instance_id, selected.attempt_id, 1,
            ((selected.node_instance_id IS NULL OR node.run_id = :run_id)
             AND (selected.attempt_id IS NULL OR (
                 parent.run_id = :run_id AND (selected.node_instance_id IS NULL
                 OR owned.node_instance_id = selected.node_instance_id)
             )))
-    FROM candidate AS selected
+    FROM expanded_actor AS selected
+    CROSS JOIN LATERAL (
+        SELECT CASE WHEN pg_catalog.pg_column_size(selected.actor) <= 576 THEN
+            CASE WHEN pg_catalog.jsonb_typeof(selected.actor) = 'object' THEN
+                CASE WHEN selected.actor =
+                        '{"kind":"system","component":"scheduler"}'::pg_catalog.jsonb
+                     OR (
+                        selected.actor->'kind' IN (
+                            '"user"'::pg_catalog.jsonb, '"service"'::pg_catalog.jsonb)
+                        AND pg_catalog.jsonb_typeof(selected.actor->'owner') = 'string'
+                        AND pg_catalog.jsonb_typeof(selected.actor->'token_id')
+                            = 'string'
+                        AND selected.actor - ARRAY['kind', 'owner', 'token_id'] =
+                            '{}'::pg_catalog.jsonb
+                     )
+                     THEN pg_catalog.convert_to(selected.actor::pg_catalog.text, 'UTF8')
+                END
+            END
+        END AS actor OFFSET 0
+    ) AS wire
     LEFT JOIN node_instance AS node ON node.id = selected.node_instance_id
     LEFT JOIN attempt AS owned ON owned.id = selected.attempt_id
     LEFT JOIN node_instance AS parent ON parent.id = owned.node_instance_id
@@ -110,8 +140,10 @@ def run_event_statement(
     if after is not None:
         query = query.where(key < bindparam("after", type_=String()))
     candidate = query.order_by(key.desc()).limit(bindparam("take", type_=Integer()))
-    projection = SQLITE_PAGE if sqlite else POSTGRES_PAGE
-    return projection.add_cte(candidate.cte("candidate").prefix_with("MATERIALIZED"))
+    limited = candidate.cte("candidate").prefix_with("MATERIALIZED")
+    if sqlite:
+        return SQLITE_PAGE.add_cte(limited)
+    return POSTGRES_PAGE.add_cte(limited, EXPANDED_ACTOR)
 
 
 async def run_event_scope(

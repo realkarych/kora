@@ -37,7 +37,13 @@ from tests.client.support import running_app
 from tests.db.closing import ConnectionLedger, WriterCutoffLoop, until
 from tests.db.native_read_support import PostgresReadConnection, SqliteTraceControl
 from tests.db.seed import Seeder
-from tests.db.test_run_event_reads import SYSTEM, seed_event, seed_run
+from tests.db.test_run_event_reads import (
+    SYSTEM,
+    USER,
+    near_toast_payload,
+    seed_event,
+    seed_run,
+)
 from tests.engine.promotion_support import PromotionCase
 from tests.engine.settlement_support import finished_run, settlement_context
 from tests.mcp.test_stdio_deploy import start
@@ -96,6 +102,31 @@ async def test_run_events_show_one_settled_outcome_across_real_clients(
 ) -> None:
     case = await _settled(database)
     await _token(database, case.scope.namespace_id)
+    async with database.transaction() as writer:
+        seed = Seeder(writer)
+        saved_actor_id = seed.new_id()
+        await writer.execute(
+            insert(event).values(
+                id=saved_actor_id,
+                namespace_id=case.scope.namespace_id,
+                run_id=case.run_id,
+                node_instance_id=None,
+                attempt_id=None,
+                kind="run.created",
+                actor=USER,
+                payload=near_toast_payload(1450),
+                at=case.clock.now(),
+                **seed.stamps(),
+            )
+        )
+        storage_codec = (
+            await writer.scalar(
+                text("SELECT pg_column_compression(actor) FROM event WHERE id = :id"),
+                {"id": saved_actor_id},
+            )
+            if database.dialect is Dialect.POSTGRESQL
+            else None
+        )
     clock = AuthorityClock()
     app = create_application(
         StaticTokenAuthenticator({}, database),
@@ -177,6 +208,10 @@ async def test_run_events_show_one_settled_outcome_across_real_clients(
     assert json.loads(refusal.stdout)["error"]["code"] == "API003"
     assert code == 0
     page = RunEventPage.model_validate_json(remote.content)
+    [historical] = [row for row in page.items if row.id == f"event_{saved_actor_id}"]
+    assert historical.actor.model_dump() == USER
+    if database.dialect is Dialect.POSTGRESQL:
+        assert storage_codec == "pglz"
     [settlement] = [row for row in page.items if row.kind == "run.succeeded"]
     _, _, saved = await case.snapshot(database)
     [event_id] = [row["id"] for row in saved if row["kind"] == "run.succeeded"]
@@ -360,7 +395,9 @@ async def test_run_event_authentication_unavailability_precedes_query(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", ["node", "attempt", "outside", "actor"])
+@pytest.mark.parametrize(
+    "corruption", ["node", "attempt", "outside", "actor", "actor-wide"]
+)
 async def test_run_event_projection_enforces_exact_owner_without_partial_page(
     database: Database,
     api_capture: Capture,
@@ -376,6 +413,7 @@ async def test_run_event_projection_enforces_exact_owner_without_partial_page(
             "attempt": {"attempt_id": other.attempt_id},
             "outside": {"namespace_id": other.namespace_id},
             "actor": {"actor": {"kind": "system", "component": "wrong"}},
+            "actor-wide": {"actor": {**USER, "owner": "corrupt-owner-" * 300}},
         }
         replacement = replacements[corruption]
         await writer.execute(
