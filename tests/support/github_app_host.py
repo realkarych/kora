@@ -57,6 +57,7 @@ class HostCase(StrEnum):
     MISSING_PERMISSIONS = "missing_permissions"
     ECHO_APP_ASSERTION = "echo_app_assertion"
     PREFIXED_APP_ASSERTION = "prefixed_app_assertion"
+    OTHER_BEARER = "other_bearer"
     EXPIRED = "expired"
     LONG_LIVED = "long_lived"
     PAGINATED = "paginated"
@@ -182,6 +183,8 @@ class AppHost:
             token = assertion
         if self.case is HostCase.PREFIXED_APP_ASSERTION:
             token = f"ghs_{APP_ID}_{assertion}"
+        if self.case is HostCase.OTHER_BEARER:
+            token = f"ghp_fixtureopaque{index}"
         minted = Minted(role, token)
         self.minted.append(minted)
         if self.case is HostCase.LOST_MINT:

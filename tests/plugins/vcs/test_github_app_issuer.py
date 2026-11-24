@@ -1,5 +1,6 @@
 import asyncio
 import json
+from base64 import encodebytes
 from collections.abc import Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
@@ -436,6 +437,7 @@ def test_github_app_roles_issue_and_drive_exact_pr_creation_and_recovery(
         (HostCase.EXCESS_PERMISSIONS, list(APP_EXCHANGE), "permission_scope_mismatch"),
         (HostCase.ECHO_APP_ASSERTION, list(APP_EXCHANGE), "token_value_invalid"),
         (HostCase.PREFIXED_APP_ASSERTION, list(APP_EXCHANGE), "token_value_invalid"),
+        (HostCase.OTHER_BEARER, list(APP_EXCHANGE), "token_value_invalid"),
         (HostCase.EXPIRED, list(APP_EXCHANGE), "token_expiry_invalid"),
         (HostCase.LONG_LIVED, list(APP_EXCHANGE), "token_expiry_invalid"),
         (HostCase.PAGINATED, [*APP_EXCHANGE, ACCESS_PATH], "repository_scope_mismatch"),
@@ -604,11 +606,30 @@ def test_github_app_validates_original_binding_and_role_before_resolving_keys(
     )
 
 
-@pytest.mark.parametrize("key_ref", ["secret://file/APP_ABSENT", KEY_REFERENCE])
+def unsupported_pkcs8(signing_key: rsa.RSAPrivateKey) -> bytes:
+    rsa_encryption_oid = bytes.fromhex("06092a864886f70d010101")
+    unsupported_oid = rsa_encryption_oid[:-1] + b"\x7f"
+    original = signing_key.private_bytes(
+        serialization.Encoding.DER,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    assert original.count(rsa_encryption_oid) == 1
+    encoded = encodebytes(original.replace(rsa_encryption_oid, unsupported_oid, 1))
+    return b"-----BEGIN PRIVATE KEY-----\n" + encoded + b"-----END PRIVATE KEY-----\n"
+
+
+@pytest.mark.parametrize("case", ["missing", "invalid", "unsupported"])
 def test_github_app_private_key_failure_is_content_free_and_local(
-    fixture: IssuerFixture, key_ref: str
+    fixture: IssuerFixture, app_key: rsa.RSAPrivateKey, case: str
 ) -> None:
-    write_secret(fixture.key_directory, KEY_NAME, HOST_TEXT_MARKER.encode())
+    key_ref = "secret://file/APP_ABSENT" if case == "missing" else KEY_REFERENCE
+    key = (
+        unsupported_pkcs8(app_key)
+        if case == "unsupported"
+        else HOST_TEXT_MARKER.encode()
+    )
+    write_secret(fixture.key_directory, KEY_NAME, key)
     caller = fixture.capture.scope
     baseline = fixture.registered()
 
@@ -632,7 +653,7 @@ def test_github_app_private_key_failure_is_content_free_and_local(
             else "signing_key_unavailable"
         )
     }
-    assert HOST_TEXT_MARKER not in repr(error)
+    assert key.decode("ascii") not in repr(error)
     assert host.paths == []
     assert_released(fixture, 1)
     assert fixture.registered() == baseline
