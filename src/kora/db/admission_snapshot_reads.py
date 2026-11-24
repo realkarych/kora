@@ -53,7 +53,12 @@ def _bounded_text(
 
 
 def _owner_statement(
-    dialect: str, owner: Table, identity: str, allowance: int
+    dialect: str,
+    owner: Table,
+    identity: str,
+    allowance: int,
+    *,
+    agent_only: bool = False,
 ) -> Executable:
     node = owner is node_instance
     names = (
@@ -70,6 +75,8 @@ def _owner_statement(
         else column("status", Text()) == "running",
         column("deadline_expired_at").is_(None),
     )
+    if node and agent_only:
+        valid = and_(valid, column("kind", Text()) == "agent")
     key = column("id", Text())
     predicate = key == identity
     if dialect == SQLITE:
@@ -102,13 +109,19 @@ def _owner_statement(
 
 
 async def read_admission_candidate(
-    connection: AsyncConnection, node_id: str, *, node_row: int, run_row: int
+    connection: AsyncConnection,
+    node_id: str,
+    *,
+    node_row: int,
+    run_row: int,
+    agent_only: bool = False,
 ) -> AdmissionCandidateBinding | None:
     transaction = connection.get_transaction()
     dialect = connection.dialect.name
     if (
         type(node_id) is not str
         or not is_identifier(node_id)
+        or type(agent_only) is not bool
         or any(
             type(limit) is not int or not 0 < limit <= SQLITE_MAX_PARENT_ALLOWANCE
             for limit in (node_row, run_row)
@@ -119,7 +132,9 @@ async def read_admission_candidate(
     ):
         return None
     with await connection.execute(
-        _owner_statement(dialect, node_instance, node_id, node_row)
+        _owner_statement(
+            dialect, node_instance, node_id, node_row, agent_only=agent_only
+        )
     ) as result:
         node = result.first()
     if node is None:

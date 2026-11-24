@@ -190,6 +190,7 @@ async def _acquire_admission_snapshot(
     observed_at: datetime,
     periodic_recheck: bool,
     deadline: float,
+    agent_only: bool,
 ) -> AcquiredAdmissionSnapshot:
     if (
         type(node_id) is not str
@@ -198,6 +199,7 @@ async def _acquire_admission_snapshot(
         or observed_at.tzinfo is None
         or observed_at.utcoffset() is None
         or type(periodic_recheck) is not bool
+        or type(agent_only) is not bool
         or type(deadline) is not float
         or not math.isfinite(deadline)
     ):
@@ -218,6 +220,7 @@ async def _acquire_admission_snapshot(
                 node_id,
                 node_row=limits.node_row,
                 run_row=limits.inputs.parent,
+                agent_only=agent_only,
             )
             if candidate is None:
                 raise AdmissionCandidateUnavailable()
@@ -294,11 +297,18 @@ async def acquire_admission_snapshot(
     observed_at: datetime,
     periodic_recheck: bool,
     deadline: float,
+    agent_only: bool = False,
 ) -> AcquiredAdmissionSnapshot:
     acquired = False
     try:
         result = await _acquire_admission_snapshot(
-            database, node_id, limits, observed_at, periodic_recheck, deadline
+            database,
+            node_id,
+            limits,
+            observed_at,
+            periodic_recheck,
+            deadline,
+            agent_only,
         )
         acquired = True
         return result

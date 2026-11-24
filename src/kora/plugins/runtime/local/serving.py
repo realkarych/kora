@@ -50,6 +50,7 @@ from kora.plugins.runtime.local.channel import (
     read_transfer,
     read_transfer_bytes,
     receive_section,
+    session_finalization_envelope,
     session_result_envelope,
     status_envelope,
     transfer_cutoff,
@@ -105,6 +106,7 @@ from kora.runner.registry import (
     refusal,
     takeover_cell,
 )
+from kora.runner.session_result import FinalizationReferences
 
 Result = TypeVar("Result")
 
@@ -267,6 +269,17 @@ def command_read(session: WorkloadSession, submitter: Submitter) -> CommandObser
 
 def session_read(session: WorkloadSession, submitter: Submitter) -> ControlFileRef:
     return session.session_observation(submitter)
+
+
+def finalization_read(
+    session: WorkloadSession, submitter: Submitter
+) -> FinalizationReferences:
+    return session.session_finalization(submitter)
+
+
+finalization_answer: Final[Answer[FinalizationReferences]] = Answer(
+    "session_unobserved", finalization_read, session_finalization_envelope
+)
 
 
 command_answer: Final[Answer[CommandObservation]] = Answer(
@@ -600,6 +613,15 @@ class ControlServer:
                         observational,
                         request.request_id,
                         session_answer,
+                    )
+                    return
+                elif request.op == "session_finalization":
+                    await self._send_answer(
+                        channel,
+                        submitter,
+                        observational,
+                        request.request_id,
+                        finalization_answer,
                     )
                     return
                 else:

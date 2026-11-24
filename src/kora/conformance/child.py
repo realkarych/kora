@@ -124,7 +124,9 @@ def main(result_path: str, event_path: str, lifetime_path: str) -> int:
             try:
                 metadata = load_provider(request.protocol, request.name, diagnostics)
                 selection = ConformanceSelection(metadata, configuration, fixture_data)
-                executor = Executor(request.protocol)
+                executor = Executor(
+                    request.protocol, change_requests=selection.change_requests
+                )
             finally:
                 drained = diagnostics.shutdown()
                 events.shutdown(socket.SHUT_WR)

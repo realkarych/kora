@@ -97,6 +97,8 @@ The selected approval digest and complete-payload storage digest remain separate
 
 ## 5. Upload, replay and result ownership
 
+The [second-slice GitHub publication contract](../github-pull-request-publication.md) defines how the provider observes PR identity and revisions for this enrichment and which recovery facts stay with the Worker.
+
 VcsRef revision 1 uses one application-level multipart request: exactly one `meta` part followed by one complete `payload` part. `meta.part` must be absent, including refusing explicit null. Resolve this restriction from the attempt's saved output contract, never caller-supplied `type_name`; refuse a chunk descriptor with `API003` before staging reservation or payload consumption/storage. Verify the multipart envelope ends before promotion and refuse duplicate or additional parts. HTTP streaming and transport chunking remain permitted; the 1 MiB payload fits the generic 16 MiB part cap. The general application-chunk progress/replay/metadata contract is separately tracked in #224 before generic upload routes ship.
 
 VcsRef upload producers send the canonical bytes above. API validation compares the received bytes with their canonical form and refuses a noncanonical representation before promotion or acceptance; it never rewrites staged content. Equivalent whitespace, member order, Unicode escapes, BOM or trailing-newline alternatives are refused even when their declared wire size and digest are correct. This preserves the existing whole-received-byte hash, single-part digest and size declarations, and staging reservations. The VcsRef-specific 1 MiB ceiling applies before the larger generic artifact caps in [API section 8](../api-and-agent-surface.md#8-rate-and-size-limits).
