@@ -166,7 +166,8 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
             schema_after = await reader.run_sync(attempt_schema_objects)
         async with database.migration_connection() as writer:
             with pytest.raises(
-                RuntimeError, match="event metadata cannot be downgraded"
+                RuntimeError,
+                match="^restore a compatible backup to downgrade event metadata$",
             ):
                 await writer.run_sync(downgrade)
         async with database.read_transaction() as reader:

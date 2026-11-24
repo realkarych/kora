@@ -85,12 +85,8 @@ def _timestamp(value: object, encoding: str) -> datetime:
     return moment
 
 
-def _public_identity(value: object, prefix: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise RunEventReadRejected()
-    return prefix + value
+def _public_identity(value: object, prefix: str) -> object:
+    return prefix + value if isinstance(value, str) else value
 
 
 def decode_run_event(row: NativeRunEvent, run: str) -> RunEvent:
@@ -121,11 +117,10 @@ def decode_run_event(row: NativeRunEvent, run: str) -> RunEvent:
 def refusal(
     code: ApiErrorCode, details: ConflictDetails | ReadProjectionDetails | None = None
 ) -> Response:
+    message = MESSAGES[code] if details is None else "Reduce the page limit and retry."
     error = ApiError(
         code=code,
-        message=MESSAGES[code]
-        if details is None
-        else "Reduce the page limit and retry.",
+        message=message,
         retryable=code is ApiErrorCode.UNAVAILABLE,
         details=details or EmptyDetails(),
         request_id=current_exchange().request_id,
@@ -133,13 +128,17 @@ def refusal(
     return error_response(ApiErrorEnvelope(error=error), method="GET")
 
 
-async def watch_request(request: Request, scoped: asyncio.Event) -> ApiErrorCode:
+async def watch_request(
+    request: Request, scoped: asyncio.Event, body: asyncio.Future[None]
+) -> ApiErrorCode:
     remaining = MAX_REQUEST_BYTES
     while (message := await request.receive())["type"] != "http.disconnect":
         remaining -= len(message.get("body", b""))
         if remaining < 0:
             await scoped.wait()
             return ApiErrorCode.VALIDATION
+        if not body.done() and not message.get("more_body", False):
+            body.set_result(None)
         await asyncio.sleep(0)
     return ApiErrorCode.UNAVAILABLE
 
@@ -157,13 +156,22 @@ class RunEventRoute:
         rows = size = 0
         scoped = asyncio.Event()
         page = asyncio.create_task(self.page(ns, run, request, deadline, scoped))
-        ingress = asyncio.create_task(watch_request(request, scoped))
+        body: asyncio.Future[None] = loop.create_future()
+        ingress = asyncio.create_task(watch_request(request, scoped, body))
         try:
             try:
                 await asyncio.wait((page, ingress), return_when=asyncio.FIRST_COMPLETED)
                 if ingress.done():
                     return refusal(ingress.result())
                 response, rows = page.result()
+                if response.status_code == 200 and not body.done():
+                    await asyncio.wait(
+                        (body, ingress),
+                        timeout=deadline - loop.time(),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if ingress.done():
+                        response, rows = refusal(ingress.result()), 0
             finally:
                 for task in (page, ingress):
                     task.cancel()
@@ -172,7 +180,7 @@ class RunEventRoute:
                         asyncio.gather(page, ingress, return_exceptions=True)
                     )
             if response.status_code == 200:
-                if loop.time() >= deadline:
+                if not body.done() or loop.time() >= deadline:
                     rows = 0
                     return refusal(ApiErrorCode.CONFLICT, READ_BUDGET)
                 size = len(response.body)

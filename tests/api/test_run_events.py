@@ -1,7 +1,7 @@
 import asyncio
 import json
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Generator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from hashlib import sha256
@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from sqlalchemy import Connection, Engine, insert, text, update
 from sqlalchemy import event as sql_events
 from sqlalchemy.util import await_
-from starlette.types import ASGIApp, Message
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from kora.api.application import create_application
 from kora.api.graph_deployment_limits import MAX_REQUEST_BYTES
@@ -320,6 +320,8 @@ class HeldEventPage(HttpCall):
     sending: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def receive(self) -> Message:
+        if self.receives == 0:
+            return await super().receive()
         await asyncio.Future[None]()
         raise AssertionError("the request was not cancelled")
 
@@ -450,9 +452,12 @@ def observed_events(
 
 @dataclass
 class DisconnectableEventPage(HttpCall):
+    body_finished: bool = False
     dropped: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def receive(self) -> Message:
+        if self.body_finished and self.receives == 0:
+            return await super().receive()
         await self.dropped.wait()
         return {"type": "http.disconnect"}
 
@@ -692,11 +697,14 @@ def test_run_event_native_deadline_is_fixed_budget_refusal(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("shutdown", [False, True])
+@pytest.mark.parametrize(
+    ("shutdown", "body_finished"), [(False, False), (False, True), (True, False)]
+)
 async def test_run_event_native_disconnect_or_shutdown_settles_once(
     database: Database,
     api_capture: Capture,
     shutdown: bool,
+    body_finished: bool,
 ) -> None:
     case = await _settled(database)
     await _token(database, case.scope.namespace_id)
@@ -706,6 +714,7 @@ async def test_run_event_native_disconnect_or_shutdown_settles_once(
     held = DisconnectableEventPage(
         path,
         headers=[(b"authorization", _authorization()["Authorization"].encode())],
+        body_finished=body_finished,
     )
     hold.attach()
 
@@ -801,10 +810,15 @@ async def test_run_event_continuation_pins_ceiling_and_sees_lower_live_membershi
 
 @dataclass
 class HeldEventDisconnectWatcher(HttpCall):
+    body_finished: bool = True
     settling: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def receive(self) -> Message:
+        if self.receives == 0:
+            message = await super().receive()
+            message["more_body"] = not self.body_finished
+            return message
         try:
             await asyncio.Future[None]()
         except asyncio.CancelledError:
@@ -814,9 +828,11 @@ class HeldEventDisconnectWatcher(HttpCall):
         raise AssertionError("the event watcher was not cancelled")
 
 
+@pytest.mark.parametrize("body_finished", [False, True])
 def test_run_event_deadline_after_native_release_still_refuses_before_delivery(
     database_settings: DatabaseSettings,
     api_capture: Capture,
+    body_finished: bool,
 ) -> None:
     loop = WriterCutoffLoop()
 
@@ -832,16 +848,21 @@ def test_run_event_deadline_after_native_release_still_refuses_before_delivery(
                 headers=[
                     (b"authorization", _authorization()["Authorization"].encode())
                 ],
+                body_finished=body_finished,
             )
+            page_finished = asyncio.Event()
+            barrier = held.settling if body_finished else page_finished
 
-            request = asyncio.create_task(held.run(app))
-            try:
-                await asyncio.wait_for(held.settling.wait(), 10)
-                assert ledger.outstanding == database.units_in_flight() == 0
-                loop.advance_to(loop.time() + 5)
-            finally:
-                held.release.set()
-            await asyncio.wait_for(request, 10)
+            with observe_projection_completion(database, page_finished):
+                request = asyncio.create_task(held.run(app))
+                try:
+                    await asyncio.wait_for(barrier.wait(), 10)
+                    assert ledger.outstanding == database.units_in_flight() == 0
+                    loop.advance_to(loop.time() + 5)
+                    await asyncio.wait_for(held.settling.wait(), 10)
+                finally:
+                    held.release.set()
+                await asyncio.wait_for(request, 10)
             [record] = [
                 event
                 for event in api_capture.finish()
@@ -909,4 +930,138 @@ async def test_oversized_segmented_event_request_aborts_one_native_page(
     assert hold.page_task.cancelling() == 1
     assert hold.cleanup.is_set()
     assert ordinary.status_code == 200
+    assert ledger.outstanding == database.units_in_flight() == 0
+
+
+@contextmanager
+def observe_projection_completion(
+    database: Database, page_finished: asyncio.Event
+) -> Generator[None, None, None]:
+    def observe_page(
+        connection: object, cursor: object, statement: str, *details: object
+    ) -> None:
+        if "ORDER BY selected.id DESC" in statement:
+            task = asyncio.current_task()
+            assert task is not None
+            task.add_done_callback(lambda _: page_finished.set())
+
+    engine = database.reader_engine.sync_engine
+    sql_events.listen(engine, "before_cursor_execute", observe_page)
+    try:
+        yield
+    finally:
+        sql_events.remove(engine, "before_cursor_execute", observe_page)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_event_page_first_waits_for_complete_chunked_body(
+    database: Database,
+    api_capture: Capture,
+    oversized: bool,
+) -> None:
+    case = await _settled(database)
+    await _token(database, case.scope.namespace_id)
+    app, path = observed_events(database, api_capture, case.run_id)
+    ledger = ConnectionLedger(database)
+    page_finished = asyncio.Event()
+    first_chunk = asyncio.Event()
+    complete_upload = asyncio.Event()
+    delivery: list[tuple[int, bool]] = []
+
+    async def observe_exchange(scope: Scope, receive: Receive, send: Send) -> None:
+        body_ended = False
+
+        async def record_receive() -> Message:
+            nonlocal body_ended
+            message = await receive()
+            if message["type"] == "http.request":
+                body_ended = not message.get("more_body", False)
+                first_chunk.set()
+            return message
+
+        async def record_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                delivery.append((message["status"], body_ended))
+            await send(message)
+
+        await app(scope, record_receive, record_send)
+
+    async def chunks() -> AsyncGenerator[bytes]:
+        yield b"page-first-private-body"
+        await complete_upload.wait()
+        if oversized:
+            chunk = b"x" * (64 * 1024)
+            for _ in range(MAX_REQUEST_BYTES // len(chunk)):
+                yield chunk
+        else:
+            yield b"last"
+
+    with observe_projection_completion(database, page_finished):
+        async with (
+            running_app(observe_exchange) as origin,
+            httpx.AsyncClient(base_url=origin, trust_env=False) as client,
+        ):
+            request = asyncio.create_task(
+                client.request("GET", path, headers=_authorization(), content=chunks())
+            )
+            try:
+                async with asyncio.timeout(10):
+                    await first_chunk.wait()
+                    await page_finished.wait()
+                outstanding = ledger.outstanding, database.units_in_flight()
+                early_delivery = tuple(delivery)
+            finally:
+                complete_upload.set()
+            response = await asyncio.wait_for(request, 10)
+            ordinary = await client.get(path, headers=_authorization())
+
+    assert outstanding == (0, 0)
+    assert early_delivery == ()
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert ordinary.status_code == 200
+    assert delivery[-1] == (200, True)
+    assert "page-first-private-body" not in response.text
+    if oversized:
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "API003"
+        assert response.json()["error"]["details"] == {}
+    else:
+        assert response.status_code == 200
+        assert delivery[0] == (200, True)
+        assert RunEventPage.model_validate_json(response.content).items
+
+
+@dataclass
+class OpenOversizedEventBody(HttpCall):
+    async def receive(self) -> Message:
+        self.receives += 1
+        return {
+            "type": "http.request",
+            "body": b"private-unscoped-body".ljust(MAX_REQUEST_BYTES + 1, b"x"),
+            "more_body": True,
+        }
+
+
+@pytest.mark.asyncio
+async def test_event_scope_refusal_precedes_open_oversized_body(
+    database: Database,
+    api_capture: Capture,
+) -> None:
+    case = await _settled(database)
+    await _token(database, case.scope.namespace_id)
+    app, path = observed_events(database, api_capture, case.run_id)
+    ledger = ConnectionLedger(database)
+    missing = "7" + "Z" * 25
+    request = OpenOversizedEventBody(
+        path.replace(case.run_id, missing),
+        headers=[(b"authorization", _authorization()["Authorization"].encode())],
+    )
+
+    await asyncio.wait_for(request.run(app), 10)
+
+    assert request.receives == 1
+    assert request.status == 404
+    assert json.loads(request.body)["error"]["code"] == "API001"
+    assert b"private-unscoped-body" not in request.body
     assert ledger.outstanding == database.units_in_flight() == 0

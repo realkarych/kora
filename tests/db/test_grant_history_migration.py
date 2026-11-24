@@ -109,7 +109,8 @@ async def test_grant_history_migration_preserves_active_legacy_rows(
             await writer.execute(insert(attempt_dispatcher).values(**values))
         async with database.migration_connection() as connection:
             with pytest.raises(
-                RuntimeError, match="event metadata cannot be downgraded"
+                RuntimeError,
+                match="^restore a compatible backup to downgrade event metadata$",
             ):
                 await connection.run_sync(downgrade)
 
