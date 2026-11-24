@@ -1,4 +1,6 @@
 import asyncio
+import os
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -230,6 +232,37 @@ def test_github_historical_lookup_can_read_after_attempt_expiry(tmp_path: Path) 
         assert found == ChangeRequestResult("unresolved")
         assert len(host.requests) == 2
         assert all(request.authorization for request in host.requests)
+
+
+def test_github_tls_does_not_create_an_ambient_key_log(tmp_path: Path) -> None:
+    authority = create_authority(tmp_path)
+    config = host_configuration("https://127.0.0.1:4443", authority.bundle)
+    keylog = tmp_path / "tls-session-keys.txt"
+    program = (
+        "import sys\n"
+        "from kora.plugins.vcs.git.github_model import GitHubConfiguration\n"
+        "GitHubConfiguration.model_validate_json(sys.argv[1]).tls()\n"
+    )
+
+    async def initialize() -> int:
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            program,
+            config.model_dump_json(),
+            env={**os.environ, "SSLKEYLOGFILE": str(keylog)},
+        )
+        try:
+            return await asyncio.wait_for(child.wait(), 10)
+        finally:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+
+    result = asyncio.run(initialize())
+
+    assert result == 0
+    assert not keylog.exists()
 
 
 def test_github_deadline_preserves_201_when_its_body_stalls(tmp_path: Path) -> None:

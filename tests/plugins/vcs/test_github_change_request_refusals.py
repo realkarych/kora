@@ -115,6 +115,7 @@ def exercise(root: Path, scenario: ChangeRequestCase) -> Generator[Exercise]:
     [
         (ChangeRequestCase.MULTIPLE, "conflict", 2),
         (ChangeRequestCase.MALFORMED, "unresolved", 0),
+        (ChangeRequestCase.MALFORMED_MERGE_TIME, "conflict", 1),
         (ChangeRequestCase.INCOMPLETE, "unresolved", 1),
         (ChangeRequestCase.MALFORMED_LINK, "unresolved", 1),
         (ChangeRequestCase.DUPLICATE_LINK, "unresolved", 1),

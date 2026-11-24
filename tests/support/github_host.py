@@ -41,6 +41,7 @@ class ChangeRequestCase(StrEnum):
     CREATE = "create"
     PREEXISTING = "preexisting"
     MERGED = "merged"
+    MALFORMED_MERGE_TIME = "malformed_merge_time"
     RESPONSE_LOSS = "response_loss"
     MULTIPLE = "multiple"
     MALFORMED = "malformed"
@@ -155,13 +156,14 @@ class PullRequest:
     state: Literal["open", "closed", "merged"] = "open"
     login: str | None = None
     different_opener: bool = False
+    merged_at: str = "2026-10-20T12:00:00Z"
 
     def view(self) -> JsonObject:
         human = self.state != "open" or self.different_opener
         return {
             "number": self.number,
             "state": "closed" if self.state == "merged" else self.state,
-            "merged_at": "2026-10-20T12:00:00Z" if self.state == "merged" else None,
+            "merged_at": self.merged_at if self.state == "merged" else None,
             "html_url": f"{WEB_RESOURCE}/pull/{self.number}",
             "user": {
                 "id": USER_ID if human else BOT_ID,
@@ -240,6 +242,7 @@ class GitHubState:
         if case in {
             ChangeRequestCase.PREEXISTING,
             ChangeRequestCase.MERGED,
+            ChangeRequestCase.MALFORMED_MERGE_TIME,
             ChangeRequestCase.MULTIPLE,
             ChangeRequestCase.INCOMPLETE,
             ChangeRequestCase.MALFORMED_LINK,
@@ -250,7 +253,16 @@ class GitHubState:
                     NUMBER,
                     self.published.head,
                     self.published.base,
-                    "merged" if case is ChangeRequestCase.MERGED else "closed",
+                    "merged"
+                    if case
+                    in {
+                        ChangeRequestCase.MERGED,
+                        ChangeRequestCase.MALFORMED_MERGE_TIME,
+                    }
+                    else "closed",
+                    merged_at=""
+                    if case is ChangeRequestCase.MALFORMED_MERGE_TIME
+                    else "2026-10-20T12:00:00Z",
                 )
             )
         if case is ChangeRequestCase.MULTIPLE:
