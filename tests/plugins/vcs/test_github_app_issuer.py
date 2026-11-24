@@ -434,6 +434,8 @@ def test_github_app_roles_issue_and_drive_exact_pr_creation_and_recovery(
         (HostCase.ALL_REPOSITORIES, list(APP_EXCHANGE), "repository_scope_mismatch"),
         (HostCase.MISSING_PERMISSIONS, list(APP_EXCHANGE), "permission_scope_mismatch"),
         (HostCase.EXCESS_PERMISSIONS, list(APP_EXCHANGE), "permission_scope_mismatch"),
+        (HostCase.ECHO_APP_ASSERTION, list(APP_EXCHANGE), "token_value_invalid"),
+        (HostCase.PREFIXED_APP_ASSERTION, list(APP_EXCHANGE), "token_value_invalid"),
         (HostCase.EXPIRED, list(APP_EXCHANGE), "token_expiry_invalid"),
         (HostCase.LONG_LIVED, list(APP_EXCHANGE), "token_expiry_invalid"),
         (HostCase.PAGINATED, [*APP_EXCHANGE, ACCESS_PATH], "repository_scope_mismatch"),

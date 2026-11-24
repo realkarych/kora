@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Final, NoReturn, Self
 
 import jwt
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from pydantic import model_validator
@@ -33,6 +34,7 @@ from kora.plugins.vcs.git.github_model import (
     HostId,
     api_operation,
     api_permissions,
+    contains_registered,
     repository_id,
 )
 from kora.plugins.vcs.local import DisplayText
@@ -58,7 +60,7 @@ MAX_TOKEN_TTL: Final[timedelta] = timedelta(hours=1, minutes=1)
 ASSERTION_AGE: Final[timedelta] = timedelta(minutes=5)
 CLOCK_SKEW: Final[timedelta] = timedelta(minutes=1)
 CLIENT_ID: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_.-]{1,128}")
-BEARER: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._~+/-]+=*")
+INSTALLATION_TOKEN: Final[re.Pattern[str]] = re.compile(r"ghs_[A-Za-z0-9._~+/-]+=*")
 CREDENTIAL_ISSUANCE = CATALOG.register(
     EventSpec(
         "vcs.git.github_app_credential",
@@ -124,7 +126,7 @@ def assertion(value: str, client_id: str, now: datetime) -> str:
             key,
             algorithm="RS256",
         )
-    except (TypeError, ValueError, jwt.PyJWTError):
+    except (TypeError, ValueError, UnsupportedAlgorithm, jwt.PyJWTError):
         refused("signing_key_invalid")
 
 
@@ -296,8 +298,9 @@ class GitHubAppIssuer:
         token = minted.get("token")
         if not (
             isinstance(token, str)
-            and 0 < len(token) <= MAX_TRANSFER_BYTES
-            and BEARER.fullmatch(token) is not None
+            and len(token) <= MAX_TRANSFER_BYTES
+            and INSTALLATION_TOKEN.fullmatch(token) is not None
+            and not contains_registered(parent, (token,))
         ):
             refused("token_value_invalid")
         observed_token = verification.admit(token)
