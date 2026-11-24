@@ -20,7 +20,6 @@ from kora.ir.vcs_ref_json import (
 MAX_RESPONSE_BYTES: int = 1_048_576
 MAX_RESPONSE_HEADER_BYTES: int = 32_768
 MAX_EXCHANGE_BYTES: int = 4_194_304
-MAX_LINK_BYTES: int = 4096
 
 
 class GitHubTransportError(Exception):
@@ -31,7 +30,7 @@ class GitHubTransportError(Exception):
 class HostResponse:
     status: int
     value: JsonValue | None
-    link: str | None
+    has_link: bool = False
 
 
 class ExchangeBackend(httpcore.AsyncNetworkBackend):
@@ -75,6 +74,7 @@ class GitHubExchange:
             ("User-Agent", "kora"),
         )
         self._remaining = MAX_EXCHANGE_BYTES
+        self.acknowledged_create = False
 
     def retire(self) -> None:
         self._token = None
@@ -119,7 +119,6 @@ class GitHubExchange:
         query: Mapping[str, str] | None,
         body: bytes | None,
     ) -> HostResponse:
-        status = 0
         if self._token is None or self._remaining == 0:
             raise GitHubTransportError
         headers = (*self._headers, ("Authorization", f"Bearer {self._token}"))
@@ -129,7 +128,7 @@ class GitHubExchange:
             async with self._pool.stream(
                 method, self._url(path, query), headers=headers, content=body
             ) as response:
-                status = response.status
+                self.acknowledged_create = method == "POST" and response.status == 201
                 return await self._read(response, method == "GET")
         except (
             httpcore.NetworkError,
@@ -137,13 +136,13 @@ class GitHubExchange:
             httpx.InvalidURL,
             OSError,
         ):
-            if method == "POST" and status == 201:
-                return HostResponse(status, None, None)
+            if self.acknowledged_create:
+                return HostResponse(201, None)
             raise GitHubTransportError from None
 
     async def _read(self, response: httpcore.Response, get: bool) -> HostResponse:
         status = response.status
-        refused = HostResponse(status, None, None)
+        refused = HostResponse(status, None)
         header_bytes = sum(len(key) + len(value) + 4 for key, value in response.headers)
         if not self._charge(header_bytes) or header_bytes > MAX_RESPONSE_HEADER_BYTES:
             return refused
@@ -152,13 +151,6 @@ class GitHubExchange:
         headers = httpx.Headers(response.headers)
         encodings = headers.get_list("content-encoding")
         if encodings and [value.lower() for value in encodings] != ["identity"]:
-            return refused
-        links = headers.get_list("link") if get else []
-        if links and (
-            len(links) != 1
-            or not links[0].isascii()
-            or not 0 < len(links[0]) <= MAX_LINK_BYTES
-        ):
             return refused
         payload = bytearray()
         async for chunk in response.aiter_stream():
@@ -171,7 +163,7 @@ class GitHubExchange:
         value = decode_strict_json(payload, MAX_RESPONSE_BYTES, MAX_JSON_DEPTH)
         if isinstance(value, JsonRefusal):
             return refused
-        return HostResponse(status, value, links[0] if links else None)
+        return HostResponse(status, value, get and "link" in headers)
 
 
 @asynccontextmanager

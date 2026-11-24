@@ -40,14 +40,19 @@ SOCKET_SECONDS: Final[float] = 5.0
 class ChangeRequestCase(StrEnum):
     CREATE = "create"
     PREEXISTING = "preexisting"
+    MERGED = "merged"
     RESPONSE_LOSS = "response_loss"
     MULTIPLE = "multiple"
     MALFORMED = "malformed"
     INCOMPLETE = "incomplete"
-    MOVED = "moved"
+    MALFORMED_LINK = "malformed_link"
+    DUPLICATE_LINK = "duplicate_link"
+    MOVED_HEAD = "moved_head"
+    MOVED_BASE = "moved_base"
     REFUSED = "refused"
     ECHO = "echo"
     OTHER_REPOSITORY = "other_repository"
+    OTHER_REPOSITORY_AT_DISPATCH = "other_repository_at_dispatch"
     OTHER_OPENER = "other_opener"
     COMPETING_WRITER = "competing_writer"
 
@@ -85,12 +90,12 @@ class PublishedGit:
     def revision(self, branch: str) -> str:
         return read_ref(self.root, branch)
 
-    def move_head(self, revision: str, expected: str) -> None:
+    def move_ref(self, branch: str, revision: str, expected: str) -> None:
         git(
             self.root,
             "--git-dir=remote.git",
             "update-ref",
-            f"refs/heads/{HEAD_BRANCH}",
+            f"refs/heads/{branch}",
             revision,
             expected,
         )
@@ -147,16 +152,16 @@ class PullRequest:
     number: int
     head: str
     base: str
-    preexisting: bool = False
+    state: Literal["open", "closed", "merged"] = "open"
     login: str | None = None
     different_opener: bool = False
 
     def view(self) -> JsonObject:
-        human = self.preexisting or self.different_opener
+        human = self.state != "open" or self.different_opener
         return {
             "number": self.number,
-            "state": "closed" if self.preexisting else "open",
-            "merged_at": None,
+            "state": "closed" if self.state == "merged" else self.state,
+            "merged_at": "2026-10-20T12:00:00Z" if self.state == "merged" else None,
             "html_url": f"{WEB_RESOURCE}/pull/{self.number}",
             "user": {
                 "id": USER_ID if human else BOT_ID,
@@ -178,6 +183,7 @@ class ExerciseState:
     records: list[PullRequest] = field(default_factory=list[PullRequest])
     posts: int = 0
     list_reads: int = 0
+    repository_reads: list[Role] = field(default_factory=list[Role])
 
     def counts(self) -> tuple[int, int]:
         return self.posts, len(self.records)
@@ -187,13 +193,13 @@ class ExerciseState:
 class Reply:
     status: int
     body: bytes
-    link: str | None = None
+    links: tuple[str, ...] = ()
 
 
 def response(
-    status: int, body: JsonObject | list[JsonObject], link: str | None = None
+    status: int, body: JsonObject | list[JsonObject], links: tuple[str, ...] = ()
 ) -> Reply:
-    return Reply(status, json.dumps(body).encode("utf-8"), link)
+    return Reply(status, json.dumps(body).encode("utf-8"), links)
 
 
 def refused(status: int) -> Reply:
@@ -233,11 +239,19 @@ class GitHubState:
         active = ExerciseState(case)
         if case in {
             ChangeRequestCase.PREEXISTING,
+            ChangeRequestCase.MERGED,
             ChangeRequestCase.MULTIPLE,
             ChangeRequestCase.INCOMPLETE,
+            ChangeRequestCase.MALFORMED_LINK,
+            ChangeRequestCase.DUPLICATE_LINK,
         }:
             active.records.append(
-                PullRequest(NUMBER, self.published.head, self.published.base, True)
+                PullRequest(
+                    NUMBER,
+                    self.published.head,
+                    self.published.base,
+                    "merged" if case is ChangeRequestCase.MERGED else "closed",
+                )
             )
         if case is ChangeRequestCase.MULTIPLE:
             active.records.append(
@@ -255,10 +269,12 @@ class GitHubState:
             location = urlsplit(path)
             route = unquote(location.path)
             if route == API_RESOURCE:
-                repository_id = REPOSITORY_ID + int(
-                    active.case is ChangeRequestCase.OTHER_REPOSITORY
+                active.repository_reads.append(role)
+                mismatch = active.case is ChangeRequestCase.OTHER_REPOSITORY or (
+                    active.case is ChangeRequestCase.OTHER_REPOSITORY_AT_DISPATCH
+                    and role == "dispatch"
                 )
-                return response(200, {"id": repository_id})
+                return response(200, {"id": REPOSITORY_ID + int(mismatch)})
             if route.startswith(API_RESOURCE + "/git/ref/heads/"):
                 branch = route.removeprefix(API_RESOURCE + "/git/ref/heads/")
                 if branch not in {HEAD_BRANCH, BASE_BRANCH}:
@@ -298,10 +314,21 @@ class GitHubState:
         if active.case is ChangeRequestCase.MALFORMED:
             return Reply(200, b"[" + HOST_TEXT_MARKER.encode("utf-8"))
         objects = [record.view() for record in active.records]
-        if active.case is ChangeRequestCase.INCOMPLETE:
+        if active.case is ChangeRequestCase.MALFORMED_LINK:
+            return response(200, objects, ("malformed continuation",))
+        if active.case in {
+            ChangeRequestCase.INCOMPLETE,
+            ChangeRequestCase.DUPLICATE_LINK,
+        }:
             next_query = urlencode({**selected, "page": ["2"]}, doseq=True)
             next_url = f"{origin}{API_RESOURCE}/pulls?{next_query}"
-            return response(200, objects, f'<{next_url}>; rel="next"')
+            link = f'<{next_url}>; rel="next"'
+            links = (
+                (link, link)
+                if active.case is ChangeRequestCase.DUPLICATE_LINK
+                else (link,)
+            )
+            return response(200, objects, links)
         return response(200, objects)
 
     def post(self, path: str, authorization: str, payload: JsonObject) -> Reply | None:
@@ -332,9 +359,13 @@ class GitHubState:
         return None
 
     def commit(self, active: ExerciseState) -> Reply | None:
-        moved = active.case is ChangeRequestCase.MOVED
-        if moved:
-            self.published.move_head(self.published.alternate, self.published.head)
+        moved = {
+            ChangeRequestCase.MOVED_HEAD: (HEAD_BRANCH, self.published.head),
+            ChangeRequestCase.MOVED_BASE: (BASE_BRANCH, self.published.base),
+        }.get(active.case)
+        if moved is not None:
+            branch, original = moved
+            self.published.move_ref(branch, self.published.alternate, original)
         try:
             created = PullRequest(
                 NUMBER + len(active.records),
@@ -350,8 +381,9 @@ class GitHubState:
             active.records.append(created)
             self.record(active)
         finally:
-            if moved:
-                self.published.move_head(self.published.head, self.published.alternate)
+            if moved is not None:
+                branch, original = moved
+                self.published.move_ref(branch, original, self.published.alternate)
         if active.case is ChangeRequestCase.RESPONSE_LOSS:
             return None
         return response(201, created.view())
@@ -398,8 +430,8 @@ class GitHubHandler(BaseHTTPRequestHandler):
         self.send_response(reply.status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(reply.body)))
-        if reply.link is not None:
-            self.send_header("Link", reply.link)
+        for link in reply.links:
+            self.send_header("Link", link)
         self.end_headers()
         self.wfile.write(reply.body)
 

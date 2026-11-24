@@ -120,10 +120,6 @@ def bundle_type(protocol: ProtocolName) -> type:
             raise ConformanceBridgeError(BridgeReason.PROTOCOL_UNSUPPORTED)
 
 
-def change_requests_configured(configuration: JsonObject) -> bool:
-    return configuration.get("change_requests") is not None
-
-
 def require_method(value: object, name: str, reason: BridgeReason) -> None:
     if not callable(getattr(value, name, None)):
         raise ConformanceBridgeError(reason)
@@ -172,11 +168,13 @@ class PreparedInvocation:
         implementation: Callable[..., object],
         inputs: ConformanceInputs,
         prepared: PreparedConformance,
+        change_requests: bool,
     ) -> None:
         self._protocol = protocol
         self._implementation = implementation
         self._inputs = inputs
         self._prepared = prepared
+        self._change_requests = change_requests
         self._instance: object | None = None
         self._auxiliaries: list[object] = []
         self._active = True
@@ -214,19 +212,19 @@ class PreparedInvocation:
         self._inputs.require_matching_schema(
             getattr(self._instance, "config_schema", None)
         )
-        if self._protocol is ProtocolName.VCS:
+        if self._change_requests:
             from kora.conformance.github import ChangeRequestConformanceInputs
             from kora.conformance.vcs import VcsConformanceInputs
             from kora.protocols.vcs import Vcs, VcsChangeRequests
 
-            selected = change_requests_configured(self.configuration)
             receiver = cast(Vcs, self._instance)
             fixture = cast(VcsConformanceInputs, exercises).change_requests
-            if receiver.capabilities().change_requests is not selected or (
-                selected and not isinstance(receiver, VcsChangeRequests)
+            if not (
+                receiver.capabilities().change_requests
+                and isinstance(receiver, VcsChangeRequests)
             ):
                 raise ConformanceBridgeError(BridgeReason.CAPABILITY_MISMATCH)
-            if selected and not isinstance(fixture, ChangeRequestConformanceInputs):
+            if not isinstance(fixture, ChangeRequestConformanceInputs):
                 raise ConformanceBridgeError(BridgeReason.BUNDLE_INVALID)
 
     def reconstruct(self) -> ArtifactStorage:
@@ -269,11 +267,10 @@ class ConformanceSelection:
             metadata.config_schema, configuration, fixture_data
         )
         bundle_type(self._protocol)
-
-    @property
-    def change_requests(self) -> bool:
-        return self._protocol is ProtocolName.VCS and change_requests_configured(
-            self._inputs.configuration
+        self.change_requests = (
+            metadata.protocol is ProtocolName.VCS
+            and metadata.name == "git"
+            and self._inputs.configuration.get("change_requests") is not None
         )
 
     @asynccontextmanager
@@ -286,7 +283,11 @@ class ConformanceSelection:
         )
         require_method(prepared, "cleanup", BridgeReason.PREPARED_INVALID)
         invocation = PreparedInvocation(
-            self._protocol, self._implementation, self._inputs, prepared
+            self._protocol,
+            self._implementation,
+            self._inputs,
+            prepared,
+            self.change_requests,
         )
         completed = False
         try:

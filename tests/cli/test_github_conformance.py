@@ -1,9 +1,12 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from kora.cli.conformance import CommandResult
+from kora.conformance.bridge import ConformanceSelection
+from kora.plugins.vcs.git.provider import provider_metadata
 from kora.protocols.lifetime import OriginalOutcome
 from tests.cli.test_conformance import (
     assert_closed,
@@ -24,6 +27,21 @@ from tests.support.github_host import (
 )
 from tests.support.https_fixture import create_authority
 from tests.support.provider_tooling import InstalledTooling
+
+
+def test_change_request_conformance_is_tied_to_the_selected_git_profile() -> None:
+    configuration = vcs_configuration(Path("vcs"))
+    configuration["change_requests"] = host_configuration(
+        "https://127.0.0.1:4443", Path("/fixture/ca.pem")
+    )
+    wire = json.dumps(configuration).encode()
+    metadata = provider_metadata()
+
+    git = ConformanceSelection(metadata, wire)
+    other = ConformanceSelection(replace(metadata, name="configured"), wire)
+
+    assert git.change_requests
+    assert not other.change_requests
 
 
 @pytest.mark.parametrize("omit_exercises", [False, True])
