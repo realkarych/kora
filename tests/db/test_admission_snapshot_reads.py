@@ -1,5 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy import Table, update
@@ -41,6 +42,38 @@ async def candidate(database: Database) -> AdmissionCandidateBinding:
         "agent",
         "pending",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["agent", "command"])
+async def test_admission_candidate_applies_staging_kind_to_exact_owner(
+    database: Database, kind: str
+) -> None:
+    expected = await candidate(database)
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(node_instance)
+            .where(node_instance.c.id == expected.node_id)
+            .values(kind=kind)
+        )
+
+    async with database.read_transaction() as reader:
+        generic = await read_admission_candidate(
+            reader, expected.node_id, node_row=ROW_BYTES, run_row=ROW_BYTES
+        )
+        with executed_queries(reader) as queries:
+            staged = await read_admission_candidate(
+                reader,
+                expected.node_id,
+                node_row=ROW_BYTES,
+                run_row=ROW_BYTES,
+                agent_only=True,
+            )
+
+    assert generic == expected
+    assert staged == (expected if kind == "agent" else None)
+    assert len(queries) == (2 if kind == "agent" else 1)
+    assert database.units_in_flight() == 0
 
 
 @pytest.mark.asyncio
@@ -135,14 +168,26 @@ async def test_admission_candidate_refuses_invalid_and_missing_identity(
             invalid_limit = await read_admission_candidate(
                 reader, expected.node_id, node_row=True, run_row=ROW_BYTES
             )
+            invalid_mode = await read_admission_candidate(
+                reader,
+                expected.node_id,
+                node_row=ROW_BYTES,
+                run_row=ROW_BYTES,
+                agent_only=cast("bool", "agent"),
+            )
         with executed_queries(reader) as missing_queries:
             absent = await read_admission_candidate(
                 reader, missing, node_row=ROW_BYTES, run_row=ROW_BYTES
             )
+        with executed_queries(reader) as missing_staged_queries:
+            absent_staged = await read_admission_candidate(
+                reader, missing, node_row=ROW_BYTES, run_row=ROW_BYTES, agent_only=True
+            )
 
-    assert invalid is invalid_limit is absent is None
+    assert invalid is invalid_limit is invalid_mode is absent is absent_staged is None
     assert invalid_queries == []
     assert len(missing_queries) == 1
+    assert len(missing_staged_queries) == 1
 
 
 @pytest.mark.asyncio
@@ -156,6 +201,11 @@ async def test_admission_candidate_guards_sqlite_row_before_later_fields(
     field = "consumed_versions" if is_node else "params"
     async with database.transaction() as writer:
         await writer.execute(
+            update(node_instance)
+            .where(node_instance.c.id == expected.node_id)
+            .values(kind="agent")
+        )
+        await writer.execute(
             update(owner)
             .where(owner.c.id == identity)
             .values({field: {"private": "wide-source" * ROW_BYTES}})
@@ -166,6 +216,14 @@ async def test_admission_candidate_guards_sqlite_row_before_later_fields(
             acquired = await read_admission_candidate(
                 reader, expected.node_id, node_row=ROW_BYTES, run_row=ROW_BYTES
             )
+        with executed_queries(reader) as staging_queries:
+            staged = await read_admission_candidate(
+                reader,
+                expected.node_id,
+                node_row=ROW_BYTES,
+                run_row=ROW_BYTES,
+                agent_only=True,
+            )
 
     if database.dialect is Dialect.SQLITE:
         assert acquired is None
@@ -173,6 +231,9 @@ async def test_admission_candidate_guards_sqlite_row_before_later_fields(
     else:
         assert acquired == expected
         assert all(field not in sql for sql, _ in queries)
+    assert staged == acquired
+    assert len(staging_queries) == len(queries)
+    assert database.units_in_flight() == 0
 
 
 @pytest.mark.asyncio
