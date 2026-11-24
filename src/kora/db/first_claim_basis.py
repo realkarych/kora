@@ -20,6 +20,7 @@ from kora.db.run_event_page_v1 import (
     sqlite_run_event_page_available,
 )
 from kora.db.tables import attempt_first_claim_basis as basis
+from kora.db.tables import event
 from kora.db.transactions import writer_transaction
 from kora.db.types import POSTGRESQL, SQLITE
 from kora.db.worker_claim_poll_v1 import CANDIDATE_INDEX, CANDIDATE_ROWS
@@ -42,15 +43,46 @@ MIGRATION_REVISION = {
     )
 }
 POSTGRES_EVENT_SUCCESSOR = text("""
-    SELECT pg_catalog.to_regclass('custody_frontier') IS NULL AND EXISTS (
-        SELECT 1 FROM pg_catalog.pg_class AS owner
-        JOIN pg_catalog.pg_class AS basis ON basis.oid =
-            pg_catalog.to_regclass('attempt_first_claim_basis')
-        WHERE owner.oid = pg_catalog.to_regclass('event')
-          AND owner.relnamespace = basis.relnamespace
-          AND owner.relowner = basis.relowner
-          AND owner.relkind = 'r' AND owner.relpersistence = 'p'
-    )
+    SELECT pg_catalog.to_regclass('custody_frontier') IS NULL
+      AND native.relnamespace = basis.relnamespace AND native.relowner = basis.relowner
+      AND native.relkind = 'r' AND native.relpersistence = 'p' AND native.relnatts = 11
+      AND NOT native.relrowsecurity AND NOT native.relforcerowsecurity
+      AND NOT native.relhasrules
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger
+                        WHERE tgrelid = native.oid AND NOT tgisinternal)
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits
+                        WHERE native.oid IN (inhparent, inhrelid))
+        AND ARRAY(SELECT attname::text || ':' ||
+                         pg_catalog.format_type(atttypid, atttypmod)
+                  FROM pg_catalog.pg_attribute
+                  WHERE attrelid = native.oid AND attnum > 0 AND NOT attisdropped
+                    AND NOT atthasdef AND attidentity = '' AND attgenerated = ''
+                    AND attnotnull = (attnum = 1 OR attnum >= 6)
+                    AND attcollation = CASE WHEN attnum <= 6
+                        THEN pg_catalog.to_regcollation('pg_catalog."C"')::oid
+                        ELSE 0::oid END ORDER BY attnum) = CAST(:columns AS text[])
+        AND ARRAY(SELECT CASE WHEN convalidated AND NOT condeferrable
+                         AND (contype <> 'f' OR confrelid IN (
+                             SELECT oid FROM pg_catalog.pg_class
+                             WHERE relnamespace = native.relnamespace))
+                         THEN conname::text || ':' ||
+                              pg_catalog.pg_get_constraintdef(c.oid, true) END
+                  FROM pg_catalog.pg_constraint AS c
+                  WHERE conrelid = native.oid AND contype <> 'n' ORDER BY conname
+        ) = CAST(:constraints AS text[])
+        AND ARRAY(SELECT CASE WHEN indisvalid AND indisready AND indislive
+                         THEN pg_catalog.pg_get_indexdef(indexrelid) END
+                  FROM pg_catalog.pg_index WHERE indrelid = native.oid
+                  ORDER BY indexrelid::regclass::text) = ARRAY[
+                    pg_catalog.format('CREATE INDEX ix_event_run_id_id ON %I.event '
+                        'USING btree (run_id, id)', ns.nspname),
+                    pg_catalog.format('CREATE UNIQUE INDEX pk_event ON %I.event '
+                        'USING btree (id)', ns.nspname)]
+    FROM pg_catalog.pg_class AS native
+    JOIN pg_catalog.pg_namespace AS ns ON ns.oid = native.relnamespace
+    JOIN pg_catalog.pg_class AS basis
+      ON basis.oid = pg_catalog.to_regclass('attempt_first_claim_basis')
+    WHERE native.oid = pg_catalog.to_regclass('event')
     """)
 SQLITE_SCHEMA = text("""
     SELECT count(*) = 0,
@@ -143,15 +175,33 @@ POSTGRES_SCHEMA = text("""
       ON parent.oid = pg_catalog.to_regclass('attempt_dispatcher')
     WHERE native.oid = pg_catalog.to_regclass('attempt_first_claim_basis')
     """)
-POSTGRES_COLUMNS: tuple[str, ...] = tuple(
-    f"{field.name}:{field_type.lower().replace('varchar', 'character varying')}"
-    for field in basis.c
-    for field_type in (
-        field.type.compile(dialect=postgres_dialect()).split(" COLLATE")[0],
+POSTGRES_COLUMNS: dict[str, tuple[str, ...]] = {
+    table.name: tuple(
+        f"{field.name}:{field_type.lower().replace('varchar', 'character varying')}"
+        for field in table.c
+        for field_type in (
+            field.type.compile(dialect=postgres_dialect()).split(" COLLATE")[0],
+        )
     )
-)
+    for table in (basis, event)
+}
+POSTGRES_EVENT_OBSERVATION: dict[str, tuple[str, ...]] = {
+    "columns": POSTGRES_COLUMNS[event.name],
+    "constraints": (
+        "ck_event_namespace_scope:CHECK (namespace_id IS NOT NULL OR kind::text = "
+        "'worker.registered'::text AND run_id IS NULL AND node_instance_id IS NULL "
+        "AND attempt_id IS NULL)",
+        "fk_event_attempt_id_attempt:FOREIGN KEY (attempt_id) REFERENCES attempt(id)",
+        "fk_event_namespace_id_namespace:FOREIGN KEY (namespace_id) "
+        "REFERENCES namespace(id)",
+        "fk_event_node_instance_id_node_instance:FOREIGN KEY (node_instance_id) "
+        "REFERENCES node_instance(id)",
+        "fk_event_run_id_run:FOREIGN KEY (run_id) REFERENCES run(id)",
+        "pk_event:PRIMARY KEY (id)",
+    ),
+}
 POSTGRES_OBSERVATION: dict[str, str | tuple[str, ...]] = {
-    "columns": POSTGRES_COLUMNS,
+    "columns": POSTGRES_COLUMNS[basis.name],
     "constraints": (
         f"ck_first_claim_basis_domain:CHECK ({first_claim_basis_domain(POSTGRESQL)})",
         "fk_first_claim_dispatcher:FOREIGN KEY (dispatcher_id) "
@@ -244,7 +294,11 @@ async def first_claim_basis_available(connection: AsyncConnection) -> bool:
         current = (
             await sqlite_run_event_page_available(connection)
             if backend == SQLITE
-            else bool(await connection.scalar(POSTGRES_EVENT_SUCCESSOR))
+            else bool(
+                await connection.scalar(
+                    POSTGRES_EVENT_SUCCESSOR, POSTGRES_EVENT_OBSERVATION
+                )
+            )
         )
     if (
         not root.is_active

@@ -119,7 +119,8 @@ class ApiDispatch:
                     RouteName.USAGE,
                 )
                 else "user",
-                current_authority=matched.name is RouteName.WORKER_CLAIMS,
+                current_authority=matched.name
+                in (RouteName.WORKER_CLAIMS, RouteName.RUN_EVENTS),
             )
             if isinstance(authority, ApiErrorEnvelope):
                 await error_response(authority, method=method)(scope, receive, send)

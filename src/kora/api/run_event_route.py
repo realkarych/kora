@@ -1,18 +1,14 @@
 import asyncio
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
-from anyio import create_task_group
-from anyio.lowlevel import checkpoint
+from anyio import CancelScope
 from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
 
-from kora.api.errors import (
-    DependencyRetryContext,
-    definitive_error,
-    dependency_unavailable,
-)
+from kora.api.errors import MESSAGES
 from kora.api.exchange import COMPONENT, current_exchange
 from kora.api.responses import error_response
 from kora.api.run_event_query import (
@@ -21,19 +17,30 @@ from kora.api.run_event_query import (
     decode_event_position,
     parse_event_query,
 )
-from kora.db.connection import Database, DatabaseSnapshotRejected, require_snapshot_time
+from kora.db.connection import (
+    Database,
+    DatabaseSnapshotFailure,
+    DatabaseSnapshotRejected,
+    complete,
+    require_snapshot_time,
+)
 from kora.db.namespace_reads import granted_namespace_id
+from kora.db.run_event_page_v1 import ACTOR_BYTES
 from kora.db.run_event_reads import (
+    NativeRunEvent,
+    NativeRunEvents,
     RunEventReadRejected,
-    RunEventRow,
-    decode_run_event_page,
     read_run_event_page,
     run_event_scope,
 )
+from kora.db.run_failure_summary import ENCODINGS
+from kora.db.types import normalise_timestamp
+from kora.ir.vcs_ref_json import decode_strict_json
 from kora.models.errors import (
     ApiError,
     ApiErrorCode,
     ApiErrorEnvelope,
+    EmptyDetails,
     ReadProjectionDetails,
 )
 from kora.models.run_events import PAGE_BYTES, ULID_PATTERN, RunEvent, RunEventPage
@@ -56,20 +63,87 @@ FINISHED = CATALOG.register(
 )
 
 
-def public_event(row: RunEventRow) -> RunEvent:
+def _text(value: object, encoding: str) -> str:
+    if not isinstance(value, bytes):
+        raise RunEventReadRejected()
+    try:
+        return value.decode(encoding)
+    except UnicodeError:
+        raise RunEventReadRejected() from None
+
+
+def _timestamp(value: object, encoding: str) -> datetime:
+    if isinstance(value, datetime):
+        return normalise_timestamp(value)
+    raw = _text(value, encoding)
+    try:
+        moment = normalise_timestamp(datetime.fromisoformat(raw))
+    except ValueError:
+        raise RunEventReadRejected() from None
+    if moment.isoformat(timespec="microseconds") != raw:
+        raise RunEventReadRejected()
+    return moment
+
+
+def _public_identity(value: object, prefix: str) -> str:
+    if not isinstance(value, str):
+        raise RunEventReadRejected()
+    return prefix + value
+
+
+def _public_event(row: NativeRunEvent, run: str) -> RunEvent:
+    identity, kind, at, actor, node, attempt, encoding_number, owned = row
+    if owned not in (True, 1) or type(encoding_number) is not int:
+        raise RunEventReadRejected()
+    if not 1 <= encoding_number <= len(ENCODINGS):
+        raise RunEventReadRejected()
+    encoding = ENCODINGS[encoding_number - 1]
+    event_kind = _text(kind, encoding)
+    if "\0" in event_kind:
+        raise RunEventReadRejected()
     return RunEvent.model_validate(
         {
-            "id": "event_" + row.id,
-            "kind": row.kind,
-            "at": row.at,
-            "actor": row.actor,
-            "run_id": "run_" + row.run_id,
+            "id": _public_identity(identity, "event_"),
+            "kind": event_kind,
+            "at": _timestamp(at, encoding),
+            "actor": decode_strict_json(
+                _text(actor, encoding).encode(), ACTOR_BYTES, 1
+            ),
+            "run_id": run,
             "node_instance_id": None
-            if row.node_instance_id is None
-            else "node_" + row.node_instance_id,
-            "attempt_id": None if row.attempt_id is None else "att_" + row.attempt_id,
+            if node is None
+            else _public_identity(node, "node_"),
+            "attempt_id": None
+            if attempt is None
+            else _public_identity(attempt, "att_"),
         }
     )
+
+
+def decode_run_event_page(rows: NativeRunEvents, run: str) -> tuple[RunEvent, ...]:
+    return tuple(_public_event(row, run) for row in rows)
+
+
+def refusal(
+    code: ApiErrorCode, details: ReadProjectionDetails | None = None
+) -> Response:
+    envelope = ApiErrorEnvelope(
+        error=ApiError(
+            code=code,
+            message=MESSAGES[code]
+            if details is None
+            else "Reduce the page limit and retry.",
+            retryable=code is ApiErrorCode.UNAVAILABLE,
+            details=details or EmptyDetails(),
+            request_id=current_exchange().request_id,
+        )
+    )
+    return error_response(envelope, method="GET")
+
+
+async def wait_disconnect(request: Request) -> None:
+    while (await request.receive())["type"] != "http.disconnect":
+        await asyncio.sleep(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,20 +155,21 @@ class RunEventRoute:
         exchange = current_exchange()
         started = asyncio.get_running_loop().time()
         rows = size = 0
-        response: Response | None = None
+        page = asyncio.create_task(self.page(ns, run, request, started + 5))
+        disconnect = asyncio.create_task(wait_disconnect(request))
         try:
-            async with create_task_group() as group:
-
-                async def disconnect() -> None:
-                    while (await request.receive())["type"] != "http.disconnect":
-                        await checkpoint()
-                    group.cancel_scope.cancel()
-
-                group.start_soon(disconnect)
-                response, rows, size = await self.page(ns, run, request, started + 5)
-                group.cancel_scope.cancel()
-            return self.unavailable() if response is None else response
+            await asyncio.wait((page, disconnect), return_when=asyncio.FIRST_COMPLETED)
+            if disconnect.done():
+                disconnect.result()
+                return refusal(ApiErrorCode.UNAVAILABLE)
+            response, rows, size = page.result()
+            return response
         finally:
+            for task in (page, disconnect):
+                if not task.done():
+                    task.cancel()
+            with CancelScope(shield=True):
+                await complete(asyncio.gather(page, disconnect, return_exceptions=True))
             exchange.logger.emit(
                 FINISHED,
                 code=exchange.code,
@@ -103,30 +178,12 @@ class RunEventRoute:
                 duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
             )
 
-    def unavailable(self) -> Response:
-        return error_response(
-            dependency_unavailable(
-                DependencyRetryContext.READ, request_id=current_exchange().request_id
-            ),
-            method="GET",
-        )
-
     async def page(
         self, ns: str, run: str, request: Request, deadline: float
     ) -> tuple[Response, int, int]:
-        exchange = current_exchange()
-        principal = exchange.principal
+        principal = current_exchange().principal
         if principal is None:
             raise RuntimeError("an admitted personal principal is required")
-
-        def refuse(code: ApiErrorCode) -> tuple[Response, int, int]:
-            return (
-                error_response(
-                    definitive_error(code, request_id=exchange.request_id), method="GET"
-                ),
-                0,
-                0,
-            )
 
         try:
             async with self.database.read_snapshot(deadline=deadline) as connection:
@@ -136,12 +193,12 @@ class RunEventRoute:
                     tuple(grant.namespace_id for grant in principal.namespaces),
                 )
                 if namespace is None:
-                    return refuse(ApiErrorCode.FORBIDDEN)
+                    return refusal(ApiErrorCode.FORBIDDEN), 0, 0
                 if re.fullmatch(f"run_{ULID_PATTERN}", run) is None:
-                    return refuse(ApiErrorCode.VALIDATION)
+                    return refusal(ApiErrorCode.VALIDATION), 0, 0
                 run_id = run[4:]
                 if not await run_event_scope(connection, namespace, run_id):
-                    return refuse(ApiErrorCode.NOT_FOUND)
+                    return refusal(ApiErrorCode.NOT_FOUND), 0, 0
                 query = parse_event_query(request.scope.get("query_string", b""))
                 position = decode_event_position(query, namespace, run_id)
                 observed_at = self.clock.now()
@@ -153,46 +210,43 @@ class RunEventRoute:
                     None if position is None else position.after,
                     query.limit,
                 )
-            rows = decode_run_event_page(native_rows)
-            items = tuple(public_event(row) for row in rows[: query.limit])
+            items = decode_run_event_page(native_rows, run)
             continuation = None
-            if len(rows) > query.limit:
+            if len(items) > query.limit:
                 continuation = RunEventPosition(
                     namespace=namespace,
                     run=run_id,
                     limit=query.limit,
-                    ceiling=rows[0].id if position is None else position.ceiling,
-                    after=rows[query.limit - 1].id,
+                    ceiling=items[0].id.removeprefix("event_")
+                    if position is None
+                    else position.ceiling,
+                    after=items[query.limit - 1].id.removeprefix("event_"),
                 ).encode()
-            content = (
-                RunEventPage(
-                    items=items, next_cursor=continuation, observed_at=observed_at
-                )
-                .model_dump_json()
-                .encode()
+            page = RunEventPage(
+                items=items[: query.limit],
+                next_cursor=continuation,
+                observed_at=observed_at,
             )
+            content = page.model_dump_json().encode()
             require_snapshot_time(deadline)
             if len(content) > PAGE_BYTES:
-                envelope = ApiErrorEnvelope(
-                    error=ApiError(
-                        code=ApiErrorCode.CONFLICT,
-                        message="Reduce the page limit and retry.",
-                        retryable=False,
-                        request_id=exchange.request_id,
-                        details=ReadProjectionDetails(
-                            reason="read_projection_too_large", run_id=run
-                        ),
-                    )
+                details = ReadProjectionDetails(
+                    reason="read_projection_too_large", run_id=run
                 )
-                return error_response(envelope, method="GET"), 0, 0
+                return refusal(ApiErrorCode.CONFLICT, details), 0, 0
         except RunEventQueryRejected:
-            return refuse(ApiErrorCode.VALIDATION)
+            return refusal(ApiErrorCode.VALIDATION), 0, 0
         except (RunEventReadRejected, ValidationError):
-            return refuse(ApiErrorCode.INTERNAL)
-        except DatabaseSnapshotRejected:
-            return self.unavailable(), 0, 0
+            return refusal(ApiErrorCode.INTERNAL), 0, 0
+        except DatabaseSnapshotRejected as error:
+            if error.reason is DatabaseSnapshotFailure.DEADLINE:
+                details = ReadProjectionDetails(
+                    reason="read_budget_exceeded", run_id=run
+                )
+                return refusal(ApiErrorCode.CONFLICT, details), 0, 0
+            return refusal(ApiErrorCode.UNAVAILABLE), 0, 0
         return (
             Response(content, media_type="application/json"),
-            len(items),
+            len(page.items),
             len(content),
         )

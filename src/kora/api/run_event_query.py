@@ -1,10 +1,9 @@
 import base64
-import binascii
 import re
 from typing import Annotated, Literal
 from urllib.parse import parse_qsl
 
-from pydantic import Field, StrictStr, ValidationError
+from pydantic import Field, StrictStr
 
 from kora.models.errors import WireRecord
 from kora.models.run_events import (
@@ -77,7 +76,7 @@ def decode_event_position(
             cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True
         )
         position = RunEventPosition.model_validate_json(data)
-    except (binascii.Error, ValidationError) as error:
+    except ValueError as error:
         raise RunEventQueryRejected() from error
     if (
         position.namespace != namespace

@@ -6,6 +6,7 @@ from sqlalchemy import insert, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import TextClause
 
+from kora.api.run_event_route import decode_run_event_page
 from kora.db.connection import Database, Dialect
 from kora.db.migrations import upgrade_database
 from kora.db.run_event_page_v1 import (
@@ -16,14 +17,15 @@ from kora.db.run_event_page_v1 import (
 from kora.db.run_event_reads import (
     CORRUPT_KEY,
     RunEventReadRejected,
-    decode_run_event_page,
     read_run_event_page,
     run_event_scope,
     run_event_statement,
 )
 from kora.db.tables import event
-from kora.db.types import JsonObject
+from kora.db.types import JsonObject, as_json_value
 from tests.db.seed import START, Seeder
+from tests.db.test_grant_history_reads import plan_nodes
+from tests.db.test_graph_read_admission import executed_queries
 from tests.support.databases import encoded_sqlite_settings
 
 SYSTEM: JsonObject = {"kind": "system", "component": "scheduler"}
@@ -47,9 +49,9 @@ class EventScope:
         }
 
 
-async def seed_run(connection: AsyncConnection) -> EventScope:
-    seeder = Seeder.at(connection, START)
-    namespace_id = await seeder.namespace()
+async def seed_run(connection: AsyncConnection, name: str = "default") -> EventScope:
+    seeder = Seeder(connection)
+    namespace_id = await seeder.namespace(name)
     graph_id = await seeder.graph(namespace_id)
     graph_version = await seeder.graph_version(graph_id)
     run_id = await seeder.run(namespace_id, graph_id, graph_version)
@@ -90,6 +92,7 @@ async def assert_index_only(
     connection: AsyncConnection,
     statement: TextClause,
     parameters: dict[str, str | int],
+    key_range: str,
 ) -> None:
     root = await connection.scalar(
         text("SELECT rootpage FROM main.sqlite_schema WHERE name = 'event'")
@@ -103,14 +106,35 @@ async def assert_index_only(
         )
     ).all()
     sources = {item[2] for item in trace if item[1] == "OpenRead" and item[3] == root}
-    operations = {item[1] for item in trace if item[2] in sources}
+    scalar_or_control_operations = {
+        "Affinity",
+        "BeginSubrtn",
+        "Goto",
+        "Halt",
+        "Init",
+        "Integer",
+        "Once",
+        "String8",
+        "Transaction",
+        "Variable",
+    }
+    operations = {
+        item[1]
+        for item in trace
+        if item[2] in sources and item[1] not in scalar_or_control_operations
+    }
+    deferred_targets = {item[4] for item in trace if item[1] == "DeferredSeek"}
+    sqlite_index_seek = (
+        f"SEARCH main.event USING COVERING INDEX {SQLITE_EVENT_PAGE_INDEX} "
+        f"(namespace_id=? AND run_id=?{key_range})"
+    )
 
-    assert any(
-        f"USING COVERING INDEX {SQLITE_EVENT_PAGE_INDEX}" in item[3] for item in plan
-    )
-    assert not operations.intersection(
-        {"Column", "FinishSeek", "SeekRowid", "SeekGE", "SeekLE", "SeekGT", "SeekLT"}
-    )
+    assert [item[3] for item in plan if "SEARCH main.event" in item[3]] == [
+        sqlite_index_seek
+    ]
+    assert not any("TEMP B-TREE" in item[3] and item[1] != 0 for item in plan)
+    assert operations <= {"OpenRead", "Close"}
+    assert sources <= deferred_targets
 
 
 async def bounded_record_geometry(connection: AsyncConnection) -> dict[str, int] | None:
@@ -155,15 +179,26 @@ async def test_sqlite_native_event_query_uses_only_bounded_index(
                     reader,
                     run_event_statement(True, ceiling, after),
                     scope.bounds(adjacent, adjacent),
+                    "" if after is None else " AND <expr><?",
                 )
             await assert_index_only(
-                reader, CORRUPT_KEY, scope.bounds(adjacent, adjacent)
+                reader, CORRUPT_KEY, scope.bounds(adjacent, adjacent), " AND <expr>=?"
             )
             valid_rows = await read_run_event_page(
                 reader, scope.namespace_id, scope.run_id, adjacent, bad, 2
             )
             invalid_rows = await read_run_event_page(
                 reader, scope.namespace_id, scope.run_id, adjacent, adjacent, 3
+            )
+        async with database.transaction() as writer:
+            await writer.execute(
+                update(event)
+                .where(event.c.id == wide)
+                .values(payload={"private": "p" * 16})
+            )
+        async with database.read_snapshot() as reader:
+            same_metadata = await read_run_event_page(
+                reader, scope.namespace_id, scope.run_id, adjacent, bad, 2
             )
         async with database.transaction() as writer:
             await seed_event(writer, scope, SYSTEM, 8, event_id="P" * (1024 * 1024))
@@ -176,17 +211,19 @@ async def test_sqlite_native_event_query_uses_only_bounded_index(
                 )
             geometry = await bounded_record_geometry(reader)
 
-        decoded = decode_run_event_page(valid_rows)
-        assert [row.id for row in decoded] == [wide, small]
+        run = "run_" + scope.run_id
+        decoded = decode_run_event_page(valid_rows, run)
+        assert valid_rows == same_metadata
+        assert [row.id for row in decoded] == [f"event_{wide}", f"event_{small}"]
         assert {row.at for row in decoded} == {START}
-        assert all(row.actor == USER for row in decoded)
+        assert all(row.actor.model_dump() == USER for row in decoded)
         assert invalid_rows[0].id == bad
         assert invalid_rows[0].actor is None
         if geometry is not None:
             assert geometry[SQLITE_EVENT_PAGE_INDEX] < 4096
             assert geometry["event"] > 1024 * 1024
         with pytest.raises(RunEventReadRejected, match="invalid retained run event"):
-            decode_run_event_page(invalid_rows)
+            decode_run_event_page(invalid_rows, run)
     finally:
         await database.close()
 
@@ -215,9 +252,12 @@ async def test_run_event_page_scoped_historical_actor_and_sibling(
         )
 
     assert admitted
-    assert [row.actor for row in decode_run_event_page(rows)] == [USER]
+    assert [
+        row.actor.model_dump()
+        for row in decode_run_event_page(rows, "run_" + scope.run_id)
+    ] == [USER]
     with pytest.raises(RunEventReadRejected, match="invalid retained run event"):
-        decode_run_event_page(invalid)
+        decode_run_event_page(invalid, "run_" + scope.run_id)
 
 
 @pytest.mark.asyncio
@@ -261,4 +301,132 @@ async def test_run_event_actor_admission_refuses_wide_saved_documents(
         assert logical[1][0] is None
         assert logical[1][1] > ACTOR_BYTES
     assert [row.actor for row in rows[:2]] == [None, None]
-    assert [row.actor for row in decode_run_event_page(rows[2:])] == [USER]
+    assert [
+        row.actor.model_dump()
+        for row in decode_run_event_page(rows[2:], "run_" + scope.run_id)
+    ] == [USER]
+
+
+async def postgres_event_toast_reads(reader: AsyncConnection) -> int:
+    await reader.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
+    result = await reader.exec_driver_sql("""
+        SELECT coalesce(toast_blks_read, 0) + coalesce(toast_blks_hit, 0)
+        FROM pg_statio_user_tables WHERE relid = 'event'::regclass
+        """)
+    count: object = result.scalar_one()
+    assert type(count) is int
+    return count
+
+
+@pytest.mark.asyncio
+async def test_event_native_plan_omits_payload_among_unrelated_history(
+    database: Database,
+) -> None:
+    postgres = database.dialect is Dialect.POSTGRESQL
+    async with database.transaction() as writer:
+        owned = await seed_run(writer)
+        unrelated = await seed_run(writer, "unrelated")
+        small = await seed_event(writer, owned, USER, 16)
+        if postgres:
+            await writer.exec_driver_sql(
+                "ALTER TABLE event ALTER COLUMN payload SET STORAGE EXTERNAL"
+            )
+        wide = await seed_event(writer, owned, USER, 1024 * 1024)
+        seed = Seeder(writer)
+        await writer.execute(
+            insert(event),
+            [
+                {
+                    "id": seed.new_id(),
+                    "namespace_id": unrelated.namespace_id,
+                    "run_id": unrelated.run_id,
+                    "node_instance_id": unrelated.node_id,
+                    "attempt_id": unrelated.attempt_id,
+                    "kind": "run.succeeded",
+                    "at": START,
+                    "payload": {"unrelated": True},
+                    "actor": SYSTEM,
+                    **seed.stamps(),
+                }
+                for _ in range(1200)
+            ],
+        )
+        for relation in ("event", "node_instance", "attempt"):
+            await writer.exec_driver_sql("ANALYZE " + relation)
+        width_statement = text(
+            "SELECT pg_column_size(payload) FROM event WHERE id = :id"
+            if postgres
+            else "SELECT octet_length(payload) FROM event WHERE id = :id"
+        )
+        stored_width: object = await writer.scalar(width_statement, {"id": wide})
+        if postgres:
+            await writer.exec_driver_sql("SELECT pg_stat_force_next_flush()")
+
+    async with database.read_snapshot() as reader:
+        initial_toast_reads = (
+            await postgres_event_toast_reads(reader) if postgres else 0
+        )
+        with executed_queries(reader) as statements:
+            wide_rows = await read_run_event_page(
+                reader, owned.namespace_id, owned.run_id, wide, None, 100
+            )
+        query, arguments = statements[-1]
+        native_plan = None
+        if postgres:
+            native_plan = as_json_value(
+                (
+                    await reader.exec_driver_sql(
+                        "EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) " + query, arguments
+                    )
+                ).scalar_one()
+            )
+            await reader.exec_driver_sql("SELECT pg_stat_force_next_flush()")
+        else:
+            await assert_index_only(
+                reader,
+                run_event_statement(True, wide, None),
+                owned.bounds(wide, wide),
+                " AND <expr><?",
+            )
+    projection_toast_reads = payload_toast_reads = 0
+    if postgres:
+        async with database.read_snapshot() as reader:
+            projection_toast_reads = await postgres_event_toast_reads(reader)
+            await reader.execute(
+                text("SELECT length(payload::text) FROM event WHERE id = :id"),
+                {"id": wide},
+            )
+            await reader.exec_driver_sql("SELECT pg_stat_force_next_flush()")
+        async with database.read_snapshot() as reader:
+            payload_toast_reads = await postgres_event_toast_reads(reader)
+
+    async with database.transaction() as writer:
+        await writer.execute(
+            update(event)
+            .where(event.c.id == wide)
+            .values(payload={"private": "p" * 16})
+        )
+    async with database.read_snapshot() as reader:
+        same_metadata = await read_run_event_page(
+            reader, owned.namespace_id, owned.run_id, wide, None, 100
+        )
+
+    assert type(stored_width) is int
+    assert stored_width > 1024 * 1024
+    assert "payload" not in query
+    assert [row.id for row in wide_rows] == [wide, small]
+    assert wide_rows == same_metadata
+    if postgres:
+        nodes = plan_nodes(native_plan)
+        [event_access] = [
+            node for node in nodes if node.get("Relation Name") == "event"
+        ]
+        assert initial_toast_reads == projection_toast_reads < payload_toast_reads
+        assert "payload" not in str(nodes[0]["Output"])
+        assert event_access["Index Name"] == "ix_event_run_id_id"
+        assert "run_id" in str(event_access["Index Cond"])
+        assert "namespace_id" in str(event_access["Filter"])
+        assert any(
+            node["Node Type"] == "Limit" and node["Actual Rows"] == 2 for node in nodes
+        )
+        assert sum(node.get("Join Type") == "Left" for node in nodes) == 3

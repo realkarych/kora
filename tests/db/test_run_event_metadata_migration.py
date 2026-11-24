@@ -119,3 +119,44 @@ async def test_run_event_upgrade_refuses_exact_private_0034_and_preserves_databa
         assert current == original
     finally:
         await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sqlite", "postgresql"),
+    [
+        (
+            "ALTER TABLE event DROP COLUMN actor",
+            "ALTER TABLE event DROP COLUMN actor",
+        ),
+        (
+            "DROP INDEX ix_event_run_page_bounded",
+            "DROP INDEX ix_event_run_id_id",
+        ),
+        (
+            "DROP INDEX ix_event_run_page_bounded",
+            "ALTER TABLE event DROP CONSTRAINT ck_event_namespace_scope",
+        ),
+    ],
+)
+async def test_run_event_successor_claim_refuses_wrong_native_shape(
+    database: Database,
+    sqlite: str,
+    postgresql: str,
+) -> None:
+    async with database.read_snapshot() as reader:
+        assert await reader.run_sync(current_revision) == RUN_EVENT_REVISION
+        assert await first_claim_basis_available(reader)
+    async with database.transaction() as writer:
+        if database.dialect is Dialect.SQLITE:
+            await writer.execute(text("DROP INDEX ix_event_run_page_bounded"))
+        if database.dialect is Dialect.POSTGRESQL or sqlite.startswith("ALTER"):
+            await writer.execute(
+                text(sqlite if database.dialect is Dialect.SQLITE else postgresql)
+            )
+
+    async with database.read_snapshot() as reader:
+        with pytest.raises(ClaimSourcesRejected, match="claim sources are unavailable"):
+            await first_claim_basis_available(reader)
+
+        assert await reader.run_sync(current_revision) == RUN_EVENT_REVISION

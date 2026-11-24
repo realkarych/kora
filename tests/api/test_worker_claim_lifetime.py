@@ -18,6 +18,7 @@ from kora.client.errors import ApiError, Failure, Outcome
 from kora.conformance.capture import captured
 from kora.db.connection import Database, DatabaseSettings
 from kora.db.migrations.environment import alembic_config, current_revision
+from kora.db.run_event_page_v1 import RUN_EVENT_REVISION
 from kora.db.tables import attempt_dispatcher
 from kora.engine.locks import TransitionLocks
 from kora.engine.namespace_policy import (
@@ -249,9 +250,11 @@ async def test_lost_http_claim_recovers_original_grant_after_api_process_restart
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("successor", ["0033", RUN_EVENT_REVISION])
 async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
     empty_database_settings: DatabaseSettings,
     evaluator: Evaluator,
+    successor: str,
 ) -> None:
     profile = installed_worker_profile("2000")
     assert profile is not None
@@ -290,7 +293,7 @@ async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
             assert await migration.run_sync(current_revision) == "0032"
             await migration.commit()
             await migration.run_sync(
-                lambda sync: command.upgrade(alembic_config(sync), "0033")
+                lambda sync: command.upgrade(alembic_config(sync), successor)
             )
             head = await migration.run_sync(current_revision)
         clock.moment += timedelta(seconds=20)
@@ -314,7 +317,7 @@ async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
     finally:
         await database.close()
 
-    assert head == "0033"
+    assert head == successor
     assert original.claim is not None
     assert replay_after_migration.claim is not None
     assert original.claim.limits["stall_after_us"] == "17"

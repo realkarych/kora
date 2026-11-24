@@ -1087,7 +1087,7 @@ def test_installed_api_refuses_unprepared_sqlite_before_bind(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stamp", ["0034", "run_event_metadata_003", None])
+@pytest.mark.parametrize("stamp", ["0034", "run_event_metadata_003", "0033", None])
 async def test_installed_api_refuses_inexact_event_schema_before_bind(
     serving_installation: Path,
     tmp_path: Path,
@@ -1100,6 +1100,9 @@ async def test_installed_api_refuses_inexact_event_schema_before_bind(
         async with database.transaction() as writer:
             if stamp is None:
                 await writer.execute(text("DROP INDEX ix_event_run_page_bounded"))
+                await writer.execute(
+                    text("CREATE INDEX ix_event_run_page_bounded ON event (run_id, id)")
+                )
             else:
                 await writer.execute(
                     text("UPDATE alembic_version SET version_num = :stamp"),
