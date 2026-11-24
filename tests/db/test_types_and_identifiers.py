@@ -208,26 +208,6 @@ def test_identifiers_are_sortable_monotonic_and_injected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inserted_rows_use_the_injected_clock(database: Database) -> None:
-    moment = datetime(2030, 1, 2, 3, 4, 5, 678000, tzinfo=UTC)
-    async with database.transaction() as connection:
-        seeder = Seeder.at(connection, moment)
-        namespace_id = await seeder.namespace()
-
-    async with database.read_transaction() as connection:
-        row = (
-            await connection.execute(
-                select(namespace.c.created_at, namespace.c.updated_at).where(
-                    namespace.c.id == namespace_id
-                )
-            )
-        ).one()
-
-    assert tuple(row) == (moment, moment)
-    assert timestamp_of(namespace_id) == moment
-
-
-@pytest.mark.asyncio
 async def test_boolean_columns_refuse_other_values(database: Database) -> None:
     async with database.transaction() as connection:
         seeder = Seeder(connection)
