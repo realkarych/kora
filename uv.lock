@@ -1226,6 +1226,10 @@ conformance = [
     { name = "pytest" },
     { name = "referencing" },
 ]
+github-app = [
+    { name = "cryptography" },
+    { name = "pyjwt", extra = ["crypto"] },
+]
 mcp = [
     { name = "mcp" },
 ]
@@ -1251,6 +1255,7 @@ dev = [
     { name = "claude-agent-sdk" },
     { name = "cryptography" },
     { name = "jsonschema" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1273,6 +1278,7 @@ requires-dist = [
     { name = "certifi", specifier = "==2026.10.19" },
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = "==0.2.168" },
     { name = "common-expression-language", marker = "extra == 'cel'", specifier = "==0.10.0" },
+    { name = "cryptography", marker = "extra == 'github-app'", specifier = "==50.0.2" },
     { name = "fastapi", specifier = "==0.162.0" },
     { name = "httpcore", specifier = "==1.0.9" },
     { name = "httpx", specifier = "==0.28.1" },
@@ -1284,6 +1290,7 @@ requires-dist = [
     { name = "opentelemetry-api", specifier = "==1.45.2" },
     { name = "packaging", specifier = "==26.3" },
     { name = "pydantic", specifier = "==2.14.1" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'github-app'", specifier = "==2.15.1" },
     { name = "pytest", marker = "extra == 'conformance'", specifier = "==9.1.1" },
     { name = "referencing", specifier = "==0.37.0" },
     { name = "referencing", marker = "extra == 'conformance'", specifier = "==0.37.0" },
@@ -1293,7 +1300,7 @@ requires-dist = [
     { name = "typer", specifier = "==0.27.3" },
     { name = "uvicorn", marker = "extra == 'serve'", specifier = "==0.54.0" },
 ]
-provides-extras = ["postgres", "cel", "conformance", "claude", "mcp", "serve"]
+provides-extras = ["postgres", "cel", "conformance", "claude", "github-app", "mcp", "serve"]
 
 [package.metadata.requires-dev]
 build = [
@@ -1307,6 +1314,7 @@ dev = [
     { name = "claude-agent-sdk", specifier = "==0.2.168" },
     { name = "cryptography", specifier = "==50.0.2" },
     { name = "jsonschema", specifier = "==4.26.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = "==2.15.1" },
     { name = "pyright", specifier = "==1.1.414" },
     { name = "pytest", specifier = "==9.1.1" },
     { name = "pytest-asyncio", specifier = "==1.4.0" },
