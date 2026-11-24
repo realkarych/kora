@@ -10,6 +10,7 @@ from starlette.responses import Response
 
 from kora.api.errors import MESSAGES
 from kora.api.exchange import COMPONENT, current_exchange
+from kora.api.graph_deployment_limits import MAX_REQUEST_BYTES
 from kora.api.responses import error_response
 from kora.api.run_event_query import (
     RunEventPosition,
@@ -45,6 +46,7 @@ from kora.models.run_events import PAGE_BYTES, ULID_PATTERN, RunEvent, RunEventP
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.protocols.time import Clock
 
+READ_BUDGET = ConflictDetails(reason="read_budget_exceeded")
 FINISHED = CATALOG.register(
     EventSpec(
         "api.run_events.finished",
@@ -83,7 +85,9 @@ def _timestamp(value: object, encoding: str) -> datetime:
     return moment
 
 
-def _public_identity(value: object, prefix: str) -> str:
+def _public_identity(value: object, prefix: str) -> str | None:
+    if value is None:
+        return None
     if not isinstance(value, str):
         raise RunEventReadRejected()
     return prefix + value
@@ -108,12 +112,8 @@ def decode_run_event(row: NativeRunEvent, run: str) -> RunEvent:
                 _text(actor, encoding).encode(), ACTOR_BYTES, 1
             ),
             "run_id": run,
-            "node_instance_id": None
-            if node is None
-            else _public_identity(node, "node_"),
-            "attempt_id": None
-            if attempt is None
-            else _public_identity(attempt, "att_"),
+            "node_instance_id": _public_identity(node, "node_"),
+            "attempt_id": _public_identity(attempt, "att_"),
         }
     )
 
@@ -121,23 +121,27 @@ def decode_run_event(row: NativeRunEvent, run: str) -> RunEvent:
 def refusal(
     code: ApiErrorCode, details: ConflictDetails | ReadProjectionDetails | None = None
 ) -> Response:
-    envelope = ApiErrorEnvelope(
-        error=ApiError(
-            code=code,
-            message=MESSAGES[code]
-            if details is None
-            else "Reduce the page limit and retry.",
-            retryable=code is ApiErrorCode.UNAVAILABLE,
-            details=details or EmptyDetails(),
-            request_id=current_exchange().request_id,
-        )
+    error = ApiError(
+        code=code,
+        message=MESSAGES[code]
+        if details is None
+        else "Reduce the page limit and retry.",
+        retryable=code is ApiErrorCode.UNAVAILABLE,
+        details=details or EmptyDetails(),
+        request_id=current_exchange().request_id,
     )
-    return error_response(envelope, method="GET")
+    return error_response(ApiErrorEnvelope(error=error), method="GET")
 
 
-async def wait_disconnect(request: Request) -> None:
-    while (await request.receive())["type"] != "http.disconnect":
+async def watch_request(request: Request, scoped: asyncio.Event) -> ApiErrorCode:
+    remaining = MAX_REQUEST_BYTES
+    while (message := await request.receive())["type"] != "http.disconnect":
+        remaining -= len(message.get("body", b""))
+        if remaining < 0:
+            await scoped.wait()
+            return ApiErrorCode.VALIDATION
         await asyncio.sleep(0)
+    return ApiErrorCode.UNAVAILABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,32 +155,26 @@ class RunEventRoute:
         started = loop.time()
         deadline = started + 5
         rows = size = 0
-        page = asyncio.create_task(self.page(ns, run, request, deadline))
-        disconnect = asyncio.create_task(wait_disconnect(request))
+        scoped = asyncio.Event()
+        page = asyncio.create_task(self.page(ns, run, request, deadline, scoped))
+        ingress = asyncio.create_task(watch_request(request, scoped))
         try:
             try:
-                await asyncio.wait(
-                    (page, disconnect), return_when=asyncio.FIRST_COMPLETED
-                )
-                if disconnect.done():
-                    disconnect.result()
-                    return refusal(ApiErrorCode.UNAVAILABLE)
+                await asyncio.wait((page, ingress), return_when=asyncio.FIRST_COMPLETED)
+                if ingress.done():
+                    return refusal(ingress.result())
                 response, rows = page.result()
             finally:
-                for task in (page, disconnect):
-                    if not task.done():
-                        task.cancel()
+                for task in (page, ingress):
+                    task.cancel()
                 with CancelScope(shield=True):
                     await complete(
-                        asyncio.gather(page, disconnect, return_exceptions=True)
+                        asyncio.gather(page, ingress, return_exceptions=True)
                     )
             if response.status_code == 200:
                 if loop.time() >= deadline:
                     rows = 0
-                    return refusal(
-                        ApiErrorCode.CONFLICT,
-                        ConflictDetails(reason="read_budget_exceeded"),
-                    )
+                    return refusal(ApiErrorCode.CONFLICT, READ_BUDGET)
                 size = len(response.body)
             return response
         finally:
@@ -189,7 +187,12 @@ class RunEventRoute:
             )
 
     async def page(
-        self, ns: str, run: str, request: Request, deadline: float
+        self,
+        ns: str,
+        run: str,
+        request: Request,
+        deadline: float,
+        scoped: asyncio.Event,
     ) -> tuple[Response, int]:
         principal = current_exchange().principal
         if principal is None:
@@ -209,6 +212,7 @@ class RunEventRoute:
                 run_id = run[4:]
                 if not await run_event_scope(connection, namespace, run_id):
                     return refusal(ApiErrorCode.NOT_FOUND), 0
+                scoped.set()
                 try:
                     query = parse_event_query(request.scope.get("query_string", b""))
                     position = decode_event_position(query, namespace, run_id)
@@ -250,7 +254,6 @@ class RunEventRoute:
             return refusal(ApiErrorCode.INTERNAL), 0
         except DatabaseSnapshotRejected as error:
             if error.reason is DatabaseSnapshotFailure.DEADLINE:
-                details = ConflictDetails(reason="read_budget_exceeded")
-                return refusal(ApiErrorCode.CONFLICT, details), 0
+                return refusal(ApiErrorCode.CONFLICT, READ_BUDGET), 0
             return refusal(ApiErrorCode.UNAVAILABLE), 0
         return Response(content, media_type="application/json"), len(page.items)

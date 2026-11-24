@@ -339,7 +339,6 @@ def create_application(
                     {
                         "name": name,
                         "in": "query",
-                        "required": False,
                         "schema": properties[name],
                     }
                     for name in RunEventsQuery.model_fields

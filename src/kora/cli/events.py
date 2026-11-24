@@ -1,5 +1,4 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
 
 from kora.cli.app import CLI_COMPONENT
 from kora.cli.graphs import report
@@ -25,15 +24,6 @@ EVENTS_FINISHED = CATALOG.register(
 )
 
 
-@dataclass(frozen=True, slots=True)
-class EventOptions:
-    run_id: str
-    namespace: str | None
-    limit: str | None
-    cursor: str | None
-    follow: bool
-
-
 def _summary(result: ListedRunEvents) -> str:
     lines: list[str] = []
     for event in result.response.items:
@@ -49,21 +39,25 @@ def _summary(result: ListedRunEvents) -> str:
 def events_command(
     environment: Mapping[str, str],
     diagnostics: ProcessDiagnostics,
-    options: EventOptions,
+    run_id: str,
+    namespace: str | None,
+    limit: str | None,
+    cursor: str | None,
+    follow: bool,
     as_json: bool,
 ) -> None:
     async def call() -> ListedRunEvents:
         settings = read_client_settings(environment, CLI_CREDENTIAL_VARIABLE)
-        namespace = read_namespace(environment, options.namespace)
+        resolved_namespace = read_namespace(environment, namespace)
         async with KoraClient(
             settings.url, settings.token, diagnostics=diagnostics
         ) as client:
             return await client.list_run_events(
-                namespace,
-                options.run_id,
-                limit=options.limit,
-                cursor=options.cursor,
-                follow=options.follow,
+                resolved_namespace,
+                run_id,
+                limit=limit,
+                cursor=cursor,
+                follow=follow,
             )
 
     report(

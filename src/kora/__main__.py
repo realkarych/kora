@@ -1210,13 +1210,10 @@ def compose_application(
         ),
         as_json: bool = typer.Option(False, "--json", help="Print the API response."),
     ) -> None:
-        from kora.cli.events import EventOptions, events_command
+        from kora.cli.events import events_command
 
         events_command(
-            environment,
-            diagnostics,
-            EventOptions(run, namespace, limit, cursor, follow),
-            as_json,
+            environment, diagnostics, run, namespace, limit, cursor, follow, as_json
         )
 
     @app.command(name="mcp", help="Serve the kora MCP tools over stdio.")

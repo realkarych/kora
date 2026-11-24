@@ -19,6 +19,7 @@ from sqlalchemy.util import await_
 from starlette.types import ASGIApp, Message
 
 from kora.api.application import create_application
+from kora.api.graph_deployment_limits import MAX_REQUEST_BYTES
 from kora.api.run_event_route import RunEventRoute
 from kora.client import KoraClient
 from kora.conformance.capture import Capture
@@ -575,6 +576,38 @@ def test_run_event_deadline_before_scope_never_echoes_path(
         runner.run(exercise())
 
 
+async def assert_earlier_native_timeout_remains_unavailable(
+    database: Database,
+    client: httpx.AsyncClient,
+    path: str,
+) -> None:
+    async with database.reader_engine.connect() as session:
+        await session.exec_driver_sql("SET statement_timeout = '1s'")
+        await session.commit()
+    hold = NativePageHold(database.reader_engine.sync_engine)
+    hold.release_cleanup.set()
+    hold.attach()
+
+    try:
+        async with lock_native_event_source(database) as postgres_lock:
+            request = asyncio.create_task(client.get(path, headers=_authorization()))
+            await hold.wait_started(postgres_lock)
+            native_refusal = await asyncio.wait_for(request, 10)
+    finally:
+        hold.detach()
+    async with database.read_transaction() as reader:
+        restored_timeout = (
+            await reader.exec_driver_sql("SHOW statement_timeout")
+        ).scalar_one()
+
+    assert native_refusal.status_code == 503
+    assert native_refusal.json()["error"]["code"] == "API011"
+    assert native_refusal.json()["error"]["details"] == {}
+    assert hold.page_task is not None
+    assert hold.page_task.cancelling() == 0
+    assert restored_timeout == "1s"
+
+
 def test_run_event_native_deadline_is_fixed_budget_refusal(
     database_settings: DatabaseSettings,
     api_capture: Capture,
@@ -604,6 +637,10 @@ def test_run_event_native_deadline_is_fixed_budget_refusal(
                 finally:
                     hold.detach()
                 resumed = await client.get(path, headers=_authorization())
+                if database.dialect is Dialect.POSTGRESQL:
+                    await assert_earlier_native_timeout_remains_unavailable(
+                        database, client, path
+                    )
 
             assert_budget_refusal(response)
             assert hold.cleanup.is_set()
@@ -784,3 +821,54 @@ def test_run_event_deadline_after_native_release_still_refuses_before_delivery(
 
     with asyncio.Runner(loop_factory=lambda: loop) as runner:
         runner.run(exercise())
+
+
+@pytest.mark.asyncio
+async def test_oversized_segmented_event_request_aborts_one_native_page(
+    database: Database,
+    api_capture: Capture,
+) -> None:
+    case = await _settled(database)
+    await _token(database, case.scope.namespace_id)
+    app, path = observed_events(database, api_capture, case.run_id)
+    ledger = ConnectionLedger(database)
+    hold = NativePageHold(database.reader_engine.sync_engine)
+    hold.release_cleanup.set()
+    body_allowed = asyncio.Event()
+
+    async def oversized() -> AsyncGenerator[bytes]:
+        await body_allowed.wait()
+        segment = b"body-projection-exclusion".ljust(64 * 1024, b"x")
+        assert len(segment) == 64 * 1024
+        for _ in range(MAX_REQUEST_BYTES // len(segment)):
+            yield segment
+        yield b"x"
+
+    async with (
+        running_app(app) as origin,
+        httpx.AsyncClient(base_url=origin, trust_env=False) as client,
+    ):
+        hold.attach()
+        try:
+            async with lock_native_event_source(database) as postgres_lock:
+                reading = asyncio.create_task(
+                    client.request(
+                        "GET", path, headers=_authorization(), content=oversized()
+                    )
+                )
+                await hold.wait_started(postgres_lock)
+                body_allowed.set()
+                await hold.release_after_cancellation()
+                exceeded = await asyncio.wait_for(reading, 10)
+        finally:
+            hold.detach()
+        ordinary = await client.get(path, headers=_authorization())
+
+    assert exceeded.status_code == 422
+    assert exceeded.json()["error"]["code"] == "API003"
+    assert "body-projection-exclusion" not in exceeded.text
+    assert hold.page_task is not None
+    assert hold.page_task.cancelling() == 1
+    assert hold.cleanup.is_set()
+    assert ordinary.status_code == 200
+    assert ledger.outstanding == database.units_in_flight() == 0

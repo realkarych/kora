@@ -27,20 +27,14 @@ from kora.db.worker_claim_poll_v1 import CANDIDATE_INDEX, CANDIDATE_ROWS
 
 SQLITE_DDL: str = str(CreateTable(basis).compile(dialect=sqlite_dialect())).strip()
 MIGRATION_REVISION = {
-    backend: text(
-        " ".join(
-            (
-                "SELECT CASE WHEN version_num IN ('0032', '0033', :run_events) "
-                "THEN version_num END FROM",
-                table,
-                "LIMIT 2",
-            )
-        )
-    ).bindparams(run_events=RUN_EVENT_REVISION)
-    for backend, table in (
-        (SQLITE, "main.alembic_version"),
-        (POSTGRESQL, "alembic_version"),
-    )
+    SQLITE: text("""
+        SELECT CASE WHEN version_num IN ('0032', '0033', :run_events)
+                    THEN version_num END FROM main.alembic_version LIMIT 2
+        """),
+    POSTGRESQL: text("""
+        SELECT CASE WHEN version_num IN ('0032', '0033', :run_events)
+                    THEN version_num END FROM alembic_version LIMIT 2
+        """),
 }
 POSTGRES_EVENT_SUCCESSOR = text("""
     SELECT pg_catalog.to_regclass('custody_frontier') IS NULL
@@ -268,7 +262,11 @@ async def first_claim_basis_available(connection: AsyncConnection) -> bool:
         or backend not in (SQLITE, POSTGRESQL)
     ):
         raise ClaimSourcesRejected()
-    revision = (await connection.scalars(MIGRATION_REVISION[backend])).all()
+    revision = (
+        await connection.scalars(
+            MIGRATION_REVISION[backend], {"run_events": RUN_EVENT_REVISION}
+        )
+    ).all()
     if backend == SQLITE:
         absent, matched, shadow = (
             await connection.execute(SQLITE_SCHEMA, {"ddl": SQLITE_DDL})

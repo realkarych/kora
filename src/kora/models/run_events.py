@@ -51,7 +51,4 @@ class RunEventPage(WireRecord):
 class RunEventsQuery(WireRecord):
     limit: EventLimit = DEFAULT_LIMIT
     cursor: EventCursor | None = None
-    follow: Literal[False] = Field(
-        default=False,
-        description="Only a finite page is supported. true returns API003.",
-    )
+    follow: Literal[False] = Field(default=False, description="true returns API003.")

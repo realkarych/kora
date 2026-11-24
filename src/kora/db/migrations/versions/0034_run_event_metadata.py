@@ -20,6 +20,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise RuntimeError(
-        "event metadata cannot be downgraded; restore a compatible backup"
-    )
+    raise RuntimeError("restore a compatible backup to downgrade event metadata")

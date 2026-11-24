@@ -1,68 +1,90 @@
 from collections.abc import Sequence
 from typing import cast
 
-from sqlalchemy import Row, text
+from sqlalchemy import (
+    ColumnElement,
+    Integer,
+    Row,
+    String,
+    bindparam,
+    column,
+    literal_column,
+    select,
+    text,
+)
 from sqlalchemy.ext.asyncio import AsyncConnection
-from sqlalchemy.sql.elements import TextClause
+from sqlalchemy.sql.selectable import TextualSelect
 
 from kora.db.run_event_page_v1 import (
     CORRUPT_EVENT_KEY,
     SQLITE_EVENT_FIELDS,
-    SQLITE_EVENT_PAGE_INDEX,
     SQLITE_EVENT_SCOPE,
 )
 from kora.db.types import SQLITE
 
-SQLITE_EVENT_SOURCE: str = (
-    f"FROM main.event INDEXED BY {SQLITE_EVENT_PAGE_INDEX} "
-    f"WHERE {SQLITE_EVENT_SCOPE} AND namespace_id = :namespace_id AND run_id = :run_id"
+SQLITE_SOURCE = text("main.event INDEXED BY ix_event_run_page_bounded")
+POSTGRES_SOURCE = text("event")
+SCOPE = (
+    column("namespace_id", String()) == bindparam("namespace_id", type_=String()),
+    column("run_id", String()) == bindparam("run_id", type_=String()),
 )
-SQLITE_EVENT_KEY: str = f"({SQLITE_EVENT_FIELDS['id']})"
-CORRUPT_KEY = text(
-    f"SELECT EXISTS(SELECT 1 {SQLITE_EVENT_SOURCE} "
-    f"AND {SQLITE_EVENT_KEY} = '{CORRUPT_EVENT_KEY}')"
-)
-OWNED_RESULT = """
-    ((selected.node_instance_id IS NULL OR node.run_id = :run_id)
-    AND (selected.attempt_id IS NULL OR (
-        parent.run_id = :run_id AND (selected.node_instance_id IS NULL
-        OR owned.node_instance_id = selected.node_instance_id)
-    )))
-    FROM selected
-    LEFT JOIN {schema}node_instance AS node ON node.id = selected.node_instance_id
-    LEFT JOIN {schema}attempt AS owned ON owned.id = selected.attempt_id
-    LEFT JOIN {schema}node_instance AS parent ON parent.id = owned.node_instance_id
-    ORDER BY selected.id DESC
+SQLITE_FIELDS = {
+    name: literal_column(f"({field})", String())
+    for name, field in SQLITE_EVENT_FIELDS.items()
+}
+POSTGRES_FIELDS = {name: column(name, String()) for name in SQLITE_EVENT_FIELDS}
+POSTGRES_FIELDS["actor"] = literal_column(
     """
-SQLITE_SELECTED = """
-    DESC LIMIT :take
-    ), selected AS (
-        SELECT id, at, kind, actor,
-               NULLIF(node_instance_id, '') AS node_instance_id,
-               NULLIF(attempt_id, '') AS attempt_id FROM candidate
-    )
+    CASE WHEN pg_catalog.pg_column_compression(actor) IS NULL
+          AND pg_catalog.pg_column_size(actor) <= 2048
+         THEN CAST(actor AS text) END
+    """,
+    String(),
+)
+SQLITE_SCOPE: ColumnElement[bool] = literal_column(SQLITE_EVENT_SCOPE)
+CORRUPT_KEY = (
+    select(literal_column("1", Integer()))
+    .select_from(SQLITE_SOURCE)
+    .where(*SCOPE, SQLITE_SCOPE, SQLITE_FIELDS["id"] == CORRUPT_EVENT_KEY)
+    .exists()
+    .select()
+)
+SQLITE_PAGE = text("""
     SELECT selected.id, CAST(selected.kind AS BLOB), CAST(selected.at AS BLOB),
            CAST(selected.actor AS BLOB) AS actor, selected.node_instance_id,
            selected.attempt_id,
            (SELECT CASE encoding WHEN 'UTF-8' THEN 1 WHEN 'UTF-16le' THEN 2
                        WHEN 'UTF-16be' THEN 3 ELSE 0 END FROM pragma_encoding()),
-    """
-POSTGRES_CANDIDATE = """
-    WITH selected AS MATERIALIZED (
-        SELECT id, kind, at, node_instance_id, attempt_id,
-               CASE WHEN pg_catalog.pg_column_compression(actor) IS NULL
-                     AND pg_catalog.pg_column_size(actor) <= 2048
-                    THEN CAST(actor AS text) END AS actor
-        FROM event WHERE namespace_id = :namespace_id AND run_id = :run_id
-    """
-POSTGRES_SELECTED = """
-        ORDER BY id DESC LIMIT :take
-    )
+           ((selected.node_instance_id IS NULL OR node.run_id = :run_id)
+            AND (selected.attempt_id IS NULL OR (
+                parent.run_id = :run_id AND (selected.node_instance_id IS NULL
+                OR owned.node_instance_id = selected.node_instance_id)
+            )))
+    FROM (
+        SELECT id, at, kind, actor, NULLIF(node_instance_id, '') AS node_instance_id,
+               NULLIF(attempt_id, '') AS attempt_id FROM candidate
+    ) AS selected
+    LEFT JOIN main.node_instance AS node ON node.id = selected.node_instance_id
+    LEFT JOIN main.attempt AS owned ON owned.id = selected.attempt_id
+    LEFT JOIN main.node_instance AS parent ON parent.id = owned.node_instance_id
+    ORDER BY selected.id DESC
+    """).columns()
+POSTGRES_PAGE = text("""
     SELECT selected.id, pg_catalog.convert_to(selected.kind, 'UTF8'), selected.at,
            CASE WHEN pg_catalog.octet_length(selected.actor) <= 1100
                 THEN pg_catalog.convert_to(selected.actor, 'UTF8') END AS actor,
            selected.node_instance_id, selected.attempt_id, 1,
-    """
+           ((selected.node_instance_id IS NULL OR node.run_id = :run_id)
+            AND (selected.attempt_id IS NULL OR (
+                parent.run_id = :run_id AND (selected.node_instance_id IS NULL
+                OR owned.node_instance_id = selected.node_instance_id)
+            )))
+    FROM candidate AS selected
+    LEFT JOIN node_instance AS node ON node.id = selected.node_instance_id
+    LEFT JOIN attempt AS owned ON owned.id = selected.attempt_id
+    LEFT JOIN node_instance AS parent ON parent.id = owned.node_instance_id
+    ORDER BY selected.id DESC
+    """).columns()
 
 
 class RunEventReadRejected(ValueError):
@@ -74,43 +96,33 @@ NativeRunEvent = Row[object, object, object, object, object, object, object, obj
 NativeRunEvents = Sequence[NativeRunEvent]
 
 
-def _range(key: str, ceiling: str | None, after: str | None) -> str:
-    upper = f" AND {key} <= :ceiling" if ceiling is not None else ""
-    lower = f" AND {key} < :after" if after is not None else ""
-    return upper + lower
-
-
 def run_event_statement(
     sqlite: bool, ceiling: str | None, after: str | None
-) -> TextClause:
-    if sqlite:
-        fields = ", ".join(
-            f"({value}) AS {name}" for name, value in SQLITE_EVENT_FIELDS.items()
-        )
-        seek = _range(SQLITE_EVENT_KEY, ceiling, after)
-        pieces = (
-            "WITH candidate AS MATERIALIZED (SELECT",
-            fields,
-            SQLITE_EVENT_SOURCE,
-            seek,
-            "ORDER BY",
-            SQLITE_EVENT_KEY,
-            SQLITE_SELECTED,
-        )
-    else:
-        pieces = (POSTGRES_CANDIDATE, _range("id", ceiling, after), POSTGRES_SELECTED)
-    schema = "main." if sqlite else ""
-    return text(" ".join((*pieces, OWNED_RESULT.format(schema=schema))))
+) -> TextualSelect:
+    source = SQLITE_SOURCE if sqlite else POSTGRES_SOURCE
+    fields = SQLITE_FIELDS if sqlite else POSTGRES_FIELDS
+    key = fields["id"]
+    projected = (field.label(name) for name, field in fields.items())
+    scope = (*SCOPE, SQLITE_SCOPE) if sqlite else SCOPE
+    query = select(*projected).select_from(source).where(*scope)
+    if ceiling is not None:
+        query = query.where(key <= bindparam("ceiling", type_=String()))
+    if after is not None:
+        query = query.where(key < bindparam("after", type_=String()))
+    candidate = query.order_by(key.desc()).limit(bindparam("take", type_=Integer()))
+    projection = SQLITE_PAGE if sqlite else POSTGRES_PAGE
+    return projection.add_cte(candidate.cte("candidate").prefix_with("MATERIALIZED"))
 
 
 async def run_event_scope(
     connection: AsyncConnection, namespace_id: str, run_id: str
 ) -> bool:
-    prefix = "main." if connection.dialect.name == SQLITE else ""
-    where = "namespace_id = :ns AND id = :run"
-    params = {"ns": namespace_id, "run": run_id}
-    query = text(" ".join(("SELECT 1 FROM", prefix + "run", "WHERE", where)))
-    return bool(await connection.scalar(query, params))
+    statement = (
+        text("SELECT 1 FROM main.run WHERE namespace_id = :ns AND id = :run")
+        if connection.dialect.name == SQLITE
+        else text("SELECT 1 FROM run WHERE namespace_id = :ns AND id = :run")
+    )
+    return bool(await connection.scalar(statement, {"ns": namespace_id, "run": run_id}))
 
 
 async def read_run_event_page(

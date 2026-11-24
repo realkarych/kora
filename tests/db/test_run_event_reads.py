@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import insert, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
-from sqlalchemy.sql.elements import TextClause
+from sqlalchemy.sql.compiler import SQLCompiler
+from sqlalchemy.sql.selectable import SelectBase
 
 from kora.api.run_event_route import decode_run_event
 from kora.db.connection import Database, Dialect
@@ -96,21 +97,30 @@ async def seed_event(
 
 async def assert_index_only(
     connection: AsyncConnection,
-    statement: TextClause,
+    statement: SelectBase,
     parameters: dict[str, str | int],
     key_range: str,
 ) -> None:
     root = await connection.scalar(
         text("SELECT rootpage FROM main.sqlite_schema WHERE name = 'event'")
     )
-    trace = (
-        await connection.execute(text("EXPLAIN " + str(statement)), parameters)
-    ).all()
-    plan = (
-        await connection.execute(
-            text("EXPLAIN QUERY PLAN " + str(statement)), parameters
+    compiled = statement.params(**parameters).compile(dialect=connection.dialect)
+    assert isinstance(compiled, SQLCompiler)
+    bindings = compiled.params
+    assert bindings is not None
+    arguments = tuple(bindings[name] for name in (compiled.positiontup or ()))
+    trace = [
+        tuple(row)
+        for row in await connection.exec_driver_sql(
+            "EXPLAIN " + compiled.string, arguments
         )
-    ).all()
+    ]
+    plan = [
+        tuple(row)
+        for row in await connection.exec_driver_sql(
+            "EXPLAIN QUERY PLAN " + compiled.string, arguments
+        )
+    ]
     sources = {item[2] for item in trace if item[1] == "OpenRead" and item[3] == root}
     scalar_or_control_operations = {
         "Affinity",
