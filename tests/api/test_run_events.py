@@ -1,15 +1,19 @@
 import asyncio
 import json
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from hashlib import sha256
 from pathlib import Path
+from threading import Event as ThreadEvent
 from typing import cast
 
+import aiosqlite
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import Engine, insert, update
+from sqlalchemy import Connection, Engine, insert, text, update
 from sqlalchemy import event as sql_events
 from sqlalchemy.util import await_
 from starlette.types import ASGIApp, Message
@@ -18,7 +22,7 @@ from kora.api.application import create_application
 from kora.api.run_event_route import RunEventRoute
 from kora.client import KoraClient
 from kora.conformance.capture import Capture
-from kora.db.connection import Database, DatabaseSettings, Lifecycle
+from kora.db.connection import Database, DatabaseSettings, Dialect, Lifecycle
 from kora.db.tables import api_token, event
 from kora.db.tokens import REVOKED, revoke_token
 from kora.engine.run_settlement import RunSettlementState, settle_run
@@ -30,6 +34,7 @@ from tests.api.support import HttpCall, RequestIds, api_capture, client_for
 from tests.cli.test_deploy_command import kora
 from tests.client.support import running_app
 from tests.db.closing import ConnectionLedger, WriterCutoffLoop, until
+from tests.db.native_read_support import PostgresReadConnection, SqliteTraceControl
 from tests.db.seed import Seeder
 from tests.db.test_run_event_reads import SYSTEM, seed_event, seed_run
 from tests.engine.promotion_support import PromotionCase
@@ -416,36 +421,158 @@ class DisconnectableEventPage(HttpCall):
 class NativePageHold:
     def __init__(self, engine: Engine) -> None:
         self.engine: Engine = engine
-        self.entered: asyncio.Event = asyncio.Event()
-        self.release_read: asyncio.Event = asyncio.Event()
+        self.loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+        self.dispatched: asyncio.Event = asyncio.Event()
+        self.sqlite_started: asyncio.Event = asyncio.Event()
+        self.release_native: ThreadEvent = ThreadEvent()
         self.cleanup: asyncio.Event = asyncio.Event()
         self.release_cleanup: asyncio.Event = asyncio.Event()
         self.page_task: asyncio.Task[object] | None = None
-        self.reader: object | None = None
+        self.reader: Connection | None = None
+        self.sqlite_trace: SqliteTraceControl | None = None
+        self.postgres_pid: int | None = None
 
-    def after_projection(
-        self, connection: object, cursor: object, statement: str, *details: object
+    def observe_native_sqlite(self, statement: str) -> None:
+        if "ORDER BY selected.id DESC" in statement:
+            self.loop.call_soon_threadsafe(self.sqlite_started.set)
+            self.release_native.wait(timeout=10)
+
+    def before_projection(
+        self, connection: Connection, cursor: object, statement: str, *details: object
     ) -> None:
-        if "ORDER BY selected.id DESC" in statement and not self.entered.is_set():
-            self.page_task = asyncio.current_task()
-            self.reader = connection
-            self.entered.set()
-            await_(self.release_read.wait())
+        if "ORDER BY selected.id DESC" not in statement or self.dispatched.is_set():
+            return
+        self.page_task = asyncio.current_task()
+        self.reader = connection
+        driver: object = connection.connection.driver_connection
+        if isinstance(driver, aiosqlite.Connection):
+            self.sqlite_trace = cast("SqliteTraceControl", driver)
+            await_(self.sqlite_trace.set_trace_callback(self.observe_native_sqlite))
+        else:
+            self.postgres_pid = cast("PostgresReadConnection", driver).get_server_pid()
+        self.dispatched.set()
 
     def before_rollback(self, connection: object) -> None:
         if connection is self.reader and not self.cleanup.is_set():
+            if self.sqlite_trace is not None:
+                await_(self.sqlite_trace.set_trace_callback(None))
             self.cleanup.set()
             await_(self.release_cleanup.wait())
 
     def attach(self) -> None:
-        sql_events.listen(self.engine, "after_cursor_execute", self.after_projection)
+        sql_events.listen(self.engine, "before_cursor_execute", self.before_projection)
         sql_events.listen(self.engine, "rollback", self.before_rollback)
 
     def detach(self) -> None:
-        self.release_read.set()
+        self.release_native.set()
         self.release_cleanup.set()
-        sql_events.remove(self.engine, "after_cursor_execute", self.after_projection)
+        sql_events.remove(self.engine, "before_cursor_execute", self.before_projection)
         sql_events.remove(self.engine, "rollback", self.before_rollback)
+
+    async def wait_started(self, postgres_lock: Database | None) -> None:
+        async with asyncio.timeout(10):
+            await self.dispatched.wait()
+            if postgres_lock is None:
+                await self.sqlite_started.wait()
+                return
+            assert self.postgres_pid is not None
+            async with postgres_lock.read_transaction() as observer:
+                while not await observer.scalar(
+                    text("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM pg_locks
+                            WHERE pid = :pid AND relation = 'event'::regclass
+                              AND mode = 'AccessShareLock' AND NOT granted
+                        )
+                        """),
+                    {"pid": self.postgres_pid},
+                ):
+                    await observer.exec_driver_sql("SELECT pg_stat_clear_snapshot()")
+
+    async def release_after_cancellation(self) -> None:
+        task = self.page_task
+        assert task is not None
+        await until(lambda: task.cancelling() > 0 or task.done())
+        self.release_native.set()
+
+
+@asynccontextmanager
+async def lock_native_event_source(
+    database: Database,
+) -> AsyncGenerator[Database | None]:
+    if database.dialect is Dialect.SQLITE:
+        yield None
+        return
+    locker = Database(database.settings)
+    try:
+        async with locker.transaction() as writer:
+            await writer.exec_driver_sql("LOCK TABLE event IN ACCESS EXCLUSIVE MODE")
+            yield locker
+    finally:
+        await locker.close()
+
+
+def assert_budget_refusal(response: httpx.Response) -> None:
+    assert response.status_code == 409
+    assert response.json()["error"] | {"request_id": None} == {
+        "code": "API002",
+        "message": "Reduce the page limit and retry.",
+        "retryable": False,
+        "details": {"reason": "read_budget_exceeded"},
+        "request_id": None,
+        "location": None,
+    }
+
+
+def test_run_event_deadline_before_scope_never_echoes_path(
+    database_settings: DatabaseSettings,
+    api_capture: Capture,
+) -> None:
+    loop = WriterCutoffLoop()
+
+    async def exercise() -> None:
+        database = Database(database_settings)
+        try:
+            case = await _settled(database)
+            await _token(database, case.scope.namespace_id)
+            canary = "unscoped-run-input"
+            app, path = observed_events(database, api_capture, case.run_id)
+            ledger = ConnectionLedger(database)
+            engine = database.reader_engine.sync_engine
+            submitted_scope = False
+
+            def expire_before_scope(
+                connection: object, cursor: object, statement: str, *details: object
+            ) -> None:
+                nonlocal submitted_scope
+                if statement.startswith("SELECT namespace.id"):
+                    submitted_scope = True
+                    loop.advance_to(loop.time() + 5)
+                    await_(asyncio.Future[None]())
+
+            sql_events.listen(engine, "before_cursor_execute", expire_before_scope)
+            async with client_for(app) as client:
+                try:
+                    response = await client.get(
+                        path.replace("run_" + case.run_id, canary),
+                        headers=_authorization(),
+                    )
+                finally:
+                    sql_events.remove(
+                        engine, "before_cursor_execute", expire_before_scope
+                    )
+                ordinary = await client.get(path, headers=_authorization())
+
+            assert_budget_refusal(response)
+            assert submitted_scope
+            assert canary not in response.text
+            assert ordinary.status_code == 200
+            assert ledger.outstanding == database.units_in_flight() == 0
+        finally:
+            await database.close()
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        runner.run(exercise())
 
 
 def test_run_event_native_deadline_is_fixed_budget_refusal(
@@ -465,29 +592,20 @@ def test_run_event_native_deadline_is_fixed_budget_refusal(
             hold.release_cleanup.set()
             hold.attach()
             async with client_for(app) as client:
-                request = asyncio.create_task(
-                    client.get(path, headers=_authorization())
-                )
                 try:
-                    await asyncio.wait_for(hold.entered.wait(), 10)
-                    loop.advance_to(loop.time() + 5)
-                    response = await asyncio.wait_for(request, 10)
+                    async with lock_native_event_source(database) as postgres_lock:
+                        request = asyncio.create_task(
+                            client.get(path, headers=_authorization())
+                        )
+                        await hold.wait_started(postgres_lock)
+                        loop.advance_to(loop.time() + 5)
+                        await hold.release_after_cancellation()
+                        response = await asyncio.wait_for(request, 10)
                 finally:
                     hold.detach()
                 resumed = await client.get(path, headers=_authorization())
 
-            assert response.status_code == 409
-            assert response.json()["error"] | {"request_id": None} == {
-                "code": "API002",
-                "message": "Reduce the page limit and retry.",
-                "retryable": False,
-                "details": {
-                    "reason": "read_budget_exceeded",
-                    "run_id": "run_" + case.run_id,
-                },
-                "request_id": None,
-                "location": None,
-            }
+            assert_budget_refusal(response)
             assert hold.cleanup.is_set()
             assert resumed.status_code == 200
             assert ledger.outstanding == database.units_in_flight() == 0
@@ -516,18 +634,20 @@ async def test_run_event_native_disconnect_or_shutdown_settles_once(
     )
     hold.attach()
 
-    request = asyncio.create_task(held.run(app))
     closing: asyncio.Task[None] | None = None
     ordinary_status: int | None = None
     try:
-        await asyncio.wait_for(hold.entered.wait(), 10)
-        if shutdown:
-            closing = asyncio.create_task(database.close(deadline_seconds=10))
-            await until(lambda: database.lifecycle is Lifecycle.CLOSING)
-            request.cancel()
-        else:
-            held.dropped.set()
-        await asyncio.wait_for(hold.cleanup.wait(), 10)
+        async with lock_native_event_source(database) as postgres_lock:
+            request = asyncio.create_task(held.run(app))
+            await hold.wait_started(postgres_lock)
+            if shutdown:
+                closing = asyncio.create_task(database.close(deadline_seconds=10))
+                await until(lambda: database.lifecycle is Lifecycle.CLOSING)
+                request.cancel()
+            else:
+                held.dropped.set()
+            await hold.release_after_cancellation()
+            await asyncio.wait_for(hold.cleanup.wait(), 10)
         assert hold.page_task is not None
         if not shutdown:
             async with client_for(app) as client:
@@ -602,3 +722,65 @@ async def test_run_event_continuation_pins_ceiling_and_sees_lower_live_membershi
     ]
     assert third_page.next_cursor is None
     assert fresh.json()["items"][0]["id"] == f"event_{highest}"
+
+
+@dataclass
+class HeldEventDisconnectWatcher(HttpCall):
+    settling: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def receive(self) -> Message:
+        try:
+            await asyncio.Future[None]()
+        except asyncio.CancelledError:
+            self.settling.set()
+            await self.release.wait()
+            raise
+        raise AssertionError("the event watcher was not cancelled")
+
+
+def test_run_event_deadline_after_native_release_still_refuses_before_delivery(
+    database_settings: DatabaseSettings,
+    api_capture: Capture,
+) -> None:
+    loop = WriterCutoffLoop()
+
+    async def exercise() -> None:
+        database = Database(database_settings)
+        try:
+            case = await _settled(database)
+            await _token(database, case.scope.namespace_id)
+            app, path = observed_events(database, api_capture, case.run_id)
+            ledger = ConnectionLedger(database)
+            held = HeldEventDisconnectWatcher(
+                path,
+                headers=[
+                    (b"authorization", _authorization()["Authorization"].encode())
+                ],
+            )
+
+            request = asyncio.create_task(held.run(app))
+            try:
+                await asyncio.wait_for(held.settling.wait(), 10)
+                assert ledger.outstanding == database.units_in_flight() == 0
+                loop.advance_to(loop.time() + 5)
+            finally:
+                held.release.set()
+            await asyncio.wait_for(request, 10)
+            [record] = [
+                event
+                for event in api_capture.finish()
+                if event["event"] == "api.run_events.finished"
+            ]
+
+            assert held.status == 409
+            refusal = parse_json_object(json.loads(held.body))
+            assert isinstance(refusal["error"], dict)
+            assert refusal["error"]["details"] == {"reason": "read_budget_exceeded"}
+            assert record["code"] == "API002"
+            assert record["rows"] == record["bytes"] == 0
+        finally:
+            await database.close()
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        runner.run(exercise())

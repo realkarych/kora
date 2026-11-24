@@ -143,7 +143,7 @@ class PricingDatabaseFactory(DatabaseFactory):
 
 
 PRICING_RUNS: int = 3
-PRICING_MIGRATION_STEPS: int = 32
+PRICING_MIGRATION_STEPS: int = 33
 PRICING_WARMUPS: int = 3
 PRICING_READ_SAMPLES: int = 30
 PRICING_HISTORY_SIZES: tuple[int, ...] = (100, 1_000, 10_000)

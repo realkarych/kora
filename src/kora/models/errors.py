@@ -84,7 +84,11 @@ class EmptyDetails(WireRecord):
 
 class ConflictDetails(WireRecord):
     reason: Literal[
-        "lock_timeout", "grant_history_conflict", "usage_conflict", "usage_regression"
+        "lock_timeout",
+        "grant_history_conflict",
+        "usage_conflict",
+        "usage_regression",
+        "read_budget_exceeded",
     ]
 
 
@@ -103,7 +107,7 @@ class BacklogDetails(WireRecord):
 
 
 class ReadProjectionDetails(WireRecord):
-    reason: Literal["read_projection_too_large", "read_budget_exceeded"]
+    reason: Literal["read_projection_too_large"]
     run_id: StrictStr
 
 

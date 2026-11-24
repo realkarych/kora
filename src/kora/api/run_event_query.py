@@ -17,10 +17,6 @@ CanonicalId = Annotated[StrictStr, Field(pattern=f"^{ULID_PATTERN}$")]
 RAW_QUERY_BYTES: int = 3 * (CURSOR_BYTES + len("limit=100&cursor=&follow=false"))
 
 
-class RunEventQueryRejected(ValueError):
-    pass
-
-
 class RunEventPosition(WireRecord):
     version: Literal[1] = 1
     operation: Literal["run_events"] = "run_events"
@@ -41,28 +37,25 @@ class RunEventPosition(WireRecord):
 
 def parse_event_query(raw: bytes) -> RunEventsQuery:
     if len(raw) > RAW_QUERY_BYTES:
-        raise RunEventQueryRejected()
-    try:
-        pairs = parse_qsl(
-            raw.decode("ascii"),
-            keep_blank_values=True,
-            strict_parsing=True,
-            encoding="ascii",
-            errors="strict",
-            max_num_fields=3,
-        )
-        values = dict(pairs)
-        limit = values.get("limit", "100")
-        if (
-            len(values) != len(pairs)
-            or values.keys() - RunEventsQuery.model_fields.keys()
-            or values.get("follow", "false") != "false"
-            or re.fullmatch(r"[1-9][0-9]{0,2}", limit) is None
-        ):
-            raise RunEventQueryRejected()
-        return RunEventsQuery(limit=int(limit), cursor=values.get("cursor"))
-    except ValueError as error:
-        raise RunEventQueryRejected() from error
+        raise ValueError("invalid run event page selector")
+    pairs = parse_qsl(
+        raw.decode("ascii"),
+        keep_blank_values=True,
+        strict_parsing=True,
+        encoding="ascii",
+        errors="strict",
+        max_num_fields=3,
+    )
+    values = dict(pairs)
+    limit = values.get("limit", "100")
+    if (
+        len(values) != len(pairs)
+        or values.keys() - RunEventsQuery.model_fields.keys()
+        or values.get("follow", "false") != "false"
+        or re.fullmatch(r"[1-9][0-9]{0,2}", limit) is None
+    ):
+        raise ValueError("invalid run event page selector")
+    return RunEventsQuery(limit=int(limit), cursor=values.get("cursor"))
 
 
 def decode_event_position(
@@ -71,13 +64,10 @@ def decode_event_position(
     cursor = query.cursor
     if cursor is None:
         return None
-    try:
-        data = base64.b64decode(
-            cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True
-        )
-        position = RunEventPosition.model_validate_json(data)
-    except ValueError as error:
-        raise RunEventQueryRejected() from error
+    data = base64.b64decode(
+        cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True
+    )
+    position = RunEventPosition.model_validate_json(data)
     if (
         position.namespace != namespace
         or position.run != run
@@ -85,5 +75,5 @@ def decode_event_position(
         or position.after > position.ceiling
         or position.encode() != cursor
     ):
-        raise RunEventQueryRejected()
+        raise ValueError("invalid run event page selector")
     return position

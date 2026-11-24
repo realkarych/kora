@@ -13,7 +13,6 @@ from kora.api.exchange import COMPONENT, current_exchange
 from kora.api.responses import error_response
 from kora.api.run_event_query import (
     RunEventPosition,
-    RunEventQueryRejected,
     decode_event_position,
     parse_event_query,
 )
@@ -22,13 +21,11 @@ from kora.db.connection import (
     DatabaseSnapshotFailure,
     DatabaseSnapshotRejected,
     complete,
-    require_snapshot_time,
 )
 from kora.db.namespace_reads import granted_namespace_id
 from kora.db.run_event_page_v1 import ACTOR_BYTES
 from kora.db.run_event_reads import (
     NativeRunEvent,
-    NativeRunEvents,
     RunEventReadRejected,
     read_run_event_page,
     run_event_scope,
@@ -40,6 +37,7 @@ from kora.models.errors import (
     ApiError,
     ApiErrorCode,
     ApiErrorEnvelope,
+    ConflictDetails,
     EmptyDetails,
     ReadProjectionDetails,
 )
@@ -91,7 +89,7 @@ def _public_identity(value: object, prefix: str) -> str:
     return prefix + value
 
 
-def _public_event(row: NativeRunEvent, run: str) -> RunEvent:
+def decode_run_event(row: NativeRunEvent, run: str) -> RunEvent:
     identity, kind, at, actor, node, attempt, encoding_number, owned = row
     if owned not in (True, 1) or type(encoding_number) is not int:
         raise RunEventReadRejected()
@@ -120,12 +118,8 @@ def _public_event(row: NativeRunEvent, run: str) -> RunEvent:
     )
 
 
-def decode_run_event_page(rows: NativeRunEvents, run: str) -> tuple[RunEvent, ...]:
-    return tuple(_public_event(row, run) for row in rows)
-
-
 def refusal(
-    code: ApiErrorCode, details: ReadProjectionDetails | None = None
+    code: ApiErrorCode, details: ConflictDetails | ReadProjectionDetails | None = None
 ) -> Response:
     envelope = ApiErrorEnvelope(
         error=ApiError(
@@ -153,34 +147,50 @@ class RunEventRoute:
 
     async def __call__(self, ns: str, run: str, request: Request) -> Response:
         exchange = current_exchange()
-        started = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + 5
         rows = size = 0
-        page = asyncio.create_task(self.page(ns, run, request, started + 5))
+        page = asyncio.create_task(self.page(ns, run, request, deadline))
         disconnect = asyncio.create_task(wait_disconnect(request))
         try:
-            await asyncio.wait((page, disconnect), return_when=asyncio.FIRST_COMPLETED)
-            if disconnect.done():
-                disconnect.result()
-                return refusal(ApiErrorCode.UNAVAILABLE)
-            response, rows, size = page.result()
+            try:
+                await asyncio.wait(
+                    (page, disconnect), return_when=asyncio.FIRST_COMPLETED
+                )
+                if disconnect.done():
+                    disconnect.result()
+                    return refusal(ApiErrorCode.UNAVAILABLE)
+                response, rows = page.result()
+            finally:
+                for task in (page, disconnect):
+                    if not task.done():
+                        task.cancel()
+                with CancelScope(shield=True):
+                    await complete(
+                        asyncio.gather(page, disconnect, return_exceptions=True)
+                    )
+            if response.status_code == 200:
+                if loop.time() >= deadline:
+                    rows = 0
+                    return refusal(
+                        ApiErrorCode.CONFLICT,
+                        ConflictDetails(reason="read_budget_exceeded"),
+                    )
+                size = len(response.body)
             return response
         finally:
-            for task in (page, disconnect):
-                if not task.done():
-                    task.cancel()
-            with CancelScope(shield=True):
-                await complete(asyncio.gather(page, disconnect, return_exceptions=True))
             exchange.logger.emit(
                 FINISHED,
                 code=exchange.code,
                 rows=rows,
                 bytes=size,
-                duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
+                duration_ms=int((loop.time() - started) * 1000),
             )
 
     async def page(
         self, ns: str, run: str, request: Request, deadline: float
-    ) -> tuple[Response, int, int]:
+    ) -> tuple[Response, int]:
         principal = current_exchange().principal
         if principal is None:
             raise RuntimeError("an admitted personal principal is required")
@@ -193,14 +203,17 @@ class RunEventRoute:
                     tuple(grant.namespace_id for grant in principal.namespaces),
                 )
                 if namespace is None:
-                    return refusal(ApiErrorCode.FORBIDDEN), 0, 0
+                    return refusal(ApiErrorCode.FORBIDDEN), 0
                 if re.fullmatch(f"run_{ULID_PATTERN}", run) is None:
-                    return refusal(ApiErrorCode.VALIDATION), 0, 0
+                    return refusal(ApiErrorCode.VALIDATION), 0
                 run_id = run[4:]
                 if not await run_event_scope(connection, namespace, run_id):
-                    return refusal(ApiErrorCode.NOT_FOUND), 0, 0
-                query = parse_event_query(request.scope.get("query_string", b""))
-                position = decode_event_position(query, namespace, run_id)
+                    return refusal(ApiErrorCode.NOT_FOUND), 0
+                try:
+                    query = parse_event_query(request.scope.get("query_string", b""))
+                    position = decode_event_position(query, namespace, run_id)
+                except ValueError:
+                    return refusal(ApiErrorCode.VALIDATION), 0
                 observed_at = self.clock.now()
                 native_rows = await read_run_event_page(
                     connection,
@@ -210,7 +223,7 @@ class RunEventRoute:
                     None if position is None else position.after,
                     query.limit,
                 )
-            items = decode_run_event_page(native_rows, run)
+            items = tuple(decode_run_event(row, run) for row in native_rows)
             continuation = None
             if len(items) > query.limit:
                 continuation = RunEventPosition(
@@ -228,25 +241,16 @@ class RunEventRoute:
                 observed_at=observed_at,
             )
             content = page.model_dump_json().encode()
-            require_snapshot_time(deadline)
             if len(content) > PAGE_BYTES:
                 details = ReadProjectionDetails(
                     reason="read_projection_too_large", run_id=run
                 )
-                return refusal(ApiErrorCode.CONFLICT, details), 0, 0
-        except RunEventQueryRejected:
-            return refusal(ApiErrorCode.VALIDATION), 0, 0
+                return refusal(ApiErrorCode.CONFLICT, details), 0
         except (RunEventReadRejected, ValidationError):
-            return refusal(ApiErrorCode.INTERNAL), 0, 0
+            return refusal(ApiErrorCode.INTERNAL), 0
         except DatabaseSnapshotRejected as error:
             if error.reason is DatabaseSnapshotFailure.DEADLINE:
-                details = ReadProjectionDetails(
-                    reason="read_budget_exceeded", run_id=run
-                )
-                return refusal(ApiErrorCode.CONFLICT, details), 0, 0
-            return refusal(ApiErrorCode.UNAVAILABLE), 0, 0
-        return (
-            Response(content, media_type="application/json"),
-            len(page.items),
-            len(content),
-        )
+                details = ConflictDetails(reason="read_budget_exceeded")
+                return refusal(ApiErrorCode.CONFLICT, details), 0
+            return refusal(ApiErrorCode.UNAVAILABLE), 0
+        return Response(content, media_type="application/json"), len(page.items)

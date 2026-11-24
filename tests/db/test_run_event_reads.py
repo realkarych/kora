@@ -6,7 +6,7 @@ from sqlalchemy import insert, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import TextClause
 
-from kora.api.run_event_route import decode_run_event_page
+from kora.api.run_event_route import decode_run_event
 from kora.db.connection import Database, Dialect
 from kora.db.migrations import upgrade_database
 from kora.db.run_event_page_v1 import (
@@ -16,6 +16,7 @@ from kora.db.run_event_page_v1 import (
 )
 from kora.db.run_event_reads import (
     CORRUPT_KEY,
+    NativeRunEvents,
     RunEventReadRejected,
     read_run_event_page,
     run_event_scope,
@@ -23,6 +24,7 @@ from kora.db.run_event_reads import (
 )
 from kora.db.tables import event
 from kora.db.types import JsonObject, as_json_value
+from kora.models.run_events import RunEvent
 from tests.db.seed import START, Seeder
 from tests.db.test_grant_history_reads import plan_nodes
 from tests.db.test_graph_read_admission import executed_queries
@@ -30,6 +32,10 @@ from tests.support.databases import encoded_sqlite_settings
 
 SYSTEM: JsonObject = {"kind": "system", "component": "scheduler"}
 USER: JsonObject = {"kind": "user", "owner": '"' * 256, "token_id": "\\" * 256}
+
+
+def decode_run_event_page(rows: NativeRunEvents, run: str) -> tuple[RunEvent, ...]:
+    return tuple(decode_run_event(row, run) for row in rows)
 
 
 @dataclass(frozen=True)
@@ -201,10 +207,25 @@ async def test_sqlite_native_event_query_uses_only_bounded_index(
                 reader, scope.namespace_id, scope.run_id, adjacent, bad, 2
             )
         async with database.transaction() as writer:
+            wrong_type = await seed_event(writer, scope, SYSTEM, 16)
+            await writer.execute(
+                text("UPDATE event SET actor = CAST(actor AS BLOB) WHERE id = :id"),
+                {"id": wrong_type},
+            )
+        async with database.read_snapshot() as reader:
+            saved_type = await reader.scalar(
+                text("SELECT typeof(actor) FROM event WHERE id = :id"),
+                {"id": wrong_type},
+            )
+            wrong_type_rows = await read_run_event_page(
+                reader, scope.namespace_id, scope.run_id, None, None, 1
+            )
+        async with database.transaction() as writer:
             await seed_event(writer, scope, SYSTEM, 8, event_id="P" * (1024 * 1024))
         async with database.read_snapshot() as reader:
             with pytest.raises(
-                RunEventReadRejected, match="invalid retained run event"
+                RunEventReadRejected,
+                match="invalid retained run event",
             ):
                 await read_run_event_page(
                     reader, scope.namespace_id, scope.run_id, adjacent, bad, 2
@@ -214,6 +235,11 @@ async def test_sqlite_native_event_query_uses_only_bounded_index(
         run = "run_" + scope.run_id
         decoded = decode_run_event_page(valid_rows, run)
         assert valid_rows == same_metadata
+        assert saved_type == "blob"
+        assert wrong_type_rows[0].id == wrong_type
+        assert wrong_type_rows[0].actor is None
+        with pytest.raises(RunEventReadRejected, match="invalid retained run event"):
+            decode_run_event_page(wrong_type_rows, run)
         assert [row.id for row in decoded] == [f"event_{wide}", f"event_{small}"]
         assert {row.at for row in decoded} == {START}
         assert all(row.actor.model_dump() == USER for row in decoded)
