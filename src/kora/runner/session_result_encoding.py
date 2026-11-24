@@ -21,6 +21,7 @@ from kora.protocols.harness import (
 from kora.protocols.runtime import SessionObservation, SessionResultObservation
 
 MAX_RESULT_BYTES: Final[int] = 16 * 1_048_576
+MAX_FINALIZATION_BYTES: Final[int] = 8192
 SCALAR_CHARS: Final[int] = 2_048
 KEY_BATCH: Final[int] = 256
 USAGE_SOURCE_BYTES: Final[int] = 8_192
@@ -28,6 +29,17 @@ OUTPUT_VALUE: Final[tuple[str, ...]] = ("result", "output", "value")
 USAGE_SOURCE: Final[tuple[str, ...]] = ("result", "usage", "", "source")
 FIXED_FIELDS: Final[frozenset[tuple[str, ...]]] = frozenset(
     {("kind",), ("cause",), ("result", "output", "source")}
+)
+
+
+FINALIZATION_FIXED_FIELDS: Final[frozenset[tuple[str, ...]]] = frozenset(
+    {
+        ("format",),
+        ("checked_result", "name"),
+        ("finalization", "capture"),
+        ("finalization", "implementation", "name"),
+        ("finalization", "implementation", "version"),
+    }
 )
 
 
@@ -164,6 +176,7 @@ class ResultEncoder:
         self.buffer = bytearray()
         self.ceiling: int = MAX_RESULT_BYTES
         self.positions = 0
+        self.fixed_fields = FIXED_FIELDS
 
     def guard(self, width: int) -> None:
         if width > self.ceiling - len(self.buffer):
@@ -234,7 +247,7 @@ class ResultEncoder:
             elif type(value) in (tuple, list):
                 self.sequence(cast(Sequence[object], value), path, depth)
             else:
-                self.scalar(value, depth is not None or path not in FIXED_FIELDS)
+                self.scalar(value, depth is not None or path not in self.fixed_fields)
         finally:
             self.ceiling = previous
 
@@ -293,5 +306,16 @@ def encode_observation(
 ) -> bytearray:
     encoder = encoder_factory(forms, stop)
     encoder.value(observation)
+    check_running(stop)
+    return encoder.buffer
+
+
+def encode_finalization(
+    checkpoint: BaseModel, forms: tuple[str, ...], stop: Event
+) -> bytearray:
+    encoder = ResultEncoder(forms, stop)
+    encoder.ceiling = MAX_FINALIZATION_BYTES
+    encoder.fixed_fields = FINALIZATION_FIXED_FIELDS
+    encoder.value(checkpoint)
     check_running(stop)
     return encoder.buffer

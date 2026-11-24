@@ -26,12 +26,17 @@ from kora.protocols.runtime import (
     SessionResultObservation,
 )
 from kora.protocols.secret_value import registered_forms
-from kora.runner.session_result import digest_of, prepare_observation
+from kora.runner.session_result import (
+    digest_of,
+    prepare_finalization,
+    prepare_observation,
+)
 from kora.runner.session_result_encoding import (
     KEY_BATCH,
     ResultPreparationStopped,
     merge_key_runs,
 )
+from tests.runner.test_session_result import finalization_facts
 
 KEY: Final[str] = 'fixture-credential-é"\\'
 COVERAGE: Final[UsageCoverage] = UsageCoverage(
@@ -277,3 +282,20 @@ def test_result_key_merge_polls_stop_during_heap_initialization() -> None:
         next(merge_key_runs(groups, stop))
 
     assert stop.polls == 2
+
+
+def test_session_finalization_refuses_secret_and_preserves_observation() -> None:
+    sensitive = "registered-sidecar-price"
+    facts = finalization_facts().model_copy(update={"price_table_id": sensitive})
+    stop = Event()
+    original = prepare_observation(observation({"safe": "clean"}), (), stop)
+
+    declined = prepare_finalization(original, facts, (sensitive,), stop)
+    accepted = prepare_finalization(original, finalization_facts(), (sensitive,), stop)
+
+    assert declined is original
+    assert declined.finalization is None
+    assert accepted.finalization is not None
+    assert accepted.payload is original.payload
+    assert accepted.reference == original.reference
+    assert b"registered-sidecar-price" not in accepted.finalization.payload

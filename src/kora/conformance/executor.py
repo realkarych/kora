@@ -337,7 +337,7 @@ def harness_cases() -> tuple[Case, ...]:
     )
 
 
-def vcs_cases() -> tuple[Case, ...]:
+def vcs_cases(change_requests: bool) -> tuple[Case, ...]:
     from kora.conformance.vcs import (
         VcsBench,
         VcsBinding,
@@ -408,7 +408,7 @@ def vcs_cases() -> tuple[Case, ...]:
             lambda i, c, x: check(provider(i), inputs(i).remote, x, inputs(i).binding),
         )
 
-    return (
+    local = (
         checkout("checkout", check_vcs_checkout_captures_requested_base),
         checkout("private_files", check_vcs_private_files_stay_outside_candidate),
         publish("sealed", check_vcs_sealed_transfer_fixes_inspected_revision),
@@ -418,6 +418,29 @@ def vcs_cases() -> tuple[Case, ...]:
         credential("binding", check_vcs_credential_binding_mismatch_is_refused),
         credential("api_credential", check_vcs_api_credential_is_refused),
     )
+    if change_requests:
+        return (*local, Case("change_requests", installed_change_requests))
+    return local
+
+
+async def installed_change_requests(
+    invocation: PreparedInvocation, capture: Capture, context: ProtocolContext
+) -> None:
+    from kora.conformance.github import (
+        ChangeRequestCase,
+        ChangeRequestConformanceInputs,
+        check_change_request,
+    )
+    from kora.conformance.vcs import VcsConformanceInputs
+    from kora.protocols.vcs import VcsChangeRequests
+
+    provider = cast(VcsChangeRequests, invocation.instance)
+    fixture = cast(
+        ChangeRequestConformanceInputs,
+        cast(VcsConformanceInputs, invocation.exercises).change_requests,
+    )
+    for scenario in ChangeRequestCase:
+        await check_change_request(provider, fixture, scenario, context)
 
 
 def storage_cases() -> tuple[Case, ...]:
@@ -552,14 +575,16 @@ def authentication_cases() -> tuple[Case, ...]:
     )
 
 
-def selected_cases(protocol: ProtocolName) -> tuple[Case, ...]:
+def selected_cases(
+    protocol: ProtocolName, *, change_requests: bool = False
+) -> tuple[Case, ...]:
     builders = {
         ProtocolName.AUTHENTICATION: authentication_cases,
         ProtocolName.RUNTIME: lambda: (),
         ProtocolName.SECRETS: secrets_cases,
         ProtocolName.POLICY: policy_cases,
         ProtocolName.HARNESS: harness_cases,
-        ProtocolName.VCS: vcs_cases,
+        ProtocolName.VCS: lambda: vcs_cases(change_requests),
         ProtocolName.ARTIFACT_STORAGE: storage_cases,
         ProtocolName.ARTIFACT_TYPE: artifact_type_cases,
     }
@@ -567,8 +592,10 @@ def selected_cases(protocol: ProtocolName) -> tuple[Case, ...]:
 
 
 class Executor:
-    def __init__(self, protocol: ProtocolName) -> None:
-        self.cases = selected_cases(protocol)
+    def __init__(
+        self, protocol: ProtocolName, *, change_requests: bool = False
+    ) -> None:
+        self.cases = selected_cases(protocol, change_requests=change_requests)
         self._completed: list[str] = []
         self._capture_settings: LoggingSettings
         if protocol is ProtocolName.AUTHENTICATION:

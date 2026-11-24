@@ -372,7 +372,14 @@ async def supervise(
                 reaper,
             )
             agent = AgentSession(
-                attempt, candidate, diagnostics, clock, reaper, sources, reader
+                attempt,
+                candidate,
+                diagnostics,
+                clock,
+                reaper,
+                sources,
+                reader,
+                registration=None if sources.scripts is None else (key, identity),
             )
             server = prepared.server(clock, reader, identity, log, command, agent)
             try:

@@ -3,21 +3,32 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
-from typing import Final
+from typing import Final, Literal
 
 import pytest
 
+from kora.ir.vcs_ref_json import canonical_bytes
 from kora.protocols.runtime import SessionFailedObservation
+from kora.runner.registry import ControlFileRef, Submitter
 from kora.runner.session_result import (
+    FINALIZATION_NAME,
     RESULT_DIRECTORY,
     RESULT_NAME,
+    FinalizationCheckpoint,
+    FinalizationFacts,
+    FinalizationImplementation,
+    FinalizationReferences,
     ResultFile,
     ResultUnreadable,
+    digest_of,
     prepare_observation,
+    read_finalization,
     read_observation,
     write_observation,
 )
+from kora.runner.session_result_encoding import MAX_FINALIZATION_BYTES
 from tests.runner.agent_support import private_directory
+from tests.support.local_peers import identity_of
 
 OBSERVATION: Final[SessionFailedObservation] = SessionFailedObservation(
     kind="session_failed", code="script_end_invalid"
@@ -110,3 +121,109 @@ def test_session_result_create_refuses_existing_name(
 
     assert (directory / RESULT_NAME).read_bytes() == b"kept"
     assert target.read_bytes() == b"kept"
+
+
+def finalization_facts() -> FinalizationFacts:
+    process = identity_of(os.getpid())
+    return FinalizationFacts(
+        attempt_id="attempt-1",
+        execution_domain_id="domain-1",
+        submitter=Submitter(dispatcher_id="dispatcher-1", process=process),
+        supervisor=process,
+        request_digest=digest_of(b"request"),
+        session_spec_digest=digest_of(b"session spec"),
+        implementation=FinalizationImplementation(name="fake", version="fake-1"),
+        capture="unavailable",
+        duration_ms=17,
+        price_table_id="price-1",
+    )
+
+
+def sidecar_case() -> FinalizationCheckpoint:
+    return FinalizationCheckpoint(
+        format="kora.local.session-finalization/1",
+        checked_result=ControlFileRef(
+            name=RESULT_NAME, size=7, digest=digest_of(b"result!")
+        ),
+        finalization=finalization_facts(),
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "positive",
+        "unknown_version",
+        "duplicate",
+        "missing_member",
+        "noncanonical",
+        "oversized",
+        "foreign_result",
+        "wrong_sidecar_name",
+        "link",
+        "wrong_sidecar_digest",
+    ],
+)
+def test_session_finalization_reads_only_the_bound_canonical_sidecar(
+    tmp_path: Path,
+    case: Literal[
+        "positive",
+        "unknown_version",
+        "duplicate",
+        "missing_member",
+        "noncanonical",
+        "oversized",
+        "foreign_result",
+        "wrong_sidecar_name",
+        "link",
+        "wrong_sidecar_digest",
+    ],
+) -> None:
+    control = private_directory(tmp_path / "control")
+    checkpoint = sidecar_case()
+    payload = canonical_bytes(checkpoint.model_dump(mode="json"))
+    result_ref = checkpoint.checked_result
+    sibling_name = FINALIZATION_NAME
+    if case == "unknown_version":
+        payload = payload.replace(b"session-finalization/1", b"session-finalization/2")
+    elif case == "duplicate":
+        payload = payload.replace(
+            b'"capture":"unavailable"',
+            b'"capture":"unavailable","capture":"unavailable"',
+        )
+    elif case == "missing_member":
+        payload = payload.replace(b'"name":"fake",', b"")
+    elif case == "noncanonical":
+        payload += b"\n"
+    elif case == "oversized":
+        payload += b" " * (MAX_FINALIZATION_BYTES + 1 - len(payload))
+    elif case == "foreign_result":
+        result_ref = result_ref.model_copy(update={"digest": OTHER_DIGEST})
+    elif case == "wrong_sidecar_name":
+        sibling_name = "session.foreign.json"
+    directory = tmp_path / "control" / RESULT_DIRECTORY
+    directory.mkdir(mode=0o700)
+    file = directory / FINALIZATION_NAME
+    file.write_bytes(payload)
+    if case == "link":
+        os.link(file, tmp_path / "link")
+    references = FinalizationReferences(
+        checked_result=result_ref,
+        finalization=ControlFileRef(
+            name=sibling_name,
+            size=len(payload),
+            digest=OTHER_DIGEST
+            if case == "wrong_sidecar_digest"
+            else digest_of(payload),
+        ),
+    )
+
+    try:
+        if case == "positive":
+            observation = read_finalization(control, references)
+            assert observation == checkpoint.finalization
+        else:
+            with pytest.raises(ResultUnreadable):
+                read_finalization(control, references)
+    finally:
+        control.close()

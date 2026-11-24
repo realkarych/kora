@@ -19,6 +19,7 @@ from functools import partial
 from pathlib import Path
 from threading import Event
 from typing import Final, TypeVar
+from weakref import WeakValueDictionary
 
 from kora.executor.digests import object_digest
 from kora.executor.launcher import ProcessLauncher, StepLauncher
@@ -45,6 +46,7 @@ from kora.plugins.runtime.local.completed import (
     recorded_observation,
     recorded_record,
     recorded_session,
+    sealed_finalization,
     sealed_session,
 )
 from kora.plugins.runtime.local.configuration import CONFIG_SCHEMA as CONFIG_SCHEMA
@@ -59,6 +61,7 @@ from kora.plugins.runtime.local.control import (
     ListenerRefused,
     deliver_workload,
     observe_command,
+    observe_finalization,
     observe_session,
     quiesce_command,
     runner_status,
@@ -101,6 +104,7 @@ from kora.protocols.runtime import (
     RuntimeCapabilities,
     RuntimeStatus,
     SessionObservation,
+    SessionResultObservation,
     TransferItem,
     Workload,
 )
@@ -160,6 +164,11 @@ from kora.runner.registry import (
     submit_cell,
     takeover_cell,
     tombstone_cell,
+)
+from kora.runner.session_result import (
+    FinalizationFacts,
+    FinalizationOrigin,
+    FinalizationReferences,
 )
 
 STOP_MATCHES: Final[int] = 8
@@ -479,6 +488,19 @@ def output_deadline_reached(
     return cutoff is not None and clock.monotonic_ns() >= cutoff
 
 
+@dataclass(frozen=True, eq=False, repr=False)
+class _FinalizationReceipt:
+    origin: FinalizationOrigin
+    references: FinalizationReferences
+
+
+@dataclass(frozen=True, repr=False)
+class SessionFinalizationRead:
+    observation: SessionResultObservation
+    facts: FinalizationFacts
+    receipt: _FinalizationReceipt
+
+
 class LocalRuntime:
     name: str = RUNTIME_NAME
     config_schema: JsonObject = CONFIG_SCHEMA
@@ -511,6 +533,7 @@ class LocalRuntime:
         self._scanner = scanner
         self._peers = peers
         self._observations: set[asyncio.Task[RuntimeStatus]] = set()
+        self._finalization_reads: set[asyncio.Task[SessionFinalizationRead]] = set()
         self._deliveries: set[asyncio.Task[None]] = set()
         self._spool = spool
         self._spool_admission = asyncio.Lock()
@@ -528,6 +551,9 @@ class LocalRuntime:
         self._root = root
         self._new_identifier = new_identifier
         self._launch = launch
+        self._finalizations: WeakValueDictionary[AttemptKey, _FinalizationReceipt] = (
+            WeakValueDictionary()
+        )
         self._closing: asyncio.Task[None] | None = None
 
     @classmethod
@@ -903,6 +929,134 @@ class LocalRuntime:
             if isinstance(current, Completed) and current.released_at is not None:
                 raise refusal("attempt_retired") from None
             raise
+
+    async def session_finalization(
+        self,
+        handle: Handle,
+        ctx: ProtocolContext,
+        *,
+        receipt: _FinalizationReceipt | None = None,
+    ) -> SessionFinalizationRead:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        if os.getpid() != self._launch.identity.pid:
+            raise delivery_error("execution_unauthorized")
+        task = asyncio.create_task(self._session_finalization(key, ctx, receipt))
+        self._finalization_reads.add(task)
+        try:
+            return await task
+        finally:
+            self._finalization_reads.discard(task)
+
+    async def _session_finalization(
+        self,
+        key: AttemptKey,
+        ctx: ProtocolContext,
+        receipt: _FinalizationReceipt | None,
+    ) -> SessionFinalizationRead:
+        process = await self.executor.run(lambda: own_identity(self._identities))
+        if process != self._launch.identity:
+            raise delivery_error("execution_unauthorized")
+        entry = await self.entry(key)
+        if isinstance(entry, (Retired, Retiring)) or (
+            isinstance(entry, Completed) and entry.released_at is not None
+        ):
+            raise refusal("attempt_retired")
+        if receipt is not None:
+            if (
+                self._finalizations.get(key) is not receipt
+                or receipt.origin.submitter.process != process
+            ):
+                raise delivery_error("execution_unauthorized")
+            if not isinstance(entry, Completed):
+                raise delivery_error("session_unobserved")
+            return await self._retained_finalization(key, entry, receipt)
+        if not isinstance(entry, Running):
+            raise delivery_error("session_unobserved")
+        if entry.submitter.process != self._launch.identity:
+            raise delivery_error("execution_unauthorized")
+        return await self._live_finalization(key, entry, ctx)
+
+    async def _live_finalization(
+        self, key: AttemptKey, entry: Running, ctx: ProtocolContext
+    ) -> SessionFinalizationRead:
+        try:
+            references = await observe_finalization(
+                entry.socket_path,
+                entry.runner,
+                entry.submitter.dispatcher_id,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+            )
+        except (ListenerRefused, ChannelError, OSError):
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code == "operation_unknown":
+                raise delivery_error("session_unobserved") from None
+            if error.code == "message_refused":
+                raise refusal("runner_unreachable") from None
+            raise
+
+        origin = FinalizationOrigin(
+            attempt_id=key.attempt_id,
+            execution_domain_id=key.execution_domain_id,
+            submitter=entry.submitter,
+            supervisor=entry.runner,
+            request_digest=entry.request_digest,
+        )
+
+        def read() -> tuple[SessionResultObservation, FinalizationFacts]:
+            attempt = self._attempt_anchor(key)
+            try:
+                return sealed_finalization(attempt, references, origin)
+            finally:
+                attempt.close()
+
+        observation, facts = await self.executor.run(read)
+        if await self.entry(key) != entry:
+            raise delivery_error("session_unobserved")
+        receipt = self._finalizations.get(key)
+        if receipt is None:
+            receipt = _FinalizationReceipt(origin, references)
+            self._finalizations[key] = receipt
+        elif receipt.origin != origin or receipt.references != references:
+            raise delivery_error("integrity_error")
+        return SessionFinalizationRead(observation, facts, receipt)
+
+    async def _retained_finalization(
+        self, key: AttemptKey, entry: Completed, receipt: _FinalizationReceipt
+    ) -> SessionFinalizationRead:
+        if (
+            entry.runner != receipt.origin.supervisor
+            or entry.request_digest != receipt.origin.request_digest
+            or entry.result is None
+            or entry.result.kind != "agent"
+            or entry.result.ref != receipt.references.checked_result
+        ):
+            raise delivery_error("session_unobserved")
+        try:
+            observation, facts = await self._from_completed(
+                key,
+                entry,
+                lambda attempt: sealed_finalization(
+                    attempt, receipt.references, receipt.origin
+                ),
+            )
+        except KoraProtocolError as error:
+            if error.code == "transfer_refused":
+                current = await self.entry(key)
+                if isinstance(current, Completed) and current.released_at is not None:
+                    raise refusal("attempt_retired") from None
+            raise
+        current = await self.entry(key)
+        if isinstance(current, Completed) and current.released_at is not None:
+            raise refusal("attempt_retired")
+        if current != entry:
+            raise delivery_error("session_unobserved")
+        return SessionFinalizationRead(observation, facts, receipt)
 
     async def quiescence(
         self, handle: Handle, ctx: ProtocolContext
@@ -1647,6 +1801,7 @@ class LocalRuntime:
                     else RELEASE_REFUSALS.get(type(entry), "attempt_not_submitted")
                 )
             if entry.released_at is not None:
+                self._finalizations.pop(key, None)
                 self._report_release(ctx, started, "already_released")
                 return
             runner = entry.runner
@@ -1682,6 +1837,7 @@ class LocalRuntime:
         except KoraProtocolError:
             self._report_release(ctx, started, "refused", progress)
             raise
+        self._finalizations.pop(key, None)
         self._report_release(ctx, started, "released", progress)
 
     def _release_files(self, key: AttemptKey) -> ReleaseProgress:
@@ -1896,10 +2052,13 @@ class LocalRuntime:
 
     async def close(self) -> None:
         if self._closing is None:
+            self._finalizations.clear()
             for delivery in self._deliveries:
                 delivery.cancel()
             for observation in self._observations:
                 observation.cancel()
+            for finalization in self._finalization_reads:
+                finalization.cancel()
             for pull in self._output_pulls:
                 if pull.pending is not None:
                     pull.pending.cancel()
@@ -1913,6 +2072,7 @@ class LocalRuntime:
     async def _release(self) -> None:
         try:
             observations = tuple(self._observations)
+            finalizations = tuple(self._finalization_reads)
             deliveries = tuple(self._deliveries)
             outputs = tuple(
                 pull.pending for pull in self._output_pulls if pull.pending is not None
@@ -1923,6 +2083,8 @@ class LocalRuntime:
                 await asyncio.gather(*deliveries, return_exceptions=True)
             if observations:
                 await asyncio.gather(*observations, return_exceptions=True)
+            if finalizations:
+                await asyncio.gather(*finalizations, return_exceptions=True)
             await self.launchers.drain(self._launch.clock)
         finally:
             try:

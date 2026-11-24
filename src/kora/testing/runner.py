@@ -16,6 +16,7 @@ from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import SystemClock
 from kora.protocols.vcs import WorkspaceRef
 from kora.runner.agent import HostedHarness
+from kora.runner.session_result import FinalizationImplementation
 from kora.testing.script import ScriptIntake
 
 
@@ -44,7 +45,11 @@ class ScriptResolver:
             output_format=execution.output_format,
         )
         adapter = FakeHarness(source, scope, self.ctx)
-        return HostedHarness(adapter, adapter.kill)
+        return HostedHarness(
+            adapter,
+            adapter.kill,
+            FinalizationImplementation(name="fake", version="fake-1"),
+        )
 
 
 def testing_sources(

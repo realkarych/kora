@@ -220,6 +220,7 @@ async def prepare_admission_snapshot(
     observed_at: datetime,
     periodic_recheck: bool,
     deadline: float,
+    agent_only: bool = False,
 ) -> PreparedAdmissionSnapshot:
     acquired: AcquiredAdmissionSnapshot | None = None
     prepared: PreparedAdmissionSnapshot | None = None
@@ -238,6 +239,7 @@ async def prepare_admission_snapshot(
             observed_at=observed_at,
             periodic_recheck=periodic_recheck,
             deadline=deadline,
+            agent_only=agent_only,
         )
         prepared = _prepare(acquired, limits, reservation)
         await asyncio.sleep(0)

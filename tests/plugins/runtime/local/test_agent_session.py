@@ -7,8 +7,9 @@ import sys
 import threading
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Final
 
@@ -19,6 +20,7 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import context_for, kora_capture
 from kora.executor.digests import object_digest
 from kora.ir.json import JsonObject
+from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.runtime.local.agent import (
     SCRIPT_LIMIT,
     AgentSession,
@@ -28,7 +30,8 @@ from kora.plugins.runtime.local.agent import (
     agent_admission,
 )
 from kora.plugins.runtime.local.command import COMPONENT
-from kora.plugins.runtime.local.completed import recorded_exited
+from kora.plugins.runtime.local.completed import recorded_exited, sealed_finalization
+from kora.plugins.runtime.local.control import observe_finalization
 from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.plugins.runtime.local.launch import ExpectedBinary
 from kora.plugins.runtime.local.reaper import AdoptedReaper
@@ -39,7 +42,7 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import AgentExecution, LaunchInputs
-from kora.protocols.identity import Handle
+from kora.protocols.identity import Handle, ProcessIdentity
 from kora.protocols.runtime import (
     SessionObservation,
     SessionResultObservation,
@@ -52,19 +55,29 @@ from kora.runner.agent import INTERRUPT_GRACE_NS, STOP_DEADLINE_NS, ResultPrepar
 from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
-from kora.runner.registry import Completed, ControlFileRef
+from kora.runner.peers import kernel_source
+from kora.runner.registry import (
+    AttemptKey,
+    Completed,
+    ControlFileRef,
+    Running,
+    TransitionExecutor,
+)
 from kora.runner.session_result import (
+    FINALIZATION_NAME,
     RESULT_DIRECTORY,
     RESULT_NAME,
+    digest_of,
     prepare_observation,
 )
-from kora.testing.local import script_chunks, script_item
+from kora.testing.local import TESTING_PRICE_TABLE, script_chunks, script_item
 from kora.testing.local import testing_runner_command as runner_command
 from kora.testing.runner import AllowDenyPolicies
 from kora.testing.runner import testing_sources as compose_sources
 from kora.testing.script import FakeScript
-from tests.plugins.harness.fake.fake_support import turn
+from tests.plugins.harness.fake.fake_support import result, tool_call, turn, usage
 from tests.plugins.runtime.local.test_command import attempt_directory, journal_events
+from tests.plugins.runtime.local.test_command_capture import observational_refusal
 from tests.plugins.runtime.local.test_command_observation import (
     SUBMITTER,
     unless_busy,
@@ -78,7 +91,11 @@ from tests.plugins.runtime.local.test_command_workspace import (
 )
 from tests.plugins.runtime.local.test_completion import completed_entry
 from tests.plugins.runtime.local.test_release import with_runner
-from tests.plugins.runtime.local.testing_support import completed_script
+from tests.plugins.runtime.local.testing_support import (
+    attempt,
+    completed_script,
+    composition,
+)
 from tests.protocols.runtime_documents import publish_plan, resource_ref, workload
 from tests.runner.agent_support import (
     FAKE_SPEC,
@@ -293,6 +310,7 @@ async def agent_session(
     *,
     bind_socket: bool = True,
     prepare_result: ResultPreparation = prepare_observation,
+    registration: tuple[AttemptKey, ProcessIdentity] | None = None,
 ) -> AsyncGenerator[tuple[AgentSession, Path]]:
     attempt = private_directory(tmp_path.resolve(), "attempt")
     directory = open_local_directory(attempt)
@@ -306,6 +324,7 @@ async def agent_session(
         sources,
         NativeIdentityReader(clock=clock),
         prepare_result=prepare_result,
+        registration=registration,
     )
     if bind_socket:
         session.bind_launch_socket(attempt / "unused-socket")
@@ -411,6 +430,8 @@ async def test_local_runner_hosts_agent_workload(
         observation = await sealed(runtime, handle, ctx)
         status = await runtime.status(handle, ctx)
         command_only = await protocol_error(runtime.command_observation(handle, ctx))
+        without_basis = await protocol_error(runtime.session_finalization(handle, ctx))
+        sidecar = result_file(root, runtime).with_name(FINALIZATION_NAME)
         recorded = journal(root, runtime)
 
     assert isinstance(observation, SessionResultObservation)
@@ -419,6 +440,8 @@ async def test_local_runner_hosts_agent_workload(
     assert observation.journal_complete
     assert (status.state, status.phase, status.exit_code) == ("exited", "complete", 0)
     assert command_only.code == "workload_kind_unavailable"
+    assert without_basis.code == "session_unobserved"
+    assert not sidecar.exists()
     assert recorded.count("transfer.materialised") == 1
     assert [kind for kind in recorded if kind != "transfer.materialised"] == [
         "runner.workspace_prepared",
@@ -534,6 +557,213 @@ async def test_session_result_is_runner_owned(
     assert recorded == {"digest": digest, "size": len(path.read_bytes())}
     assert unplanted == observation
     assert corrupted.code == "integrity_error"
+
+
+@pytest.mark.asyncio
+async def test_agent_session_maps_finalization_snapshot(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    source = FakeScript.model_validate(
+        {
+            "end": "completed",
+            "on_interrupt": "acknowledge",
+            "steps": [
+                turn("turn-1", "local finalization"),
+                tool_call("Read", "denied-read", arguments={"file_path": "seed.txt"}),
+                usage("turn-1", 1),
+                result(),
+            ],
+        }
+    )
+    async with composition(tmp_path, kora_capture) as local:
+        runtime, ctx = local.runtime, local.ctx
+        work = await local.workload("attempt-1", source)
+        spec = work.session_spec
+        assert spec is not None
+        request_value: JsonObject = {
+            **work.execution_request,
+            "policy_layers": {
+                "namespace": {"allow": [], "deny": []},
+                "node": {"allow": [], "deny": ["Read"]},
+            },
+        }
+        work = work.model_copy(
+            update={
+                "execution_request": AgentExecution.model_validate(
+                    request_value
+                ).model_dump(mode="json"),
+                "execution_request_digest": object_digest(request_value),
+            }
+        )
+        handle = await runtime.submit(work, ctx)
+        buffer = source.serialise()
+        await runtime.transfer_in(
+            handle, script_item(buffer), script_chunks(buffer), ctx
+        )
+        key = runtime.registry.key(handle.attempt_id)
+        path = attempt(local) / "control" / RESULT_DIRECTORY
+
+        before = ctx.clock.monotonic_ns()
+        await unless_busy(lambda: runtime.start(handle, ctx))
+        live = await unless_busy(lambda: runtime.session_finalization(handle, ctx))
+        after = ctx.clock.monotonic_ns()
+        running = await runtime.entry(key)
+        assert isinstance(running, Running)
+        assert not recorded_exited(NativeIdentityReader(), running.runner)
+        repeated_live = await runtime.session_finalization(handle, ctx)
+        ordinary = await runtime.session_observation(handle, ctx)
+        payload = (path / RESULT_NAME).read_bytes()
+        sibling = (path / FINALIZATION_NAME).read_bytes()
+        log = journal_events(attempt(local) / "journal.jsonl")
+        await unless_busy(lambda: runtime.quiescence(handle, ctx))
+        await until(lambda: recorded_exited(NativeIdentityReader(), running.runner))
+        replay = await runtime.session_finalization(handle, ctx, receipt=live.receipt)
+        unchanged = (
+            (path / RESULT_NAME).read_bytes(),
+            (path / FINALIZATION_NAME).read_bytes(),
+        )
+        await runtime.release(handle, ctx)
+        released = await protocol_error(
+            runtime.session_finalization(handle, ctx, receipt=live.receipt)
+        )
+
+    (row,) = live.observation.result.usage
+    (denial,) = live.observation.result.denials.items
+    assert live.observation == ordinary
+    assert live.observation.result.usage_coverage.completeness == "complete"
+    assert (
+        row.observation_id,
+        row.observation_sequence,
+        row.input_tokens,
+        row.output_tokens,
+    ) == ("observation-1", 1, 11, 7)
+    assert live.observation.result.harness == "fake"
+    assert request_value["harness"] == "claude"
+    assert live.observation.result.turns == 1
+    assert live.observation.result.stop_reason == "completed"
+    assert live.observation.result.denials.total == 1
+    assert live.observation.result.denials_complete
+    assert (denial.tool, denial.source, denial.code, denial.pattern) == (
+        "Read",
+        "policy",
+        "denied",
+        "node.deny.0",
+    )
+    assert all(event.kind != "tool_result" for event in log)
+    assert live.facts.capture == "unavailable"
+    assert (live.facts.implementation.name, live.facts.implementation.version) == (
+        "fake",
+        "fake-1",
+    )
+    assert live.facts.price_table_id == TESTING_PRICE_TABLE.id
+    assert 0 <= live.facts.duration_ms <= (after - before) // 1_000_000
+    assert (live.facts.attempt_id, live.facts.execution_domain_id) == (
+        key.attempt_id,
+        key.execution_domain_id,
+    )
+    assert (live.facts.submitter, live.facts.supervisor, live.facts.request_digest) == (
+        running.submitter,
+        running.runner,
+        running.request_digest,
+    )
+    assert live.facts.session_spec_digest == digest_of(
+        canonical_bytes(spec.model_dump(mode="json"))
+    )
+    assert unchanged == (payload, sibling)
+    assert live.receipt.references.checked_result.digest == digest_of(payload)
+    assert live.receipt.references.finalization.digest == digest_of(sibling)
+    assert repeated_live.receipt is live.receipt
+    assert replay == live
+    assert not path.exists()
+    assert released.code == "attempt_retired"
+
+
+async def read_finalization_as_observer(
+    path: str, runner: ProcessIdentity, executor: TransitionExecutor, _base: Path
+) -> object:
+    return await observe_finalization(
+        path,
+        runner,
+        "dispatcher-2",
+        kernel_source(NativeIdentityReader()),
+        executor,
+        SystemClock(),
+        "finalization-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_session_finalization_requires_original_live_receipt(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with composition(tmp_path / "original", kora_capture) as local:
+        runtime, ctx = local.runtime, local.ctx
+        handle = await local.run_agent("attempt-1", completed_script())
+        live = await unless_busy(lambda: runtime.session_finalization(handle, ctx))
+        attempt_path = attempt(local)
+        sibling = attempt_path / "control" / RESULT_DIRECTORY / FINALIZATION_NAME
+        other_handle = await local.run_agent("attempt-2", completed_script())
+        wrong_origins = (
+            live.facts.origin().model_copy(update={"attempt_id": "different-attempt"}),
+            live.facts.origin().model_copy(
+                update={"execution_domain_id": "different-domain"}
+            ),
+            live.facts.origin().model_copy(
+                update={"request_digest": "sha256:" + "0" * 64}
+            ),
+            live.facts.origin().model_copy(
+                update={
+                    "submitter": live.facts.submitter.model_copy(
+                        update={"dispatcher_id": "different-dispatcher"}
+                    )
+                }
+            ),
+            live.facts.origin().model_copy(
+                update={"supervisor": live.facts.submitter.process}
+            ),
+        )
+
+        anchor = open_local_directory(attempt_path)
+        try:
+            wrong_sources = tuple(
+                code_of_call(
+                    partial(
+                        sealed_finalization, anchor, live.receipt.references, origin
+                    )
+                )
+                for origin in wrong_origins
+            )
+        finally:
+            anchor.close()
+        foreign = await protocol_error(
+            runtime.session_finalization(other_handle, ctx, receipt=live.receipt)
+        )
+        await unless_busy(lambda: runtime.quiescence(handle, ctx))
+        entry = completed_entry(runtime)
+        await until(lambda: recorded_exited(NativeIdentityReader(), entry.runner))
+        premature = await protocol_error(runtime.session_finalization(handle, ctx))
+        altered = replace(
+            live.receipt,
+            references=live.receipt.references.model_copy(
+                update={"finalization": live.receipt.references.checked_result}
+            ),
+        )
+        foreign_owner = await protocol_error(
+            runtime.session_finalization(handle, ctx, receipt=altered)
+        )
+        tampered(sibling)
+        damaged = await protocol_error(
+            runtime.session_finalization(handle, ctx, receipt=live.receipt)
+        )
+        legacy = await runtime.session_observation(handle, ctx)
+        await runtime.release(handle, ctx)
+    observer = await observational_refusal(tmp_path, read_finalization_as_observer)
+
+    assert wrong_sources == ("execution_unauthorized",) * len(wrong_origins)
+    assert foreign.code == foreign_owner.code == observer == "execution_unauthorized"
+    assert premature.code == "session_unobserved"
+    assert damaged.code == "integrity_error"
+    assert legacy == live.observation
 
 
 @pytest.mark.parametrize("with_deadline", [False, True])

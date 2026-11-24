@@ -18,6 +18,7 @@ from kora.protocols.runtime import (
     CaptureFacts,
     CommandObservation,
     SessionObservation,
+    SessionResultObservation,
 )
 from kora.runner.filesystem import (
     DirectoryAnchor,
@@ -35,8 +36,12 @@ from kora.runner.registry import (
 )
 from kora.runner.session_result import (
     LEGACY_RESULT_NAME,
+    FinalizationFacts,
+    FinalizationOrigin,
+    FinalizationReferences,
     ResultFile,
     ResultUnreadable,
+    read_finalization,
     read_observation,
 )
 
@@ -128,6 +133,36 @@ def sealed_session(attempt: DirectoryAnchor, ref: ControlFileRef) -> SessionObse
         raise delivery_error("transfer_refused") from None
     finally:
         control.close()
+
+
+def sealed_finalization(
+    attempt: DirectoryAnchor,
+    references: FinalizationReferences,
+    origin: FinalizationOrigin,
+) -> tuple[SessionResultObservation, FinalizationFacts]:
+    try:
+        control = open_private_directory(attempt, CONTROL_DIRECTORY)
+    except (OSError, FilesystemError):
+        raise delivery_error("transfer_refused") from None
+    try:
+        facts = read_finalization(control, references)
+        if facts.origin() != origin:
+            raise delivery_error("execution_unauthorized")
+        ref = references.checked_result
+        observation = read_observation(
+            control, ResultFile(ref.name, ref.size, ref.digest)
+        )
+    except (ResultUnreadable, OSError, FilesystemError):
+        raise delivery_error("integrity_error") from None
+    finally:
+        control.close()
+    if (
+        not isinstance(observation, SessionResultObservation)
+        or observation.result.harness != facts.implementation.name
+        or observation.result.installed_version != facts.implementation.version
+    ):
+        raise delivery_error("integrity_error")
+    return observation, facts
 
 
 def recorded_session(

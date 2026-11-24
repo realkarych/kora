@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from typing import cast
 
 import pytest
 from sqlalchemy import insert, update
@@ -73,7 +74,7 @@ async def test_admission_snapshot_invalid_limits_never_check_out(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", ["identity", "time", "deadline"])
+@pytest.mark.parametrize("invalid", ["identity", "time", "deadline", "agent-only"])
 async def test_admission_snapshot_invalid_request_never_checks_out(
     database: Database, invalid: str
 ) -> None:
@@ -88,6 +89,7 @@ async def test_admission_snapshot_invalid_request_never_checks_out(
             observed_at=START.replace(tzinfo=None) if invalid == "time" else START,
             periodic_recheck=True,
             deadline=deadline if invalid != "deadline" else float("nan"),
+            agent_only=cast("bool", "agent") if invalid == "agent-only" else False,
         )
 
     assert ledger.checkouts == ledger.outstanding == database.units_in_flight() == 0

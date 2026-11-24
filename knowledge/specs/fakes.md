@@ -254,6 +254,8 @@ The IR-named harness stays in `CallScope`, while `FakeHarness.build_session_spec
 
 The [explicit session-input contract](protocols.md#sealed-session-inputs-issue-1597) is active in this composition under #1614: its compact `AgentExecution` request does not establish full API sealing or production authority. The composition constructs deterministic `SessionInputs` explicitly and passes them to the fake builder; no empty-input compatibility fallback is permitted.
 
+The same test-only resolver supplies an affirmative no-opaque-capture decision for its actual FakeHarness implementation under [#1833](https://github.com/realkarych/kora/issues/1833). The [private finalization source](protocols.md#runner-side-agent-host-issue-1394) verifies the original native submitter and the checked result before issuing an in-memory receipt. Its same-process read after native supervisor exit is available only before actual release. Script contents, graph names and missing files supply no capture decision. The ordinary checked result and its compatibility remain available independently of the optional snapshot. This evidence stays within the local testing composition.
+
 ## 4. The fake harness
 
 **Replay belongs to the real adapter.** Replaying recorded SDK streams is the replay layer of each real adapter's conformance ([Claude adapter contracts](protocols.md#claude-adapter-contracts-issue-125)). The fake harness never parses an SDK stream. It reads one ordered script and never chooses an enforced outcome.

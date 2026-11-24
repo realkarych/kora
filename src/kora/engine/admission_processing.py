@@ -140,6 +140,7 @@ class AdmissionProcessor:
                 observed_at=self.clock(),
                 periodic_recheck=periodic_recheck,
                 deadline=deadline,
+                agent_only=self.initial_root_only,
             )
             if self.initial_root_only and not any(
                 node.path == source.acquired.candidate.node_path
