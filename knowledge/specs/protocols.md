@@ -1287,6 +1287,8 @@ Expected binding or secret-scope failures raise fixed nonretryable `launch_rejec
 
 ## 4. VCS (FR-5.2)
 
+The [second-slice GitHub publication contract](github-pull-request-publication.md) defines the pending same-repository profile, exact revisions, effect recovery and provider activation boundary.
+
 The [VcsRef revision-1 contract](artifacts/README.md) defines the shared payload, principal record, immutable behavior and supported native-revision domain. Head, push and approval observations follow its [fail-closed revision boundary](artifacts/README.md#6-current-observations-and-approvals). The VCS plans; kora's common executor runs its typed plans. [ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md) supersedes collection in the candidate working copy. Requests carry no runtime identity. A VCS can supply Git or an independent native representation without changing the core.
 
 ```python
@@ -2420,6 +2422,8 @@ These are **future executable test contracts** for [dsl.md](dsl.md) section 4; d
 | canonical scenarios | Each file in [examples/scenarios/sql_optimization/](examples/scenarios/sql_optimization/) passes with the status its `expect` states |
 
 ### Code-host identity contracts (ADR-0023)
+
+The [GitHub provider evidence](github-pull-request-publication.md#4-first-provider-evidence-and-activation) assigns the first exact-create and recovery cases to the installed provider and keeps caller and issuer activation evidence with their owners.
 
 These are **future executable test contracts** for [ADR-0023](../../docs/decisions/0023-code-host-identity-and-purpose-scoped-credentials.md); documentation CI does not run them. Each runs against two configurations: the GitHub App backend over a local Git repository with an in-process code-host fake, and the independent directory-backed VCS with an issuance backend of its own and opaque revision and change-request identifiers. The static-credential configuration runs the same cases to show its weaker reports. Metadata cases run on PostgreSQL and SQLite.
 
