@@ -187,7 +187,7 @@ class _WorkerLifespan(LifespanOn):
         if not self.should_exit:
             try:
                 await self._recover()
-            except SchedulerFailure:
+            except (SchedulerFailure, TimeoutError):
                 await self.shutdown()
                 raise ServingFailure(ServingRefusal.STARTUP_FAILED) from None
         stopped = self._stopped()
@@ -264,6 +264,8 @@ class ApiServer(Server):
             await self._scheduler.recover()
 
     async def _run_scheduler(self, scheduler: ServingScheduler) -> None:
+        if self.should_exit:
+            return
         try:
             await scheduler.run()
         finally:

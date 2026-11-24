@@ -9,16 +9,28 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import event as sql_events
+from sqlalchemy.util.concurrency import await_
 
+from kora.api.exchange import COMPONENT
 from kora.api.graph_deployment_worker import DeploymentPreparer
+from kora.api.graph_services import deployment_selection
 from kora.api.installed_scheduler import (
     initial_admission_limits,
     installed_root_admission,
 )
 from kora.api.installed_worker import installed_worker_profile
+from kora.api.serving import (
+    ApiServer,
+    ServingFailure,
+    ServingRefusal,
+    ServingSignals,
+    own_signal_wakeup,
+)
 from kora.client.transport import KoraClient
 from kora.conformance.capture import Capture
 from kora.db.connection import Database
+from kora.db.identifiers import Clock, IdentifierGenerator
 from kora.engine.admission_preparation import (
     AdmissionPreparationRejected,
     prepare_admission_snapshot,
@@ -33,7 +45,15 @@ from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun
 from kora.models.worker_claims import WorkerClaim, WorkerClaimRequest
 from kora.observability.settings import COMPONENT_LEVELS_VARIABLE, LEVEL_VARIABLE
-from tests.api.deployment_cases import GRAPH, NAMESPACE, preparer, skeleton_ir
+from kora.protocols.time import SystemClock
+from kora.scheduler.loop import first_claim_scheduler
+from tests.api.deployment_cases import (
+    GRAPH,
+    LOCAL_CAPABILITIES,
+    NAMESPACE,
+    preparer,
+    skeleton_ir,
+)
 from tests.api.deployment_cases import SELECTION as INSTALLATION
 from tests.api.scheduler_claim_support import (
     PARAMS,
@@ -41,7 +61,7 @@ from tests.api.scheduler_claim_support import (
     service_identity,
 )
 from tests.api.serving_lifecycle_child import serving_event
-from tests.api.support import api_capture
+from tests.api.support import api_capture, application
 from tests.api.test_installed_workers import (
     ENABLED,
     WORKER_SETTINGS,
@@ -67,10 +87,15 @@ from tests.api.test_packaging import (
     terminate_installed_api,
 )
 from tests.api.worker_support import CAPABILITIES, bearer, registration
-from tests.db.closing import ConnectionLedger
+from tests.db.closing import (
+    CONDITION_DEADLINE_SECONDS,
+    ConnectionLedger,
+    WriterCutoffLoop,
+)
 from tests.engine.admission_processing_support import process
 from tests.engine.admission_snapshot_support import acquire, snapshot_case
 from tests.engine.claim_support import state
+from tests.engine.expiry_support import execution_case
 from tests.engine.graph_output_cases import child as ir_child
 from tests.engine.start_cases import start_rows
 from tests.plugins.authentication.support import seed_case
@@ -88,6 +113,126 @@ FIRST_CLAIM_DEBUG = FIRST_CLAIM | {
 TRIGGER_KEY = "installed-scheduler-start"
 SCHEDULER_LIFECYCLE = "scheduler.lifecycle"
 SCHEDULER_TRANSITION = "scheduler.transition"
+
+
+def startup_owner(database: Database, capture: Capture, clock: Clock) -> ApiServer:
+    profile = installed_worker_profile("2000")
+    assert profile is not None
+    selected = deployment_selection("claude", LOCAL_CAPABILITIES)
+    admission = installed_root_admission(
+        database,
+        profile.limits,
+        clock,
+        IdentifierGenerator(clock),
+        selected,
+        LOCAL_CAPABILITIES,
+    )
+    owner = ApiServer(
+        application(database, capture),
+        0,
+        capture.diagnostics.logger(COMPONENT),
+        worker_startup=True,
+        scheduler=first_claim_scheduler(
+            admission, read_seconds=profile.limits.read_seconds
+        ),
+    )
+    owner.config.load()
+    owner.lifespan = owner.config.lifespan_class(owner.config)
+    return owner
+
+
+@pytest.mark.asyncio
+async def test_installed_scheduler_accepts_stop_before_first_tick(
+    sqlite_template: Path, tmp_path: Path, api_capture: Capture
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "metadata.sqlite")
+    database = Database(settings)
+    owner = startup_owner(database, api_capture, SystemClock().now)
+    signals = ServingSignals()
+    signals.server = owner
+
+    try:
+        with (
+            signals.own(),
+            own_signal_wakeup(asyncio.get_running_loop()),
+            owner.capture_signals(),
+        ):
+            await owner.startup()
+            try:
+                signal.raise_signal(signal.SIGTERM)
+                accepted = owner.should_exit
+            finally:
+                await owner.shutdown()
+                await owner.drain()
+    finally:
+        await database.close()
+    records = api_capture.finish()
+
+    assert owner.started
+    assert all(not server.is_serving() for server in owner.servers)
+    assert accepted
+    assert signals.received == signal.SIGTERM
+    assert [
+        row["outcome"] for row in records if row["event"] == SCHEDULER_LIFECYCLE
+    ] == ["recovered"]
+    assert database.units_in_flight() == 0
+
+
+def test_installed_scheduler_settles_lifespan_after_lease_recovery_timeout(
+    sqlite_template: Path, tmp_path: Path, api_capture: Capture
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "metadata.sqlite")
+    loop = WriterCutoffLoop()
+
+    async def exercise() -> None:
+        database = Database(settings)
+        try:
+            case = await execution_case(database)
+            clock = case.promotion.clock
+            clock.advance(60)
+            saved = await case.snapshot(database)
+            owner = startup_owner(database, api_capture, clock.now)
+            held = asyncio.Event()
+            writer_seen = False
+
+            def expire_writer(
+                connection: object, cursor: object, statement: str, *details: object
+            ) -> None:
+                nonlocal writer_seen
+                query = " ".join(statement.lower().split())
+                if not writer_seen and "from run where run.id =" in query:
+                    writer_seen = not database.writer_is_free()
+                    loop.advance_to(loop.time() + CONDITION_DEADLINE_SECONDS)
+                    await_(held.wait())
+
+            engine = database.writer_engine.sync_engine
+            sql_events.listen(engine, "after_cursor_execute", expire_writer)
+            try:
+                async with asyncio.timeout(2 * CONDITION_DEADLINE_SECONDS):
+                    with pytest.raises(ServingFailure) as refusal:
+                        await owner.startup()
+            finally:
+                sql_events.remove(engine, "after_cursor_execute", expire_writer)
+                lifespan_settled = owner.lifespan.shutdown_event.is_set()
+                if owner.started:
+                    await owner.shutdown()
+                    await owner.drain()
+                elif not lifespan_settled:
+                    await owner.lifespan.shutdown()
+            after = await case.snapshot(database)
+
+            assert writer_seen
+            assert lifespan_settled
+            assert refusal.value.reason is ServingRefusal.STARTUP_FAILED
+            assert not owner.started
+            assert after == saved
+            assert database.writer_is_free()
+            assert database.units_in_flight() == 0
+        finally:
+            await database.close()
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        runner.run(exercise())
 
 
 @pytest.mark.asyncio
