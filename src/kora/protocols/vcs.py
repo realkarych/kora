@@ -1,6 +1,6 @@
 from dataclasses import dataclass, fields
 from datetime import timedelta
-from typing import Annotated, Final, Literal, Protocol, Self, cast
+from typing import Annotated, Final, Literal, Protocol, Self, cast, runtime_checkable
 
 from pydantic import (
     AfterValidator,
@@ -22,7 +22,7 @@ from kora.ir.vcs_ref_json import MAX_JSON_BYTES, canonical_size
 from kora.protocols.common import BoundaryModel, ProtocolContext, is_identifier
 from kora.protocols.deadlines import require
 from kora.protocols.identity import Count, Identifier, Instant, object_size
-from kora.protocols.secret_value import SecretTransfer, SecretValue
+from kora.protocols.secret_value import SecretScope, SecretTransfer, SecretValue
 
 PlanExecutor = Literal["runner", "worker_host"]
 CredentialMode = Literal["credential_required", "local_credential_free"]
@@ -457,6 +457,81 @@ class Vcs(Protocol):
     ) -> PublishPlan: ...
 
     async def head_sha(self, ref: VcsRef, ctx: ProtocolContext) -> str: ...
+
+
+@dataclass(frozen=True)
+class ChangeRequestIntent:
+    binding: str
+    binding_revision: int
+    repository_id: str
+    base_branch: str
+    published: VcsRef
+
+
+@dataclass(frozen=True)
+class ChangeRequestGrant:
+    request: CredentialRequest
+    issued: IssuedCredential
+    namespace_id: str
+    dispatcher_id: str
+    repository_id: str
+    scope: SecretScope
+
+
+@dataclass(frozen=True)
+class ChangeRequestCall:
+    intent: ChangeRequestIntent
+    grant: ChangeRequestGrant
+    dispatcher_id: str
+
+
+@dataclass(frozen=True)
+class ChangeRequestSearch:
+    call: ChangeRequestCall
+    mode: Literal["precreate", "historical"]
+    known_number: int | None = None
+
+
+@dataclass(frozen=True)
+class ChangeRequestDispatch:
+    call: ChangeRequestCall
+    title: str
+    body: str
+
+
+@dataclass(frozen=True)
+class ChangeRequestIdentity:
+    repository_id: str
+    number: int
+
+
+@dataclass(frozen=True)
+class ChangeRequestFact:
+    identity: ChangeRequestIdentity
+    state: Literal["open", "closed", "merged"]
+    head: str
+    base: str
+    opener: PrincipalRef
+    url: str
+
+
+@dataclass(frozen=True)
+class ChangeRequestResult:
+    outcome: Literal["absent", "observed", "created", "conflict", "unresolved"]
+    identities: tuple[ChangeRequestIdentity, ...] = ()
+    fact: ChangeRequestFact | None = None
+    acknowledged_create: bool = False
+
+
+@runtime_checkable
+class VcsChangeRequests(Protocol):
+    async def lookup_change_request(
+        self, request: ChangeRequestSearch, ctx: ProtocolContext
+    ) -> ChangeRequestResult: ...
+
+    async def create_change_request(
+        self, request: ChangeRequestDispatch, ctx: ProtocolContext
+    ) -> ChangeRequestResult: ...
 
 
 def printable_path(value: str) -> str:

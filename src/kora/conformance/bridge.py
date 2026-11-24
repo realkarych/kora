@@ -40,6 +40,7 @@ class BridgeReason(StrEnum):
     PREPARED_INVALID = "prepared_invalid"
     ARGUMENTS_INVALID = "arguments_invalid"
     BUNDLE_INVALID = "bundle_invalid"
+    CAPABILITY_MISMATCH = "capability_mismatch"
     PROTOCOL_UNSUPPORTED = "protocol_unsupported"
     INVOCATION_CLOSED = "invocation_closed"
     RECEIVER_REPEATED = "receiver_repeated"
@@ -117,6 +118,10 @@ def bundle_type(protocol: ProtocolName) -> type:
             return ArtifactTypeConformanceInputs
         case _:
             raise ConformanceBridgeError(BridgeReason.PROTOCOL_UNSUPPORTED)
+
+
+def change_requests_configured(configuration: JsonObject) -> bool:
+    return configuration.get("change_requests") is not None
 
 
 def require_method(value: object, name: str, reason: BridgeReason) -> None:
@@ -209,6 +214,20 @@ class PreparedInvocation:
         self._inputs.require_matching_schema(
             getattr(self._instance, "config_schema", None)
         )
+        if self._protocol is ProtocolName.VCS:
+            from kora.conformance.github import ChangeRequestConformanceInputs
+            from kora.conformance.vcs import VcsConformanceInputs
+            from kora.protocols.vcs import Vcs, VcsChangeRequests
+
+            selected = change_requests_configured(self.configuration)
+            receiver = cast(Vcs, self._instance)
+            fixture = cast(VcsConformanceInputs, exercises).change_requests
+            if receiver.capabilities().change_requests is not selected or (
+                selected and not isinstance(receiver, VcsChangeRequests)
+            ):
+                raise ConformanceBridgeError(BridgeReason.CAPABILITY_MISMATCH)
+            if selected and not isinstance(fixture, ChangeRequestConformanceInputs):
+                raise ConformanceBridgeError(BridgeReason.BUNDLE_INVALID)
 
     def reconstruct(self) -> ArtifactStorage:
         if not self._active:
@@ -250,6 +269,12 @@ class ConformanceSelection:
             metadata.config_schema, configuration, fixture_data
         )
         bundle_type(self._protocol)
+
+    @property
+    def change_requests(self) -> bool:
+        return self._protocol is ProtocolName.VCS and change_requests_configured(
+            self._inputs.configuration
+        )
 
     @asynccontextmanager
     async def prepare(
