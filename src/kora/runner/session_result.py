@@ -1,13 +1,18 @@
 import hashlib
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Event
-from typing import Final
+from typing import Final, Literal
 
 from pydantic import ValidationError
 
+from kora.ir.cost import Identifier as CostIdentifier
+from kora.ir.scalars import Digest
+from kora.ir.vcs_ref_json import JsonRefusal, canonical_bytes, decode_strict_json
+from kora.protocols.boundary import BoundaryModel
 from kora.protocols.harness import RunnerCause
+from kora.protocols.identity import Count, Identifier, ProcessIdentity
 from kora.protocols.runtime import (
     SESSION_OBSERVATION,
     SessionFailedObservation,
@@ -18,8 +23,14 @@ from kora.runner.filesystem import (
     create_directory,
     open_private_directory,
 )
-from kora.runner.registry import synchronize, unlink_if_present
+from kora.runner.registry import (
+    ControlFileRef,
+    Submitter,
+    synchronize,
+    unlink_if_present,
+)
 from kora.runner.session_result_encoding import (
+    MAX_FINALIZATION_BYTES,
     MAX_RESULT_BYTES,
     ResultContainsSecret,
     ResultEncoder,
@@ -27,12 +38,14 @@ from kora.runner.session_result_encoding import (
     ResultEncodingRefused,
     ResultTooLarge,
     check_running,
+    encode_finalization,
     encode_observation,
 )
 
 RESULT_DIRECTORY: Final[str] = "result"
 LEGACY_RESULT_NAME: Final[str] = "session.json"
 RESULT_NAME: Final[str] = "session.checked.json"
+FINALIZATION_NAME: Final[str] = "session.finalization.checked.json"
 CREATE_FLAGS: Final[int] = (
     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 )
@@ -51,6 +64,53 @@ class ResultFile:
     digest: str
 
 
+class FinalizationOrigin(BoundaryModel):
+    attempt_id: Identifier
+    execution_domain_id: Identifier
+    submitter: Submitter
+    supervisor: ProcessIdentity
+    request_digest: Digest
+
+
+class FinalizationImplementation(BoundaryModel):
+    name: Literal["fake"]
+    version: Literal["fake-1"]
+
+
+class FinalizationFacts(FinalizationOrigin):
+    session_spec_digest: Digest
+    implementation: FinalizationImplementation
+    capture: Literal["unavailable"]
+    duration_ms: Count
+    price_table_id: CostIdentifier
+
+    def origin(self) -> FinalizationOrigin:
+        return FinalizationOrigin(
+            attempt_id=self.attempt_id,
+            execution_domain_id=self.execution_domain_id,
+            submitter=self.submitter,
+            supervisor=self.supervisor,
+            request_digest=self.request_digest,
+        )
+
+
+class FinalizationReferences(BoundaryModel):
+    checked_result: ControlFileRef
+    finalization: ControlFileRef
+
+
+class FinalizationCheckpoint(BoundaryModel):
+    format: Literal["kora.local.session-finalization/1"]
+    checked_result: ControlFileRef
+    finalization: FinalizationFacts
+
+
+@dataclass(frozen=True)
+class PreparedFinalization:
+    payload: bytearray
+    reference: ResultFile
+
+
 @dataclass(frozen=True)
 class PreparedObservation:
     payload: bytearray
@@ -59,6 +119,7 @@ class PreparedObservation:
     cause: RunnerCause | None
     stop_reason: str | None
     journal_complete: bool
+    finalization: PreparedFinalization | None = None
 
 
 def prepare_observation(
@@ -107,14 +168,44 @@ def prepare_failure(code: str, stop: Event) -> PreparedObservation:
     )
 
 
-def result_reference(payload: bytearray, stop: Event) -> ResultFile:
+def prepare_finalization(
+    prepared: PreparedObservation,
+    facts: FinalizationFacts,
+    forms: tuple[str, ...],
+    stop: Event,
+) -> PreparedObservation:
+    if prepared.failure is not None:
+        return prepared
+    reference = prepared.reference
+    checkpoint = FinalizationCheckpoint(
+        format="kora.local.session-finalization/1",
+        checked_result=ControlFileRef(
+            name=reference.name, size=reference.size, digest=reference.digest
+        ),
+        finalization=facts,
+    )
+    try:
+        payload = encode_finalization(checkpoint, forms, stop)
+        sibling = result_reference(payload, stop, FINALIZATION_NAME)
+    except (
+        ResultContainsSecret,
+        ResultTooLarge,
+        ResultEncodingRefused,
+    ):
+        return prepared
+    return replace(prepared, finalization=PreparedFinalization(payload, sibling))
+
+
+def result_reference(
+    payload: bytearray, stop: Event, name: str = RESULT_NAME
+) -> ResultFile:
     digest = hashlib.sha256()
     view = memoryview(payload)
     for offset in range(0, len(view), 16_384):
         check_running(stop)
         digest.update(view[offset : offset + 16_384])
     check_running(stop)
-    return ResultFile(RESULT_NAME, len(payload), f"sha256:{digest.hexdigest()}")
+    return ResultFile(name, len(payload), f"sha256:{digest.hexdigest()}")
 
 
 def digest_of(payload: bytes) -> str:
@@ -131,23 +222,35 @@ def result_directory(control: DirectoryAnchor) -> DirectoryAnchor:
 def write_observation(
     control: DirectoryAnchor, prepared: PreparedObservation
 ) -> ResultFile:
+    return write_result(control, prepared.reference, prepared.payload)
+
+
+def write_finalization(
+    control: DirectoryAnchor, prepared: PreparedFinalization
+) -> ResultFile:
+    return write_result(control, prepared.reference, prepared.payload)
+
+
+def write_result(
+    control: DirectoryAnchor, reference: ResultFile, payload: bytearray
+) -> ResultFile:
     directory = result_directory(control)
     try:
         descriptor = os.open(
-            RESULT_NAME, CREATE_FLAGS, 0o400, dir_fd=directory.descriptor
+            reference.name, CREATE_FLAGS, 0o400, dir_fd=directory.descriptor
         )
         try:
             try:
-                written_through(descriptor, prepared.payload)
+                written_through(descriptor, payload)
             finally:
                 os.close(descriptor)
             synchronize(directory.descriptor)
         except OSError:
-            unlink_if_present(directory, RESULT_NAME)
+            unlink_if_present(directory, reference.name)
             raise
     finally:
         directory.close()
-    return prepared.reference
+    return reference
 
 
 def written_through(descriptor: int, payload: bytearray) -> None:
@@ -169,7 +272,45 @@ def discard_observation(control: DirectoryAnchor) -> None:
 def read_observation(
     control: DirectoryAnchor, reference: ResultFile
 ) -> SessionObservation:
-    if reference.name != RESULT_NAME or not 0 < reference.size <= MAX_RESULT_BYTES:
+    payload = read_result(control, reference, RESULT_NAME, MAX_RESULT_BYTES)
+    try:
+        return SESSION_OBSERVATION.validate_json(payload)
+    except ValidationError:
+        raise ResultUnreadable from None
+
+
+def read_finalization(
+    control: DirectoryAnchor, references: FinalizationReferences
+) -> FinalizationFacts:
+    reference = references.finalization
+    payload = read_result(
+        control,
+        ResultFile(reference.name, reference.size, reference.digest),
+        FINALIZATION_NAME,
+        MAX_FINALIZATION_BYTES,
+    )
+    value = decode_strict_json(payload, MAX_FINALIZATION_BYTES, 16)
+    if isinstance(value, JsonRefusal) or not isinstance(value, dict):
+        raise ResultUnreadable
+    if canonical_bytes(value) != payload:
+        raise ResultUnreadable
+    try:
+        checkpoint = FinalizationCheckpoint.model_validate(value)
+    except ValidationError:
+        raise ResultUnreadable from None
+    if (
+        references.checked_result.name != RESULT_NAME
+        or not 0 < references.checked_result.size <= MAX_RESULT_BYTES
+        or checkpoint.checked_result != references.checked_result
+    ):
+        raise ResultUnreadable
+    return checkpoint.finalization
+
+
+def read_result(
+    control: DirectoryAnchor, reference: ResultFile, name: str, limit: int
+) -> bytes:
+    if reference.name != name or not 0 < reference.size <= limit:
         raise ResultUnreadable
     directory = open_private_directory(control, RESULT_DIRECTORY)
     try:
@@ -191,10 +332,7 @@ def read_observation(
         os.close(descriptor)
     if len(payload) != reference.size or digest_of(payload) != reference.digest:
         raise ResultUnreadable
-    try:
-        return SESSION_OBSERVATION.validate_json(payload)
-    except ValidationError:
-        raise ResultUnreadable from None
+    return payload
 
 
 def bounded_read(descriptor: int, size: int) -> bytes:

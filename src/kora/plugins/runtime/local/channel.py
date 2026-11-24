@@ -34,6 +34,7 @@ from kora.protocols.runtime import (
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from kora.runner.registry import ControlFileRef, TransitionExecutor
+from kora.runner.session_result import FinalizationReferences
 
 PRE_ATTACH_BYTES: Final[int] = 8192
 MAX_LOG_BYTES: Final[int] = 67_108_864
@@ -713,6 +714,38 @@ def read_session_result(payload: bytes, request_id: str) -> ControlFileRef:
             raise message_refused(MessageRefusal.MALFORMED)
         raise error
     envelope = json_model(SessionResultEnvelope, payload)
+    if envelope is None or envelope.request_id != request_id:
+        raise message_refused(MessageRefusal.MALFORMED)
+    return envelope.value
+
+
+class SessionFinalizationEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["session_finalization"]
+    value: FinalizationReferences
+
+
+def session_finalization_envelope(
+    request_id: str, value: FinalizationReferences
+) -> bytes:
+    envelope = SessionFinalizationEnvelope(
+        request_id=request_id, result="session_finalization", value=value
+    )
+    return canonical_bytes(envelope.model_dump(mode="json"))
+
+
+def read_session_finalization(
+    payload: bytes, request_id: str
+) -> FinalizationReferences:
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    envelope = json_model(SessionFinalizationEnvelope, payload)
     if envelope is None or envelope.request_id != request_id:
         raise message_refused(MessageRefusal.MALFORMED)
     return envelope.value
