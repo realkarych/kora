@@ -1290,7 +1290,7 @@ Expected binding or secret-scope failures raise fixed nonretryable `launch_rejec
 
 ## 4. VCS (FR-5.2)
 
-The [second-slice GitHub publication contract](github-pull-request-publication.md) defines the pending same-repository profile, exact revisions, effect recovery and provider activation boundary.
+The [second-slice GitHub publication contract](github-pull-request-publication.md) defines the same-repository profile, exact revisions, effect recovery and provider activation boundary. Its installed provider checkpoint exposes independent read-only lookup and caller-authorized create under the optional change-request capability. It consumes an admitted API grant. Native GitHub App issuance and the production graph caller activate separately.
 
 The [VcsRef revision-1 contract](artifacts/README.md) defines the shared payload, principal record, immutable behavior and supported native-revision domain. Head, push and approval observations follow its [fail-closed revision boundary](artifacts/README.md#6-current-observations-and-approvals). The VCS plans; kora's common executor runs its typed plans. [ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md) supersedes collection in the candidate working copy. Requests carry no runtime identity. A VCS can supply Git or an independent native representation without changing the core.
 

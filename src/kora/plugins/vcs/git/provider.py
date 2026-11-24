@@ -1,6 +1,7 @@
 import tempfile
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
+from dataclasses import replace
 from pathlib import Path
 from typing import Final
 
@@ -14,7 +15,10 @@ from kora.executor.launcher import (
 from kora.executor.scan import InspectionSource, InspectionSources
 from kora.ir import VcsRef
 from kora.ir.json import JsonObject, parse_json_object
+from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.plugins.vcs.git.environment import git_environment, trusted_options
+from kora.plugins.vcs.git.github import GitHubChangeRequests
+from kora.plugins.vcs.git.github_model import GitHubConfiguration
 from kora.plugins.vcs.git.plans import (
     CommitIdentity,
     PlanSettings,
@@ -45,10 +49,14 @@ from kora.protocols.common import BoundaryModel, ProtocolContext
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 from kora.protocols.vcs import (
+    ChangeRequestDispatch,
+    ChangeRequestResult,
+    ChangeRequestSearch,
     CheckoutPlan,
     CheckoutRequest,
     PublishPlan,
     PublishRequest,
+    VcsCapabilities,
 )
 
 VERSION: Final[str] = "1"
@@ -57,6 +65,15 @@ HEAD_TIMEOUT_NS: Final[int] = 30 * NANOSECONDS_PER_SECOND
 HEAD_OUTPUT: Final[int] = 65_536
 MISSING_REF_EXIT: Final[int] = 2
 EVENTS: Final[LocalEvents] = local_events("vcs.git", PROVIDER_NAME)
+CHANGE_REQUEST = CATALOG.register(
+    EventSpec(
+        "vcs.git.change_request",
+        "vcs.git",
+        Level.DEBUG,
+        "a GitHub change request call finished",
+        {"operation": FieldKind.STRING, "outcome": FieldKind.STRING},
+    )
+)
 
 
 class IdentityConfiguration(BoundaryModel):
@@ -66,6 +83,7 @@ class IdentityConfiguration(BoundaryModel):
 
 class GitConfiguration(LocalConfiguration):
     identity: IdentityConfiguration
+    change_requests: GitHubConfiguration | None = None
 
 
 CONFIG_SCHEMA: Final[JsonObject] = parse_json_object(
@@ -82,6 +100,11 @@ class GitVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
         configuration: GitConfiguration,
         launcher: StepLauncher | None = None,
     ) -> None:
+        host = configuration.change_requests
+        if host is not None and any(
+            remote.binding == host.binding for remote in configuration.remotes.values()
+        ):
+            configuration_refused("github_and_local_binding_overlap")
         self.launcher = launcher or ProcessLauncher()
         identity = configuration.identity
         with tempfile.TemporaryDirectory(prefix="kora-git-") as home:
@@ -103,6 +126,31 @@ class GitVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
         super().__init__(PROVIDER_NAME, EVENTS, remotes)
         self.identity = CommitIdentity(identity.name, identity.email)
         self.sources = GitInspectionSources(self.git_tools, self.launcher)
+        self.github = (
+            GitHubChangeRequests(host, host.tls()) if host is not None else None
+        )
+
+    def capabilities(self) -> VcsCapabilities:
+        return replace(super().capabilities(), change_requests=self.github is not None)
+
+    def configured_github(self, ctx: ProtocolContext) -> GitHubChangeRequests:
+        if self.github is None:
+            self.refuse(ctx, "vcs_request_invalid")
+        return self.github
+
+    async def lookup_change_request(
+        self, request: ChangeRequestSearch, ctx: ProtocolContext
+    ) -> ChangeRequestResult:
+        result = await self.configured_github(ctx).lookup(request, ctx)
+        ctx.logger.emit(CHANGE_REQUEST, operation="lookup", outcome=result.outcome)
+        return result
+
+    async def create_change_request(
+        self, request: ChangeRequestDispatch, ctx: ProtocolContext
+    ) -> ChangeRequestResult:
+        result = await self.configured_github(ctx).create(request, ctx)
+        ctx.logger.emit(CHANGE_REQUEST, operation="create", outcome=result.outcome)
+        return result
 
     @property
     def tools(self) -> Mapping[str, str]:

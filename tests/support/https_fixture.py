@@ -72,6 +72,9 @@ def create_authority(directory: Path) -> Authority:
     authority_name = x509.Name(
         [x509.NameAttribute(NameOID.COMMON_NAME, "kora acquisition fixture root")]
     )
+    authority_subject_key = x509.SubjectKeyIdentifier.from_public_key(
+        authority_key.public_key()
+    )
     authority = (
         x509.CertificateBuilder()
         .subject_name(authority_name)
@@ -81,6 +84,7 @@ def create_authority(directory: Path) -> Authority:
         .not_valid_before(now - datetime.timedelta(minutes=5))
         .not_valid_after(now + datetime.timedelta(days=1))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(authority_subject_key, critical=False)
         .add_extension(
             x509.KeyUsage(
                 digital_signature=False,
@@ -115,6 +119,12 @@ def create_authority(directory: Path) -> Authority:
         )
         .add_extension(
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+                authority_subject_key
+            ),
+            critical=False,
         )
         .sign(authority_key, hashes.SHA256())
     )

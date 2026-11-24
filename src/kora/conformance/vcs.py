@@ -17,6 +17,7 @@ from kora.conformance.common import (
     test_failure_is_a_bounded_protocol_error,
     test_provider_logs_through_its_context,
 )
+from kora.conformance.github import ChangeRequestConformanceInputs
 from kora.executor.authorization import (
     PinnedPublication,
     TrustedBinding,
@@ -116,6 +117,7 @@ class VcsConformanceInputs:
     binding: VcsBinding
     bench: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[VcsBench]]
     configuration_effect: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[None]]
+    change_requests: ChangeRequestConformanceInputs | None = None
 
 
 class Kept:
