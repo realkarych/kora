@@ -204,7 +204,7 @@ Reference table for [ADR-0026](../../docs/decisions/0026-package-layers.md), whi
 | `cel_eval` | evaluation of checked expressions through the binding | `cel`, `ir`, `observability` |
 | `engine` | shared transition functions, immutable execution records, manual-start replay, transaction-local start-capacity checks and manual-start acceptance | `db`, `cel_eval`, `protocols`, `ir`, `observability` |
 | `api` | FastAPI application | `engine`, `db`, `models`, `cel_eval`, `cel`, `protocols`, `ir`, `observability` |
-| `scheduler` | scheduling passes and tick | `engine`, `db`, `cel_eval`, `protocols`, `ir`, `observability` |
+| `scheduler` | bounded staging polling, initial admission and recovery composition | `engine`, `db`, `cel_eval`, `protocols`, `ir`, `observability` |
 | `worker` | claims, preparation and upload | `client`, `executor`, `models`, `protocols`, `ir`, `observability` |
 | `dsl` | Python DSL and author-side compiler; compile asks the harness adapter's `check_config` through the provider registry | `cel`, `protocols`, `ir`, `observability` |
 | `cli` | CLI over the shared client; `kora compile` runs the DSL in-process | `client`, `models`, `dsl`, `cel`, `protocols`, `ir`, `observability` |

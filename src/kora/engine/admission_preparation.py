@@ -8,6 +8,7 @@ from kora.db.claim_source_values import decode_claim_source
 from kora.db.connection import (
     SNAPSHOT_NATIVE_ERRORS,
     Database,
+    DatabaseSnapshotFailure,
     DatabaseSnapshotRejected,
     clear_snapshot_error,
     require_snapshot_time,
@@ -16,6 +17,7 @@ from kora.db.native_values import NAMESPACE_POLICY_NATIVE_LIMIT
 from kora.db.types import DIGEST_LENGTH
 from kora.engine.admission_snapshot import (
     AcquiredAdmissionSnapshot,
+    AdmissionCandidateUnavailable,
     AdmissionSnapshotLimits,
     acquire_admission_snapshot,
 )
@@ -50,6 +52,10 @@ PREPARED: EventSpec = CATALOG.register(
 class AdmissionPreparationRejected(ValueError):
     def __init__(self) -> None:
         super().__init__("admission sources cannot be prepared")
+
+
+class AdmissionPreparationUnavailable(AdmissionPreparationRejected):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,7 +254,14 @@ async def prepare_admission_snapshot(
         OverflowError,
         DatabaseSnapshotRejected,
         *SNAPSHOT_NATIVE_ERRORS,
-    ):
+    ) as error:
+        if (
+            isinstance(error, AdmissionCandidateUnavailable)
+            or (acquired is not None and isinstance(error, ValueError))
+            or isinstance(error, DatabaseSnapshotRejected)
+            and error.reason is DatabaseSnapshotFailure.DEADLINE
+        ):
+            raise_safe(AdmissionPreparationUnavailable())
         raise_safe(AdmissionPreparationRejected())
     finally:
         del acquired, prepared, database, node_id, limits

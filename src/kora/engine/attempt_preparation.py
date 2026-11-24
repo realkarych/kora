@@ -12,6 +12,7 @@ from kora.engine.attempt_preparation_budget import (
     admit_attempt_preparation,
 )
 from kora.engine.claim_material import ClaimRuntimeSelection, prepare_claim_material
+from kora.engine.claim_timing import prepare_claim_timeout
 from kora.engine.graph_execution_contract import CheckedExecutionContract
 from kora.engine.graph_types import read_document
 from kora.engine.namespace_policy import NamespacePolicyConfiguration
@@ -162,6 +163,8 @@ def prepare_attempt_admission(
                 for path in node.predecessors
                 if any(entry.producer == path for entry in node.inputs)
             ),
+            prepare_claim_timeout(material.run_timeout),
+            prepare_claim_timeout(material.attempt_timeout),
         )
     except (ValueError, TypeError, RecursionError, OverflowError):
         del checked, readiness, params, binding, price, policy, selection, installation
