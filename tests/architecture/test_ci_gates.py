@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.ci.lane_plan import MAXIMUM_LANES
 from tests.support.workflows import table, workflow_document
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,7 +36,7 @@ LANE_OUTCOMES = {
     "general-1": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "general-8": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "general-10": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "general-20": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    f"general-{MAXIMUM_LANES}": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "local-runtime": WITHOUT_STATIC_CHECKS,
     STATIC_CHECK_LANE: {
@@ -46,7 +47,7 @@ LANE_OUTCOMES = {
 }
 UNPLANNED_LANES = (
     "general-0",
-    "general-21",
+    f"general-{MAXIMUM_LANES + 1}",
     "general-01",
     "general-",
     "conformance",
@@ -239,6 +240,22 @@ def test_lane_completion_rejects_every_incomplete_outcome(
     result = run_gate(["scaffold-lane"], values, tmp_path / "output")
 
     assert result.returncode != 0
+
+
+@pytest.mark.parametrize("upload", ["success", "skipped"])
+def test_penultimate_general_lane_requires_uploaded_evidence(
+    tmp_path: Path, upload: str
+) -> None:
+    values: dict[str, str | None] = {
+        **expected_lane_outcomes("general-1"),
+        "KORA_SCAFFOLD_LANE": f"general-{MAXIMUM_LANES - 1}",
+        "UPLOAD_OUTCOME": upload,
+        "WORKFLOW_CANCELLED": "false",
+    }
+
+    result = run_gate(["scaffold-lane"], values, tmp_path / "output")
+
+    assert (result.returncode == 0) is (upload == "success")
 
 
 def static_check_gate(

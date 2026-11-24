@@ -6,8 +6,8 @@ KORA_HEADROOM_WARNING_SECONDS=450
 
 admit_lane() {
   case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
-    ubuntu-24.04:general-[1-9]|ubuntu-24.04:general-1[0-9]|ubuntu-24.04:general-20|ubuntu-24.04:storage|ubuntu-24.04:local-runtime) ;;
-    macos-15:general-[1-9]|macos-15:general-1[0-9]|macos-15:general-20|macos-15:storage|macos-15:local-runtime) ;;
+    ubuntu-24.04:general-[1-9]|ubuntu-24.04:general-1[0-9]|ubuntu-24.04:general-2[0-2]|ubuntu-24.04:storage|ubuntu-24.04:local-runtime) ;;
+    macos-15:general-[1-9]|macos-15:general-1[0-9]|macos-15:general-2[0-2]|macos-15:storage|macos-15:local-runtime) ;;
     *) exit 1 ;;
   esac
 }

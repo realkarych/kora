@@ -240,14 +240,15 @@ def test_a_single_test_above_the_target_gets_a_child_of_its_own() -> None:
     ]
 
 
-def test_lane_count_accepts_exactly_the_lane_bound() -> None:
-    nodes, durations = uniform_suite(3 * MAXIMUM_LANES)
+@pytest.mark.parametrize("required_lanes", [MAXIMUM_LANES - 1, MAXIMUM_LANES])
+def test_lane_count_accepts_the_lanes_at_the_bound(required_lanes: int) -> None:
+    nodes, durations = uniform_suite(3 * required_lanes)
 
     lanes = lane_count(nodes, durations, 3, 100)
     plan = assign(nodes, durations, lanes, 3, 100)
 
-    assert lanes == MAXIMUM_LANES
-    assert len(plan) == MAXIMUM_LANES
+    assert lanes == required_lanes
+    assert len(plan) == required_lanes
     assert all(len(lane) == 3 for lane in plan)
     assert all(child.milliseconds == 100 for lane in plan for child in lane)
     assert sorted(placed(plan)) == sorted(nodes)

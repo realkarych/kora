@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from kora.ir.json import parse_json_object
 from scripts.ci.lane_plan import (
+    MAXIMUM_LANES,
     PlanFailure,
     Record,
     Table,
@@ -103,11 +104,13 @@ def lane_directory(root: Path, operating_system: str, python: str, lane: str) ->
     return root / f"scaffold-tests-{operating_system}-{python}-{lane}"
 
 
-def general_files(directory: Path, lane: str, collected: tuple[str, ...]) -> None:
+def general_files(
+    directory: Path, lane: str, collected: tuple[str, ...], lanes: int = LANES
+) -> None:
     (directory / "complete.txt").write_text(collection_text(collected))
     (directory / "complete.stderr").write_text("")
     (directory / "complete.exit").write_text("0\n")
-    plan = assign(general_nodes(collected), DURATIONS, LANES)
+    plan = assign(general_nodes(collected), DURATIONS, lanes)
     children = plan[int(lane.removeprefix("general-")) - 1]
     for name, child in zip(CHILD_NAMES, children, strict=True):
         write_junit(directory / f"{name}.xml", identities(child.nodes))
@@ -115,11 +118,15 @@ def general_files(directory: Path, lane: str, collected: tuple[str, ...]) -> Non
         (directory / f"{name}.exit").write_text("0\n")
 
 
-def lane_files(directory: Path, lane: str, operating_system: str) -> None:
+def write_passed_lane_status(directory: Path) -> None:
     directory.mkdir(parents=True)
     (directory / "tests.exit").write_text("0\n")
     (directory / "tests.stdout").write_text("1 passed\n")
     (directory / "tests.stderr").write_text("")
+
+
+def lane_files(directory: Path, lane: str, operating_system: str) -> None:
+    write_passed_lane_status(directory)
     if lane == "storage":
         write_junit(directory / "junit.xml", identities(STORAGE_NODES))
     elif lane == "local-runtime":
@@ -606,7 +613,7 @@ def test_collection_preserves_parameter_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "lane", ["integration", "conformance", "general-0", "general-21"]
+    "lane", ["integration", "conformance", "general-0", f"general-{MAXIMUM_LANES + 1}"]
 )
 def test_record_refuses_an_unplanned_lane_before_reading_evidence(
     tmp_path: Path, lane: str
@@ -742,28 +749,50 @@ def test_macos_storage_receipt_requires_the_scheduled_ignores(tmp_path: Path) ->
         verify(tmp_path)
 
 
-def test_lane_assignment_writes_planned_nodes_in_collection_order(
-    tmp_path: Path,
+@pytest.mark.parametrize("lanes", [LANES, MAXIMUM_LANES - 1, MAXIMUM_LANES])
+def test_lane_assignment_writes_planned_nodes_and_records_evidence(
+    tmp_path: Path, lanes: int
 ) -> None:
-    collected = complete_nodes("macos-15")
-    complete = tmp_path / "complete.txt"
-    complete.write_text(collection_text(collected))
-    table = Table("1", "c" * 40, {"macos-15-3.11.17": DURATIONS})
+    system, python, databases = ENVIRONMENTS[-1]
+    extra = tuple(
+        f"tests/test_extension_{index}.py::test_value"
+        for index in range((lanes - LANES) * len(CHILD_NAMES))
+    )
+    collected = complete_nodes(system, *extra)
+    lane = general_lanes(lanes)[-1]
+    directory = tmp_path / "evidence"
+    write_passed_lane_status(directory)
+    general_files(directory, lane, collected, lanes)
+    counts = planned_counts(json.dumps(dict.fromkeys(COUNTS, lanes)))
 
     children = write_assignment(
-        complete, "macos-15", "3.11.17", "general-2", "2", tmp_path, table
+        directory / "complete.txt", system, python, lane, str(lanes), tmp_path, TABLE
+    )
+    receipt = record_lane(
+        directory,
+        "123",
+        "1",
+        REVISION,
+        REQUESTED,
+        system,
+        python,
+        databases,
+        lane,
+        lane_arguments(system, lane),
     )
 
-    written = {
-        name: (tmp_path / f"{name}.args").read_text().splitlines()
-        for name in CHILD_NAMES
-    }
-    assert children == assign(general_nodes(collected), DURATIONS, 2)[1]
+    assert lane in [row["lane"] for row in matrix_rows(counts)["macos_general"]]
+    assert receipt.lane == lane
+    assert children == assign(general_nodes(collected), DURATIONS, lanes)[-1]
     for name, child in zip(CHILD_NAMES, children, strict=True):
-        assert written[name] == [node for node in collected if node in child.nodes]
+        written = (tmp_path / f"{name}.args").read_text().splitlines()
+        assert written == [node for node in collected if node in child.nodes]
+        assert f"{name}.xml" in receipt.files
 
 
-@pytest.mark.parametrize(("lane", "lanes"), [("general-3", "2"), ("general-1", "21")])
+@pytest.mark.parametrize(
+    ("lane", "lanes"), [("general-3", "2"), ("general-1", str(MAXIMUM_LANES + 1))]
+)
 def test_lane_assignment_refuses_a_lane_outside_its_plan(
     tmp_path: Path, lane: str, lanes: str
 ) -> None:
@@ -809,7 +838,7 @@ def test_plan_outputs_split_lane_rows_by_platform(tmp_path: Path) -> None:
         "[]",
         '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1}',
         '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1, "macos-15-3.11.17": 0}',
-        '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1, "macos-15-3.11.17": 21}',
+        json.dumps({**COUNTS, "macos-15-3.11.17": MAXIMUM_LANES + 1}),
         '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1, '
         '"macos-15-3.11.17": true}',
         '{"ubuntu-24.04-3.11.17": 1, "ubuntu-24.04-3.15.0": 1, '
