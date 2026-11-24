@@ -46,10 +46,12 @@ from tests.scaffold_evidence import (
     verify_scheduled,
     write_assignment,
 )
+from tests.support.workflows import job_of, step_list, table, workflow_document
 
 ROOT = Path(__file__).resolve().parents[2]
 REVISION = "a" * 40
 REQUESTED = "b" * 40
+ATTEMPT = "2"
 GENERAL_NODES = (
     "tests/test_general.py::TestCase::test_value[sqlite-a::b/c]",
     "tests/test_second.py::test_value",
@@ -100,8 +102,10 @@ def complete_nodes(operating_system: str, *extra: str) -> tuple[str, ...]:
     return (*GENERAL_NODES, *STORAGE_NODES, *extra, *local_nodes(operating_system))
 
 
-def lane_directory(root: Path, operating_system: str, python: str, lane: str) -> Path:
-    return root / f"scaffold-tests-{operating_system}-{python}-{lane}"
+def lane_directory(
+    root: Path, operating_system: str, python: str, lane: str, attempt: str = ATTEMPT
+) -> Path:
+    return root / f"scaffold-tests-attempt-{attempt}-{operating_system}-{python}-{lane}"
 
 
 def general_files(
@@ -143,7 +147,7 @@ def complete_evidence(root: Path) -> None:
             record_lane(
                 directory,
                 "123",
-                "1",
+                ATTEMPT,
                 REVISION,
                 REQUESTED,
                 operating_system,
@@ -175,7 +179,9 @@ def recollect(root: Path, operating_system: str, python: str, *extra: str) -> No
 def verify(
     root: Path, counts: dict[str, int] = COUNTS, event: str = "schedule"
 ) -> Verification:
-    return verify_scaffold(root, "123", "1", REVISION, REQUESTED, counts, TABLE, event)
+    return verify_scaffold(
+        root, "123", ATTEMPT, REVISION, REQUESTED, counts, TABLE, event
+    )
 
 
 def pull_request_evidence(root: Path) -> None:
@@ -186,6 +192,38 @@ def pull_request_evidence(root: Path) -> None:
 
 def local_total() -> int:
     return sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
+
+
+def test_scaffold_download_selects_the_current_attempt_when_artifacts_coexist(
+    tmp_path: Path,
+) -> None:
+    artifacts, downloaded = tmp_path / "artifacts", tmp_path / "downloaded"
+    complete_evidence(artifacts)
+    current = lane_directory(artifacts, "macos-15", "3.11.17", "local-runtime")
+    previous = lane_directory(artifacts, "macos-15", "3.11.17", "local-runtime", "1")
+    shutil.copytree(current, previous)
+    receipt = previous / "receipt.json"
+    data = parse_json_object(json.loads(receipt.read_text()))
+    data["run_attempt"] = "1"
+    receipt.write_text(json.dumps(data))
+    job = job_of({"ci.yml": workflow_document()}, "ci.yml", "scaffold-evidence")
+    download = next(
+        step for step in step_list(job) if step.get("id") == "evidence_download"
+    )
+    pattern = table(download["with"])["pattern"]
+    assert isinstance(pattern, str)
+    downloaded.mkdir()
+
+    selected = list(
+        artifacts.glob(pattern.replace("${{ github.run_attempt }}", ATTEMPT))
+    )
+    for artifact in selected:
+        shutil.copytree(artifact, downloaded / artifact.name)
+    result = verify(downloaded)
+
+    assert current in selected
+    assert previous not in selected
+    assert result.lanes == 12
 
 
 @pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
@@ -307,7 +345,7 @@ def test_platform_event_timings_leave_out_the_general_lanes_of_macos(
 ) -> None:
     pull_request_evidence(tmp_path)
 
-    lanes = list(observed_timings(tmp_path, COUNTS, TABLE, event))
+    lanes = list(observed_timings(tmp_path, ATTEMPT, COUNTS, TABLE, event))
 
     assert len(lanes) == 2 * LANES
     assert {timing.environment for lane in lanes for timing in lane} == {
@@ -335,7 +373,7 @@ def test_general_lanes_may_collect_the_same_tests_in_another_order(
 def test_observed_timings_cover_every_general_child(tmp_path: Path) -> None:
     complete_evidence(tmp_path)
 
-    lanes = list(observed_timings(tmp_path, COUNTS, TABLE, "schedule"))
+    lanes = list(observed_timings(tmp_path, ATTEMPT, COUNTS, TABLE, "schedule"))
 
     timings = [timing for lane in lanes for timing in lane]
     assert len(lanes) == 3 * LANES
@@ -355,7 +393,7 @@ def test_timings_print_readable_lanes_before_failing_on_a_missing_one(
     command = [sys.executable, "-m", "tests.scaffold_evidence", "timings"]
 
     result = subprocess.run(
-        [*command, str(tmp_path), json.dumps(COUNTS), "schedule"],
+        [*command, str(tmp_path), ATTEMPT, json.dumps(COUNTS), "schedule"],
         cwd=ROOT,
         capture_output=True,
         check=False,
@@ -414,7 +452,7 @@ def test_timings_refuse_evidence_that_verification_also_refuses(
     rehash(directory, [changed])
 
     with pytest.raises(failure):
-        list(observed_timings(tmp_path, COUNTS, TABLE, "schedule"))
+        list(observed_timings(tmp_path, ATTEMPT, COUNTS, TABLE, "schedule"))
 
     with pytest.raises(failure):
         verify(tmp_path)
@@ -425,7 +463,9 @@ def test_scaffold_evidence_refuses_relabelled_macos_receipt(
     tmp_path: Path, operating_system: str
 ) -> None:
     complete_evidence(tmp_path)
-    receipt = tmp_path / "scaffold-tests-macos-15-3.11.17-storage" / "receipt.json"
+    receipt = (
+        lane_directory(tmp_path, "macos-15", "3.11.17", "storage") / "receipt.json"
+    )
     data = parse_json_object(json.loads(receipt.read_text()))
     data["operating_system"] = operating_system
     receipt.write_text(json.dumps(data))
@@ -449,7 +489,7 @@ def test_general_child_evidence_refuses_rehashed_semantic_corruption(
     tmp_path: Path, corruption: str, match: str
 ) -> None:
     complete_evidence(tmp_path)
-    directory = tmp_path / "scaffold-tests-macos-15-3.11.17-general-1"
+    directory = lane_directory(tmp_path, "macos-15", "3.11.17", "general-1")
     changed: list[str] = []
     if corruption == "missing":
         (directory / "child-2.xml").unlink()
@@ -483,6 +523,7 @@ def test_general_child_evidence_refuses_rehashed_semantic_corruption(
     ("corruption", "match"),
     [
         ("missing lane", "exactly the planned lanes"),
+        ("previous attempt", "exactly the planned lanes"),
         ("extra lane", "exactly the planned lanes"),
         ("fewer planned", "exactly the planned lanes"),
         ("more planned", "exactly the planned lanes"),
@@ -502,6 +543,13 @@ def test_scaffold_evidence_requires_exactly_the_planned_general_lanes(
         for path in second.iterdir():
             path.unlink()
         second.rmdir()
+    elif corruption == "previous attempt":
+        previous = lane_directory(tmp_path, "ubuntu-24.04", "3.15.0", "general-2", "1")
+        second.rename(previous)
+        receipt = previous / "receipt.json"
+        data = parse_json_object(json.loads(receipt.read_text()))
+        data["run_attempt"] = "1"
+        receipt.write_text(json.dumps(data))
     elif corruption == "extra lane":
         lane_directory(tmp_path, "ubuntu-24.04", "3.15.0", "general-3").mkdir()
     elif corruption in {"fewer planned", "more planned"}:
@@ -532,6 +580,7 @@ def test_scaffold_evidence_requires_exactly_the_planned_general_lanes(
         ("missing", FileNotFoundError, "receipt.json"),
         ("extra", EvidenceFailure, "exactly the planned lanes"),
         ("stale", EvidenceFailure, "mismatched provenance"),
+        ("stale attempt", EvidenceFailure, "mismatched provenance"),
         ("hash", EvidenceFailure, "hash differs from its receipt"),
         ("failed", EvidenceFailure, "execution did not succeed"),
         ("skipped", EvidenceFailure, "test did not pass"),
@@ -545,16 +594,19 @@ def test_scaffold_evidence_refuses_incomplete_or_mismatched_execution(
     tmp_path: Path, corruption: str, failure: type[Exception], match: str
 ) -> None:
     complete_evidence(tmp_path)
-    directory = tmp_path / "scaffold-tests-macos-15-3.11.17-storage"
+    directory = lane_directory(tmp_path, "macos-15", "3.11.17", "storage")
     receipt = directory / "receipt.json"
     changed: list[str] = []
     if corruption == "missing":
         receipt.unlink()
     elif corruption == "extra":
         (tmp_path / "unexpected").mkdir()
-    elif corruption == "stale":
+    elif corruption in {"stale", "stale attempt"}:
         data = parse_json_object(json.loads(receipt.read_text()))
-        data["run_id"] = "122"
+        if corruption == "stale":
+            data["run_id"] = "122"
+        else:
+            data["run_attempt"] = "1"
         receipt.write_text(json.dumps(data))
     elif corruption == "hash":
         (directory / "tests.stdout").write_text("changed")
@@ -648,7 +700,7 @@ def test_local_runtime_lane_requires_its_host_fixture_tests(
     tmp_path: Path, corruption: str, match: str
 ) -> None:
     complete_evidence(tmp_path)
-    directory = tmp_path / "scaffold-tests-ubuntu-24.04-3.11.17-local-runtime"
+    directory = lane_directory(tmp_path, "ubuntu-24.04", "3.11.17", "local-runtime")
     nodes = local_nodes("ubuntu-24.04")
     changed: list[str] = []
     if corruption == "missing host fixture":
@@ -740,7 +792,9 @@ def test_linux_pull_request_lanes_keep_unscheduled_neighbours(
 
 def test_macos_storage_receipt_requires_the_scheduled_ignores(tmp_path: Path) -> None:
     complete_evidence(tmp_path)
-    receipt = tmp_path / "scaffold-tests-macos-15-3.11.17-storage" / "receipt.json"
+    receipt = (
+        lane_directory(tmp_path, "macos-15", "3.11.17", "storage") / "receipt.json"
+    )
     data = parse_json_object(json.loads(receipt.read_text()))
     data["arguments"] = list(STORAGE_ARGUMENTS)
     receipt.write_text(json.dumps(data))

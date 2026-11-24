@@ -1839,6 +1839,32 @@ def lane_job_step(workflows: Workflows, job: str, identity: str) -> dict[str, ob
     return next(step for step in steps if step.get("id") == identity)
 
 
+def test_scaffold_artifact_names_and_download_use_the_same_attempt() -> None:
+    workflows = repository_workflows()
+    producer_jobs = (
+        "scaffold-tests",
+        "scaffold-tests-macos",
+        "scaffold-tests-macos-general",
+    )
+    attempt_prefix = "scaffold-tests-attempt-${{ github.run_attempt }}-"
+
+    uploads = [
+        lane_job_step(workflows, job, "evidence_upload") for job in producer_jobs
+    ]
+    download = lane_job_step(workflows, "scaffold-evidence", "evidence_download")
+
+    assert all(
+        action_name(step["uses"]) == "actions/upload-artifact" for step in uploads
+    )
+    assert all(
+        table(step["with"])["name"]
+        == attempt_prefix + "${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}"
+        for step in uploads
+    )
+    assert action_name(download["uses"]) == "actions/download-artifact"
+    assert table(download["with"])["pattern"] == attempt_prefix + "*"
+
+
 def stop_requiring_lanes(workflows: Workflows, job: str, result: str) -> None:
     evidence = job_of(workflows, "ci.yml", "scaffold-evidence")
     evidence["needs"] = [need for need in needs_of(evidence) if need != job]
