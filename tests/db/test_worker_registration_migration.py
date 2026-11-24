@@ -103,7 +103,7 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
             )
 
         assert result.from_revision == "0022"
-        assert result.to_revision == "0033"
+        assert result.to_revision == "run_event_metadata_0034"
         assert after_worker == before_worker
         assert tuple(cursor) == (None, 0)
         assert after_event == before_event

@@ -59,8 +59,8 @@ async def test_claim_poll_migration_preserves_workers_and_recovers(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0031",
-            "0033",
-            2,
+            "run_event_metadata_0034",
+            3,
         )
         assert replay.steps == 0
         assert original_worker == saved_worker

@@ -27,6 +27,7 @@ from kora.api.routes import (
     ActiveCatalog,
     RouteName,
 )
+from kora.api.run_event_route import RunEventRoute
 from kora.api.run_trigger_route import trigger_handler
 from kora.api.worker_claims_route import WorkerClaimsRoute
 from kora.api.worker_heartbeat_route import WorkerHeartbeatRoute
@@ -37,6 +38,7 @@ from kora.engine.admission_initialization import AdmissionInitialization
 from kora.engine.worker_claim_poll import ClaimOverloaded
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
+from kora.models.run_events import RunEventPage, RunEventsQuery
 from kora.models.runs import AcceptedRun, SkippedRun, TriggerRequest
 from kora.models.worker_claims import WorkerClaimRequest, WorkerClaimResponse
 from kora.models.worker_history import WorkerHistoryQuery
@@ -192,6 +194,7 @@ def create_application(
     request_id: Callable[[], str],
     deployment: GraphServices | None = None,
     *,
+    run_events: RunEventRoute | None = None,
     worker_registration: WorkerRegistrationRoute | None = None,
     worker_claims: WorkerClaimsRoute | None = None,
     worker_history: WorkerHistoryRoute | None = None,
@@ -317,6 +320,30 @@ def create_application(
             methods=["POST"],
             operation_id="claim_worker",
             response_model=WorkerClaimResponse,
+        )
+    if run_events is not None:
+        properties = RunEventsQuery.model_json_schema()["properties"]
+        framework.add_api_route(
+            RouteName.RUN_EVENTS.value,
+            run_events,
+            methods=["GET"],
+            operation_id="list_run_events",
+            response_model=RunEventPage,
+            responses={
+                status: {"model": ApiErrorEnvelope}
+                for status in (401, 403, 404, 409, 422, 500, 503)
+            },
+            openapi_extra={
+                "parameters": [
+                    {
+                        "name": name,
+                        "in": "query",
+                        "required": False,
+                        "schema": properties[name],
+                    }
+                    for name in RunEventsQuery.model_fields
+                ]
+            },
         )
     if worker_history is not None:
 

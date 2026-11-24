@@ -85,7 +85,10 @@ async def test_first_claim_basis_upgrade_preserves_receipt_and_refuses_downgrade
             predecessor = await first_claim_basis_available(reader)
             original = (await reader.execute(select(attempt_dispatcher))).one()
 
-        report = await upgrade_database(empty_database_settings)
+        async with database.migration_connection() as migrator:
+            await migrator.run_sync(
+                lambda sync: command.upgrade(alembic_config(sync), "0033")
+            )
         async with database.read_snapshot() as reader:
             migrated = await first_claim_basis_available(reader)
             retained = (await reader.execute(select(attempt_dispatcher))).one()
@@ -101,11 +104,6 @@ async def test_first_claim_basis_upgrade_preserves_receipt_and_refuses_downgrade
 
         assert predecessor is False
         assert migrated is still_available is True
-        assert (report.from_revision, report.to_revision, report.steps) == (
-            "0032",
-            "0033",
-            1,
-        )
         assert revision == "0033"
         assert retained == original
         assert absent is None

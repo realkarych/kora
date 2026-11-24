@@ -109,8 +109,8 @@ async def test_capacity_migration_preserves_attempts_and_recovers_indexes(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0025",
-            "0033",
-            8,
+            "run_event_metadata_0034",
+            9,
         )
         assert repeated.steps == 0
         assert after == before

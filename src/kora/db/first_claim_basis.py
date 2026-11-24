@@ -15,6 +15,10 @@ from kora.db.first_claim_basis_v1 import (
     first_claim_basis_domain,
 )
 from kora.db.grant_history import row_fits
+from kora.db.run_event_page_v1 import (
+    RUN_EVENT_REVISION,
+    sqlite_run_event_page_available,
+)
 from kora.db.tables import attempt_first_claim_basis as basis
 from kora.db.transactions import writer_transaction
 from kora.db.types import POSTGRESQL, SQLITE
@@ -22,15 +26,32 @@ from kora.db.worker_claim_poll_v1 import CANDIDATE_INDEX, CANDIDATE_ROWS
 
 SQLITE_DDL: str = str(CreateTable(basis).compile(dialect=sqlite_dialect())).strip()
 MIGRATION_REVISION = {
-    SQLITE: text(
-        "SELECT CASE WHEN version_num IN ('0032', '0033') THEN version_num END "
-        "FROM main.alembic_version LIMIT 2"
-    ),
-    POSTGRESQL: text(
-        "SELECT CASE WHEN version_num IN ('0032', '0033') THEN version_num END "
-        "FROM alembic_version LIMIT 2"
-    ),
+    backend: text(
+        " ".join(
+            (
+                "SELECT CASE WHEN version_num IN ('0032', '0033', :run_events) "
+                "THEN version_num END FROM",
+                table,
+                "LIMIT 2",
+            )
+        )
+    ).bindparams(run_events=RUN_EVENT_REVISION)
+    for backend, table in (
+        (SQLITE, "main.alembic_version"),
+        (POSTGRESQL, "alembic_version"),
+    )
 }
+POSTGRES_EVENT_SUCCESSOR = text("""
+    SELECT pg_catalog.to_regclass('custody_frontier') IS NULL AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_class AS owner
+        JOIN pg_catalog.pg_class AS basis ON basis.oid =
+            pg_catalog.to_regclass('attempt_first_claim_basis')
+        WHERE owner.oid = pg_catalog.to_regclass('event')
+          AND owner.relnamespace = basis.relnamespace
+          AND owner.relowner = basis.relowner
+          AND owner.relkind = 'r' AND owner.relpersistence = 'p'
+    )
+    """)
 SQLITE_SCHEMA = text("""
     SELECT count(*) = 0,
            count(*) = 1 AND
@@ -219,6 +240,12 @@ async def first_claim_basis_available(connection: AsyncConnection) -> bool:
         in (True, 1)
     )
     current = revision == ["0033"] and matched
+    if revision == [RUN_EVENT_REVISION] and matched:
+        current = (
+            await sqlite_run_event_page_available(connection)
+            if backend == SQLITE
+            else bool(await connection.scalar(POSTGRES_EVENT_SUCCESSOR))
+        )
     if (
         not root.is_active
         or connection.get_transaction() is not root

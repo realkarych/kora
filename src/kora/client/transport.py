@@ -46,6 +46,7 @@ from kora.ir.json import (
 )
 from kora.models.errors import HTTP_STATUSES, ApiErrorCode, require_api_error_fields
 from kora.models.graphs import DeployRequest, DeployResponse
+from kora.models.run_events import PAGE_BYTES, RunEventPage
 from kora.models.runs import AcceptedRun, SkippedRun, StartOutcome, TriggerRequest
 from kora.models.worker_claims import (
     WorkerClaimRequest,
@@ -73,6 +74,7 @@ OPENAPI_RESPONSE_BYTES: int = 4 * 1024 * 1024
 GRAPH_VERSIONS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
 DEPLOY_RESPONSE_BYTES: int = 2 * 1024 * 1024
 GRAPH_RUNS_PATH: str = "/api/v1/namespaces/{ns}/graphs/{graph}/runs"
+RUN_EVENTS_PATH: str = "/api/v1/namespaces/{ns}/runs/{run}/events"
 GRANT_HISTORY_PATH: str = "/api/v1/attempts/{att}/grants"
 IDEMPOTENCY_KEY = re.compile(r"[!-~]{1,255}")
 USAGE_PATH: str = "/api/v1/attempts/{att}/usage"
@@ -140,6 +142,16 @@ def deployed_graph_version(value: JsonObject) -> DeployedGraphVersion:
 class TriggeredRun:
     response: AcceptedRun | SkippedRun
     document: JsonObject
+
+
+@dataclass(frozen=True, slots=True)
+class ListedRunEvents:
+    response: RunEventPage
+    document: JsonObject
+
+
+def listed_run_events(value: JsonObject) -> ListedRunEvents:
+    return ListedRunEvents(RunEventPage.model_validate(value), value)
 
 
 START_OUTCOME: TypeAdapter[AcceptedRun | SkippedRun] = TypeAdapter(StartOutcome)
@@ -403,6 +415,34 @@ class KoraClient:
             registered_worker,
             response_limit=16 * 1024,
             body=body,
+        )
+
+    async def list_run_events(
+        self,
+        namespace: str,
+        run_id: str,
+        *,
+        limit: str | None = None,
+        cursor: str | None = None,
+        follow: bool = False,
+    ) -> ListedRunEvents:
+        if not NAMESPACE.fullmatch(namespace) or not re.fullmatch(
+            r"[a-zA-Z0-9_-]{1,255}", run_id
+        ):
+            raise ClientError(Failure.DESTINATION_POLICY, Outcome.NOT_SENT)
+        values = (
+            ("limit", limit),
+            ("cursor", cursor),
+            ("follow", "true" if follow else None),
+        )
+        return await self._request_json(
+            "GET",
+            RUN_EVENTS_PATH.format(
+                ns=quote(namespace, safe=""), run=quote(run_id, safe="")
+            ),
+            listed_run_events,
+            response_limit=PAGE_BYTES,
+            query=tuple((name, value) for name, value in values if value is not None),
         )
 
     async def claim_worker(

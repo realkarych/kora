@@ -862,6 +862,7 @@ def serve_sqlite_api(
     from kora.api.graph_services import GraphServices, deployment_selection
     from kora.api.installed_scheduler import installed_root_admission
     from kora.api.installed_worker import installed_worker_profile
+    from kora.api.run_event_route import RunEventRoute
     from kora.api.serving import (
         ServingFailure,
         ServingRefusal,
@@ -948,6 +949,7 @@ def serve_sqlite_api(
             clock,
             new_instance_id,
             deployment,
+            run_events=RunEventRoute(database, clock),
             worker_registration=registration,
             worker_claims=claims,
             admission_initialization=initialization,
@@ -1194,6 +1196,26 @@ def compose_application(
                 allow_unenforced_secrets,
                 tuple(param or ()),
             ),
+            as_json,
+        )
+
+    @app.command(name="events", help="Read a finite page of saved run events.")
+    def events(
+        run: str,
+        namespace: str | None = typer.Option(None, "--namespace"),
+        limit: str | None = typer.Option(None, "--limit"),
+        cursor: str | None = typer.Option(None, "--cursor"),
+        follow: bool = typer.Option(
+            False, "--follow", help="Unavailable in this profile."
+        ),
+        as_json: bool = typer.Option(False, "--json", help="Print the API response."),
+    ) -> None:
+        from kora.cli.events import EventOptions, events_command
+
+        events_command(
+            environment,
+            diagnostics,
+            EventOptions(run, namespace, limit, cursor, follow),
             as_json,
         )
 

@@ -90,9 +90,12 @@ def test_log_filtering_does_not_change_durable_events(
                 server.drop_database(name)
 
     assert [result.code for result in results.values()] == [0, 0]
-    assert [result.stdout for result in results.values()] == [b"0033\n", b"0033\n"]
+    assert [result.stdout for result in results.values()] == [
+        b"run_event_metadata_0034\n",
+        b"run_event_metadata_0034\n",
+    ]
     assert snapshots["ERROR"] == snapshots["DEBUG"]
-    assert snapshots["ERROR"]["version"] == [("0033",)]
+    assert snapshots["ERROR"]["version"] == [("run_event_metadata_0034",)]
     assert len(records(results["ERROR"])) < len(records(results["DEBUG"]))
     debug_events = [str(record["event"]) for record in records(results["DEBUG"])]
     assert debug_events.index("db.migration.started") < debug_events.index(

@@ -42,6 +42,7 @@ from kora.engine.attempt_preparation_budget import (
     attempt_preparation_reservation,
 )
 from kora.models.graphs import DeployResponse
+from kora.models.run_events import RunEventPage
 from kora.models.runs import AcceptedRun
 from kora.models.worker_claims import WorkerClaim, WorkerClaimRequest
 from kora.observability.settings import COMPONENT_LEVELS_VARIABLE, LEVEL_VARIABLE
@@ -491,6 +492,16 @@ async def test_installed_scheduler_restart_reaches_one_first_http_claim(
             granted = await state(database)
             replay = await worker.claim_worker(registered.worker_id, request)
             replayed = await state(database)
+            events = await installed_cli(
+                serving_installation,
+                tmp_path,
+                {
+                    "KORA_URL": origin,
+                    "KORA_TOKEN": bearer(personal),
+                    "KORA_NAMESPACE": NAMESPACE,
+                },
+                ["events", accepted.run_id, "--json"],
+            )
         settled = await state(database)
         saved_start = await start_rows(database)
     finally:
@@ -513,6 +524,15 @@ async def test_installed_scheduler_restart_reaches_one_first_http_claim(
     assert_api_error(denied, 403, "API005")
     assert first == replay
     assert granted == replayed == settled
+    assert events.code == 0
+    timeline = RunEventPage.model_validate_json(events.stdout)
+    kinds = [entry.kind for entry in timeline.items if entry.run_id == accepted.run_id]
+    assert (
+        kinds.count("run.created")
+        == kinds.count("run.started")
+        == kinds.count("attempt.claimed")
+        == 1
+    )
     assert first.claim is not None
     assert_first_claim_is_bound_to_original_run(
         first.claim, deployed, accepted, queued, granted, request.claim_id

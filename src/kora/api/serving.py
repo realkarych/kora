@@ -25,6 +25,7 @@ from kora.db.connection import (
     DatabaseSettings,
 )
 from kora.db.migrations import database_is_at_head
+from kora.db.run_event_page_v1 import sqlite_run_event_page_available
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.protocols.scheduler_lifecycle import SchedulerFailure
 
@@ -492,7 +493,9 @@ async def serve_on_loop(
     server: ApiServer | None = None
     failure: ServingRefusal | None = None
     try:
-        if not await database_is_at_head(database):
+        if not await database_is_at_head(database) or not await database.read(
+            sqlite_run_event_page_available
+        ):
             failure = ServingRefusal.SQLITE_UNPREPARED
         elif signals.received is None:
             if preparer is not None:

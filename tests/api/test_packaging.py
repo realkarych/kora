@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from kora.api.routes import RouteName
 from kora.db.connection import Database, DatabaseSettings
@@ -448,7 +448,7 @@ async def test_installed_sqlite_api_serves_health_and_authenticated_schema(
     definition = parse_json_object(schema.json())
     assert definition["openapi"] == "3.1.0"
     assert isinstance(definition["paths"], dict)
-    assert set(definition["paths"]) == {"/healthz"}
+    assert set(definition["paths"]) == {"/healthz", RouteName.RUN_EVENTS.value}
     assert "servers" not in definition
     for response in disabled:
         assert response.status_code == 404
@@ -629,6 +629,7 @@ async def test_installed_sqlite_api_deploys_and_replays_manual_trigger(
         RouteName.HEALTH.value,
         RouteName.GRAPH_VERSIONS.value,
         RouteName.GRAPH_RUNS.value,
+        RouteName.RUN_EVENTS.value,
     }
     assert wrong_namespace.status_code == 403
     assert (
@@ -1083,6 +1084,43 @@ def test_installed_api_refuses_unprepared_sqlite_before_bind(
     assert PRIVATE_MARKER.encode() not in result.stderr
     if case == "missing-file":
         assert not database_file.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stamp", ["0034", "run_event_metadata_003", None])
+async def test_installed_api_refuses_inexact_event_schema_before_bind(
+    serving_installation: Path,
+    tmp_path: Path,
+    sqlite_template: Path,
+    stamp: str | None,
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "events.sqlite")
+    database = Database(settings)
+    try:
+        async with database.transaction() as writer:
+            if stamp is None:
+                await writer.execute(text("DROP INDEX ix_event_run_page_bounded"))
+            else:
+                await writer.execute(
+                    text("UPDATE alembic_version SET version_num = :stamp"),
+                    {"stamp": stamp},
+                )
+    finally:
+        await database.close()
+
+    result = await asyncio.to_thread(
+        api_startup_result,
+        serving_installation,
+        tmp_path,
+        str(settings.url),
+        0,
+    )
+
+    assert result.returncode == 78
+    assert refusal_reason(result) == "sqlite_unprepared"
+    assert all(
+        record["event"] != "api.serving_bound" for record in diagnostics(result.stderr)
+    )
 
 
 @pytest.mark.parametrize(

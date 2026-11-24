@@ -102,6 +102,11 @@ class BacklogDetails(WireRecord):
     next_action: Literal["retry_start"]
 
 
+class ReadProjectionDetails(WireRecord):
+    reason: Literal["read_projection_too_large", "read_budget_exceeded"]
+    run_id: StrictStr
+
+
 class ValidationDetails(WireRecord):
     errors: tuple[Diagnostic, ...] = Field(max_length=MAX_DIAGNOSTICS)
     warnings: tuple[Diagnostic, ...] = Field(max_length=MAX_DIAGNOSTICS)
@@ -204,6 +209,7 @@ class ApiError(WireRecord):
         EmptyDetails
         | ConflictDetails
         | BacklogDetails
+        | ReadProjectionDetails
         | ValidationDetails
         | RuntimeEvidenceDetails
         | DispatcherEvidenceDetails
@@ -228,7 +234,9 @@ class ApiError(WireRecord):
                 raise PydanticCustomError(
                     "api_details", "API error details are invalid."
                 )
-        elif isinstance(self.details, ConflictDetails | BacklogDetails):
+        elif isinstance(
+            self.details, ConflictDetails | BacklogDetails | ReadProjectionDetails
+        ):
             if self.code != ApiErrorCode.CONFLICT:
                 raise PydanticCustomError(
                     "api_details", "API error details are invalid."

@@ -17,8 +17,7 @@ from kora.client import ClientError, KoraClient
 from kora.client.errors import ApiError, Failure, Outcome
 from kora.conformance.capture import captured
 from kora.db.connection import Database, DatabaseSettings
-from kora.db.migrations import upgrade_database
-from kora.db.migrations.environment import alembic_config
+from kora.db.migrations.environment import alembic_config, current_revision
 from kora.db.tables import attempt_dispatcher
 from kora.engine.locks import TransitionLocks
 from kora.engine.namespace_policy import (
@@ -285,9 +284,15 @@ async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
             )
     finally:
         await database.close()
-    upgrade = await upgrade_database(empty_database_settings)
     database = Database(empty_database_settings)
     try:
+        async with database.migration_connection() as migration:
+            assert await migration.run_sync(current_revision) == "0032"
+            await migration.commit()
+            await migration.run_sync(
+                lambda sync: command.upgrade(alembic_config(sync), "0033")
+            )
+            head = await migration.run_sync(current_revision)
         clock.moment += timedelta(seconds=20)
         before_replay = await state(database)
         with captured("api", LoggingSettings(), "legacy-claim", clock.now) as capture:
@@ -309,11 +314,7 @@ async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
     finally:
         await database.close()
 
-    assert (upgrade.from_revision, upgrade.to_revision, upgrade.steps) == (
-        "0032",
-        "0033",
-        1,
-    )
+    assert head == "0033"
     assert original.claim is not None
     assert replay_after_migration.claim is not None
     assert original.claim.limits["stall_after_us"] == "17"
