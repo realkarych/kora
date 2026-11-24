@@ -191,6 +191,20 @@ def verify_fact(
     )
 
 
+def api_permissions(access: Access) -> dict[str, str]:
+    permissions = {
+        "metadata": "read",
+        "pull_requests": "write" if access == "create" else "read",
+    }
+    if access == "precreate":
+        permissions["contents"] = "read"
+    return permissions
+
+
+def api_operation(access: Access) -> Literal["read", "change_requests"]:
+    return "change_requests" if access == "create" else "read"
+
+
 def admit_call(
     call: ChangeRequestCall,
     context: ProtocolContext,
@@ -201,13 +215,10 @@ def admit_call(
     request, issued = grant.request, grant.issued
     token, rights = issued.value, issued.rights
     same_binding = (config.binding, config.binding_revision, "credential_required")
-    expected_pull = (
-        "pull_requests:write" if access == "create" else "pull_requests:read"
-    )
-    expected_native = {"metadata:read", expected_pull}
-    if access == "precreate":
-        expected_native.add("contents:read")
-    expected_coarse = {"change_requests"} if access == "create" else {"read"}
+    expected_native = {
+        f"{name}:{level}" for name, level in api_permissions(access).items()
+    }
+    expected_coarse = {api_operation(access)}
     if not (
         (intent.binding, intent.binding_revision) == same_binding[:2]
         and (request.binding, request.binding_revision, request.credential_mode)

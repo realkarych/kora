@@ -136,6 +136,9 @@ class ScopeAdmission:
     def owns(self, value: "SecretValue") -> bool:
         return not self._scope.released and value.belongs_to(self._scope)
 
+    def binds(self, scope: SecretScope) -> bool:
+        return self._scope is scope and not scope.released
+
     def __repr__(self) -> str:
         return "SecretAdmission()"
 
