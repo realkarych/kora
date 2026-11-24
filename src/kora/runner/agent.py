@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -8,6 +8,7 @@ from typing import Annotated, Final, Literal, Protocol
 
 from pydantic import Field, StrictInt, StrictStr, StringConstraints, ValidationError
 
+from kora.ir.cost import PriceRevision
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
@@ -30,6 +31,7 @@ from kora.protocols.harness import (
     SessionResult,
     SessionSpec,
 )
+from kora.protocols.identity_records import MAX_COUNT
 from kora.protocols.policy import Policy, PolicyDecision, PolicyLayers, ToolCallRequest
 from kora.protocols.runtime import (
     SessionFailedObservation,
@@ -51,15 +53,21 @@ from kora.runner.native_io import (
     NativeIOUnresolved,
 )
 from kora.runner.session_result import (
+    FinalizationFacts,
+    FinalizationImplementation,
+    FinalizationOrigin,
+    PreparedFinalization,
     PreparedObservation,
     ResultFile,
     digest_of,
     discard_observation,
+    prepare_finalization,
     prepare_observation,
     read_observation,
+    write_finalization,
     write_observation,
 )
-from kora.runner.session_result_encoding import ResultPreparationStopped
+from kora.runner.session_result_encoding import ResultPreparationStopped, check_running
 from kora.runner.sink import JournalWriter, RunnerSink, settled_by
 
 INTERRUPT_GRACE_NS: Final[int] = 30 * NANOSECONDS_PER_SECOND
@@ -122,6 +130,17 @@ def refused(code: str) -> KoraProtocolError:
     return KoraProtocolError(code, "the agent workload is refused", False, {})
 
 
+FINALIZATION: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runner.agent.finalization",
+        COMPONENT,
+        Level.DEBUG,
+        "the runner checked the isolated finalization snapshot",
+        {"outcome": FieldKind.STRING},
+    )
+)
+
+
 class SessionLimits(BoundaryModel):
     stall_after_us: Annotated[
         StrictStr, StringConstraints(pattern=r"^(0|[1-9][0-9]{0,18})$")
@@ -142,6 +161,7 @@ class AdmittedSession:
 class HostedHarness:
     adapter: HarnessAdapter
     kill: Callable[[], None]
+    no_capture: FinalizationImplementation | None = None
 
 
 class HarnessResolver(Protocol):
@@ -246,6 +266,52 @@ class Session:
     deadline: LocalThresholds | None
 
 
+@dataclass
+class MeasuredSession:
+    origin: FinalizationOrigin
+    implementation: FinalizationImplementation
+    spec: SessionSpec
+    spec_digest: str
+    duration_ms: int | None = None
+
+    async def run(
+        self, clock: Clock, operation: Callable[[], Awaitable[SessionResult]]
+    ) -> SessionResult:
+        start = clock.monotonic_ns()
+        result = await operation()
+        elapsed = clock.monotonic_ns() - start
+        if 0 <= elapsed < (MAX_COUNT + 1) * 1_000_000:
+            self.duration_ms = elapsed // 1_000_000
+        return result
+
+    def facts(self, result: SessionResult) -> FinalizationFacts | None:
+        if (
+            self.duration_ms is None
+            or result.harness != self.implementation.name
+            or result.installed_version != self.implementation.version
+        ):
+            return None
+        try:
+            price = PriceRevision.model_validate(self.spec.price_table)
+        except ValidationError:
+            return None
+        if price.id != self.spec.price_table_id:
+            return None
+        origin = self.origin
+        return FinalizationFacts(
+            attempt_id=origin.attempt_id,
+            execution_domain_id=origin.execution_domain_id,
+            submitter=origin.submitter,
+            supervisor=origin.supervisor,
+            request_digest=origin.request_digest,
+            session_spec_digest=self.spec_digest,
+            implementation=self.implementation,
+            capture="unavailable",
+            duration_ms=self.duration_ms,
+            price_table_id=price.id,
+        )
+
+
 @dataclass(frozen=True)
 class Released:
     session: bool
@@ -268,10 +334,18 @@ class AgentHost:
         self._session: Session | None = None
         self._fenced = asyncio.Event()
         self._sealed: ResultFile | None = None
+        self._finalization: ResultFile | None = None
+        self._finalization_cancelled = False
         self._has_result = False
         self._result_work: NativeResultWork | None = None
 
-    def start(self, workload: Workload, workspace: WorkspaceRef) -> None:
+    def start(
+        self,
+        workload: Workload,
+        workspace: WorkspaceRef,
+        *,
+        origin: FinalizationOrigin | None = None,
+    ) -> None:
         if self._session is not None or self._fenced.is_set():
             raise refused("workload_busy")
         admitted = self.admitted(workload, workspace)
@@ -309,13 +383,26 @@ class AgentHost:
         except BaseException:
             sink.close()
             raise
-        run = asyncio.create_task(hosted.adapter.run(spec, policy, sink, launches))
+        measurement = (
+            None
+            if origin is None or hosted.no_capture is None
+            else MeasuredSession(origin, hosted.no_capture, spec, digest)
+        )
+        run = asyncio.create_task(
+            hosted.adapter.run(spec, policy, sink, launches)
+            if measurement is None
+            else measurement.run(
+                services.clock, lambda: hosted.adapter.run(spec, policy, sink, launches)
+            )
+        )
         timer = asyncio.create_task(
             watch_liveness(
                 sink, services.clock, admitted.stall_after_ns, deadline, run.done
             )
         )
-        supervised = asyncio.create_task(self._supervise(sink, hosted, run, timer))
+        supervised = asyncio.create_task(
+            self._supervise(sink, hosted, run, timer, measurement)
+        )
         self._session = Session(sink, hosted, run, supervised, timer, deadline)
         services.log.emit(SESSION_STARTED)
 
@@ -349,6 +436,7 @@ class AgentHost:
         hosted: HostedHarness,
         run: "asyncio.Task[SessionResult]",
         timer: "asyncio.Task[None]",
+        measurement: MeasuredSession | None,
     ) -> None:
         stopping = asyncio.ensure_future(sink.termination())
         try:
@@ -387,6 +475,7 @@ class AgentHost:
                 journal_complete=complete,
             ),
             sink,
+            measurement=measurement,
         )
 
     async def _cancel_timer(self, timer: "asyncio.Task[None]") -> None:
@@ -455,7 +544,12 @@ class AgentHost:
         work.stop.set()
 
     async def _finalize(
-        self, observation: SessionObservation, sink: RunnerSink, *, fixed: bool = False
+        self,
+        observation: SessionObservation,
+        sink: RunnerSink,
+        *,
+        fixed: bool = False,
+        measurement: MeasuredSession | None = None,
     ) -> None:
         log = self._services.log
         with self._lock:
@@ -480,7 +574,9 @@ class AgentHost:
             forms = () if fixed or scope is None else scope.result_spellings()
             try:
                 prepared = await work.prepare(
-                    lambda: self._services.prepare_result(observation, forms, work.stop)
+                    lambda: self._prepare_result(
+                        observation, measurement, forms, work.stop
+                    )
                 )
             finally:
                 forms = ()
@@ -489,7 +585,7 @@ class AgentHost:
                 log.emit(SESSION_FAILED, code=code)
             else:
                 try:
-                    self._seal(prepared, sink)
+                    self._seal(prepared, sink, measure=measurement is not None)
                 finally:
                     del prepared
         except (NativeIOBusy, NativeIOClosed, NativeIOUnresolved):
@@ -501,6 +597,27 @@ class AgentHost:
             finally:
                 await work.close()
 
+    def _prepare_result(
+        self,
+        observation: SessionObservation,
+        measurement: MeasuredSession | None,
+        forms: tuple[str, ...],
+        stop: threading.Event,
+    ) -> PreparedObservation:
+        prepared = self._services.prepare_result(observation, forms, stop)
+        if (
+            prepared.failure is not None
+            or measurement is None
+            or not isinstance(observation, SessionResultObservation)
+        ):
+            return prepared
+        check_running(stop)
+        facts = measurement.facts(observation.result)
+        check_running(stop)
+        if facts is None:
+            return prepared
+        return prepare_finalization(prepared, facts, forms, stop)
+
     async def drain_result_work(self) -> None:
         work = self._result_work
         if work is not None:
@@ -510,7 +627,9 @@ class AgentHost:
         work = self._result_work
         return work is None or work.settled
 
-    def _seal(self, prepared: PreparedObservation, sink: RunnerSink) -> None:
+    def _seal(
+        self, prepared: PreparedObservation, sink: RunnerSink, *, measure: bool
+    ) -> None:
         log = self._services.log
         with self._lock:
             if self._fenced.is_set():
@@ -550,6 +669,34 @@ class AgentHost:
             journal_complete=prepared.journal_complete,
         )
 
+        if measure:
+            self._services.log.emit(
+                FINALIZATION,
+                outcome=self._seal_finalization(prepared.finalization),
+            )
+
+    def _seal_finalization(self, prepared: PreparedFinalization | None) -> str:
+        with self._lock:
+            if (
+                prepared is None
+                or self._fenced.is_set()
+                or self._finalization_cancelled
+                or self._result_deadline_passed()
+            ):
+                return "unobserved"
+            try:
+                reference = write_finalization(self._control, prepared)
+            except (OSError, FilesystemError):
+                return "unwritten"
+            if (
+                self._fenced.is_set()
+                or self._finalization_cancelled
+                or self._result_deadline_passed()
+            ):
+                return "unobserved"
+            self._finalization = reference
+            return "sealed"
+
     def _discard(self) -> None:
         try:
             discard_observation(self._control)
@@ -558,6 +705,8 @@ class AgentHost:
 
     async def cancel(self) -> None:
         session = self._started()
+        with self._lock:
+            self._finalization_cancelled = True
         session.sink.terminate("cancel")
         await asyncio.wait({session.supervised})
 
@@ -600,6 +749,10 @@ class AgentHost:
     def result_reference(self) -> ResultFile | None:
         with self._lock:
             return self._sealed
+
+    def finalization_reference(self) -> ResultFile | None:
+        with self._lock:
+            return self._finalization
 
     def result_publication_expired(self) -> bool:
         with self._lock:
