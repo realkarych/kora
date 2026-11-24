@@ -55,6 +55,8 @@ class HostCase(StrEnum):
     ALL_REPOSITORIES = "all_repositories"
     EXCESS_PERMISSIONS = "excess_permissions"
     MISSING_PERMISSIONS = "missing_permissions"
+    ECHO_APP_ASSERTION = "echo_app_assertion"
+    PREFIXED_APP_ASSERTION = "prefixed_app_assertion"
     EXPIRED = "expired"
     LONG_LIVED = "long_lived"
     PAGINATED = "paginated"
@@ -86,9 +88,9 @@ def verify_assertion(authorization: str, public_key: rsa.RSAPublicKey) -> None:
     issued_at, expires = claims.get("iat"), claims.get("exp")
     now = int(FIXTURE_TIME.timestamp())
     assert type(issued_at) is int
-    assert now - 60 <= issued_at <= now
+    assert issued_at == now - 60
     assert type(expires) is int
-    assert now < expires <= now + 600
+    assert expires == now + 300
 
 
 def permissions_for(role: Role) -> JsonObject:
@@ -165,7 +167,7 @@ class AppHost:
         self.peers_opened = 0
         self.peers_closed = 0
 
-    def issue_token(self, payload: JsonObject) -> Reply | None:
+    def issue_token(self, payload: JsonObject, assertion: str) -> Reply | None:
         index = len(self.minted)
         role = self.roles[index]
         permissions = permissions_for(role)
@@ -173,7 +175,13 @@ class AppHost:
             "repository_ids": [REPOSITORY_ID],
             "permissions": permissions,
         }
-        token = "fixture-opaque." + "1aA_" * 123 + f".mint-{index}"
+        token = f"ghs_fixtureopaque{index}"
+        if index % 2 == 1:
+            token = f"ghs_{APP_ID}_fixture.{index}.{('1aA_' * 130)}"
+        if self.case is HostCase.ECHO_APP_ASSERTION:
+            token = assertion
+        if self.case is HostCase.PREFIXED_APP_ASSERTION:
+            token = f"ghs_{APP_ID}_{assertion}"
         minted = Minted(role, token)
         self.minted.append(minted)
         if self.case is HostCase.LOST_MINT:
@@ -262,7 +270,7 @@ class AppHost:
         if route == MINT_PATH:
             assert request.method == "POST"
             assert request.payload is not None
-            return self.issue_token(request.payload)
+            return self.issue_token(request.payload, request.authorization[7:])
         if route == ACCESS_PATH:
             return self.check_repositories(request)
         if self.pulls is None:
