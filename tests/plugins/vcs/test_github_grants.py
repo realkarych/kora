@@ -19,6 +19,7 @@ from kora.protocols.secret_value import TRANSFER_SCOPE_KEY, SecretScope
 from kora.protocols.time import SystemClock
 from kora.protocols.vcs import (
     ChangeRequestCall,
+    ChangeRequestDispatch,
     ChangeRequestGrant,
     ChangeRequestIntent,
     ChangeRequestResult,
@@ -42,6 +43,7 @@ BadGrant = Literal[
     "rights",
     "expiry",
     "registration",
+    "local_publication",
 ]
 
 
@@ -154,6 +156,12 @@ def altered_call(
             changed = replace(grant, issued=issued)
         case "registration":
             changed = replace(grant, scope=SecretScope(capture.diagnostics))
+        case "local_publication":
+            local = call.intent.published.pushed_by.model_copy(
+                update={"kind": "local_service"}
+            )
+            published = call.intent.published.model_copy(update={"pushed_by": local})
+            return replace(call, intent=replace(call.intent, published=published))
     return replace(call, grant=changed)
 
 
@@ -167,6 +175,7 @@ def altered_call(
         "rights",
         "expiry",
         "registration",
+        "local_publication",
     ],
 )
 def test_github_refuses_mismatched_grants_before_network(
@@ -221,3 +230,75 @@ def test_github_historical_lookup_can_read_after_attempt_expiry(tmp_path: Path) 
         assert found == ChangeRequestResult("unresolved")
         assert len(host.requests) == 2
         assert all(request.authorization for request in host.requests)
+
+
+def test_github_deadline_preserves_201_when_its_body_stalls(tmp_path: Path) -> None:
+    authority = create_authority(tmp_path)
+
+    async def exercise(capture: Capture) -> tuple[ChangeRequestResult, int]:
+        stopped = asyncio.Event()
+        posts = 0
+
+        async def serve(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            nonlocal posts
+            posted = False
+            try:
+                header = await reader.readuntil(b"\r\n\r\n")
+                posted = header.startswith(b"POST ")
+                if posted:
+                    posts += 1
+                    writer.write(
+                        b"HTTP/1.1 201 Created\r\nContent-Length: 128\r\n\r\n{"
+                    )
+                    await writer.drain()
+                    await reader.read()
+                else:
+                    writer.write(
+                        b'HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n{"id":51}'
+                    )
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                if posted:
+                    stopped.set()
+
+        server = await asyncio.start_server(
+            serve, "127.0.0.1", 0, ssl=authority.context
+        )
+        port = server.sockets[0].getsockname()[1]
+        config = host_configuration(f"https://127.0.0.1:{port}", authority.bundle)
+        provider = GitHubChangeRequests(config, config.tls())
+        ctx, call = original_call(capture, config)
+        rights = CredentialRights(
+            resource_scope="repository",
+            native_permissions=("metadata:read", "pull_requests:write"),
+            operations=frozenset({"change_requests"}),
+        )
+        issued = call.grant.issued.model_copy(update={"rights": rights})
+        call = replace(call, grant=replace(call.grant, issued=issued))
+        deadline = ExecutionDeadline(
+            FIXED_TIME + timedelta(seconds=2),
+            "attempt",
+            ATTEMPT,
+            timedelta(),
+            DEADLINE_GRACE,
+        )
+
+        async with asyncio.timeout(10), server:
+            found = await provider.create(
+                ChangeRequestDispatch(call, "fixture title", "fixture body"),
+                replace(ctx, deadline=deadline),
+            )
+            await stopped.wait()
+        return found, posts
+
+    with captured(
+        CONFORMANCE_COMPONENT, LoggingSettings(), CASE_NAME, utc_now
+    ) as capture:
+        found, posts = asyncio.run(exercise(capture))
+
+    assert found == ChangeRequestResult("unresolved", acknowledged_create=True)
+    assert posts == 1

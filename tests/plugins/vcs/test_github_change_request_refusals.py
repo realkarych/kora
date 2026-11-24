@@ -29,7 +29,9 @@ from tests.fixtures.provider_tooling.src.kora_tooling_fixture.github_exercises i
 )
 from tests.support.configured_conformance import vcs_configuration
 from tests.support.github_host import (
+    BASE_BRANCH,
     CREDENTIAL_MARKER,
+    HEAD_BRANCH,
     HOST_TEXT_MARKER,
     NUMBER,
     ChangeRequestCase,
@@ -114,6 +116,8 @@ def exercise(root: Path, scenario: ChangeRequestCase) -> Generator[Exercise]:
         (ChangeRequestCase.MULTIPLE, "conflict", 2),
         (ChangeRequestCase.MALFORMED, "unresolved", 0),
         (ChangeRequestCase.INCOMPLETE, "unresolved", 1),
+        (ChangeRequestCase.MALFORMED_LINK, "unresolved", 1),
+        (ChangeRequestCase.DUPLICATE_LINK, "unresolved", 1),
         (ChangeRequestCase.OTHER_REPOSITORY, "unresolved", 0),
     ],
 )
@@ -141,9 +145,49 @@ async def test_github_precreate_refuses_search_without_authorizing_a_post(
 
 
 @pytest.mark.asyncio
+async def test_github_create_refuses_rebound_repository_before_post(
+    tmp_path: Path,
+) -> None:
+    scenario = ChangeRequestCase.OTHER_REPOSITORY_AT_DISPATCH
+    with exercise(tmp_path, scenario) as test:
+        assert await test.lookup() == ChangeRequestResult("absent")
+
+        observed = await test.dispatch()
+
+        assert observed == ChangeRequestResult("unresolved")
+        assert test.case.counts() == ChangeRequestCounts(0, 0)
+        assert test.server.posts == 0
+        assert test.server.cases[scenario].repository_reads == ["precreate", "dispatch"]
+
+
+@pytest.mark.asyncio
+async def test_github_merged_request_keeps_original_opener(tmp_path: Path) -> None:
+    with exercise(tmp_path, ChangeRequestCase.MERGED) as test:
+        expected = test.case.expected
+
+        observed = await test.lookup()
+        historical = await test.lookup(historical=True)
+
+        assert expected.state == "merged"
+        assert expected.opener != test.case.recovery.grant.issued.principal
+        assert (
+            observed
+            == historical
+            == ChangeRequestResult("observed", (expected.identity,), expected)
+        )
+        assert test.case.counts() == ChangeRequestCounts(0, 1)
+        assert test.server.posts == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "scenario",
-    [ChangeRequestCase.MOVED, ChangeRequestCase.OTHER_OPENER, ChangeRequestCase.ECHO],
+    [
+        ChangeRequestCase.MOVED_HEAD,
+        ChangeRequestCase.MOVED_BASE,
+        ChangeRequestCase.OTHER_OPENER,
+        ChangeRequestCase.ECHO,
+    ],
 )
 async def test_github_create_preserves_effect_when_enrichment_is_refused(
     tmp_path: Path, scenario: ChangeRequestCase
@@ -158,13 +202,21 @@ async def test_github_create_preserves_effect_when_enrichment_is_refused(
         )
         assert test.case.counts() == ChangeRequestCounts(1, 1)
         assert test.server.posts == 1
-        if scenario is ChangeRequestCase.MOVED:
-            assert test.server.published.head == test.server.published.revision(
-                test.case.precreate.intent.published.branch
-            )
-            assert test.server.cases[scenario].records[0].head == (
-                test.server.published.alternate
-            )
+        published = test.server.published
+        record = test.server.cases[scenario].records[0]
+        assert published.revision(HEAD_BRANCH) == published.head
+        assert published.revision(BASE_BRANCH) == published.base
+        expected_head = (
+            published.alternate
+            if scenario is ChangeRequestCase.MOVED_HEAD
+            else published.head
+        )
+        expected_base = (
+            published.alternate
+            if scenario is ChangeRequestCase.MOVED_BASE
+            else published.base
+        )
+        assert (record.head, record.base) == (expected_head, expected_base)
         records = test.capture.finish()
         assert [
             (record.get("operation"), record.get("outcome"))

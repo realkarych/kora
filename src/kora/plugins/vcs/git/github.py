@@ -24,7 +24,6 @@ from kora.plugins.vcs.local import refusal
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import (
     NANOSECONDS_PER_SECOND,
-    ClockSample,
     remaining_ns,
     thresholds,
 )
@@ -44,8 +43,7 @@ PAGE_SIZE: Final[int] = 100
 def useful_seconds(context: ProtocolContext, access: Access) -> float:
     if context.deadline is None or access == "historical":
         return OPERATION_SECONDS
-    sample = ClockSample(context.clock.now(), context.clock.monotonic_ns())
-    edge = thresholds(context.deadline, sample).interrupt_at_ns
+    edge = thresholds(context.deadline, context.clock.sample()).interrupt_at_ns
     remaining = remaining_ns(edge, context.clock.monotonic_ns())
     return min(OPERATION_SECONDS, remaining / NANOSECONDS_PER_SECOND)
 
@@ -97,13 +95,19 @@ class GitHubChangeRequests:
                 )
         return ChangeRequestResult("conflict", identities, acknowledged_create=created)
 
+    async def repository_matches(self, exchange: GitHubExchange) -> bool:
+        repo = await exchange.get(self.repo_path)
+        return (
+            repo.status == 200
+            and repository_id(repo.value) == self.config.repository_id
+        )
+
     async def read(
         self,
         exchange: GitHubExchange,
         request: ChangeRequestSearch,
     ) -> ChangeRequestResult:
-        repo = await exchange.get(self.repo_path)
-        if repo.status != 200 or repository_id(repo.value) != self.config.repository_id:
+        if not await self.repository_matches(exchange):
             return ChangeRequestResult("unresolved")
         if request.known_number is not None:
             found = await exchange.get(f"{self.pulls_path}/{request.known_number}")
@@ -125,7 +129,7 @@ class GitHubChangeRequests:
         found = await exchange.get(self.pulls_path, {**query, "page": "1"})
         if found.status != 200 or not isinstance(found.value, list):
             return ChangeRequestResult("unresolved")
-        if found.link is not None or len(found.value) > PAGE_SIZE:
+        if found.has_link or len(found.value) > PAGE_SIZE:
             return ChangeRequestResult(
                 "unresolved", self.identities(found.value[:PAGE_SIZE])
             )
@@ -203,11 +207,14 @@ class GitHubChangeRequests:
         if seconds <= 0:
             return ChangeRequestResult("unresolved")
         intent = call.intent
+        exchange: GitHubExchange | None = None
         try:
             async with (
                 asyncio.timeout(seconds),
                 github_exchange(self.config.api_origin, self.tls, token) as exchange,
             ):
+                if not await self.repository_matches(exchange):
+                    return ChangeRequestResult("unresolved")
                 response = await exchange.post(
                     self.pulls_path,
                     {
@@ -221,4 +228,5 @@ class GitHubChangeRequests:
                     return self.classify([response.value], call, created=True)
                 return ChangeRequestResult("unresolved")
         except (GitHubTransportError, TimeoutError):
-            return ChangeRequestResult("unresolved")
+            acknowledged = exchange is not None and exchange.acknowledged_create
+            return ChangeRequestResult("unresolved", acknowledged_create=acknowledged)

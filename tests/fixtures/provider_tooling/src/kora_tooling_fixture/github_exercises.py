@@ -126,14 +126,18 @@ def exercise_for(
             }
         ),
     )
-    existing = case == "preexisting"
+    state: Literal["open", "closed", "merged"] = "open"
+    if case == "merged":
+        state = "merged"
+    elif case == "preexisting":
+        state = "closed"
     web = f"https://github.com/{config.owner}/{config.repository}"
     expected = ChangeRequestFact(
         identity=ChangeRequestIdentity(intent.repository_id, NUMBER),
-        state="closed" if existing else "open",
+        state=state,
         head=head,
         base=base,
-        opener=opener(config, existing=existing),
+        opener=opener(config, existing=state != "open"),
         url=f"{web}/pull/{NUMBER}",
     )
     return ChangeRequestExercise(

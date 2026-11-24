@@ -2,6 +2,7 @@ import asyncio
 import ssl
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import certifi
 import pytest
@@ -54,7 +55,7 @@ def test_github_transport_does_not_follow_redirect(tmp_path: Path) -> None:
     ):
         response = asyncio.run(send(host.url("")))
 
-        assert response == HostResponse(302, None, None)
+        assert response == HostResponse(302, None)
         assert len(host.requests) == 1
         assert host.requests[0].authorization
         assert other.requests == []
@@ -72,13 +73,13 @@ def test_github_transport_refuses_oversized_response(tmp_path: Path) -> None:
     with https_server(authority, [Body(200, payload)]) as host:
         response = asyncio.run(send(host.url("")))
 
-        assert response == HostResponse(200, None, None)
+        assert response == HostResponse(200, None)
         assert len(host.requests) == 1
 
 
 @dataclass
 class HeldPeer:
-    body_response: bool
+    stage: Literal["tls", "get", "post"]
     entered: asyncio.Event = field(default_factory=asyncio.Event)
     finished: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -86,34 +87,44 @@ class HeldPeer:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
-            if self.body_response:
+            if self.stage != "tls":
                 await reader.readuntil(b"\r\n\r\n")
-                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\n\r\n[")
+                if self.stage == "post":
+                    await reader.readexactly(2)
+                status = b"201 Created" if self.stage == "post" else b"200 OK"
+                writer.write(
+                    b"HTTP/1.1 " + status + b"\r\nContent-Length: 128\r\n\r\n["
+                )
                 await writer.drain()
             else:
                 await reader.readexactly(1)
             self.entered.set()
             await reader.read()
+        except ConnectionResetError:
+            return
         finally:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except ConnectionResetError:
+                pass
             self.finished.set()
 
 
-@pytest.mark.parametrize("body_response", [False, True], ids=["tls", "body"])
+@pytest.mark.parametrize("stage", ["tls", "get", "post"])
 def test_github_transport_cancellation_closes_the_active_socket(
-    tmp_path: Path, body_response: bool
+    tmp_path: Path, stage: Literal["tls", "get", "post"]
 ) -> None:
     authority = create_authority(tmp_path)
     tls = ssl.create_default_context(cafile=authority.bundle)
 
     async def inspect() -> tuple[bool, bool]:
-        peer = HeldPeer(body_response)
+        peer = HeldPeer(stage)
         server = await asyncio.start_server(
             peer.serve,
             "127.0.0.1",
             0,
-            ssl=authority.context if body_response else None,
+            ssl=authority.context if stage != "tls" else None,
         )
         port = server.sockets[0].getsockname()[1]
 
@@ -121,7 +132,10 @@ def test_github_transport_cancellation_closes_the_active_socket(
             async with github_exchange(
                 f"https://127.0.0.1:{port}", tls, BEARER
             ) as exchange:
-                await exchange.get(PATH)
+                if stage == "post":
+                    await exchange.post(PATH, {})
+                else:
+                    await exchange.get(PATH)
 
         async with asyncio.timeout(10), server:
             task = asyncio.create_task(send())

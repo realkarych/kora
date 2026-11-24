@@ -4,13 +4,15 @@ from pathlib import Path
 from typing import Annotated, Final, Literal, Self
 
 import certifi
-from pydantic import Field, StrictInt, StringConstraints, model_validator
+from pydantic import Field, StrictInt, model_validator
+from pydantic_core import PydanticCustomError
 
 from kora.ir import PrincipalRef
 from kora.ir.json import JsonValue, fits_utf8
+from kora.plugins.vcs import local
 from kora.plugins.vcs.git.plans import is_checkout_branch, is_object_id
-from kora.plugins.vcs.local import configuration_refused, refusal
 from kora.protocols.common import BoundaryModel, ProtocolContext, is_identifier
+from kora.protocols.identity import instant_input, utc_instant
 from kora.protocols.secret_value import ScopeAdmission, SecretScope
 from kora.protocols.vcs import (
     Binding,
@@ -26,9 +28,6 @@ API_ORIGIN: Final[str] = "https://api.github.com"
 WEB_ORIGIN: Final[str] = "https://github.com"
 MAX_PR_NUMBER: Final[int] = 2**31 - 1
 MAX_HOST_ID: Final[int] = 2**63 - 1
-PublicLabel = Annotated[
-    str, StringConstraints(strict=True, min_length=1, max_length=255)
-]
 HostId = Annotated[StrictInt, Field(gt=0, le=MAX_HOST_ID)]
 Access = Literal["precreate", "historical", "create"]
 OBJECT_NAME: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_.-]{1,100}")
@@ -41,16 +40,13 @@ class GitHubConfiguration(BoundaryModel):
     binding: Binding
     binding_revision: BindingRevision
     repository_id: HostId
-    owner: PublicLabel
-    repository: PublicLabel
-    base_branch: PublicLabel
-    provider_instance: PublicLabel
+    owner: local.DisplayText
+    repository: local.DisplayText
+    base_branch: local.DisplayText
+    provider_instance: local.DisplayText
     bot_account_id: HostId
-    api_origin: PublicLabel = API_ORIGIN
-    ca_file: (
-        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=4096)]
-        | None
-    ) = None
+    api_origin: local.DisplayText = API_ORIGIN
+    ca_file: local.PathEntry | None = None
 
     @model_validator(mode="after")
     def destination_is_bounded(self) -> Self:
@@ -77,9 +73,11 @@ class GitHubConfiguration(BoundaryModel):
 
     def tls(self) -> ssl.SSLContext:
         try:
-            return ssl.create_default_context(cafile=self.ca_file or certifi.where())
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.load_verify_locations(self.ca_file or certifi.where())
+            return context
         except (OSError, ValueError):
-            configuration_refused("github_tls_invalid")
+            local.configuration_refused("github_tls_invalid")
 
 
 def bound_id(value: JsonValue, maximum: int) -> int | None:
@@ -125,7 +123,6 @@ def opener(value: JsonValue, config: GitHubConfiguration) -> PrincipalRef | None
     actor_type = value.get("type")
     if account is None or not isinstance(login, str) or LOGIN.fullmatch(login) is None:
         return None
-    kind: Literal["app", "bot_user", "user"]
     if actor_type == "Bot":
         kind = "app" if account == config.bot_account_id else "bot_user"
     elif actor_type == "User" and account != config.bot_account_id:
@@ -171,8 +168,12 @@ def verify_fact(
     observed_state: Literal["open", "closed", "merged"] = (
         "open" if state == "open" else "closed"
     )
-    if item.get("merged_at") is not None:
-        if observed_state != "closed" or not isinstance(item["merged_at"], str):
+    if (merged_at := item.get("merged_at")) is not None:
+        try:
+            utc_instant(instant_input(merged_at))
+        except PydanticCustomError:
+            return None
+        if observed_state != "closed":
             return None
         observed_state = "merged"
     values = (
@@ -222,6 +223,7 @@ def admit_call(
         and grant.dispatcher_id == call.dispatcher_id
         and grant.repository_id == intent.repository_id == str(config.repository_id)
         and intent.base_branch == config.base_branch
+        and intent.published.pushed_by.kind != "local_service"
         and is_checkout_branch(intent.published.branch)
         and fits_utf8(intent.published.branch, 1024)
         and is_object_id(intent.published.commit)
@@ -242,5 +244,5 @@ def admit_call(
         and isinstance(context.secret_admission, ScopeAdmission)
         and context.secret_admission.owns(token)
     ):
-        raise refusal("vcs_binding_mismatch")
+        raise local.refusal("vcs_binding_mismatch")
     return token.reveal()
