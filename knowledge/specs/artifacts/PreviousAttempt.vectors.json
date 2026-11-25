@@ -1,0 +1,92 @@
+[
+  {
+    "name": "sql_failure",
+    "value": {
+      "subgraph_attempt": 1,
+      "error_class": "attempt_failed",
+      "reason": "SQL result mismatch",
+      "artifacts": {
+        "implement.change": {
+          "artifact_version_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        },
+        "check.result": {
+          "artifact_version_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+        }
+      }
+    },
+    "canonical": "{\"artifacts\":{\"check.result\":{\"artifact_version_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAW\"},\"implement.change\":{\"artifact_version_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}},\"error_class\":\"attempt_failed\",\"reason\":\"SQL result mismatch\",\"subgraph_attempt\":1}",
+    "canonical_bytes": 238,
+    "payload_digest": "sha256:8fb4425bc0a72267a137dede7bab4a550187326b3b24f20a145700704fae598e"
+  },
+  {
+    "name": "same_command_bytes_different_version",
+    "value": {
+      "subgraph_attempt": 1,
+      "error_class": "attempt_failed",
+      "reason": "SQL result mismatch",
+      "artifacts": {
+        "implement.change": {
+          "artifact_version_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        },
+        "check.result": {
+          "artifact_version_id": "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+        }
+      }
+    },
+    "canonical": "{\"artifacts\":{\"check.result\":{\"artifact_version_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAX\"},\"implement.change\":{\"artifact_version_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}},\"error_class\":\"attempt_failed\",\"reason\":\"SQL result mismatch\",\"subgraph_attempt\":1}",
+    "canonical_bytes": 238,
+    "payload_digest": "sha256:80084bd3410f8d69d1decf3ab364ce4f43f62b3e13a191c895c2a4e00d613bed"
+  },
+  {
+    "name": "no_accepted_outputs",
+    "value": {
+      "subgraph_attempt": 1,
+      "error_class": "attempt_failed",
+      "reason": "",
+      "artifacts": {}
+    },
+    "canonical": "{\"artifacts\":{},\"error_class\":\"attempt_failed\",\"reason\":\"\",\"subgraph_attempt\":1}",
+    "canonical_bytes": 80,
+    "payload_digest": "sha256:376a532aa1e1bbde3de7a429e568eb4b19b42d3feb3dd0ee75c930c9a91d4082"
+  },
+  {
+    "name": "accepted_session_without_capture",
+    "value": {
+      "subgraph_attempt": 1,
+      "error_class": "attempt_failed",
+      "reason": "No transcript was captured",
+      "artifacts": {
+        "implement.session": {
+          "artifact_version_id": "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+        }
+      }
+    },
+    "canonical": "{\"artifacts\":{\"implement.session\":{\"artifact_version_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAY\"}},\"error_class\":\"attempt_failed\",\"reason\":\"No transcript was captured\",\"subgraph_attempt\":1}",
+    "canonical_bytes": 178,
+    "payload_digest": "sha256:c400dfeff4cd7cb799bf18f3a96a620f75559e2fa31698718ec8bc6f61cc876f"
+  },
+  {
+    "name": "unicode_and_escapes",
+    "value": {
+      "subgraph_attempt": 99,
+      "error_class": "command_failed",
+      "reason": "café 東京 🙂\n\"quoted\"\\path\t\u0000",
+      "artifacts": {}
+    },
+    "canonical": "{\"artifacts\":{},\"error_class\":\"command_failed\",\"reason\":\"café 東京 🙂\\n\\\"quoted\\\"\\\\path\\t\\u0000\",\"subgraph_attempt\":99}",
+    "canonical_bytes": 124,
+    "payload_digest": "sha256:ceeebf90f70aeced82af8fe04d1177a6e71026aaad4f46989c3b0bf8d1c97c50"
+  },
+  {
+    "name": "decomposed_unicode",
+    "value": {
+      "subgraph_attempt": 99,
+      "error_class": "command_failed",
+      "reason": "café 東京 🙂\n\"quoted\"\\path\t\u0000",
+      "artifacts": {}
+    },
+    "canonical": "{\"artifacts\":{},\"error_class\":\"command_failed\",\"reason\":\"café 東京 🙂\\n\\\"quoted\\\"\\\\path\\t\\u0000\",\"subgraph_attempt\":99}",
+    "canonical_bytes": 125,
+    "payload_digest": "sha256:2713c895a58ab2e63dcd33020d35b8781c8de7240b90f0840145653dab7e0878"
+  }
+]

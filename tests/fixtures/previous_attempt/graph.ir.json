@@ -1,0 +1,61 @@
+{
+  "$schema": "https://kora.dev/schemas/ir/1.0.json",
+  "ir_version": "1.0",
+  "type_contracts": {
+    "AgentSession": {"builtin_revision": "1"},
+    "CommandResult": {"builtin_revision": "1"},
+    "VcsRef": {"builtin_revision": "1"}
+  },
+  "graph": {
+    "id": "sql_feedback_example",
+    "namespace": "synthetic",
+    "nodes": {
+      "repair": {
+        "kind": "subgraph",
+        "config": {"body": "repair_iteration"},
+        "outputs": {"change": {"type": "VcsRef"}}
+      }
+    },
+    "subgraphs": {
+      "repair_iteration": {
+        "retry": {"max_attempts": 2, "initial_interval": "0s", "retry_on": ["attempt_failed"]},
+        "outputs": {"change": {"type": "VcsRef", "from": "implement", "output": "change"}},
+        "nodes": {
+          "implement": {
+            "kind": "agent",
+            "inputs": {
+              "previous_attempt": {"type": "PreviousAttempt", "from": "$previous_attempt", "optional": true}
+            },
+            "outputs": {"change": {"type": "VcsRef"}, "session": {"type": "AgentSession"}},
+            "config": {
+              "harness": "claude",
+              "prompt": "Repair the SQL query. {% if inputs.previous_attempt %}Prior check: {{ inputs.previous_attempt.reason }}{% endif %}",
+              "workspace": {"repo": "synthetic/sql", "rev": "base", "from_ref": "inputs.previous_attempt.artifacts['implement.change']"}
+            }
+          },
+          "check": {
+            "kind": "command",
+            "inputs": {"change": {"type": "VcsRef", "from": "implement", "output": "change"}},
+            "outputs": {"result": {"type": "CommandResult"}},
+            "config": {
+              "cmd": ["python3", "-c", "import sqlite3, sys; from pathlib import Path; db = sqlite3.connect(':memory:'); db.executescript('CREATE TABLE sample(amount INTEGER); INSERT INTO sample VALUES (1), (2), (3);'); rows = db.execute(Path('query.sql').read_text(encoding='utf-8')).fetchall(); print(rows); sys.exit(0 if rows == [(3,)] else 3)"],
+              "workspace": {"repo": "synthetic/sql", "from_ref": "inputs.change"},
+              "success_exit_codes": [0, 3]
+            }
+          },
+          "decide": {
+            "kind": "branch",
+            "inputs": {"gate": {"type": "CommandResult", "from": "check", "output": "result"}},
+            "config": {
+              "cases": [
+                {"when": "inputs.gate.exit_code != 0", "to": ["$fail_attempt"], "reason": "'SQL result mismatch'"}
+              ],
+              "else": []
+            }
+          }
+        }
+      }
+    }
+  },
+  "runtime": {"runtime": "local", "vcs": "git"}
+}

@@ -20,6 +20,7 @@ def test_type_schema_catalogue_is_published_unchanged_in_core_wheel(
         "StructuredOutput",
         "AgentSession",
         "CommandResult",
+        "PreviousAttempt",
         "AgentSession.cel",
     )
 
