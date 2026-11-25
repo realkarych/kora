@@ -316,22 +316,23 @@ class GitHubAppIssuer:
             ),
             operations=frozenset({api_operation(request.role)}),
         )
-        verified = IssuedCredential.model_validate(
-            {
-                "binding": source.binding,
-                "binding_revision": source.binding_revision,
-                "credential_mode": source.credential_mode,
-                "value": observed_token,
-                "principal": self._principal,
-                "rights": rights,
-                "expires_at": expiry,
-                "replacement": "reissue",
-                "revocation": "native",
-            },
+        facts = {
+            "binding": source.binding,
+            "binding_revision": source.binding_revision,
+            "credential_mode": source.credential_mode,
+            "principal": self._principal,
+            "rights": rights,
+            "expires_at": expiry,
+            "replacement": "reissue",
+            "revocation": "native",
+        }
+        IssuedCredential.model_validate(
+            facts | {"value": observed_token},
             context={TRANSFER_SCOPE_KEY: verification},
         )
-        issued = verified.model_copy(
-            update={"value": caller_scope.admit(observed_token.reveal())}
+        issued = IssuedCredential.model_validate(
+            facts | {"value": caller_scope.admit(observed_token.reveal())},
+            context={TRANSFER_SCOPE_KEY: caller_scope},
         )
         return ChangeRequestGrant(
             source,
