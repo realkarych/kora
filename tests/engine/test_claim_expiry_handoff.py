@@ -574,7 +574,6 @@ async def test_run_latch_denies_competing_claim_and_live_heartbeat_before_cascad
     delivery = await first_poll.poll(case.query, case.principal)
     assert delivery is not None
     query, principal = await contender(database, case)
-    await hold_target(database, case)
     other = narrow_database(database)
     cutoff = START + timedelta(seconds=1)
     clock.moment = cutoff
@@ -583,6 +582,7 @@ async def test_run_latch_denies_competing_claim_and_live_heartbeat_before_cascad
     fresh = case.query.model_copy(update={"claim_id": "expiry"})
 
     try:
+        await hold_target(other, case)
         with hold.installed():
             async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
                 original = tasks.create_task(first_poll.poll(fresh, case.principal))
