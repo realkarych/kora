@@ -194,7 +194,7 @@ jobs:
         id: evidence_upload
         if: ${{ always() && matrix.lane != 'static-checks' }}
         with:
-          name: scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
+          name: scaffold-tests-attempt-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
           path: ${{ env.KORA_SCAFFOLD_DIRECTORY }}
           if-no-files-found: error
       - name: Remove local runtime host fixtures
@@ -339,7 +339,7 @@ jobs:
         id: evidence_upload
         if: ${{ always() && matrix.lane != 'static-checks' }}
         with:
-          name: scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
+          name: scaffold-tests-attempt-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
           path: ${{ env.KORA_SCAFFOLD_DIRECTORY }}
           if-no-files-found: error
       - name: Remove local runtime host fixtures
@@ -475,7 +475,7 @@ jobs:
         id: evidence_upload
         if: ${{ always() && matrix.lane != 'static-checks' }}
         with:
-          name: scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
+          name: scaffold-tests-attempt-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
           path: ${{ env.KORA_SCAFFOLD_DIRECTORY }}
           if-no-files-found: error
       - name: Remove local runtime host fixtures
@@ -587,6 +587,7 @@ jobs:
         shell: bash
     env:
       PYTHONPATH: ${{ github.workspace }}/src
+      KORA_SCAFFOLD_ATTEMPT: ${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -615,7 +616,7 @@ jobs:
         if: ${{ needs.change-scope.outputs.full != 'false' }}
         id: evidence_download
         with:
-          pattern: scaffold-tests-*
+          pattern: scaffold-tests-attempt-${{ github.run_attempt }}-*
           path: scaffold-evidence
       - name: Report planned and recorded lane times
         if: ${{ !cancelled() && needs.change-scope.outputs.full != 'false' }}
@@ -625,13 +626,12 @@ jobs:
           KORA_EVENT_NAME: ${{ github.event_name }}
         run: |
           uv run --no-sync python -m tests.scaffold_evidence timings \
-            scaffold-evidence "$KORA_SCAFFOLD_LANES" "$KORA_EVENT_NAME"
+            scaffold-evidence "$KORA_SCAFFOLD_ATTEMPT" "$KORA_SCAFFOLD_LANES" "$KORA_EVENT_NAME"
       - name: Verify the planned lanes and complete collection coverage
         if: ${{ !cancelled() && needs.change-scope.outputs.full != 'false' }}
         id: verification
         env:
           KORA_SCAFFOLD_RUN: ${{ github.run_id }}
-          KORA_SCAFFOLD_ATTEMPT: ${{ github.run_attempt }}
           KORA_WORKFLOW_REVISION: ${{ github.sha }}
           KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
           KORA_SCAFFOLD_LANES: ${{ needs.scaffold-plan.outputs.lanes }}

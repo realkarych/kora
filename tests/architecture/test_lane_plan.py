@@ -351,12 +351,14 @@ COLLECTED = [
 ]
 
 
-def write_receipt(directory: Path, run: str = "77", requested: str = REVISION) -> None:
+def write_receipt(
+    directory: Path, run: str = "77", requested: str = REVISION, *, attempt: str = "1"
+) -> None:
     (directory / "receipt.json").write_text(
         json.dumps(
             {
                 "run_id": run,
-                "run_attempt": "1",
+                "run_attempt": attempt,
                 "checkout_revision": REVISION,
                 "requested_revision": requested,
             }
@@ -364,26 +366,47 @@ def write_receipt(directory: Path, run: str = "77", requested: str = REVISION) -
     )
 
 
+def timing_lane_directory(root: Path, lane: str, attempt: str | None) -> Path:
+    prefix = (
+        "scaffold-tests" if attempt is None else f"scaffold-tests-attempt-{attempt}"
+    )
+    return root / f"{prefix}-ubuntu-24.04-3.11.17-{lane}"
+
+
 def recorded_lane(
-    root: Path, lane: str, nodes: list[str], seconds: float, run: str = "77"
-) -> None:
-    directory = root / f"scaffold-tests-ubuntu-24.04-3.11.17-{lane}"
+    root: Path,
+    lane: str,
+    nodes: list[str],
+    seconds: float,
+    run: str = "77",
+    *,
+    attempt: str | None = None,
+) -> Path:
+    directory = timing_lane_directory(root, lane, attempt)
     directory.mkdir()
-    write_receipt(directory, run)
+    write_receipt(directory, run, attempt=attempt or "1")
     (directory / "child-1.exit").write_text("0\n")
     (directory / "complete.txt").write_text(
         "\n".join(COLLECTED) + f"\n\n{len(COLLECTED)} tests collected in 0.10s\n"
     )
     cases = {identity(node): seconds for node in nodes}
     (directory / "child-1.xml").write_text(junit_text(cases))
+    return directory
 
 
-def test_refresh_records_milliseconds_and_tests_per_module(tmp_path: Path) -> None:
-    recorded_lane(tmp_path, "general-1", module_nodes("tests/test_a.py", 2), 0.25)
-    recorded_lane(tmp_path, "general-2", ["tests/test_b.py::test_value"], 1.5)
-    storage = tmp_path / "scaffold-tests-ubuntu-24.04-3.11.17-storage"
+@pytest.mark.parametrize("attempt", [None, "2"])
+def test_refresh_records_milliseconds_and_tests_per_module(
+    tmp_path: Path, attempt: str | None
+) -> None:
+    recorded_lane(
+        tmp_path, "general-1", module_nodes("tests/test_a.py", 2), 0.25, attempt=attempt
+    )
+    recorded_lane(
+        tmp_path, "general-2", ["tests/test_b.py::test_value"], 1.5, attempt=attempt
+    )
+    storage = timing_lane_directory(tmp_path, "storage", attempt)
     storage.mkdir()
-    write_receipt(storage)
+    write_receipt(storage, attempt=attempt or "1")
     (storage / "junit.xml").write_text(junit_text({"tests.plugins.storage.x": 9.0}))
 
     table = recorded_table(
@@ -410,6 +433,9 @@ GREEN_COMPLETE_RUN = "one green complete master run"
     [
         ("foreign test", PlanFailure, "not in the collection"),
         ("two runs", PlanFailure, GREEN_COMPLETE_RUN),
+        ("two attempts", PlanFailure, GREEN_COMPLETE_RUN),
+        ("wrong named attempt", PlanFailure, GREEN_COMPLETE_RUN),
+        ("duplicate lane", PlanFailure, "repeats a lane"),
         ("pull request merge", PlanFailure, GREEN_COMPLETE_RUN),
         ("failed child", PlanFailure, GREEN_COMPLETE_RUN),
         ("missing receipt", PlanFailure, "not a regular file"),
@@ -422,13 +448,22 @@ GREEN_COMPLETE_RUN = "one green complete master run"
 def test_refresh_refuses_artifacts_outside_one_green_complete_run(
     tmp_path: Path, corruption: str, failure: type[Exception], match: str
 ) -> None:
-    recorded_lane(tmp_path, "general-1", module_nodes("tests/test_a.py", 2), 0.25)
-    directory = tmp_path / "scaffold-tests-ubuntu-24.04-3.11.17-general-1"
+    nodes = module_nodes("tests/test_a.py", 2)
+    directory = recorded_lane(tmp_path, "general-1", nodes, 0.25)
     report = directory / "child-1.xml"
     if corruption == "foreign test":
         report.write_text(junit_text({"tests.test_other.test_value": 1.0}))
     elif corruption == "two runs":
         recorded_lane(tmp_path, "general-2", ["tests/test_b.py::test_value"], 1, "78")
+    elif corruption == "two attempts":
+        recorded_lane(
+            tmp_path, "general-2", ["tests/test_b.py::test_value"], 1, attempt="2"
+        )
+    elif corruption == "wrong named attempt":
+        qualified = timing_lane_directory(tmp_path, "general-1", "2")
+        directory.rename(qualified)
+    elif corruption == "duplicate lane":
+        recorded_lane(tmp_path, "general-1", nodes, 0.25, attempt="1")
     elif corruption == "pull request merge":
         write_receipt(directory, requested="d" * 40)
     elif corruption == "failed child":
