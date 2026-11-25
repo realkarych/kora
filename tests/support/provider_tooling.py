@@ -126,6 +126,7 @@ def prepare_wheelhouse(
     conformance: bool = False,
     postgres: bool = False,
     serve: bool = False,
+    github_app: bool = False,
 ) -> None:
     configuration = ProjectManifest.model_validate(
         tomllib.loads((REPOSITORY / "pyproject.toml").read_text())
@@ -141,6 +142,8 @@ def prepare_wheelhouse(
         requirements += configuration.project.optional_dependencies["postgres"]
     if serve:
         requirements += configuration.project.optional_dependencies["serve"]
+    if github_app:
+        requirements += configuration.project.optional_dependencies["github-app"]
     pending = [Requirement(value) for value in requirements]
     seen: dict[str, frozenset[str]] = {}
     while pending:

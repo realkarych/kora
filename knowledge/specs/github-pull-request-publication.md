@@ -72,3 +72,23 @@ The provider checkpoint is tracked by [issue #1835](https://github.com/realkaryc
 The graph-activation work composes these owners with the retried agent and command-gate subgraph for both harnesses under ADR-0001. It supplies the accepted gate and cost presentation and exercises SHA-bound approval and invalidation. The first provider evidence carries no authority to activate any of those graph effects.
 
 Before live activation, the implementing change records the authorized repository, the host-side ref and writer assumptions, how it settles uncertain dispatch, and any accepted residual external effects in the applicable threat-model entries. GitHub may act on a created PR before kora can validate it. The planned activation requires owner approval of those limits and the integration evidence.
+
+## 6. GitHub App credential issuance
+
+[Issue #1844](https://github.com/realkarych/kora/issues/1844) supplies an optional issuer for the trusted control-plane composition. An immutable binding pins the destination profile, App ID, client ID, installation ID, namespace, and the provisioned stable account identity of the App bot. The binding also names a dedicated control-plane key resolver namespace and reference. Provision the key outside every namespace resolver and prefix available to graphs. The issuer calls that dedicated resolver with its own registered scope. It keeps both the parent key and the signed App assertion within issuer-owned lifetime.
+
+The initial issuer serves the PR adapter's three API roles. Before resolver or host calls it matches the original binding, revision, credential-required mode, repository, namespace, attempt and typed caller scope. The trusted caller carries the dispatcher identity and selects its admitted role. The Worker route will check the actual current grant and original sealed request. This provider boundary has no route or graph activation.
+
+| Role | Requested and verified native permissions |
+| --- | --- |
+| Historical lookup | `metadata:read` and `pull_requests:read` |
+| Precreate lookup | `metadata:read`, `pull_requests:read` and `contents:read` |
+| Create | `metadata:read` and `pull_requests:write` |
+
+The App assertion is RS256, with a five-minute future expiry and a one-minute backdated issued-at from the trusted clock. Successful authenticated App and installation reads must match their pinned identities. The installation must be an active user or organization installation. The issuer requests one immutable repository ID and the exact role permissions. It rejects excess or missing returned permissions and a bearer that lacks the installation-token prefix or contains a registered signing secret. The token body remains opaque. A returned repository list must contain exactly the selected repository. If the host omits that list, use the new installation token for one bounded read of `/installation/repositories` and require a complete singleton result with the pinned ID. Explicitly broader scope refuses issuance.
+
+Treat the returned token as an opaque, bounded bearer value. Register it in a private verification scope before any read with that token. Its reported expiry must be in the future and within one hour plus one minute of clock allowance. Recheck expiry again before handoff. The transferable grant retains the exact host expiry, verified repository and role permissions, and original App principal snapshot. It reports `reissue` and `native` as the provider's replacement and revocation capabilities. The caller owns the registered returned value until it releases its scope. After handoff the issuer releases its own registrations, including the verification copy. Local release supplies no remote revocation evidence. Response loss can leave a token minted. Each separately authorized acquisition makes a fresh exchange.
+
+One finite deadline covers resolver and host work. Precreate and create also respect the original useful deadline, and historical lookup can acquire a read token under a separate finite budget after execution expiry. The issuer uses the pinned HTTPS origin and TLS policy of the destination profile. Secure refusal and closure evidence cover unsuccessful exchanges and independent cancellation. Diagnostic output includes a fixed outcome and caller context through the bounded logging contract. The Worker storage and audit integration retain their separate responsibilities.
+
+The optional `kora[github-app]` profile carries the pinned signing libraries. The base provider imports no signing dependency. Controlled HTTPS exercises the real signing exchange, verified scope, and handoff to the installed PR adapter. Any live qualification depends on the independently authorized repository and App installation.
