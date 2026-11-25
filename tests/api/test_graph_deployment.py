@@ -48,7 +48,7 @@ from tests.api.deployment_cases import (
     publish,
     seeded_namespace,
     skeleton_ir,
-    unresolved_approval,
+    unresolved_predicate,
     with_agent_secret,
 )
 from tests.db.closing import ConnectionLedger
@@ -172,7 +172,7 @@ async def test_deployment_preparation_refuses_before_preparing(
     malformed = skeleton_ir()
     malformed["graph"] = "not a graph"
     oversized = with_prompt("x" * IR_BYTES)
-    unresolved = unresolved_approval()
+    unresolved = unresolved_predicate()
 
     outcomes = [
         await prepare_graph_deployment(

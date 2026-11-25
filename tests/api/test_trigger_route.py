@@ -13,7 +13,7 @@ from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import api_token, graph_version, namespace
 from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.json import JsonObject
-from kora.models.errors import ApiErrorEnvelope
+from kora.models.errors import ApiErrorEnvelope, ValidationDetails
 from kora.models.runs import AcceptedRun, SkippedRun
 from kora.protocols.authentication import Principal
 from tests.api.deployment_cases import (
@@ -30,9 +30,10 @@ from tests.api.deployment_cases import (
     with_agent_secret,
 )
 from tests.api.support import api_capture, application, client_for, deployment_services
+from tests.client.support import running_app
 from tests.db.seed import Seeder
 from tests.engine.graph_output_cases import child
-from tests.engine.start_cases import prepared_once, start_rows
+from tests.engine.start_cases import prepare_legacy_approval, prepared_once, start_rows
 from tests.plugins.authentication.support import AuthorityClock, seed_case
 
 __all__ = ["api_capture", "evaluator", "preparer"]
@@ -161,6 +162,62 @@ async def test_trigger_route_accepts_and_replays(
         private not in rendered
         for private in (NAMESPACE, accepted.run_id, "k1", headers["Authorization"])
     )
+
+
+@pytest.mark.asyncio
+async def test_trigger_route_replays_before_cli_approval_installation_check(
+    database: Database,
+    evaluator: Evaluator,
+    preparer: DeploymentPreparer,
+    api_capture: Capture,
+) -> None:
+    headers, namespace_id = await user(database)
+    version = await deployed(database, evaluator, namespace_id)
+    legacy = await prepare_legacy_approval(evaluator, {"config": {"binds": {}}})
+    app = application(
+        database, api_capture, deployment_services(database, preparer, HARNESS)
+    )
+    body: JsonObject = {"params": {}}
+    saved_key = keyed(headers, "saved")
+    async with (
+        running_app(app) as origin,
+        httpx.AsyncClient(base_url=origin, trust_env=False) as client,
+    ):
+        original = await client.post(RUNS, json=body, headers=saved_key)
+        newer = await publish(
+            database,
+            legacy,
+            namespace_id,
+            IdentifierGenerator(AuthorityClock().now).new(),
+        )
+        before = await start_rows(database)
+
+        refused = await client.post(RUNS, json=body, headers=keyed(headers, "fresh"))
+        after_refusal = await start_rows(database)
+        replayed = await client.post(RUNS, json=body, headers=saved_key)
+        after_replay = await start_rows(database)
+        mismatch = await client.post(
+            RUNS,
+            json=body | {"allow_unenforced_secrets": True},
+            headers=saved_key,
+        )
+        after_mismatch = await start_rows(database)
+
+    assert original.status_code == 201
+    assert AcceptedRun.model_validate(original.json()).graph_version_id == version
+    assert "gv_" + newer.graph_version_id != version
+    assert all(len(rows) == 1 for rows in before.values())
+    refusal = error_of(refused).error
+    assert (refused.status_code, refusal.code) == (422, "API003")
+    assert isinstance(refusal.details, ValidationDetails)
+    assert refusal.details.errors_omitted == 0
+    assert [(finding.code, finding.path) for finding in refusal.details.errors] == [
+        ("IR028", ("graph", "nodes", "approve", "config", "binds"))
+    ]
+    assert replayed.status_code == 200
+    assert replayed.json() == original.json()
+    assert (mismatch.status_code, error_of(mismatch).error.code) == (409, "API004")
+    assert before == after_refusal == after_replay == after_mismatch
 
 
 @pytest.mark.asyncio

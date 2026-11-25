@@ -23,7 +23,10 @@ from tests.api.deployment_cases import (
     seeded_namespace,
 )
 from tests.db.seed import FakeClock
-from tests.ir.first_slice_configuration_cases import chain_document, chain_nodes
+from tests.ir.first_slice_configuration_cases import (
+    chain_document,
+    installable_chain_nodes,
+)
 from tests.observability.conftest import (
     Configure,
     Pipe,
@@ -39,7 +42,7 @@ def test_deployment_checks_logging_is_content_free(
     configure: Configure, pipe: Pipe, capsys: pytest.CaptureFixture[str], invalid: bool
 ) -> None:
     markers = ("private_prompt", "private_repo", "private_harness")
-    nodes = chain_nodes()
+    nodes = installable_chain_nodes()
     config = cast("dict[str, object]", nodes["agent"]["config"])
     config.update(prompt=markers[0], workspace={"repo": markers[1]})
     if invalid:

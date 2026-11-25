@@ -79,6 +79,7 @@ from tests.engine.start_cases import (
     commit,
     deploy,
     facts_for,
+    publish_legacy_approval,
     publish_version,
     redeploy,
     request_for,
@@ -285,6 +286,30 @@ async def test_manual_start_replays_saved_outcomes(
 
     assert again == StartAcceptance(AcceptanceOutcome.REPLAYED, first)
     assert changed == StartAcceptance(AcceptanceOutcome.MISMATCHED)
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_manual_start_replays_before_the_installation_check(
+    database: Database, evaluator: Evaluator
+) -> None:
+    case = await deploy(database, evaluator)
+    accepted = await start(database, case)
+    before = await start_rows(database)
+    unsupported = DeploymentSelection("uninstalled", UNENFORCED)
+
+    refused = await start(database, case, key="fresh", selection=unsupported)
+    replayed = await start(database, case, selection=unsupported)
+    mismatched = await start(
+        database, case, allow_unenforced_secrets=True, selection=unsupported
+    )
+    after = await start_rows(database)
+
+    assert isinstance(accepted, StartAcceptance)
+    assert accepted.outcome is AcceptanceOutcome.ACCEPTED
+    assert isinstance(refused, InstallationRefusal)
+    assert replayed == StartAcceptance(AcceptanceOutcome.REPLAYED, accepted.response)
+    assert mismatched == StartAcceptance(AcceptanceOutcome.MISMATCHED)
     assert after == before
 
 
@@ -782,3 +807,46 @@ async def test_accept_manual_start_prepares_again_once(
     else:
         assert result == StartAcceptance(AcceptanceOutcome.STALE)
         assert all(not table for table in rows.values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changes", "field"),
+    [
+        ({"config": {"context": "inputs.gate.exit_code"}}, ("config", "context")),
+        ({"config": {"channel": "slack"}}, ("config", "channel")),
+        ({"config": {"binds": {}}}, ("config", "binds")),
+        ({"input": {"optional": True}}, ("inputs", "gate")),
+        (
+            {
+                "inputs": {
+                    "other": {
+                        "type": "CommandResult",
+                        "from": "gate",
+                        "output": "result",
+                    }
+                }
+            },
+            ("inputs",),
+        ),
+    ],
+    ids=["context", "channel", "binds", "optional", "another-input"],
+)
+async def test_cli_approval_rechecks_exact_authored_context(
+    database: Database,
+    evaluator: Evaluator,
+    changes: JsonObject,
+    field: tuple[str, ...],
+) -> None:
+    case = await publish_legacy_approval(database, evaluator, changes)
+    before = await start_rows(database)
+
+    result = await start(database, case, version=case.version_id)
+    after = await start_rows(database)
+
+    assert isinstance(result, InstallationRefusal)
+    assert [(error.code, error.path) for error in result.diagnostics.errors] == [
+        ("IR028", ("graph", "nodes", "approve", *field))
+    ]
+    assert after == before
+    assert all(not rows for rows in after.values())

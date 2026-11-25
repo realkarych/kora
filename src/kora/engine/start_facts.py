@@ -31,7 +31,12 @@ from kora.engine.start_preparation import StartPreparationLimits
 from kora.engine.start_records import PreparedManualStartRequest
 from kora.engine.start_replay import ManualStartCandidate
 from kora.ir.config import AgentConfig
-from kora.ir.deployment_checks import DeploymentSelection, installation_findings
+from kora.ir.deployment_checks import (
+    DeploymentSelection,
+    approval_installation_findings,
+    installation_findings,
+    merge_diagnostics,
+)
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
 from kora.ir.runtime import Retention
@@ -196,7 +201,12 @@ def _facts(
     document = read_document(checked.canonical_ir, TextBudget(maximum))
     if declares_agent_secrets(document):
         return StartRefusal.SECRETS
-    findings = installation_findings(document, selection)
+    findings = merge_diagnostics(
+        (
+            installation_findings(document, selection),
+            approval_installation_findings(document),
+        )
+    )
     if not findings.valid:
         return InstallationRefusal(findings)
     runtime_limits = document.runtime.limits

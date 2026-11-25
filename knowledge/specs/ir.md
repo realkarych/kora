@@ -286,7 +286,7 @@ A subagent is a closed record with required strict string `name`, `description` 
 
 The [first-slice chain](first-slice.md#refusal-contract) uses direct CLI bindings to its published `VcsRef` and command `CommandResult`, as in [dependency-upgrade.ir.yaml](examples/dependency-upgrade.ir.yaml). A ReviewBundle is an optional context artifact, not a requirement for this CLI path; its fact/narrative ownership remains unchanged when used.
 
-The [local CLI context contract](cli-approval-opening.md#1-source-and-opening) under #1737 defines an installation refusal for unsupported authored input and context selections in the walking skeleton. It retains ordinary IR path checking and the authored field.
+The [local CLI context contract](cli-approval-opening.md#1-source-and-opening) under #1737 defines an installation refusal for unsupported authored input and context selections in the walking skeleton. It retains ordinary IR path checking and the authored field. The installation and manual-start check is implemented under #1851 with `test_cli_approval_rechecks_exact_authored_context`; the fresh locked recheck at opening remains with #1447.
 
 Only an absent `form` selects the built-in default form:
 

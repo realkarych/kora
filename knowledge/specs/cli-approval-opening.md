@@ -116,7 +116,7 @@ The #1447 runtime delivery owns the real opening and expiry integration, includi
 
 The local result implementation owns its migration, bounded native selector, atomic acceptance and native reclaim. Qualify its first reliance with #1447's real shared apply through the scheduler default continuation and committed expiry latch, using a real accepted and settled `CommandResult` and its exact current context. A prearranged wait fixture can exercise a negative or storage case and cannot establish that integrated acceptance. This focused engine composition needs neither a previously shipped opening, the #1448 loop nor a public route. A wait whose configured default path lacks the producer is ineligible for activation. The schema upgrade also preserves the existing first Worker Claim and receipt replay through their real entry point.
 
-The following checks are runtime activation requirements, not current passing results. Run each database case on SQLite and PostgreSQL with injected time and deterministic barriers.
+The following checks are runtime activation requirements, not current passing results. Run each database case on SQLite and PostgreSQL with injected time and deterministic barriers. The validate/deploy and manual-start legs of `test_cli_approval_rechecks_exact_authored_context` are implemented under [#1851](https://github.com/realkarych/kora/issues/1851); its fresh opening leg remains with #1447.
 
 | Test | Blocking evidence |
 |---|---|
