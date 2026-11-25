@@ -96,6 +96,8 @@ Journal and metadata ownership do not supply host containment. Installed core/pr
 
 ## 6. Qualification and delivery limits
 
+[The isolated Linux ext4 walking-skeleton contract](first-slice.md#isolated-walking-skeleton-qualification) places the named physical and forced-loss legs post-MVP for one test invocation. It requires the original live native outcome, issuer, provider and resource evidence. The qualification cases below retain their production and backend activation scope.
+
 The following are future acceptance cases, not test results. Each implementing issue owns real source producers, its exact activation condition and executable evidence. Existing SQLite/PostgreSQL and Linux/macOS obligations remain. Existing scheduled/manual provider studies keep their scope and schedule; this document adds no new CI campaign or merge gate.
 
 | Required case | Producer and checkable decision |
