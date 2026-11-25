@@ -64,6 +64,10 @@ ADMISSION_OUTCOMES = frozenset(
 )
 RUN_STATES = frozenset({"pending", "running", "failed", "cancelled", "succeeded"})
 ROOT_STATES = frozenset({"pending", "ready", "waiting", "failed", "cancelled"})
+SCHEDULER_READBACK_UNKNOWN = (
+    "Scheduler timeout durable_readback=unknown "
+    "root_lookup=unknown root_outcomes=unknown"
+)
 FIXTURE_SQL_KEY = ' \nWHERE (id COLLATE "BINARY") = ? AND '
 CANDIDATE_SOURCE = "\nFROM main.node_instance INDEXED BY ix_claim_node_locator"
 PARENT_SOURCE = "\nFROM main.run INDEXED BY ix_run_input_locator"
@@ -185,13 +189,23 @@ class SQLiteRecoveryEvidence:
                 label = "driver_return" if mark.returned else "before_dispatch"
                 (before if index < cutoff else joined)[mark.phase, label] += 1
         return (
-            f"native_at_watchdog={dict(before)!r} native_during_join={dict(joined)!r}"
+            f"native_through_watchdog={dict(before)!r} "
+            f"native_during_join={dict(joined)!r}"
         )
 
 
 def recovery_capture_note(
     capture: Capture, evidence: SQLiteRecoveryEvidence, root: str | None
 ) -> str:
+    if evidence.incomplete:
+        return "root_lookup=unknown root_outcomes=unknown"
+    native = [
+        mark.identity
+        for mark in evidence.marks
+        if mark.phase == "candidate" and not mark.returned
+    ]
+    lookup = "observed_through_join" if root in native else "unobserved"
+    unknown = f"root_lookup={lookup} capture=unknown root_outcomes=unknown"
     try:
         records = capture.finish()
     except (
@@ -201,7 +215,7 @@ def recovery_capture_note(
         UnicodeDecodeError,
         OSError,
     ):
-        return "capture=unknown"
+        return unknown
     snapshot = capture.diagnostics.snapshot()
     if (
         snapshot.dropped_total()
@@ -210,7 +224,7 @@ def recovery_capture_note(
         or snapshot.sink_failures
         or capture.reader.discarded
     ):
-        return "capture=unknown"
+        return unknown
     observed: list[tuple[str, bool | int | str]] = []
     wraps = 0
     for record in records:
@@ -226,26 +240,25 @@ def recovery_capture_note(
                 or value not in (0, 1)
                 or type(wrapped) is not bool
             ):
-                return "capture=unknown"
+                return unknown
             wraps += wrapped
             if value == 0:
                 continue
         elif field == "outcome":
             if not isinstance(value, str) or value not in ADMISSION_OUTCOMES:
-                return "capture=unknown"
+                return unknown
         elif type(value) is not bool:
-            return "capture=unknown"
+            return unknown
         observed.append((field, value))
         if len(observed) > MAX_RECOVERY_MARKS:
-            return "capture=unknown"
-    native = [
-        mark.identity
-        for mark in evidence.marks
-        if mark.phase == "candidate" and not mark.returned
-    ]
+            return unknown
     labels = [name for name, _ in observed]
-    prefix = f"selected_candidates={labels.count('count')} wraps={wraps}"
-    if evidence.incomplete or labels != [
+    prefix = (
+        f"root_lookup={lookup} "
+        f"selected_candidates_through_join={labels.count('count')} "
+        f"wraps_through_join={wraps}"
+    )
+    if lookup == "unobserved" or labels != [
         "count",
         "acquired",
         "prepared",
@@ -257,7 +270,7 @@ def recovery_capture_note(
         for index, identity in enumerate(native)
         if identity == root
     ]
-    return f"{prefix} root_acquired_prepared_outcome={outcomes!r}"
+    return f"{prefix} root_acquired_prepared_outcome_through_join={outcomes!r}"
 
 
 async def recovery_timeout_note(
@@ -268,7 +281,7 @@ async def recovery_timeout_note(
     cutoff: int,
 ) -> str:
     if len(accepted) != 2:
-        return "Scheduler timeout evidence=unknown"
+        return SCHEDULER_READBACK_UNKNOWN
     wait_count = (
         select(func.count())
         .select_from(wait)
@@ -303,9 +316,9 @@ async def recovery_timeout_note(
         async with database.read_snapshot(deadline=deadline) as reader:
             rows = (await reader.execute(query)).all()
     except (DatabaseClosedError, DatabaseSnapshotRejected, SQLAlchemyError, OSError):
-        return "Scheduler timeout durable_readback=unknown"
+        return SCHEDULER_READBACK_UNKNOWN
     if len(rows) != 2 or {row[0] for row in rows} != set(accepted):
-        return "Scheduler timeout durable_readback=unknown"
+        return SCHEDULER_READBACK_UNKNOWN
     _, run_status, root, root_status, waits = next(
         row for row in rows if row[0] == accepted[1]
     )
@@ -324,7 +337,7 @@ async def recovery_timeout_note(
             )
         )
     ):
-        return "Scheduler timeout durable_readback=unknown"
+        return SCHEDULER_READBACK_UNKNOWN
     state = root_status if root else "unmaterialized"
     return (
         f"Scheduler second root run={run_status} state={state} durable_waits={waits} "
