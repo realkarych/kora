@@ -6,10 +6,16 @@ import selectors
 import shutil
 import signal
 import socket
+import sqlite3
+import ssl
 import subprocess
 import sys
 import time
+from collections.abc import AsyncGenerator, Awaitable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, closing
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -18,21 +24,33 @@ import pytest
 from sqlalchemy import select, text
 
 from kora.api.routes import RouteName
+from kora.client.errors import ClientError, Failure, Outcome
 from kora.db.connection import Database, DatabaseSettings
 from kora.db.tables import attempt, graph_version
 from kora.engine.start_records import AcceptedStart, decode_start_receipt
 from kora.ir.json import JsonObject, parse_json_object
 from kora.models.errors import ApiErrorEnvelope
 from kora.models.graphs import DeployResponse
+from kora.models.run_events import RunEvent, RunEventPage
 from kora.models.runs import AcceptedRun
 from tests.api.deployment_cases import GRAPH, NAMESPACE, skeleton_ir
 from tests.api.serving_lifecycle_child import SLOW_RESPONSE_BYTES, serving_event
 from tests.api.test_linux_serving_barrier import native_probe_required_here
 from tests.api.test_worker_registration import registry_state
 from tests.cli.test_deploy_command import collect_cli
-from tests.client.support import tls_pair
+from tests.client.support import (
+    Reader,
+    TlsMaterial,
+    Writer,
+    peer,
+    tls_pair,
+    write_tls_material,
+)
+from tests.db.seed import START, Seeder
+from tests.db.test_run_event_reads import SYSTEM, EventScope, seed_event
 from tests.engine.graph_output_cases import child as ir_child
 from tests.engine.start_cases import start_rows
+from tests.mcp.test_stdio_deploy import StdioSession
 from tests.plugins.authentication.support import seed_case
 from tests.support.databases import copy_sqlite_template
 from tests.support.observability import ProcessResult
@@ -53,6 +71,11 @@ DRAIN_RECEIPT_TIMEOUT = 8
 PRIVATE_MARKER = "private-installed-api-marker"
 PRIVATE_PARAMETER = "private-installed-parameter-value"
 DOMAIN_HARNESS = "KORA_API_HARNESS"
+HTTPS_ORIGIN = "KORA_API_HTTPS_ORIGIN"
+TLS_CERT_FILE = "KORA_API_TLS_CERT_FILE"
+TLS_KEY_FILE = "KORA_API_TLS_KEY_FILE"
+CA_BUNDLE = "KORA_CA_BUNDLE"
+TLS_EVENTS_NAMESPACE = "installed_tls_events"
 DEPLOY_PATH = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/versions"
 TRIGGER_PATH = f"/api/v1/namespaces/{NAMESPACE}/graphs/{GRAPH}/runs"
 WORKER_ROUTES = ("/api/v1/workers", "/api/v1/workers/staged-worker/claims")
@@ -107,15 +130,18 @@ def installed_core(
     *,
     serve: bool = False,
     postgres: bool = False,
+    mcp: bool = False,
     copy_payload: bool = False,
 ) -> Path:
     wheelhouse = root / "dependencies"
     wheelhouse.mkdir()
-    prepare_wheelhouse(wheelhouse, serve=serve, postgres=postgres)
+    prepare_wheelhouse(wheelhouse, serve=serve, postgres=postgres, mcp=mcp)
     wheel = copy_core_wheel(core_wheel, wheelhouse)
     python = create_virtual_environment(root / "environment")
     extras = ",".join(
-        name for name, enabled in (("serve", serve), ("postgres", postgres)) if enabled
+        name
+        for name, enabled in (("serve", serve), ("postgres", postgres), ("mcp", mcp))
+        if enabled
     )
     file_isolation = ["--link-mode", "copy"] if copy_payload else []
     run_setup(
@@ -149,6 +175,15 @@ def serving_installation(
 ) -> Path:
     return installed_core(
         core_wheel, tmp_path_factory.mktemp("installed-api-serving"), serve=True
+    )
+
+
+@pytest.fixture(scope="module")
+def https_installation(
+    core_wheel: Path, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    return installed_core(
+        core_wheel, tmp_path_factory.mktemp("installed-api-https"), serve=True, mcp=True
     )
 
 
@@ -274,6 +309,12 @@ def refusal_reason(result: subprocess.CompletedProcess[bytes]) -> str:
 
 def socket_port(bound_socket: socket.socket) -> int:
     return int(bound_socket.getsockname()[1])
+
+
+def unused_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((LOOPBACK, 0))
+        return socket_port(probe)
 
 
 async def read_bound_port(process: asyncio.subprocess.Process) -> tuple[int, bytes]:
@@ -506,6 +547,574 @@ async def installed_cli(
         )
     )
     return await collect_cli(launch, SERVE_TIMEOUT)
+
+
+def https_environment(material: TlsMaterial, port: int) -> dict[str, str]:
+    return {
+        HTTPS_ORIGIN: f"https://{LOOPBACK}:{port}",
+        TLS_CERT_FILE: str(material.certificate),
+        TLS_KEY_FILE: str(material.key),
+    }
+
+
+def https_client_environment(
+    origin: str, credential: str, *, bundle: Path | None = None
+) -> dict[str, str]:
+    return {
+        **api_environment(None),
+        "KORA_URL": origin,
+        "KORA_NAMESPACE": TLS_EVENTS_NAMESPACE,
+        "KORA_TOKEN": credential,
+        **({CA_BUNDLE: str(bundle)} if bundle is not None else {}),
+    }
+
+
+async def seed_installed_run_events(
+    settings: DatabaseSettings,
+) -> tuple[str, tuple[RunEvent, RunEvent]]:
+    database = Database(settings)
+    try:
+        personal = await seed_case(database, TLS_EVENTS_NAMESPACE)
+        authorization = personal.request.authorization
+        assert authorization is not None
+        namespace_id = personal.principal.namespaces[0].namespace_id
+        actor: JsonObject = {
+            "kind": "user",
+            "owner": personal.principal.owner,
+            "token_id": personal.principal.token_id,
+        }
+        async with database.transaction() as writer:
+            seed = Seeder(writer)
+            graph_id = await seed.graph(namespace_id)
+            version_id = await seed.graph_version(graph_id)
+            run_id = await seed.run(namespace_id, graph_id, version_id)
+            node_id = await seed.node(run_id, "installed")
+            attempt_id = await seed.attempt(node_id)
+            scope = EventScope(namespace_id, run_id, node_id, attempt_id)
+            older = await seed_event(
+                writer,
+                scope,
+                actor,
+                0,
+                event_id="0" * 25 + "1",
+                payload={"private": PRIVATE_MARKER},
+                kind="run.created",
+            )
+            newer = await seed_event(
+                writer,
+                scope,
+                SYSTEM,
+                0,
+                event_id="0" * 25 + "2",
+                payload={"private": PRIVATE_MARKER},
+            )
+    finally:
+        await database.close()
+    expected = {
+        "run_id": f"run_{run_id}",
+        "node_instance_id": f"node_{node_id}",
+        "attempt_id": f"att_{attempt_id}",
+        "at": START,
+    }
+    return authorization.removeprefix("Bearer "), (
+        RunEvent.model_validate(
+            {
+                **expected,
+                "id": f"event_{newer}",
+                "kind": "run.succeeded",
+                "actor": SYSTEM,
+            }
+        ),
+        RunEvent.model_validate(
+            {**expected, "id": f"event_{older}", "kind": "run.created", "actor": actor}
+        ),
+    )
+
+
+def event_arguments(run_id: str, cursor: str | None) -> list[str]:
+    return [
+        "events",
+        run_id,
+        "--json",
+        "--limit",
+        "1",
+        *(["--cursor", cursor] if cursor is not None else []),
+    ]
+
+
+@asynccontextmanager
+async def installed_operating_mcp(
+    python: Path, directory: Path, environment: dict[str, str]
+) -> AsyncGenerator[StdioSession]:
+    process = await asyncio.create_subprocess_exec(
+        str(python.with_name("kora")),
+        "mcp",
+        "--server",
+        "operating",
+        cwd=directory,
+        env={
+            **environment,
+            "KORA_MCP_TOKEN": environment["KORA_TOKEN"],
+            "KORA_TOKEN": PRIVATE_MARKER,
+        },
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    session = StdioSession(process)
+    try:
+        await session.initialize()
+        yield session
+    finally:
+        try:
+            async with asyncio.timeout(SERVE_TIMEOUT):
+                code, stderr = await session.close()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        assert code == 0, stderr
+        assert b"process.failed" not in stderr
+        for name in ("KORA_TOKEN", "KORA_URL", CA_BUNDLE):
+            if name in environment:
+                assert environment[name].encode() not in stderr
+        assert PRIVATE_MARKER.encode() not in stderr
+
+
+async def installed_mcp_event_result(
+    session: StdioSession, run_id: str, cursor: str | None
+) -> JsonObject:
+    arguments: JsonObject = {
+        "mode": "events",
+        "namespace": TLS_EVENTS_NAMESPACE,
+        "run_id": run_id,
+        "limit": 1,
+    }
+    if cursor is not None:
+        arguments["cursor"] = cursor
+    message = await session.request(
+        "tools/call", {"name": "kora_runs", "arguments": arguments}
+    )
+    return parse_json_object(message["result"])
+
+
+async def raw_event_page(
+    client: httpx.AsyncClient, run_id: str, credential: str, cursor: str | None
+) -> RunEventPage:
+    query = {"limit": "1"}
+    if cursor is not None:
+        query["cursor"] = cursor
+    response = await client.get(
+        f"/api/v1/namespaces/{TLS_EVENTS_NAMESPACE}/runs/{run_id}/events",
+        params=query,
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+    assert response.status_code == 200, response.content
+    return RunEventPage.model_validate_json(response.content)
+
+
+async def cli_event_page(
+    python: Path,
+    directory: Path,
+    environment: dict[str, str],
+    run_id: str,
+    cursor: str | None,
+) -> RunEventPage:
+    outcome = await installed_cli(
+        python, directory, environment, event_arguments(run_id, cursor)
+    )
+    assert outcome.code == 0, outcome.stderr
+    for name in ("KORA_TOKEN", "KORA_URL", CA_BUNDLE):
+        assert environment[name].encode() not in outcome.stderr
+    return RunEventPage.model_validate_json(outcome.stdout)
+
+
+async def mcp_event_page(
+    session: StdioSession, run_id: str, cursor: str | None
+) -> RunEventPage:
+    response = await installed_mcp_event_result(session, run_id, cursor)
+    assert response["isError"] is False
+    return RunEventPage.model_validate(response["structuredContent"])
+
+
+@dataclass(frozen=True)
+class EventObservation:
+    began: datetime
+    page: RunEventPage
+    ended: datetime
+
+
+async def observed_page(request: Awaitable[RunEventPage]) -> EventObservation:
+    began = datetime.now(UTC)
+    page = await request
+    return EventObservation(began, page, datetime.now(UTC))
+
+
+@asynccontextmanager
+async def pending_tls_handshake(port: int, authority: Path) -> AsyncGenerator[Reader]:
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(authority)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    client = context.wrap_bio(incoming, outgoing, server_hostname=LOOPBACK)
+    with pytest.raises(ssl.SSLWantReadError):
+        client.do_handshake()
+
+    async with asyncio.timeout(SERVE_TIMEOUT):
+        reader, writer = await asyncio.open_connection(LOOPBACK, port)
+    try:
+        async with asyncio.timeout(SERVE_TIMEOUT):
+            writer.write(outgoing.read())
+            await writer.drain()
+            header = await reader.readexactly(5)
+            hello = await reader.readexactly(int.from_bytes(header[3:], "big"))
+        assert header[0] == 22
+        assert hello[0] == 2
+        yield reader
+    finally:
+        writer.close()
+        async with asyncio.timeout(SERVE_TIMEOUT):
+            try:
+                await writer.wait_closed()
+            except ConnectionResetError:
+                assert reader.exception() is not None
+
+
+async def wait_for_tls_socket_close(reader: Reader) -> None:
+    try:
+        await reader.read()
+    except ConnectionResetError:
+        return
+
+
+@pytest.mark.asyncio
+async def test_installed_sqlite_https_preserves_event_surface_parity(
+    https_installation: Path, tmp_path: Path, sqlite_template: Path
+) -> None:
+    sqlite_path = tmp_path / "private-event-database.sqlite"
+    settings = copy_sqlite_template(sqlite_template, sqlite_path)
+    credential, events = await seed_installed_run_events(settings)
+    run_id = events[0].run_id
+    material = write_tls_material(tmp_path)
+    port = unused_loopback_port()
+    profile = https_environment(material, port)
+    origin = profile[HTTPS_ORIGIN]
+    environment = https_client_environment(
+        origin, credential, bundle=material.authority
+    )
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(material.authority)
+    keylog = tmp_path / "private-tls-keylog"
+
+    process = await asyncio.create_subprocess_exec(
+        *api_command(https_installation, port),
+        cwd=tmp_path,
+        env={
+            **api_environment(str(settings.url)),
+            **profile,
+            "SSLKEYLOGFILE": str(keylog),
+        },
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        bound_port, early = await read_bound_port(process)
+        assert bound_port == port
+        async with (
+            httpx.AsyncClient(
+                base_url=origin, verify=context, trust_env=False, timeout=SERVE_TIMEOUT
+            ) as client,
+            installed_operating_mcp(https_installation, tmp_path, environment) as mcp,
+        ):
+            remote = await observed_page(
+                raw_event_page(client, run_id, credential, None)
+            )
+            cli = await observed_page(
+                cli_event_page(https_installation, tmp_path, environment, run_id, None)
+            )
+            tool = await observed_page(mcp_event_page(mcp, run_id, None))
+            first = (remote, cli, tool)
+            assert all(observation.page.next_cursor for observation in first)
+            second = (
+                await observed_page(
+                    raw_event_page(client, run_id, credential, remote.page.next_cursor)
+                ),
+                await observed_page(
+                    cli_event_page(
+                        https_installation,
+                        tmp_path,
+                        environment,
+                        run_id,
+                        cli.page.next_cursor,
+                    )
+                ),
+                await observed_page(mcp_event_page(mcp, run_id, tool.page.next_cursor)),
+            )
+        with closing(sqlite3.connect(sqlite_path, timeout=0)) as observer:
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                observer.execute("PRAGMA journal_mode=DELETE").close()
+    finally:
+        stdout, trailing = await terminate_installed_api(process)
+
+    assert process.returncode == 0, early + trailing
+    assert stdout == b""
+    for observations, event in zip((first, second), events, strict=True):
+        for observed in observations:
+            assert observed.began <= observed.page.observed_at <= observed.ended
+            assert observed.page.items == (event,)
+        assert observations[0].page.observed_at < observations[1].page.observed_at
+        assert observations[1].page.observed_at < observations[2].page.observed_at
+        assert len({value.page.next_cursor for value in observations}) == 1
+    assert all(value.page.next_cursor is None for value in second)
+    stderr = early + trailing
+    assert [record["event"] for record in diagnostics(stderr)].count(
+        "api.serving_stopped"
+    ) == 1
+    for private in (*profile.values(), str(settings.url), credential, PRIVATE_MARKER):
+        assert private.encode() not in stderr
+    assert not keylog.exists()
+    with (
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe,
+        closing(sqlite3.connect(sqlite_path, timeout=0)) as observer,
+    ):
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((LOOPBACK, port))
+        probe.listen()
+        assert observer.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+        assert observer.execute("SELECT count(*) FROM event").fetchone() == (2,)
+
+
+@pytest.mark.asyncio
+async def test_installed_sqlite_https_settles_accepted_handshake_before_lifespan_exit(
+    https_installation: Path, tmp_path: Path, sqlite_template: Path
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
+    fixture = Path(__file__).with_name("serving_lifecycle_child.py")
+    material = write_tls_material(tmp_path)
+    port = unused_loopback_port()
+    release_read, release_write = os.pipe()
+
+    try:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                str(https_installation),
+                "-I",
+                str(fixture),
+                "hold_tls_shutdown",
+                str(port),
+                str(release_read),
+                pass_fds=(release_read,),
+                cwd=tmp_path,
+                env={
+                    **api_environment(str(settings.url)),
+                    **https_environment(material, port),
+                },
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        finally:
+            os.close(release_read)
+        try:
+            bound, early = await read_bound_port(process)
+            assert bound == port
+            assert process.stdout is not None
+            async with pending_tls_handshake(port, material.authority) as pending:
+                process.send_signal(signal.SIGTERM)
+                async with asyncio.timeout(DRAIN_RECEIPT_TIMEOUT):
+                    barrier = await process.stdout.readline()
+                    await wait_for_tls_socket_close(pending)
+                    assert process.returncode is None
+                    with pytest.raises(ConnectionRefusedError):
+                        await asyncio.open_connection(LOOPBACK, port)
+                    os.write(release_write, b"r")
+                    stdout, trailing = await process.communicate()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    finally:
+        os.close(release_write)
+
+    assert process.returncode == 0, early + trailing
+    assert barrier == b"tls_lifespan_shutdown_received\n"
+    assert stdout == b"tls_database_settled\n"
+    assert [record["event"] for record in diagnostics(early + trailing)].count(
+        "api.serving_stopped"
+    ) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("problem", ["unknown_root", "wrong_address"])
+async def test_installed_event_clients_refuse_unverified_tls(
+    https_installation: Path, tmp_path: Path, problem: str
+) -> None:
+    context, bundle = tls_pair(
+        tmp_path, address="127.0.0.2" if problem == "wrong_address" else LOOPBACK
+    )
+    sent: list[bytes] = []
+    run_id = "run_" + "0" * 26
+    credential = "private-tls-credential"
+    expected = ClientError(Failure.TLS, Outcome.NOT_SENT).envelope()
+
+    async def receive(reader: Reader, writer: Writer) -> None:
+        sent.append(await reader.read())
+
+    async with peer(receive, context) as server:
+        environment = https_client_environment(
+            server.url,
+            credential,
+            bundle=bundle if problem == "wrong_address" else None,
+        )
+        environment["SSL_CERT_FILE"] = str(bundle)
+        cli = await installed_cli(
+            https_installation, tmp_path, environment, event_arguments(run_id, None)
+        )
+        async with installed_operating_mcp(
+            https_installation, tmp_path, environment
+        ) as mcp:
+            tool = await installed_mcp_event_result(mcp, run_id, None)
+
+    assert cli.code == 1
+    assert json.loads(cli.stdout) == expected
+    assert tool["isError"] is True
+    assert tool["structuredContent"] == expected
+    assert sent == []
+    for private in (server.url, str(bundle), credential):
+        assert (
+            private.encode() not in cli.stdout + cli.stderr + json.dumps(tool).encode()
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundle_kind", ["malformed", "pipe"])
+async def test_installed_event_clients_refuse_invalid_ca_bundle(
+    https_installation: Path, tmp_path: Path, bundle_kind: str
+) -> None:
+    bundle = tmp_path / "private-malformed-ca.pem"
+    if bundle_kind == "pipe":
+        os.mkfifo(bundle, 0o600)
+    else:
+        bundle.write_text(PRIVATE_MARKER, encoding="ascii")
+    environment = https_client_environment(
+        "https://127.0.0.1:9", "private-tls-credential", bundle=bundle
+    )
+    environment["KORA_MCP_TOKEN"] = environment["KORA_TOKEN"]
+
+    cli = await installed_cli(
+        https_installation,
+        tmp_path,
+        environment,
+        event_arguments("run_" + "0" * 26, None),
+    )
+    mcp = await installed_cli(
+        https_installation, tmp_path, environment, ["mcp", "--server", "operating"]
+    )
+
+    for result in (cli, mcp):
+        assert result.code == 78
+        assert result.stdout == b""
+        assert (
+            b"kora: invalid client configuration: KORA_CA_BUNDLE: invalid\n"
+            in result.stderr
+        )
+        assert b"process.failed" not in result.stderr
+        for private in (str(bundle), PRIVATE_MARKER, environment["KORA_TOKEN"]):
+            assert private.encode() not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "missing_origin",
+        "missing_certificate",
+        "missing_key",
+        "empty_origin",
+        "wrong_scheme",
+        "wrong_host",
+        "wrong_port",
+        "url_components",
+        "port_zero",
+        "missing_file",
+        "bad_pem",
+        "key_mismatch",
+        "encrypted_key",
+        "pipe",
+        "harness",
+        "worker",
+        "scheduler",
+    ],
+)
+def test_installed_sqlite_https_refuses_invalid_profile_before_bind(
+    https_installation: Path, tmp_path: Path, sqlite_template: Path, problem: str
+) -> None:
+    settings = copy_sqlite_template(
+        sqlite_template, tmp_path / "private-database.sqlite"
+    )
+    material = write_tls_material(
+        tmp_path,
+        password=PRIVATE_MARKER.encode() if problem == "encrypted_key" else None,
+    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+        reserved.bind((LOOPBACK, 0))
+        reserved.listen()
+        port = socket_port(reserved)
+        profile = https_environment(material, port)
+        invalid_material = tmp_path / "private-invalid-tls-material"
+        changes: dict[str, tuple[str, str | None]] = {
+            "missing_origin": (HTTPS_ORIGIN, None),
+            "missing_certificate": (TLS_CERT_FILE, None),
+            "missing_key": (TLS_KEY_FILE, None),
+            "empty_origin": (HTTPS_ORIGIN, ""),
+            "wrong_scheme": (HTTPS_ORIGIN, f"http://{LOOPBACK}:{port}"),
+            "wrong_host": (HTTPS_ORIGIN, f"https://localhost:{port}"),
+            "wrong_port": (HTTPS_ORIGIN, "https://127.0.0.1"),
+            "url_components": (
+                HTTPS_ORIGIN,
+                f"https://{PRIVATE_MARKER}@{LOOPBACK}:{port}/",
+            ),
+            "port_zero": (HTTPS_ORIGIN, "https://127.0.0.1:0"),
+            "missing_file": (TLS_CERT_FILE, str(invalid_material)),
+            "bad_pem": (TLS_CERT_FILE, str(invalid_material)),
+            "key_mismatch": (TLS_KEY_FILE, str(invalid_material)),
+            "encrypted_key": (TLS_KEY_FILE, str(material.key)),
+            "pipe": (TLS_KEY_FILE, str(invalid_material)),
+            "harness": (DOMAIN_HARNESS, "claude"),
+            "worker": ("KORA_API_WORKER_CLOCK_UNCERTAINTY_US", "1"),
+            "scheduler": ("KORA_API_SCHEDULER", "first-claim"),
+        }
+        if problem == "bad_pem":
+            invalid_material.write_bytes(PRIVATE_MARKER.encode())
+        if problem == "key_mismatch":
+            other = tmp_path / "different-authority"
+            other.mkdir()
+            invalid_material.write_bytes(write_tls_material(other).key.read_bytes())
+        if problem == "pipe":
+            os.mkfifo(invalid_material, 0o600)
+        variable, value = changes[problem]
+        if value is None:
+            del profile[variable]
+        else:
+            profile[variable] = value
+
+        result = subprocess.run(
+            api_command(https_installation, 0 if problem == "port_zero" else port),
+            cwd=tmp_path,
+            env={**api_environment(str(settings.url)), **profile},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=SERVE_TIMEOUT,
+        )
+
+    assert result.returncode == 78, result.stderr
+    assert result.stdout == b""
+    assert refusal_reason(result) == "tls_configuration"
+    assert b"process.failed" not in result.stderr
+    assert b"pass phrase" not in result.stderr
+    for private in (str(tmp_path), profile.get(HTTPS_ORIGIN), PRIVATE_MARKER):
+        if private:
+            assert private.encode() not in result.stderr
 
 
 async def deployment_rows(

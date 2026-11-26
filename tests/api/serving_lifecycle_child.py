@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import aiosqlite
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.engine import AdaptedConnection, Connection
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -26,7 +26,7 @@ from kora.api.graph_deployment_worker import THREAD_NAME, DeploymentPreparer
 from kora.api.graph_services import deployment_selection
 from kora.api.installed_scheduler import installed_root_admission
 from kora.api.installed_worker import installed_worker_profile
-from kora.api.serving import serve_sqlite
+from kora.api.serving import read_tls_context, serve_sqlite
 from kora.api.worker_claims_route import WorkerClaimsRoute
 from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.cel_eval.evaluate import PatternCompilation
@@ -340,6 +340,22 @@ def worker_lifecycle_app(
     return exercise
 
 
+def tls_held_shutdown(database: Database, release: int) -> ASGIApp:
+    async def exercise(scope: Scope, receive: Receive, send: Send) -> None:
+        assert scope["type"] == "lifespan"
+        assert (await receive())["type"] == "lifespan.startup"
+        async with database.read_transaction() as connection:
+            assert await connection.scalar(text("SELECT 42")) == 42
+        await send({"type": "lifespan.startup.complete"})
+        assert (await receive())["type"] == "lifespan.shutdown"
+        assert owns_sqlite_descriptor(database.settings.sqlite_path)
+        os.write(1, b"tls_lifespan_shutdown_received\n")
+        assert await asyncio.to_thread(os.read, release, 1) == b"r"
+        await send({"type": "lifespan.shutdown.complete"})
+
+    return exercise
+
+
 def scheduler_lifecycle_owner(
     database: Database,
     release: int,
@@ -404,6 +420,7 @@ def launch() -> int:
     preparer = None
     port = 0
     worker_startup = False
+    tls_context = None
     make_scheduler: Callable[[Database], Scheduler] | None = None
     forced_owners: list[Database] = []
     try:
@@ -466,6 +483,11 @@ def launch() -> int:
                 worker_startup = True
             case ["buffered_response"]:
                 make_application = buffered_response
+            case ["hold_tls_shutdown", requested_port, release]:
+                port = int(requested_port)
+                tls_context = read_tls_context(os.environ, port, ordinary_sqlite=True)
+                assert tls_context is not None
+                make_application = partial(tls_held_shutdown, release=int(release))
             case _:
                 make_application = held_request_app
         result = serve_sqlite(
@@ -476,10 +498,14 @@ def launch() -> int:
             preparer=preparer,
             worker_startup=worker_startup,
             make_scheduler=make_scheduler,
+            tls_context=tls_context,
         )
         if sys.argv[1:2] == ["hold_native"]:
             assert not owns_sqlite_descriptor(settings.sqlite_path)
             os.write(1, b"native_sqlite_file_closed\n")
+        if sys.argv[1:2] == ["hold_tls_shutdown"]:
+            assert not owns_sqlite_descriptor(settings.sqlite_path)
+            os.write(1, b"tls_database_settled\n")
         if sys.argv[1:2] == ["hold_scheduler_poll_forced"]:
             [database] = forced_owners
             assert database.lifecycle is Lifecycle.CLOSED

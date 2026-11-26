@@ -191,11 +191,14 @@ async def test_client_keeps_bearer_within_verified_origin(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("problem", ["unknown_root", "wrong_host"])
+@pytest.mark.parametrize("problem", ["unknown_root", "wrong_host", "wrong_address"])
 async def test_client_checks_tls_before_sending_credentials(
     tmp_path: Path, problem: str
 ) -> None:
-    context, bundle = tls_pair(tmp_path)
+    context, bundle = tls_pair(
+        tmp_path, address="127.0.0.2" if problem == "wrong_address" else "127.0.0.1"
+    )
+    trust = None if problem == "unknown_root" else bundle
     seen: list[bytes] = []
 
     async def handle(reader: Reader, writer: Writer) -> None:
@@ -204,7 +207,6 @@ async def test_client_checks_tls_before_sending_credentials(
 
     async with peer(handle, context) as origin:
         address = origin.origin("localhost") if problem == "wrong_host" else origin.url
-        trust = bundle if problem == "wrong_host" else None
         async with KoraClient(address, CREDENTIAL, ca_bundle=trust) as client:
             with pytest.raises(ClientError) as refusal:
                 await client.openapi()

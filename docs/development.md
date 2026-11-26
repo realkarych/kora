@@ -357,6 +357,22 @@ The first sync installs the locked dependencies without the project; the editabl
 
 `KORA_BUILD_OFFLINE=1` makes the hook's pnpm install offline, while `uv build --offline` makes Python build dependency resolution offline. Complete the dependency setup, including registry metadata priming, first. The hook accepts only an unset value, `0` or `1`; a missing tool, install failure, build failure or missing frontend asset aborts a normal wheel build. Build output is generated and ignored, and should never be committed.
 
+### Local SQLite HTTPS
+
+Install `kora[serve]`, migrate the SQLite database and provision personal tokens before starting the API. To serve HTTPS, choose a fixed loopback port and provide a PEM certificate chain with the IP subject alternative name `127.0.0.1` and its matching unencrypted PEM private key. Keep the private key readable only by the service owner. Give clients the public CA bundle that issued the certificate.
+
+```sh
+KORA_DATABASE_URL=sqlite+aiosqlite:///./.kora-data/kora.db \
+KORA_API_HTTPS_ORIGIN=https://127.0.0.1:8443 \
+KORA_API_TLS_CERT_FILE=/secure/kora/server-chain.pem \
+KORA_API_TLS_KEY_FILE=/secure/kora/server-key.pem \
+kora api --port 8443
+```
+
+Set `KORA_URL=https://127.0.0.1:8443` in the CLI and stdio MCP environments. For a private CA, set `KORA_CA_BUNDLE` to the local PEM trust bundle in both environments. Supply the CLI's own personal token through `KORA_TOKEN` and supply the stdio process's own token through `KORA_MCP_TOKEN`. Install `kora[mcp]` in the stdio server's environment and run `kora mcp --server operating`.
+
+Leave the three serving TLS settings unset to use the default loopback HTTP profile. For HTTPS use the ordinary SQLite profile and leave the harness, Worker and Scheduler selectors unset. See the [serving contract](../knowledge/specs/api-and-agent-surface.md#installed-sqlite-loopback-https-1897) for the accepted origin forms and startup refusals. The #1897 setup wording is pending line-by-line owner review.
+
 ## Documentation and schema checks
 
 The documentation jobs use pinned Markdown and Mermaid tools through npx, lychee as recorded in the [dated research](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#ci-and-documentation-check-record), and a pinned schema checker through uvx. Install that lychee release using its [official installation instructions](https://lychee.cli.rs/installation/). These tool setups may download dependencies; the link check itself uses the repository's offline configuration.

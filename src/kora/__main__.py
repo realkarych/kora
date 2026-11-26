@@ -71,6 +71,8 @@ from kora.protocols.metadata import parse_config_schema
 from kora.protocols.time import Clock, SystemClock
 
 if TYPE_CHECKING:
+    from ssl import SSLContext
+
     from kora.api.graph_deployment_worker import DeploymentPreparer
     from kora.db.connection import Database, DatabaseSettings
     from kora.ir.json import JsonObject
@@ -688,12 +690,12 @@ def serve_mcp(
         raise typer.Exit(EXIT_CONFIGURATION) from None
     try:
         settings = read_client_settings(environment, MCP_CREDENTIAL_VARIABLE, url)
+        asyncio.run(serve_stdio(server.value, settings, diagnostics))
     except ClientConfigurationError as error:
         write_stderr(
             f"{CLIENT_CONFIGURATION_PREFIX}: {error.variable}: {error.problem.value}\n"
         )
         raise typer.Exit(EXIT_CONFIGURATION) from None
-    asyncio.run(serve_stdio(server.value, settings, diagnostics))
 
 
 def installed_versions(expected: Mapping[str, str]) -> bool:
@@ -792,7 +794,12 @@ def serve_api(
 
     from kora.api.exchange import COMPONENT
     from kora.api.installed_scheduler import FIRST_CLAIM, SCHEDULER_VARIABLE
-    from kora.api.serving import ServingRefusal, refuse
+    from kora.api.serving import (
+        ServingFailure,
+        ServingRefusal,
+        read_tls_context,
+        refuse,
+    )
     from kora.db.connection import (
         DatabaseConfigurationError,
         Dialect,
@@ -805,6 +812,20 @@ def serve_api(
     except DatabaseConfigurationError:
         return refuse(log, ServingRefusal.DATABASE_CONFIGURATION, EXIT_CONFIGURATION)
     scheduler = environment.get(SCHEDULER_VARIABLE)
+    worker_uncertainty = environment.get(API_WORKER_UNCERTAINTY_VARIABLE)
+    try:
+        tls_context = read_tls_context(
+            environment,
+            port,
+            ordinary_sqlite=(
+                settings.dialect is Dialect.SQLITE
+                and harness is None
+                and worker_uncertainty is None
+                and scheduler is None
+            ),
+        )
+    except ServingFailure as error:
+        return refuse(log, error.reason, EXIT_CONFIGURATION)
     if scheduler is not None and (
         scheduler != FIRST_CLAIM
         or settings.dialect is not Dialect.SQLITE
@@ -840,11 +861,12 @@ def serve_api(
     return serve_sqlite_api(
         settings,
         harness,
-        environment.get(API_WORKER_UNCERTAINTY_VARIABLE),
+        worker_uncertainty,
         scheduler is not None,
         port,
         diagnostics,
         log,
+        tls_context=tls_context,
     )
 
 
@@ -856,6 +878,8 @@ def serve_sqlite_api(
     port: int,
     diagnostics: ProcessDiagnostics,
     log: ComponentLogger,
+    *,
+    tls_context: "SSLContext | None",
 ) -> int:
     from kora.api.application import create_application
     from kora.api.exchange import ApiExchange
@@ -977,6 +1001,7 @@ def serve_sqlite_api(
         preparer=preparer,
         worker_startup=worker is not None,
         make_scheduler=scheduler if scheduler_enabled else None,
+        tls_context=tls_context,
     )
 
 
