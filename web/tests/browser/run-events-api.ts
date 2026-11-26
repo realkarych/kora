@@ -285,12 +285,19 @@ async function exactJsonNumbers(): Promise<void> {
     { number: largeInteger + '.0', admitted: false },
   ]
   for (const { number, admitted } of cases) {
-    const body = errorWithDetails('{"count":' + number + '}')
+    const observeRetention = number === '1e309'
+    const marker = wireContent + '-overflow'
+    const errorText = errorWithDetails('{"count":' + number + '}')
+    const body = observeRetention ? errorText.replace(wireContent, marker) : errorText
     await withListener((request, response) => {
       request.resume()
       send(response, body, 409)
     }, async (origin) => {
       const result = await readRunEvents(wireOptions(origin))
+      if (observeRetention) {
+        const input: unknown = Reflect.get(RegExp, 'input')
+        assert(typeof input === 'string' && !input.includes(marker), 'Numeric refusal retained response content.')
+      }
 
       if (admitted) {
         assert(result.kind === 'api-error')
