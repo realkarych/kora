@@ -1041,6 +1041,8 @@ The estimates do not measure native representation, allocator overhead or RSS.
 | Compile on a cache miss | Canonical rendering length |
 | Scheduler transaction projection, including collection re-cut and event projection | Bytes read and written. Charge only to the transaction allowance. |
 
+Every comprehension also charges its iteration weight times the range bound length.
+
 Each variable bound carries canonical bytes, value count, element count, string length and any declared element and field bounds.
 An undeclared child inherits the parent's bytes and value count and the global element and string ceilings.
 A cycle, including a self-cycle, discards all declared children of its member bounds, which then use inheritance.
@@ -1061,7 +1063,8 @@ A child cannot exceed its parent's bytes or value count or the global element an
 The estimate examines the entire type and bound of each referenced variable and treats a reached malformed bound as the builder error `BoundError`.
 The default variable bound uses 4,096 canonical bytes and 256 values alongside the independent container and string limits, which aggregate limits may dominate.
 
-The element bound of a list literal, a concatenation or a conditional joins its operands' element bounds, using the inherited bound for an operand that declares none or that declares fields, whatever the static type.
+The element bound of a list literal joins the bounds of its whole element values.
+Concatenation and conditionals join operand element bounds, using inheritance for an operand that lacks an element bound or declares fields, regardless of its static type.
 A map or record range iterates over keys.
 A `dyn` range iterates over the join of its key and element bounds, with inheritance for an operand with declared fields.
 A type join keeps a type only for the same object or primitive kind and otherwise gives `dyn`.
@@ -1154,14 +1157,15 @@ An admitted expression can stall or crash the shared process.
 | Evaluations per batch | 16 |
 | Outstanding charge | 8 MiB |
 | Handles | 128 |
-| Pending lifecycle reports | 256 |
+| Pending lifecycle reports | At most twice the configured handle capacity, 256 by default |
 | YAML path, event ID and checked rendering | 1,024, 128 and 65,536 characters respectively |
 
 Job counts include in-flight work and completed results waiting for delivery.
 Charge detached values, renderings, bounded metadata and result retention to the shared owner.
 Result growth that would exceed the shared outstanding charge limit returns operational `busy`.
 Pending lifecycle reports count toward new-handle admission, with up to one timeout and one completed-close report per handle.
-These internal limits precede the first product consumer and are configurable through `Settings`.
+The evaluation and validation job, outstanding charge, batch and handle limits listed above are `Settings` defaults.
+The YAML path, event ID and rendering maxima are fixed.
 The [lifetime method](../research/cel-evaluator-lifetime-2026-10-21.md#method-amendment-dated-2026-10-28-process-wide-rss-spans-and-hop-latency-become-diagnostics) governs native validation-compile qualification at its recorded trigger.
 
 Validation and evaluation charge the checked expression's effective bound snapshot.
