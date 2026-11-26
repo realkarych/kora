@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import select
 import sys
 import time
 import uuid
@@ -31,7 +32,7 @@ ADMISSION_ACK = b"accepted\n"
 UNIT_PROPERTIES = (
     "Id,LoadState,Transient,ActiveState,SubState,Job,InvocationID,ControlGroup,MainPID,"
     "Result,ExecMainCode,ExecMainStatus,Type,ExitType,RemainAfterExit,KillMode,"
-    "Restart,Delegate,JobTimeoutUSec"
+    "Restart,Delegate,JobRunningTimeoutUSec"
 )
 LIFETIME_PROPERTIES = {
     "Type": "exec",
@@ -40,7 +41,7 @@ LIFETIME_PROPERTIES = {
     "KillMode": "control-group",
     "Restart": "no",
     "Delegate": "no",
-    "JobTimeoutUSec": "5s",
+    "JobRunningTimeoutUSec": "5s",
 }
 INVOCATION = re.compile(r"[0-9a-f]{32}")
 SERVICE_PATH = re.compile(r"/system.slice/kora-browser-packages-[0-9a-f]{32}\.service")
@@ -171,8 +172,13 @@ class Service:
         return process.returncode, output.decode("utf-8", "replace")
 
     async def launch(
-        self, work: Sequence[str], window: AttemptWindow
+        self,
+        work: Sequence[str],
+        window: AttemptWindow,
+        *,
+        gate_cutoff: float | None = None,
     ) -> asyncio.subprocess.Process:
+        cutoff = window.start if gate_cutoff is None else min(window.start, gate_cutoff)
         async with asyncio.timeout_at(window.start):
             return await asyncio.create_subprocess_exec(
                 SUDO,
@@ -192,14 +198,14 @@ class Service:
                 "--property=KillMode=control-group",
                 "--property=Restart=no",
                 "--property=Delegate=no",
-                f"--property=JobTimeoutSec={START_SECONDS:g}s",
+                f"--property=JobRunningTimeoutSec={START_SECONDS:g}s",
                 f"--property=TimeoutStartSec={START_SECONDS:g}s",
                 f"--property=TimeoutStopSec={STOP_PHASE_SECONDS}s",
                 f"--property=RuntimeMaxSec={window.work:.6f}s",
                 PYTHON,
                 "-I",
                 str(Path(__file__).resolve()),
-                str(int(window.start * 1_000_000_000)),
+                str(int(cutoff * 1_000_000_000)),
                 *work,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -209,13 +215,17 @@ class Service:
     async def bind(
         self, client: asyncio.subprocess.Process, deadline: float
     ) -> OriginalService:
+        invocation = await self.offer(client, deadline)
+        await self.require_running(invocation, deadline)
+        return OriginalService.capture(self, invocation)
+
+    async def offer(self, client: asyncio.subprocess.Process, deadline: float) -> str:
         message = "The launched package helper did not establish ownership."
         offer = await receive(client, 33, deadline, message)
         invocation = offer[:-1].decode("ascii", "replace")
         if not offer.endswith(b"\n") or not INVOCATION.fullmatch(invocation):
             raise BrowserPackagesRefused(message)
-        await self.require_running(invocation, deadline)
-        return OriginalService.capture(self, invocation)
+        return invocation
 
     async def require_running(self, invocation: str, deadline: float) -> None:
         while True:
@@ -426,10 +436,16 @@ async def package_attempt(
 
 
 def accepted(deadline: str) -> bool:
+    if not deadline.isascii() or not deadline.isdecimal():
+        return False
+    cutoff = int(deadline)
     with sys.stdin.buffer as admission:
-        record = admission.readline(ADMISSION_BYTES)
+        remaining = (cutoff - time.monotonic_ns()) / 1_000_000_000
+        if remaining <= 0 or not select.select([admission], [], [], remaining)[0]:
+            return False
+        record = os.read(admission.fileno(), ADMISSION_BYTES)
     parts = record.decode("ascii", "replace").split()
-    if len(parts) != 2 or not record.endswith(b"\n") or not deadline.isdecimal():
+    if len(parts) != 2 or not record.endswith(b"\n"):
         return False
     invocation, cgroup = parts
     return (
@@ -437,7 +453,7 @@ def accepted(deadline: str) -> bool:
         and os.environ.get("INVOCATION_ID") == invocation
         and bool(SERVICE_PATH.fullmatch(cgroup))
         and Path("/proc/self/cgroup").read_text(encoding="ascii") == f"0::{cgroup}\n"
-        and time.monotonic_ns() < int(deadline)
+        and time.monotonic_ns() < cutoff
     )
 
 

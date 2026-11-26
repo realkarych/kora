@@ -814,10 +814,12 @@ def test_browser_package_attempt_shortens_work_and_reserves_proof() -> None:
         AttemptWindow.allocate(minimum)
     shortened = AttemptWindow.allocate(minimum + 1)
 
-    assert shortened.work == 1
-    assert shortened.settled - shortened.start - shortened.work == STOP_SECONDS
-    assert shortened.prove - shortened.settled == PROOF_SECONDS
-    assert shortened.join - shortened.prove == RETURN_SECONDS
+    assert shortened.work == pytest.approx(1, rel=0, abs=1e-6)
+    assert shortened.settled - shortened.start - shortened.work == pytest.approx(
+        STOP_SECONDS, rel=0, abs=1e-6
+    )
+    assert shortened.prove == shortened.settled + PROOF_SECONDS
+    assert shortened.join == shortened.prove + RETURN_SECONDS
 
 
 def test_browser_package_allowance_does_not_move_the_ledger_cutoff() -> None:
@@ -827,7 +829,7 @@ def test_browser_package_allowance_does_not_move_the_ledger_cutoff() -> None:
 
     assert window.settled == cutoff
     assert window.prove == cutoff + PROOF_SECONDS
-    assert window.join == cutoff + COMMAND_RESERVE_SECONDS
+    assert window.join == window.prove + RETURN_SECONDS
     assert 0 < window.work <= 1
 
 

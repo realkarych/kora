@@ -72,10 +72,8 @@ async def confirm_refused_admission(
         if case is RefusedAdmission.FOREIGN:
             client.stdin.write(f"{'0' * 32} {service.cgroup}\n".encode("ascii"))
             await client.stdin.drain()
-        if case is RefusedAdmission.LATE:
-            await asyncio.sleep(max(0.0, window.start - time.monotonic()) + 0.01)
-            await owned.admit(client, window.settled)
-        client.stdin.close()
+        if case is not RefusedAdmission.LATE:
+            client.stdin.close()
         try:
             await owned.finished(window.settled)
         except BrowserPackagesRefused as error:
@@ -94,6 +92,49 @@ async def confirm_refused_admission(
                 os.close(owned.directory)
         async with asyncio.timeout_at(window.join):
             await client.wait()
+
+
+async def check_expired_start(administrative: Path) -> None:
+    from scripts.ci.browser_system_packages import (
+        SYSTEM_CGROUP,
+        AttemptWindow,
+        OriginalService,
+        Service,
+    )
+
+    service = Service.new()
+    window = AttemptWindow.allocate(WITNESS_ALLOWANCE)
+    client = await service.launch(
+        ("witness", str(administrative), "hold"),
+        window,
+        gate_cutoff=time.monotonic() - 1,
+    )
+    try:
+        invocation = await service.offer(client, window.start)
+        async with asyncio.timeout_at(window.settled):
+            assert await client.wait() != 0
+        status = await service.show(window.prove)
+        assert status["Id"] == service.name
+        assert status["InvocationID"] == invocation
+        assert status["ActiveState"] == "failed"
+        assert status["Job"] == ""
+        assert status["ExecMainStatus"] == "78"
+        assert not (administrative / "held").exists()
+        try:
+            owned = OriginalService.capture(service, invocation)
+        except FileNotFoundError:
+            cgroup = SYSTEM_CGROUP / service.cgroup[1:]
+            assert not cgroup.exists()
+        else:
+            try:
+                assert owned.empty()
+            finally:
+                os.close(owned.directory)
+        code, _ = await service.control(("reset-failed",), window.prove, root=True)
+        assert code == 0
+    finally:
+        if client.stdin is not None:
+            client.stdin.close()
 
 
 async def wait_for_lock(administrative: Path) -> None:
@@ -250,6 +291,7 @@ async def check_lifecycle(administrative: Path) -> None:
 
     for case in RefusedAdmission:
         await confirm_refused_admission(administrative, case)
+    await check_expired_start(administrative)
     await check_refusal_is_terminal(administrative)
     sys.stdout.write("Package service refused missing, foreign and late admission.\n")
     async with asyncio.TaskGroup() as tasks:
