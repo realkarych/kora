@@ -1,5 +1,7 @@
 const bodyLimit = 1024 * 1024
 const maximumJsonDepth = 64
+const maximumIntegerMagnitude = ((1n << 14_000n) - 1n).toString()
+const jsonNumber = /-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/uy
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
 const failureCodes = {
@@ -44,6 +46,20 @@ function propertyFollows(text: string, index: number): boolean {
   return false
 }
 
+function admittedNumberEnd(text: string, start: number): number {
+  jsonNumber.lastIndex = start
+  const match = jsonNumber.exec(text)
+  if (match === null) return -1
+  const [token, magnitude, fraction, exponent] = match
+  if (magnitude === undefined) return -1
+
+  const admitted = fraction === undefined && exponent === undefined
+    ? magnitude.length < maximumIntegerMagnitude.length
+      || (magnitude.length === maximumIntegerMagnitude.length && magnitude <= maximumIntegerMagnitude)
+    : Number.isFinite(Number(token))
+  return admitted ? jsonNumber.lastIndex : -1
+}
+
 function boundedJsonStructure(text: string): boolean {
   if (text.charCodeAt(0) === 0xfeff) return false
 
@@ -66,6 +82,10 @@ function boundedJsonStructure(text: string): boolean {
         if (typeof key !== 'string' || properties.has(key)) return false
         properties.add(key)
       }
+    } else if (character !== undefined && (character === '-' || (character >= '0' && character <= '9'))) {
+      const end = admittedNumberEnd(text, index)
+      if (end === -1) return false
+      index = end - 1
     }
   }
   return containers.length === 0

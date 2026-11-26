@@ -26,6 +26,15 @@ const wireSelectors = {
 }
 const route = '/api/v1/namespaces/' + wireSelectors.namespace + '/runs/' + wireSelectors.run + '/events'
 
+const systemEvent = {
+  id: 'event_01JCE8H63M86YBS2P0NN4R3JDH',
+  kind: 'run.succeeded',
+  at: observedAt,
+  actor: { kind: 'system', component: 'scheduler' },
+  run_id: wireSelectors.run,
+  node_instance_id: null,
+  attempt_id: null,
+}
 const page = JSON.stringify({ items: [], observed_at: observedAt, next_cursor: null })
 const errorBody = {
   error: { request_id: errorId, code: 'API901', message: wireContent, location: null, retryable: false, details: {} },
@@ -233,27 +242,18 @@ async function validPageAndErrors(): Promise<void> {
 }
 
 async function exactPageShape(): Promise<void> {
-  const system = {
-    id: 'event_01JCE8H63M86YBS2P0NN4R3JDH',
-    kind: 'run.succeeded',
-    at: observedAt,
-    actor: { kind: 'system', component: 'scheduler' },
-    run_id: wireSelectors.run,
-    node_instance_id: null,
-    attempt_id: null,
-  }
   const token = {
-    ...system,
+    ...systemEvent,
     id: 'event_01JCE8H63M86YBS2P0NN4R3JDK',
     actor: { kind: 'user', owner: 'person', token_id: 'token' },
   }
-  const valid = { items: [token, system], observed_at: observedAt, next_cursor: null }
+  const valid = { items: [token, systemEvent], observed_at: observedAt, next_cursor: null }
   const extra = { unexpected: wireContent }
   const pages = [
     { ...valid, ...extra },
-    { ...valid, items: [token, { ...system, ...extra }] },
-    { ...valid, items: [token, { ...system, actor: { ...system.actor, ...extra } }] },
-    { ...valid, items: [{ ...token, actor: { ...token.actor, ...extra } }, system] },
+    { ...valid, items: [token, { ...systemEvent, ...extra }] },
+    { ...valid, items: [token, { ...systemEvent, actor: { ...systemEvent.actor, ...extra } }] },
+    { ...valid, items: [{ ...token, actor: { ...token.actor, ...extra } }, systemEvent] },
   ]
   await withListener((request, response) => {
     request.resume()
@@ -273,9 +273,45 @@ async function exactPageShape(): Promise<void> {
   })
 }
 
+async function exactJsonNumbers(): Promise<void> {
+  const largeInteger = '1' + '0'.repeat(309)
+  const beyondIntegerBound = 1n << 14_000n
+  const cases = [
+    { number: largeInteger, admitted: true },
+    { number: (beyondIntegerBound - 1n).toString(), admitted: true },
+    { number: beyondIntegerBound.toString(), admitted: false },
+    { number: '-1.25e2', admitted: true },
+    { number: '1e309', admitted: false },
+    { number: largeInteger + '.0', admitted: false },
+  ]
+  for (const { number, admitted } of cases) {
+    const body = errorWithDetails('{"count":' + number + '}')
+    await withListener((request, response) => {
+      request.resume()
+      send(response, body, 409)
+    }, async (origin) => {
+      const result = await readRunEvents(wireOptions(origin))
+
+      if (admitted) {
+        assert(result.kind === 'api-error')
+        assert.equal(result.error.error.code, 'API901')
+        assert.equal(result.requestId, requestId)
+        assert.equal(result.errorRequestId, errorId)
+        assert.equal(result.responseText, body)
+      } else {
+        assert(result.kind === 'client-error' && result.reason === 'status_envelope')
+        assert(!('responseText' in result))
+      }
+    })
+  }
+}
+
 async function invalidFrames(): Promise<void> {
   const duplicate = page.replace('}', ',"n\\u0065xt_cursor":null}')
-  const malformed = Buffer.concat([Buffer.from(page.slice(0, -1) + ',"extra":"'), Buffer.from([0xc3, 0x28]), Buffer.from('"}')])
+  const validEventPage = JSON.stringify({ items: [systemEvent], observed_at: observedAt, next_cursor: null })
+  const [prefix, suffix] = validEventPage.split(systemEvent.kind)
+  assert(prefix !== undefined && suffix !== undefined)
+  const malformed = Buffer.concat([Buffer.from(prefix), Buffer.from([0xc3, 0x28]), Buffer.from(suffix)])
   const frames = [Buffer.from(duplicate), malformed]
   for (const frame of frames) {
     await withListener((request, response) => {
@@ -284,7 +320,7 @@ async function invalidFrames(): Promise<void> {
     }, async (origin) => {
       const result = await readRunEvents(wireOptions(origin))
 
-      assert(result.kind === 'client-error' && result.code === 'CLT003')
+      assert(result.kind === 'client-error' && result.reason === 'json')
     })
   }
 
@@ -441,6 +477,8 @@ async function wire(): Promise<void> {
   await validPageAndErrors()
   failureStage = 'exact-page-shape'
   await exactPageShape()
+  failureStage = 'json-numbers'
+  await exactJsonNumbers()
   failureStage = 'invalid-frames'
   await invalidFrames()
   failureStage = 'compressed-response-limit'

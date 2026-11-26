@@ -83,14 +83,13 @@ function exactMatch(pattern: RegExp, value: string): boolean {
   return pattern.exec(value)?.[0] === value
 }
 
-function validJsonScalars(value: unknown): boolean {
-  if (typeof value === 'number') return Number.isFinite(value)
+function validJsonUnicode(value: unknown): boolean {
   if (typeof value === 'string') return !unpairedSurrogate.test(value)
-  if (Array.isArray(value)) return value.every(validJsonScalars)
+  if (Array.isArray(value)) return value.every(validJsonUnicode)
   if (isRecord(value)) {
-    return Object.entries(value).every(([name, item]) => !unpairedSurrogate.test(name) && validJsonScalars(item))
+    return Object.entries(value).every(([name, item]) => !unpairedSurrogate.test(name) && validJsonUnicode(item))
   }
-  return value === null || typeof value === 'boolean'
+  return true
 }
 
 function boundedText(value: unknown, limit: number): value is string {
@@ -251,7 +250,7 @@ export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsR
     const { requestId, errorText } = exchange
     if (status === undefined) return localFailure(result.error, requestId)
     if (status !== 200) {
-      if (errorText === null || !errorEnvelope(result.error, status) || !validJsonScalars(result.error)) {
+      if (errorText === null || !errorEnvelope(result.error, status) || !validJsonUnicode(result.error)) {
         throw new RunEventsFailure('status_envelope')
       }
       const errorRequestId = safeCorrelation(result.error.error.request_id, token)
@@ -259,7 +258,7 @@ export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsR
       return { kind: 'api-error', status, error: result.error, responseText: errorText, requestId, errorRequestId }
     }
     if (result.error !== undefined) throw new RunEventsFailure('json')
-    if (!eventPage(result.data, input.run, input.limit ?? 100) || !validJsonScalars(result.data)) {
+    if (!eventPage(result.data, input.run, input.limit ?? 100) || !validJsonUnicode(result.data)) {
       throw new RunEventsFailure('schema')
     }
     budget.check()
