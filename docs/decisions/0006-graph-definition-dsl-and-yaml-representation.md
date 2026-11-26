@@ -16,6 +16,10 @@
 
 kora orchestrates graphs whose nodes are whole coding-agent sessions. Graph authors are engineers used to Airflow-style Python; a platform team must review, diff and operate hundreds of graphs it did not write. The scheduler is shared by many teams, so it must never execute author code at run time (FR-1.2, FR-7.5), and the definition must stay portable to other SDKs and a UI editor (NFR-6.1). Archon, the primary contrast in the positioning document (requirements decision 13), has authors write YAML by hand.
 
+## Early authoring amendment of 2026-11-26
+
+The project owner [approved a bounded static mode ahead of first-slice acceptance](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699). An explicit `--format json` selects the early mode. It parses one file without importing or executing it, accepts the sequential agent, command and CLI approval graph with a manual trigger, and emits the existing IR v1.0 as deterministic JSON for the installed deploy client. [The early DSL contract](../../knowledge/specs/dsl.md#early-sequential-json-mode-issue-1918) defines the accepted syntax and refusals. The full compiler retains the canonical YAML and module import contract below. The wording is pending line-by-line owner review.
+
 ## Decision
 
 Graphs are authored in Python with decorators and the `>>` operator; `kora compile` lowers them to a YAML intermediate representation (IR), the only thing the scheduler consumes.

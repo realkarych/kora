@@ -652,7 +652,7 @@ The binding compiles only the checked canonical rendering, and the IR retains th
 #### Local and server validation
 
 The author-side `kora compile` uses the kora parser and checker without importing the binding.
-Stdio `kora_compile` compiles locally and forwards only compiled IR to `/validate`. [DSL compilation](dsl.md#2-compile-step-kora-compile) · [MCP operations](api-and-agent-surface.md#4-mcp-servers-fr-01-dd-28)
+The general stdio `kora_compile` compiles locally and forwards only compiled IR to `/validate`. The [early JSON mode](dsl.md#early-sequential-json-mode-issue-1918) shares the authored IR checks without making an API request. Installation and executable binding checks run at deploy. [DSL compilation](dsl.md#2-compile-step-kora-compile) · [MCP operations](api-and-agent-surface.md#4-mcp-servers-fr-01-dd-28)
 
 For complete server validation, including `/validate`, `/plan` and full deployment validation, compile every distinct canonical rendering and each distinct decoded `matches()` pattern once.
 A proven rejection under the complete public validation rules is reported as `IR011` without the native message.
