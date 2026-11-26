@@ -2096,11 +2096,11 @@ The static grammar foundation under [issue #518](https://github.com/realkarych/k
 | `codex` `Bash` | `command` |
 | `codex` `apply_patch` | `command`, the patch text |
 | `pi` `Bash` | exact `command` |
-| `pi` `Edit`, `Write` | `file_path` mapped to the admitted target |
+| `pi` `Edit`, `Write` | `file_path` is the admitted lexical workspace pathname |
 
 The `codex` rows describe the runner-local Policy arguments. The adapter obtains the arguments from the correlated native approval and associated pre-effect evidence under the [selected execution profile](codex-execution-profile.md#one-use-response-and-settlement). The request uses the runner's trusted workspace. The shell rules assume a verified sh-family shell. The Codex Bash selection and launch owner require separate qualification. The protected native profile must exclude `write_stdin`.
 
-The work item 15 obligation to fix `SHELL` for `claude` still applies. `allow_deny` accepts the harnesses `claude` and `codex`. The [Pi policy mapping](pi-execution-profile.md#required-tool-policy) governs the future qualified `pi` path. Use the canonical shell and file-edit rules on the mapped arguments and exact workspace. Preserve both the lexical and resolved path for Policy matching. Bind the physical effect target separately at the owned tool boundary and preserve it across file opens. Pi's `Read` path is bound to the action and adds no argument-pattern extractor. The fake harness sends the name the IR selects when its testing composition supports that choice. Until Pi's mapping lands, `pi` and any other unimplemented harness raise `policy_harness_unsupported`.
+The work item 15 obligation to fix `SHELL` for `claude` still applies. `allow_deny` accepts the harnesses `claude` and `codex`. The [Pi policy mapping](pi-execution-profile.md#required-tool-policy) governs the future qualified `pi` path. Use the canonical shell and file-edit rules on the mapped arguments and exact workspace. The admitted lexical workspace pathname lets Policy check both the lexical and resolved paths. At the owned tool boundary, require the same physical target identity that Policy evaluated and preserve that binding across the actual open and effect. Refuse if the identity cannot be matched. Pi's `Read` path is bound to the action and adds no argument-pattern extractor. The fake harness sends the name the IR selects when its testing composition supports that choice. Until Pi's mapping lands, `pi` and any other unimplemented harness raise `policy_harness_unsupported`.
 
 **Two conditions.**
 
