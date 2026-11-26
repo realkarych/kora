@@ -22,7 +22,12 @@ from weakref import ReferenceType, ref
 
 import aiosqlite
 from sqlalchemy import URL, Connection, event, make_url, text
-from sqlalchemy.engine.interfaces import DBAPIConnection, DBAPICursor, ExceptionContext
+from sqlalchemy.engine.interfaces import (
+    DBAPIConnection,
+    DBAPICursor,
+    ExceptionContext,
+    ExecutionContext,
+)
 from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import (
@@ -389,6 +394,40 @@ class SqliteDriverConnection(aiosqlite.Connection):
         self._thread.daemon = True
 
 
+class _GuardedSqliteDriverConnection(SqliteDriverConnection):
+    async def close(self) -> None:
+        await complete(self._close_and_join())
+
+    async def _close_and_join(self) -> None:
+        try:
+            await super().close()
+        finally:
+            if self._thread.ident is not None:
+                await asyncio.to_thread(self._thread.join)
+
+
+@dataclass(frozen=True)
+class _GuardedSqliteReader:
+    path: Path
+    require_live: Callable[[], None]
+
+    def before_setup(
+        self, raw_connection: DBAPIConnection, record: ConnectionPoolEntry
+    ) -> None:
+        self.require_live()
+
+    def before_statement(
+        self,
+        connection: Connection,
+        cursor: DBAPICursor,
+        statement: str,
+        parameters: object,
+        context: ExecutionContext | None,
+        executemany: bool,
+    ) -> None:
+        self.require_live()
+
+
 class _SqliteServingLifetime:
     def __init__(self) -> None:
         self._guard = Lock()
@@ -434,13 +473,21 @@ class _ServingSqliteConnection(sqlite3.Connection):
 
 
 def open_sqlite_file(
-    path: Path, lifetime: _SqliteServingLifetime | None = None
+    path: Path,
+    lifetime: _SqliteServingLifetime | None = None,
+    *,
+    guarded_reader: _GuardedSqliteReader | None = None,
 ) -> sqlite3.Connection:
+    target: str | Path = path
+    if guarded_reader is not None:
+        guarded_reader.require_live()
+        target = guarded_reader.path.as_uri() + "?mode=ro"
     connection = sqlite3.connect(
-        path,
+        target,
         timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
         isolation_level=None,
         check_same_thread=False,
+        uri=guarded_reader is not None,
         factory=sqlite3.Connection if lifetime is None else _ServingSqliteConnection,
     )
     if lifetime is not None and isinstance(connection, _ServingSqliteConnection):
@@ -449,13 +496,47 @@ def open_sqlite_file(
 
 
 def sqlite_connector(
-    path: Path, lifetime: _SqliteServingLifetime | None = None
+    path: Path,
+    lifetime: _SqliteServingLifetime | None = None,
+    *,
+    guarded_reader: _GuardedSqliteReader | None = None,
 ) -> Callable[[], Awaitable[aiosqlite.Connection]]:
+    if guarded_reader is not None:
+
+        async def connect() -> aiosqlite.Connection:
+            async def acquire() -> _GuardedSqliteDriverConnection:
+                opened = await asyncio.to_thread(
+                    open_sqlite_file, path, lifetime, guarded_reader=guarded_reader
+                )
+                driver = _GuardedSqliteDriverConnection(opened)
+                try:
+                    await driver
+                    guarded_reader.require_live()
+                except BaseException:
+                    try:
+                        await driver.close()
+                    finally:
+                        await asyncio.to_thread(opened.close)
+                    raise
+                return driver
+
+            return await finish_releasing(
+                acquire(), _GuardedSqliteDriverConnection.close
+            )
+
+        return connect
+
     async def connect() -> aiosqlite.Connection:
         opened = await asyncio.to_thread(open_sqlite_file, path, lifetime)
         return await SqliteDriverConnection(opened)
 
     return connect
+
+
+def retire_guarded_sqlite_reader(
+    connection: DBAPIConnection | None, record: ConnectionPoolEntry
+) -> None:
+    record.close()
 
 
 def sqlite_engine(
@@ -464,8 +545,11 @@ def sqlite_engine(
     *,
     require_full_sync: bool = False,
     serving_lifetime: _SqliteServingLifetime | None = None,
+    guarded_reader: _GuardedSqliteReader | None = None,
 ) -> AsyncEngine:
-    connector = sqlite_connector(settings.sqlite_path.absolute(), serving_lifetime)
+    connector = sqlite_connector(
+        settings.sqlite_path.absolute(), serving_lifetime, guarded_reader=guarded_reader
+    )
     if writer:
         engine = create_async_engine(
             settings.url, poolclass=StaticPool, async_creator=connector
@@ -474,7 +558,7 @@ def sqlite_engine(
         engine = create_async_engine(
             settings.url,
             poolclass=AsyncAdaptedQueuePool,
-            pool_size=SQLITE_READERS,
+            pool_size=SQLITE_READERS if guarded_reader is None else 1,
             max_overflow=0,
             pool_timeout=settings.pool_timeout_seconds,
             async_creator=connector,
@@ -495,6 +579,15 @@ def sqlite_engine(
         )
     else:
         event.listen(engine.sync_engine, "handle_error", handle_native_read_error)
+    if guarded_reader is not None:
+        event.listen(engine.pool, "connect", guarded_reader.before_setup, insert=True)
+        event.listen(engine.pool, "checkin", retire_guarded_sqlite_reader)
+        event.listen(
+            engine.sync_engine, "before_cursor_execute", guarded_reader.before_statement
+        )
+        event.listen(
+            engine.sync_engine, "handle_error", keep_connection_on_cancellation
+        )
     return engine
 
 
@@ -769,6 +862,23 @@ WRITER_ENTRY_NATIVE_ERRORS: tuple[type[Exception], ...] = (
 
 
 class Database:
+    @classmethod
+    def guarded_sqlite_reader(
+        cls, path: Path, require_live: Callable[[], None]
+    ) -> "Database":
+        if not path.is_absolute() or ".." in path.parts:
+            raise DatabaseConfigurationError(
+                "the protected SQLite path must be canonical"
+            )
+        settings = DatabaseSettings(
+            URL.create(SQLITE_DRIVER, database=str(path)), Dialect.SQLITE
+        )
+        return cls(
+            settings,
+            observe_sqlite_serving=True,
+            _guarded_reader=_GuardedSqliteReader(path, require_live),
+        )
+
     def __init__(
         self,
         settings: DatabaseSettings,
@@ -776,6 +886,7 @@ class Database:
         require_sqlite_full_sync: bool = False,
         require_postgresql_wal_settings: bool = False,
         observe_sqlite_serving: bool = False,
+        _guarded_reader: _GuardedSqliteReader | None = None,
     ) -> None:
         if require_sqlite_full_sync and settings.dialect is not Dialect.SQLITE:
             raise ValueError("the SQLite writer mode requires SQLite")
@@ -792,9 +903,28 @@ class Database:
             _SqliteServingLifetime() if observe_sqlite_serving else None
         )
         self._require_postgresql_wal_settings = require_postgresql_wal_settings
+        self._guarded_reader = _guarded_reader
         self._writer_lock = asyncio.Lock()
-        self._sqlite_writer_usable = True
-        if settings.dialect is Dialect.SQLITE:
+        self._sqlite_writer_usable = _guarded_reader is None
+        self._writer: AsyncEngine | None
+        if _guarded_reader is not None:
+            if (
+                self._sqlite_serving is None
+                or require_sqlite_full_sync
+                or settings.sqlite_path != _guarded_reader.path
+            ):
+                raise DatabaseConfigurationError(
+                    "the protected SQLite reader is unavailable"
+                )
+            self._writer = None
+            self._reader = sqlite_engine(
+                settings,
+                writer=False,
+                serving_lifetime=self._sqlite_serving,
+                guarded_reader=_guarded_reader,
+            )
+            reader_capacity = 1
+        elif settings.dialect is Dialect.SQLITE:
             create_private_file(settings.sqlite_path)
             self._writer = sqlite_engine(
                 settings,
@@ -808,18 +938,15 @@ class Database:
                 require_full_sync=require_sqlite_full_sync,
                 serving_lifetime=self._sqlite_serving,
             )
+            reader_capacity = SQLITE_READERS
         else:
             self._writer = postgresql_engine(settings)
             self._reader = self._writer
-        reader_capacity = (
-            SQLITE_READERS
-            if self.dialect is Dialect.SQLITE
-            else (
+            reader_capacity = (
                 settings.pool_size + settings.max_overflow
                 if settings.pool_size > 0 and settings.max_overflow >= 0
                 else 0
             )
-        )
         self._snapshot_admission: _SnapshotAdmission = _SnapshotAdmission(
             self._reader, reader_capacity
         )
@@ -832,6 +959,8 @@ class Database:
 
     @property
     def writer_engine(self) -> AsyncEngine:
+        if self._writer is None:
+            raise DatabaseClosedError("the database writer is unavailable")
         return self._writer
 
     @property
@@ -842,7 +971,7 @@ class Database:
         if self.dialect is not Dialect.POSTGRESQL:
             return None
         return cast(
-            "PostgresAdapter", self._writer.dialect.loaded_dbapi
+            "PostgresAdapter", self.writer_engine.dialect.loaded_dbapi
         ).asyncpg.PostgresError
 
     @property
@@ -850,7 +979,7 @@ class Database:
         return self._lifecycle
 
     def writer_is_free(self) -> bool:
-        return not self._writer_lock.locked()
+        return self._writer is not None and not self._writer_lock.locked()
 
     def units_in_flight(self) -> int:
         return self._in_flight
@@ -1028,6 +1157,7 @@ class Database:
     async def _lease(
         self, transactional: bool, *, admission: _WriterAdmission | None = None
     ) -> AsyncGenerator[AsyncConnection, None]:
+        writer = self.writer_engine
         self._enter_unit()
         cancelled_entry = False
         try:
@@ -1036,7 +1166,7 @@ class Database:
                     if not self._sqlite_writer_usable:
                         raise DatabaseClosedError("the database writer is unavailable")
                     async with self._unit(
-                        self._writer, transactional, admission=admission
+                        writer, transactional, admission=admission
                     ) as connection:
                         yield connection
             else:
@@ -1044,7 +1174,7 @@ class Database:
                     transactional and self._require_postgresql_wal_settings
                 )
                 async with self._unit(
-                    self._writer,
+                    writer,
                     transactional,
                     admission=admission,
                     verify_postgresql_writer=verify_postgresql_writer,
@@ -1086,6 +1216,9 @@ class Database:
     async def _read_transaction(
         self, deadline: float | None, *, snapshot: bool = False
     ) -> AsyncGenerator[AsyncConnection, None]:
+        guarded_reader = self._guarded_reader
+        if guarded_reader is not None:
+            guarded_reader.require_live()
         self._enter_unit()
         cancelled = False
         try:
@@ -1098,6 +1231,8 @@ class Database:
                     )
                     self._refuse_when_closed()
                 yield connection
+            if guarded_reader is not None:
+                guarded_reader.require_live()
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -1274,16 +1409,17 @@ class Database:
         if self._lifecycle is not Lifecycle.OPEN or not self._sqlite_writer_usable:
             raise DatabaseSnapshotRejected(DatabaseSnapshotFailure.UNAVAILABLE)
         if self.dialect is Dialect.POSTGRESQL:
-            self._snapshot_admission.require_current(self._writer, deadline)
+            self._snapshot_admission.require_current(self.writer_engine, deadline)
 
     async def _checkout_writer_before(self, deadline: float) -> AsyncConnection:
         self._require_writer_entry(deadline)
+        writer = self.writer_engine
         if self.dialect is Dialect.POSTGRESQL:
-            return await self._snapshot_admission.connect_before(self._writer, deadline)
+            return await self._snapshot_admission.connect_before(writer, deadline)
 
         async def connect() -> AsyncConnection:
             self._require_writer_entry(deadline)
-            return await self._writer.connect()
+            return await writer.connect()
 
         async def release_late_checkout(connection: AsyncConnection) -> None:
             await self._release_sqlite_writer_entry(connection, cancelled=True)
@@ -1599,7 +1735,8 @@ class Database:
             return
         self._disposed = True
         try:
-            await self._writer.dispose()
+            if self._writer is not None:
+                await self._writer.dispose()
         finally:
             if self._reader is not self._writer:
                 await self._reader.dispose()
