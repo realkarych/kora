@@ -633,6 +633,8 @@ Before activation, additionally qualify saturation refusal before I/O; conflicti
 
 #### Crash-durable metadata profile
 
+This profile governs production and installed authority. The sole [isolated Linux ext4 walking-skeleton admission](first-slice.md#isolated-walking-skeleton-qualification) permits live test-only address-fenced effects with the original native writer and closure checks. The test admission supplies no production qualification.
+
 The [accepted custody mechanism](execution-custody-authority.md#6-qualification-and-delivery-limits) separates current settings observations from actual native persistence, whole-image restore and prior-issuer exclusion. The [native refinement](execution-custody-native.md) under #1580 specifies its exact journal/frontier records, all-writer protocol and system-crash method, accepted in #1586. The [recovery-priority amendment](execution-custody-recovery-priority.md) governs the v2 journal authority binding and same-pool PostgreSQL admission and resource release. The metadata `custody_frontier` keeps its existing record format. Custody implementation and qualification remain pending.
 
 The project owner accepted an explicit installation-wide profile on 2026-11-07 under [#954](https://github.com/realkarych/kora/issues/954#issuecomment-6712053449). Enable address-fenced custody only in a metadata authority with the verified profile. Include every actual writer and checkpoint path that can change or carry relied-on state, including pooled replacement connections, migrations, recovery and alternate writers. Installations in ordinary mode keep address-fenced effects disabled.
