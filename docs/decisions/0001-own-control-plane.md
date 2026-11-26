@@ -88,6 +88,14 @@ The second slice demonstrates the outer loop with both Claude and Codex. A subgr
 
 The pilot uses the existing Git VCS provider, as the [owner confirmed on 2026-11-11](https://github.com/realkarych/kora/issues/1359#issuecomment-6801963893). The non-Git adapter remains part of MVP acceptance on the second runtime/VCS pair. The [MVP acceptance criteria](../requirements/functional.md) continue to apply.
 
+## Isolated walking-skeleton verification amendment of 2026-11-25
+
+The [owner decision under #1869](https://github.com/realkarych/kora/issues/1869#issuecomment-7172798303) permits the checked walking-skeleton graph to run in an owned disposable Linux guest on ext4 for one boot and one live test API process. The only mount authority in the guest for this installation is the trusted launcher. It creates and protects the single SQLite main path for the entire invocation. The test API can rely on that path's continuity without native main-file identity from its SQLite connection or a physical qualification report for the installation. The [isolated admission contract](../../knowledge/specs/first-slice.md#isolated-walking-skeleton-qualification) defines the exact guard, fail-closed behavior and owning evidence.
+
+The isolated milestone requires the real API, Worker, LocalRuntime supervisor and Scheduler, original ready upload, seal and hold, accepted outputs and report, actual closure, exact authorized replay and orderly Scheduler restart on the same database. The sole test API hosts both Scheduler lifetimes in succession. The fresh Scheduler must enable exactly one next Claim. The named power-cut, system/storage and image-recovery qualification legs, forced process-loss campaigns and transient registry-directory synchronization failure after replacement move to post-MVP for this milestone. Confirmed response loss, ordinary refusal and cancellation, actual release and the named joined request evidence remain required.
+
+Production custody and affected installed guarantees still require their own exact qualification and activation. An isolated result confers no installed authority, recovery after API or boot loss, or permission to bypass a missing native outcome.
+
 ## Decision
 
 kora keeps its own control plane for the MVP (requirements decision 12): a scheduler that is a stateless loop over the metadata database, an HTTP API, and workers per runtime (ADR-0003).
