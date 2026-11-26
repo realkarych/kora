@@ -1009,9 +1009,11 @@ jobs:
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           pnpm --dir web install --frozen-lockfile
         if: ${{ needs.change-scope.outputs.full != 'false' }}
+      - name: Verify browser package attempt ownership
+        run: python3 -m tests.architecture.browser_system_packages_witness
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Install browser system packages
-        run: |
-          python3 scripts/ci/acquire.py run 120 -- sudo env "PATH=$PATH" timeout --kill-after=5 105 sh -c 'dpkg --configure -a && pnpm --dir web exec playwright install-deps chromium-headless-shell'
+        run: python3 -m scripts.ci.acquire browser-system-packages 120
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Install pinned browser
         run: |
