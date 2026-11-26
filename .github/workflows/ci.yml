@@ -997,6 +997,7 @@ jobs:
           package-manager-cache: false
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        id: browser_pnpm
         with:
           package_json_file: web/package.json
           run_install: false
@@ -1014,6 +1015,8 @@ jobs:
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Install browser system packages
         run: python3 -m scripts.ci.acquire browser-system-packages 120
+        env:
+          KORA_BROWSER_PNPM_BIN: ${{ steps.browser_pnpm.outputs.bin_dest }}
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Install pinned browser
         run: |

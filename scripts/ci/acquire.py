@@ -546,17 +546,30 @@ async def perform(
     if arguments[0] == "browser-system-packages":
         from scripts.ci.browser_system_packages import (
             BrowserPackagesRefused,
-            install_browser_system_packages,
+            Programs,
+            package_attempt,
         )
 
         try:
+            programs = Programs.workflow()
+            work = ("install", str(programs.tool_cache), str(programs.pnpm_bin))
+            latest_settlement = (
+                budget.started
+                + JOB_BUDGET_SECONDS
+                - budget.spent
+                - COMMAND_RESERVE_SECONDS
+            )
+
+            async def attempt(allowance: float) -> str | None:
+                return await package_attempt(work, allowance, latest_settlement)
+
             await run_attempts(
                 "browser system packages",
                 int(arguments[1]),
                 pause,
                 errors,
                 budget,
-                install_browser_system_packages,
+                attempt,
             )
         except BrowserPackagesRefused as error:
             raise AcquisitionError(str(error)) from None

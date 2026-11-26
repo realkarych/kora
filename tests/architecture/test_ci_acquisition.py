@@ -785,6 +785,13 @@ def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
     assert witness < system_packages < browser < build
     assert browser_steps[witness]["if"] == browser_steps[system_packages]["if"]
     assert browser_steps[system_packages]["if"] == browser_steps[browser]["if"]
+    assert table(browser_steps[system_packages]["env"])["KORA_BROWSER_PNPM_BIN"] == (
+        "${{ steps.browser_pnpm.outputs.bin_dest }}"
+    )
+    selected_pnpm = next(
+        step for step in browser_steps if step.get("id") == "browser_pnpm"
+    )
+    assert action_of(selected_pnpm) == "pnpm/action-setup"
     assert (
         sum(
             BROWSER_SYSTEM_PACKAGES in str(step.get("run", ""))
@@ -811,6 +818,17 @@ def test_browser_package_attempt_shortens_work_and_reserves_proof() -> None:
     assert shortened.settled - shortened.start - shortened.work == STOP_SECONDS
     assert shortened.prove - shortened.settled == PROOF_SECONDS
     assert shortened.join - shortened.prove == RETURN_SECONDS
+
+
+def test_browser_package_allowance_does_not_move_the_ledger_cutoff() -> None:
+    cutoff = time.monotonic() + START_SECONDS + STOP_SECONDS + 1
+
+    window = AttemptWindow.allocate(MAX_COMMAND_SECONDS, cutoff)
+
+    assert window.settled == cutoff
+    assert window.prove == cutoff + PROOF_SECONDS
+    assert window.join == cutoff + COMMAND_RESERVE_SECONDS
+    assert 0 < window.work <= 1
 
 
 def test_browser_package_attempt_with_insufficient_budget_does_not_retry(
