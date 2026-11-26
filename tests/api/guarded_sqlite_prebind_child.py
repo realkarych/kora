@@ -3,6 +3,7 @@ import errno
 import os
 import re
 import select
+import shutil
 import socket
 import sqlite3
 import stat
@@ -688,9 +689,10 @@ def witness_bound_image(domain: Path, device: str, *, inexact: bool) -> None:
         directory.rmdir()
 
 
-def release_loop(device: str, indicator: Path) -> None:
+def release_loop(device: str, indicator: Path, image: Path) -> None:
     command("/usr/sbin/losetup", "--detach", device)
     assert not indicator.exists()
+    image.unlink()
 
 
 def run_launcher(base: Path, outer_namespace: int) -> None:
@@ -704,7 +706,6 @@ def run_launcher(base: Path, outer_namespace: int) -> None:
     with ExitStack() as owned:
         with image.open("xb") as raw:
             raw.truncate(FILESYSTEM_BYTES)
-        owned.callback(image.unlink)
         command("/usr/sbin/mke2fs", "-q", "-F", "-t", "ext4", str(image))
         device = command("/usr/sbin/losetup", "--find", "--show", str(image)).strip()
         require(
@@ -715,7 +716,7 @@ def run_launcher(base: Path, outer_namespace: int) -> None:
         require(
             indicator.read_text().strip() == str(image), "the loop image is not owned"
         )
-        owned.callback(release_loop, device, indicator)
+        owned.callback(release_loop, device, indicator, image)
         command(
             "/usr/bin/mount",
             "-t",
@@ -745,54 +746,51 @@ def run_owned_guest() -> None:
         f"ENV Linux-x86_64 {OWNED_GUEST_RELEASE} "
         f"Python={version} SQLite={sqlite3.sqlite_version}"
     )
-    with tempfile.TemporaryDirectory(prefix="kora-1882-", dir="/run") as scratch:
-        base = Path(scratch)
-        os.chown(base, 0, API_UID)
-        base.chmod(0o710)
-        (base / "media").mkdir(mode=0o700)
-        domain = base / "fs"
-        domain.mkdir(mode=0o700)
-        with subprocess.Popen(
-            (
-                "/usr/bin/unshare",
-                "--mount",
-                "--propagation",
-                "private",
-                sys.executable,
-                "-B",
-                "-m",
-                WITNESS_MODULE,
-                "launcher",
-                str(base),
-                str(mount_namespace()),
-            ),
-            env=fixture_environment(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-        ) as launcher:
-            try:
-                assert launcher.stdout is not None
-                readable, _, _ = select.select(
-                    [launcher.stdout], [], [], WITNESS_TIMEOUT
-                )
-                assert readable
-                assert launcher.stdout.readline(128) == b"PREBIND PRIVATE_EXT4\n"
-                assert not list(domain.iterdir())
-                assert (
-                    Path(f"/proc/{launcher.pid}/ns/mnt").stat().st_ino
-                    != mount_namespace()
-                )
-                output, _ = launcher.communicate(input=b"1", timeout=100)
-                assert launcher.returncode == 0
-                sys.stdout.write(output.decode("ascii"))
-                sys.stdout.flush()
-            finally:
-                if launcher.poll() is None:
-                    assert launcher.stdin is not None
-                    launcher.stdin.close()
-                    launcher.wait(timeout=100)
-            assert not Path(f"/proc/{launcher.pid}").exists()
+    base = Path(tempfile.mkdtemp(prefix="kora-1882-", dir="/run"))
+    os.chown(base, 0, API_UID)
+    base.chmod(0o710)
+    (base / "media").mkdir(mode=0o700)
+    domain = base / "fs"
+    domain.mkdir(mode=0o700)
+    with subprocess.Popen(
+        (
+            "/usr/bin/unshare",
+            "--mount",
+            "--propagation",
+            "private",
+            sys.executable,
+            "-B",
+            "-m",
+            WITNESS_MODULE,
+            "launcher",
+            str(base),
+            str(mount_namespace()),
+        ),
+        env=fixture_environment(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    ) as launcher:
+        try:
+            assert launcher.stdout is not None
+            readable, _, _ = select.select([launcher.stdout], [], [], WITNESS_TIMEOUT)
+            assert readable
+            assert launcher.stdout.readline(128) == b"PREBIND PRIVATE_EXT4\n"
             assert not list(domain.iterdir())
+            assert (
+                Path(f"/proc/{launcher.pid}/ns/mnt").stat().st_ino != mount_namespace()
+            )
+            output, _ = launcher.communicate(input=b"1", timeout=100)
+            assert launcher.returncode == 0
+            sys.stdout.write(output.decode("ascii"))
+            sys.stdout.flush()
+        finally:
+            if launcher.poll() is None:
+                assert launcher.stdin is not None
+                launcher.stdin.close()
+                launcher.wait(timeout=100)
+        assert not Path(f"/proc/{launcher.pid}").exists()
+        assert not list(domain.iterdir())
+    shutil.rmtree(base)
     assert not base.exists()
     fixture_message("PASS launcher_reaped=1 directory=0")
 
