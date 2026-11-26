@@ -97,19 +97,52 @@ The approval predicate pass consumes this effective schema under [issue #644](ht
 
 ### 2.1. Authoritative type contracts (ADR-0018)
 
-The unreleased IR 1.0 uses `kora.execution.v1` interpretation. `type_contracts` is required in this format and contains every used non-list type and its parent/reference closure. A graph that uses no artifact types, such as a timer-only graph, has an empty `type_contracts: {}` closure. `List[T]` derives its contract from the fixed list semantics and `T`; it has no separate registry alias. The compiler emits definitions from author-side models, including an explicit `$schema`, and installed immutable built-in revisions. It performs no registration/network write during compilation.
+IR 1.0 uses `kora.execution.v1`.
+The required `type_contracts` map carries every used base type and its complete parent and reference closure.
+A graph with no artifact types uses `type_contracts: {}`.
+`List[T]` derives its contract from `T` and the fixed list semantics without a separate registry alias.
+The offline compiler emits author-defined contracts, explicit `$schema` and installed immutable built-in revisions.
 
-The [built-in revision catalogue](artifacts/README.md) publishes authoritative VcsRef and [StructuredOutput revision-1](artifacts/StructuredOutput.md) schemas and validation, digest-selection and summary semantics. [CommandResult revision 1](artifacts/CommandResult.md) publishes its complete execution-evidence contract under #432. Derived List[CommandResult] and recursive scheduler collect/export aggregate activation remain pending work items 3/9/10/11/12 under generic saved list semantics; per-result, upload and CEL bounds establish no aggregate bound, and this publication selects no new aggregate numerical default or campaign. [AgentSession revision 1](artifacts/AgentSession.md) freezes the transcript-primary representation, complete logical-output replay and `kora.agent-session-view.v1` checker/projection policy; #138 coordinates remaining models and consumers. A built-in entry is `{builtin_revision: "1"}`. The installation must resolve that revision to its immutable schema and behavior descriptors; a revision cannot be rebound to new bytes. A custom entry contains `schema`, `parent` (a type name or null) and `behavior` with exact `validation`, `digest_fields` and `summary` implementation identities. These identities identify provider-declared immutable semantics, not executable source or an instruction to download/import author code. Registered provider metadata supplies the installed binding and verifies its implementation identity; an unavailable or mismatched binding is rejected, not replaced by the current implementation.
+A built-in entry uses `{builtin_revision: "1"}` and resolves to that revision's immutable schema and behavior descriptors.
+The [built-in catalogue](artifacts/README.md) publishes the schemas and validation, digest and summary bindings for VcsRef and [StructuredOutput](artifacts/StructuredOutput.md), the execution evidence for [CommandResult](artifacts/CommandResult.md), and the transcript-primary representation, complete logical-output replay and `kora.agent-session-view.v1` policy for [AgentSession](artifacts/AgentSession.md).
+Derived `List[CommandResult]` and recursive scheduler collect/export aggregates await work items 3, 9–12 under the generic saved list rules.
+Per-result, upload and CEL limits establish no list-wide bound.
 
-The generic behavior identities are `kora.json-schema-2020-12.v1` for schema validation and `kora.json-payload.v1` for whole-payload digest selection and the identity summary. Custom summary bindings use their provider's immutable identity and the trusted installation's configured entry point. Identity summaries are content-bearing payloads, not permanent small metadata. Actual selected fields/projections and summaries are stored at production time ([protocols.md](protocols.md) section 8).
+A custom entry requires `schema`, `parent` (a type name or null) and `behavior` with exact `validation`, `digest_fields` and `summary` identities.
+These identities name immutable behavior declared by providers.
+The trusted installation resolves the registered binding and verifies the exact identity, refusing an unavailable or mismatched binding without running author code or fetching an implementation.
+The generic identities are `kora.json-schema-2020-12.v1` for validation and `kora.json-payload.v1` for whole-payload digest selection and the identity summary.
+Custom summaries bind the provider's immutable identity to the configured entry point.
+Selected fields, projections and summaries are stored when produced under [the artifact type protocol](protocols.md).
+Identity summaries remain content-bearing payloads.
 
-Schemas use JSON Schema draft 2020-12. Local fragment references resolve inside their document; cross-type references use `urn:kora:artifact:<name>` with a namespace separator encoded as `:`, for example `urn:kora:artifact:dwh_core:Candidate`. Built-in schemas have the same canonical `$id` form. Deployment builds an in-memory resolver only from the saved closure. Other external references, unresolved parents/references, parent cycles, unsupported dialects and unavailable behavior identities are `IR022` at the affected path. No runtime network resolver or mutable registry lookup is allowed. Schema syntax/metaschema validity and closure/assignability are semantic checks beyond the outer JSON Schema.
+Schemas use JSON Schema draft 2020-12.
+Local references keep their original document root.
+Cross-type references and built-in `$id` use `urn:kora:artifact:<name>` with `:` as the namespace separator, as in `urn:kora:artifact:dwh_core:Candidate`.
+Deployment builds its in-memory resolver from the saved closure alone.
+The resolver uses no runtime network lookup or mutable registry alias.
+Disallowed external references, unresolved parents or targets, parent cycles, unsupported dialects and unavailable behavior identities refuse with `IR022` at the affected path.
+Schema validity, closure and assignability require the semantic passes in [section 10](#10-validation-rules-kora-validate).
 
-Custom definitions in the document are authoritative, even if the namespace's current alias has changed since compilation. Deploy checks namespace ownership and the whole closure, expands built-in revisions and includes inline node output schemas in `graph_version.execution_contract`. It does not replace an embedded definition with today's registry value. Registration changes a namespace alias for future authoring only. Deployment identity is the digest of canonical `{ir, execution_contract}` under the [exact graph version digest inputs](data-model.md#graph-version-digest-inputs). The separate `ir_digest` identifies the compiled document. The same complete deployment is idempotent within its authorized graph; different resolved resource/type behavior cannot reuse the old identity. `meta` remains informational.
+Deployment checks namespace ownership and the whole closure, expands built-in revisions and includes inline output schemas in `graph_version.execution_contract`.
+It keeps the embedded definitions by value under [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md).
+Registration changes namespace aliases for future authoring only.
+The [version identity](data-model.md#graph-version-digest-inputs) is the digest of canonical `{ir, execution_contract}`, with separate `ir_digest` for the compiled document.
+The same complete deployment is idempotent within its authorized graph.
+Different resolved resource or type behavior requires a different version identity.
+`meta` remains informational.
 
-Every consumer uses this closure: schema-driven CEL checking, edge assignability, worker output schema, API upload validation, branch/collection evaluation and content-bound approval digests. Scheduler-only nodes acquire no physical attempt row. A supported execution-semantics version must implement both saved built-in revisions and declared custom behavior; unsupported execution fails explicitly before the affected operation, while historical reads use saved results. Referenced skill/MCP/resource identities are carried when declared or observed, with delivery still owned by issues #45 and #48.
+CEL checking, edge assignability, worker output and upload validation, branch and collection evaluation, and content-bound approval digests use the saved closure.
+Scheduler-only nodes acquire no physical attempt row.
+Execution must support every required saved built-in revision and custom behavior under the selected semantics.
+An unavailable interpretation must fail before the affected operation.
+Historical reads use saved results.
+Declared or observed skill, MCP and resource identities travel with their existing owners under #45 and #48.
 
-Artifact type names are a built-in or namespaced type, recursively wrapped in `List[T]` where needed. The JSON Schema checks the structural spelling; semantic type validation (`IR003`) parses the complete type and checks balanced brackets at every nesting level. The schema alone cannot establish arbitrary bracket balance and imposes no list-depth limit. Static fan-out declaration checking uses this saved closure and the same iterative spelling parser; its nominal result does not activate list payload admission or fan-out execution.
+Type names are built-in or namespace-qualified base names, with recursive `List[T]` wrappers where needed.
+The outer JSON Schema checks spelling without a nesting limit or a bracket-balance guarantee.
+Semantic validation checks balance at every depth and reports `IR003`.
+Static fan-out uses the saved closure and iterative spelling parser for nominal checks, leaving payload admission and execution to their own activation rules.
 
 #### Exact native builtin effective contracts
 
@@ -1629,7 +1662,11 @@ Each undeclared reference produces fixed `IR007` at its referring safe segmented
 
 No provider is resolved or listed and no process environment is read. Opaque metadata/payloads and ordinary `env` values are not scanned. Namespace-prefix authorization, provider availability, reserved environment names, secret egress/isolation policy, value-like `env` detection, installation admission and public graph execution remain separate. Existing provider configuration remains authoritative for secret-prefix policy. [Evidence and limits](../research/secret-alias-membership-evidence-2026-10-31.md) name the owning checks and observability activation.
 
-The first semantic pass, `kora.ir.validate_graph_links`, is implemented under [issue #463](https://github.com/realkarych/kora/issues/463). It accepts a structurally validated `GraphDocument` whose caller-owned maps remain unchanged during the synchronous call. `GraphLinkResult.links_valid` describes only the scoped link checks: ordinary node/output and control references, body definitions/exports, fan-out names, branch ownership, dependency and definition cycles, target producer/output names and `independent_of` input membership. Every stored body is checked once, including unused definitions; calls are not expanded into instances. Reserved-source payload paths, retry legality, type/contract closure, expressions, providers, installation features and raw-document admission remain later passes. No endpoint, CLI command, MCP tool or execution authority is added.
+`kora.ir.validate_graph_links` requires a structurally validated `GraphDocument` whose caller-owned maps stay unchanged during the call.
+`GraphLinkResult.links_valid` covers local producer/output and control links, body definitions and exports, fan-out names, branch ownership, dependency and definition cycles, target producer/output names and `independent_of` input membership.
+It checks each stored body once, including unused bodies, without expanding call instances.
+Raw-document admission, reserved-source paths, retry, types and contracts, expressions, provider and installation checks retain their own passes.
+The scoped result confers no execution or public-operation authority. [Graph-link scope](https://github.com/realkarych/kora/issues/463)
 
 The known declared target-parameter type pass, `kora.ir.validate_known_target_parameter_types`, is implemented under [issue #554](https://github.com/realkarych/kora/issues/554), with the structurally validated, unchanged-snapshot precondition. It owns only a root `ParameterTarget` and compares the exact declared property of an authored `graph.params` schema mapped by the existing PLAIN `SchemaTypes` to a `Record`. A known STRING primitive, including string enum/const metadata, is string; another known non-Dyn type produces fixed `IR020` at `graph.target.key.param`. Nullable is not unwrapped, and optional string declarations remain legal. Only revalidated graph source survives, with null node and offset; no parameter/type/schema/reference text enters the finding or scalar completion event.
 
@@ -1643,17 +1680,58 @@ The declared tool-policy pass, `kora.ir.validate_tool_policies`, is implemented 
 
 Fixed IR013 uses the owning `config.tool_policy` root for aggregate limits, allow/deny for array limits and an indexed array path for pattern refusals. Only safe owning-node source and node identity survive, with null offset and no ancestor fallback. Oversized arrays suppress only their member compilation; independent array/layer checks continue. `ToolPolicyResult` retains bounded copied diagnostics and node/definition/policy/pattern counts; patterns count all authored entries, including overlarge arrays. `tool_policies_valid` establishes only these static checks. No tool matching, filesystem resolution, namespace consumer, capability/installation/public admission or execution authority is added. [Evidence and limits](../research/tool-policy-validation-evidence-2026-10-31.md).
 
-The type-declaration pass, `kora.ir.validate_type_declarations`, is implemented under [issue #468](https://github.com/realkarych/kora/issues/468), with the same structurally validated, unchanged-snapshot precondition. `TypeDeclarationResult.declarations_valid` covers balanced nested `List[T]` spelling (`IR003`), declared base names, namespace-qualified custom entries, saved parents, parent cycles and recognition of published built-in name/revision pairs (`IR022`). It checks every supplied contract, every node input/output in the root and stored bodies, and every subgraph interface input/export, including unused bodies. Missing prerequisites suppress only dependent checks; cycle findings identify members rather than descendants. Counters expose declaration and contract visits. Published recognition currently covers revision `1` of `VcsRef`, `StructuredOutput`, `AgentSession` and `CommandResult`; it does not establish installed behavior support or activate derived-list materialization. Schema/reference closure, behavior binding, effective schema compatibility, edge assignability, CEL environments and public admission remain pending. The pass acquires no execution authority and adds no public operation.
+The type-declaration, saved-schema and inline-schema passes require the same structurally validated snapshot to remain unchanged during the call.
+Each visit count describes only that pass, and an invalid prerequisite suppresses only dependent checks.
+These results confer no execution admission or public-operation authority.
 
-The saved-schema pass, `kora.ir.validate_type_schemas`, is implemented under [issue #473](https://github.com/realkarych/kora/issues/473), with the same typed, unchanged-snapshot precondition. `TypeSchemaResult.schemas_valid` covers draft-2020-12 metaschema validity and offline schema-reference closure for every saved type contract, including unused entries. Published revision-1 schemas for `VcsRef`, `StructuredOutput`, `AgentSession` and `CommandResult` ship as immutable package resources. A built-in reference still requires its entry in the supplied contract map. Counters expose contract, schema-position and reference visits; boolean schemas count as positions. Root schema dialect admission remains structural; nested unsupported dialects produce `IR022`.
+`kora.ir.validate_type_declarations` checks all supplied contracts, node input/output types and stored-body interface types, including unused definitions.
+`TypeDeclarationResult.declarations_valid` covers balanced `List[T]` spelling (`IR003`) and declared bases, qualified custom names, saved parents, parent cycles and published built-in revisions (`IR022`).
+Cycle findings identify members rather than descendants.
+The result counts declarations and contracts. [Declaration evidence](https://github.com/realkarych/kora/issues/468)
+Published recognition covers revision 1 of VcsRef, StructuredOutput, AgentSession and CommandResult.
+Schema/reference closure, behavior binding, effective compatibility, edge assignability, CEL and execution admission require their own checks.
+There is no installed behavior or list-materialization authority in this result.
 
-References admit an empty/local URI or exact saved `urn:kora:artifact:<name>` URI with an optional empty or JSON Pointer fragment. URI fragments use percent-encoded UTF-8 and RFC 6901 escapes; array indices use canonical nonnegative decimal spelling. The target must occupy a recognized schema position, including compatibility `definitions` and schema-valued `dependencies`. Annotation, enum, default, const and unknown extension data are not schemas. External URLs, relative paths, anchors, unresolved targets and nested `$id` resources are refused. Root `$id` creates no alias. Reference cycles are legal and are not expanded. `$dynamicRef` follows the same initial-target restriction, so admitted targets have ordinary static-reference behavior; anchor declarations confer no lookup authority. Deprecated `$recursiveRef` receives the same closure check without enabling an older dialect. These rules retain section 7.4's exclusion of nested schema resources and do not add a runtime resolver.
+`kora.ir.validate_type_schemas` checks the draft 2020-12 metaschema and offline reference closure of every saved contract, including unused entries.
+`TypeSchemaResult.schemas_valid` covers those two checks.
+The four published revision-1 schemas ship as immutable package resources, and even a built-in reference requires the supplied contract entry.
+The result counts contracts, schema positions (including boolean schemas) and references.
+The structural layer admits the root dialect, and nested unsupported dialects yield `IR022`.
 
-Typed keyword preflight prevents malformed nested values from reaching native error rendering. The real pinned metaschema checks bounded-depth, fixed-representation keyword views; every independent keyword and map entry continues after refusal. The explicit metadata format checker checks regex syntax only, independent of optional URI-format packages. Regex compiler capacity failures produce fixed `IR022`; URI authority and dialect policy are checked separately as above. Other metadata URI format annotations do not establish additional URI-format guarantees, and payload `format` evaluation is outside this pass. No new schema depth or capacity quota is introduced. Effective inherited compatibility, installed behavior binding, edge assignability, CEL environments, public admission and aggregate materialization remain later work-item-3/integration deliveries. The [evidence record](../research/type-schema-validation-evidence-2026-10-30.md) states resource ownership and diagnostic limits.
+An offline reference has an empty base for the current schema or an exact artifact URN from the supplied saved closure, with an optional empty or JSON Pointer fragment.
+Fragments use percent-encoded UTF-8 and RFC 6901 escapes.
+Array indices use canonical nonnegative decimal spelling.
+The target must be a recognized schema position, including compatibility `definitions` and schema-valued `dependencies`.
+Annotations, enum, default, const and unknown extension data supply no positions.
+External URLs, relative paths, anchors, unresolved targets and nested `$id` resources are refused.
+Root `$id` creates no alias and anchor declarations create no lookup authority.
+Reference cycles are legal and never expanded.
+`$dynamicRef` has the same initial-target restriction, so admitted targets resolve as static references.
+`$recursiveRef` receives the same closure check without enabling an older dialect.
+These offline rules retain the [checker boundary for nested resources](#74-schema-driven-checker).
 
-The inline-schema pass, `kora.ir.validate_inline_schemas`, is implemented under [issue #476](https://github.com/realkarych/kora/issues/476), with the same typed, unchanged-snapshot precondition. It checks `graph.params`, every node `outputs.*.schema`, stored subgraph `inputs.*.schema`, agent `config.output_schema` and human-input `config.form`. Root and all stored bodies are visited once, including unused bodies; calls do not expand instances. Each authored field is its own schema root. An omitted `$schema` selects draft 2020-12 without changing the document; an explicit different dialect fails. Missing fields remain missing and an authored `{}` is checked as a root.
+Typed keyword preflight keeps malformed nested values out of native error rendering.
+The pinned metaschema checks bounded-depth, fixed-representation keyword views and continues across independent entries after refusal.
+The metadata format checker checks regex syntax independently of optional URI-format packages.
+Regex compiler capacity failures yield fixed `IR022`.
+Dialect and URI authority follow the rules above, and URI annotations do not add format guarantees.
+Payload values and their `format` interpretation are outside this pass.
+The pass adds no depth or capacity quota.
+Effective compatibility, installed behavior, edge assignability, CEL, admission and aggregates remain separate.
+[Saved-schema scope](https://github.com/realkarych/kora/issues/473) and [evidence](../research/type-schema-validation-evidence-2026-10-30.md) record resource and diagnostic ownership.
 
-`InlineSchemaResult.inline_schemas_valid` covers only these schemas' metaschema validity and reference targets under the same offline rules. Local references use the owning field; root-identity cache keys prevent answers leaking between fields. Only available supplied saved type contracts populate artifact URNs. Inline `$id` values create no aliases. An unavailable built-in fails if referenced; unrelated invalid saved contracts remain the saved-schema/declaration passes' responsibility. The result exposes node, definition, inline-root, schema-position and reference counts. It does not establish effective output/form equality, approval defaults or predicates, inherited compatibility, payload validity, provider support, CEL typing or execution admission. [Evidence and limits](../research/inline-schema-validation-evidence-2026-10-30.md).
+`kora.ir.validate_inline_schemas` visits the root and each stored body once, including unused bodies, without expanding calls.
+It checks each authored `graph.params`, node `outputs.*.schema`, subgraph `inputs.*.schema`, agent `config.output_schema` and human-input `config.form` as a separate schema root.
+Missing fields stay missing and an authored `{}` is checked.
+An omitted `$schema` selects draft 2020-12 without modifying the document, and a different explicit dialect fails.
+
+`InlineSchemaResult.inline_schemas_valid` covers metaschema validity and offline reference targets.
+Local references and cache keys use the owning field's root.
+Only available supplied saved contracts define artifact URNs, and inline `$id` values create no aliases.
+An unavailable built-in fails when referenced, while rules for unrelated saved definitions remain with the type passes.
+The result counts nodes, definitions, inline roots, schema positions and references.
+Effective schema equality, approval defaults and predicates, inheritance, payload validation, providers, CEL and execution admission have their own checks.
+[Inline-schema scope](https://github.com/realkarych/kora/issues/476) and [evidence](../research/inline-schema-validation-evidence-2026-10-30.md) record the scoped verification.
 
 The separately planned [StructuredOutput execution profile](artifacts/StructuredOutput.md#32-initial-executable-schema-surface) is an additional support-admission boundary, not a change to these structural/metaschema/closure results. It excludes regex and unevaluated-item/property keywords in relevant schema positions, cyclic potential validation calls and lone surrogates in retained schema/input text; structurally valid IR using them remains representable. The complete accounting/parameters/charging specification is approved under #515, while the reserved policy supplies no executable effective-schema support until all named implementation and verification gates pass. Work items 3/8 retain the [named preparation/evaluation/composition gates](artifacts/StructuredOutput.md#5-verification-and-activation), including fixed refusal distinct from genuine schema mismatch. Existing recursive reference closure and schema syntax checks retain their meanings.
 
@@ -1665,13 +1743,33 @@ Schema equality is structural JSON-value equality: object-key order is ignored, 
 
 `OutputSchemaResult.output_schemas_valid` covers only established role cardinality and these authored comparisons. Missing, cyclic, unqualified or unpublished saved ancestry suppresses dependent StructuredOutput checks; existing declaration/schema passes still own their `IR022` findings. Independent exact-VcsRef and form checks continue. Per-call ancestry memoization includes unknown results and every visited prefix. `ancestry_steps` counts first contract-map lookups, including missing names, rather than cached uses; `values_checked` counts compared JSON-value pairs rather than keys or bytes. Other counters expose nodes, stored definitions, applicable output declarations and comparisons. This result can be valid while prerequisite passes fail. It does not establish inherited-schema compatibility, payload validity, approval predicates, provider support, CEL typing or execution admission. [Evidence and limits](../research/output-schema-consistency-evidence-2026-10-30.md).
 
-The direct-edge type pass, `kora.ir.validate_edge_types`, is implemented under [issue #482](https://github.com/realkarych/kora/issues/482), with the same structurally validated, unchanged-snapshot precondition. It checks nominal compatibility of ordinary same-body node/output references that select a whole artifact, including nested lists under [issue #495](https://github.com/realkarych/kora/issues/495). Root and every stored body are visited once, including unused bodies; call instances are not expanded. All node kinds may participate, and an optional input still has to satisfy this nominal relation when its declared endpoints are known.
+`kora.ir.validate_edge_types` takes a structurally validated snapshot that remains unchanged during the call.
+It checks each node input in the root and every stored body once, including unused bodies, without expanding call instances.
+Whole-artifact references resolve only within the owning body.
+All node kinds and optional inputs follow the same rule.
 
-An authored `path`, including an empty string, or a reserved source (`$params`, `$inputs`, `$previous_attempt`) excludes that input first. Otherwise a missing ordinary producer/output is unresolved. An iterative parser extracts each endpoint's base name and list depth; unbalanced spelling is unresolved. Both base names must then have valid saved ancestry, even when the depths differ. Declaration failures retain their own pass and diagnostic ownership. Published built-in name/revision pairs and namespace-qualified custom entries with null parents are roots. An iterative reverse-forest traversal uses one global preorder counter across roots and stores half-open intervals. Missing, cyclic, unqualified and unpublished ancestry, including descendants and identical endpoint names, stays unresolved. A resolved producer type is compatible with a resolved input type exactly when both have equal list depth and the producer base is the same name or a saved descendant of the input base. Scalar types have depth zero. Known incompatibility is `IR003` at the consumer's `inputs.<name>.type`. Parsing preserves the existing declaration check's balanced-spelling behavior and does not unwrap lists for output-role cardinality.
+Each node input contributes once to one category, in this order.
 
-`EdgeTypeResult.edge_types_valid` reports only the absence of established nominal mismatches. The result counts visited nodes/definitions/inputs, examined contract-map entries, indexed valid types and checked/unresolved/excluded edges. Every node input contributes exactly once to one of the last three categories, in the order above. Unrelated missing links and invalid declarations retain their existing pass and code ownership; they do not suppress independent known comparisons. Schemas, behavior bindings and current registry aliases are not consulted, and no authored field is changed.
+1. **Excluded.** An authored `path`, including `""`, or `$params`, `$inputs` or `$previous_attempt` stops comparison.
+2. **Unresolved.** The `from` or `output` is omitted, the named producer or output is missing, either spelling is unbalanced, or either base lacks valid saved ancestry.
+   Missing, cyclic, unqualified and unpublished ancestry leaves descendants and identical names unresolved, even with unequal list depths.
+3. **Checked.** Iterative parsing yields the base and list depth, with depth zero for a scalar.
+   Both bases must resolve before comparing depths.
+   Compatibility requires equal depth and a producer base equal to or descended from the input base in the saved closure.
+   A known mismatch reports `IR003` at the consumer's `inputs.<name>.type`.
 
-This pass does not prove inherited CEL property compatibility, schema subsumption, payload validity, path or reserved-source typing, list payload admission or materialization, body interface/export/collection mappings, provider support or execution admission. Its scoped valid result may coexist with failed prerequisite passes and excluded inputs. First-slice installation refusals remain unchanged. [Original scalar evidence](../research/direct-edge-type-validation-evidence-2026-10-30.md) and [list-extension evidence and limits](../research/list-edge-type-validation-evidence-2026-10-30.md).
+Published built-in name/revision pairs and namespace-qualified custom types with null parents root the ancestry forest.
+An iterative reverse-forest traversal indexes half-open intervals with one preorder counter across roots.
+Balanced spelling follows the declaration check, and output-role cardinality uses the original declaration without unwrapping lists.
+
+`EdgeTypeResult.edge_types_valid` means there is no established nominal mismatch.
+The result counts nodes, definitions, inputs, examined contracts, indexed valid types and checked, unresolved and excluded inputs.
+The link and declaration passes retain their diagnostics and codes, and independent known edges still get checked.
+The pass leaves authored fields intact and uses saved nominal ancestry without schema contents, installed behavior or current aliases.
+
+The result may be valid even when inputs are excluded or a prerequisite pass fails.
+Inherited CEL properties, schema subsumption, payload validity, path and reserved-source typing, list admission and materialization, body interfaces, export and collection mappings, provider support and installation or execution admission keep their own checks and activation rules.
+The [scalar](https://github.com/realkarych/kora/issues/482) and [list](https://github.com/realkarych/kora/issues/495) scopes have separate [scalar evidence](../research/direct-edge-type-validation-evidence-2026-10-30.md) and [list evidence](../research/list-edge-type-validation-evidence-2026-10-30.md).
 
 The subgraph-export type pass, `kora.ir.validate_export_types`, is implemented under [issue #497](https://github.com/realkarych/kora/issues/497), with the same structurally validated, unchanged-snapshot precondition. Every stored definition is counted once, including unused bodies and bodies with absent/empty exports. Every declared export is compared against its same-body producer's named declared output; call instances are not expanded. `TypeAncestry.accepts_type` shares complete spelling and saved-base assignability with the direct-edge pass, preserving its classification and output-role boundaries.
 
