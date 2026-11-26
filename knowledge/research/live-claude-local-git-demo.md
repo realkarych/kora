@@ -145,12 +145,52 @@ Record the graph revision, installed Python and Git identities, rendered JSON di
 
 Use the ordinary launch and stop procedures supplied by work item 20, with the installed Claude, LocalRuntime and Git binding, a private prepared SQLite database, and an authorized personal credential for the graph namespace. Record the installed revision and active producer versions. Confirm installed deploy and trigger admit this bound graph and that trusted publication, accepted VcsRef and AgentSession, sealed command inputs, and CommandResult acceptance and reads are available. If an interface or ownership check is missing, keep the live witness pending with its owner. The `first-claim` staging API has a narrower scope, and the isolated walking skeleton uses an input-free command. [Work item 20](../../docs/implementation-plan.md#6-work-items) · [Installed Scheduler staging](../specs/api-and-agent-surface.md#installed-sqlite-scheduler-staging) · [First-slice contract](../specs/first-slice.md) · [Dependency check](https://github.com/realkarych/kora/issues/1919#issuecomment-7202461193)
 
-Once the ordinary execution installation is ready, use its origin and personal credential through `KORA_URL` and `KORA_TOKEN`. Deploy the rendered JSON and trigger its exact returned graph version. Require an accepted run for that same version.
+In a fresh Bash session, run the disposable repository creation block from a checkout containing the installed live-example compiler revision and its `examples/live-claude-local-git/graph.py`. Prepare the live graph in the private scratch directory. Replace only the four installation literals for the physical bare repository, its seeded commit, the runtime Python invocation and the trusted Git executable. Use absolute paths that fit unescaped Python string literals. [Offline compile-to-deploy comparison](https://github.com/realkarych/kora/issues/1919#issuecomment-7205618627)
+
+```bash
+repo="$bare"
+graph_source="$demo_dir/graph.py"
+compiled_ir="$demo_dir/compiled.ir.json"
+"$kora_python" -I - examples/live-claude-local-git/graph.py "$graph_source" "$repo" "$base" "$git_bin" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+source, destination, repo, base, git = sys.argv[1:]
+for path in (repo, sys.executable, git):
+    if not Path(path).is_absolute() or not path.isprintable() or '"' in path or "\\" in path:
+        raise SystemExit("installation paths must be absolute unescaped Python literals")
+if re.fullmatch(r"[0-9a-f]{40}", base) is None:
+    raise SystemExit("expected a full lowercase Git SHA-1")
+
+literals = {
+    '"/operator-owned/demo.git"': repo,
+    '"1111111111111111111111111111111111111111"': base,
+    '"/operator-owned/bin/python"': sys.executable,
+    '"/operator-owned/bin/git"': git,
+}
+text = Path(source).read_bytes().decode("utf-8")
+if any(text.count(literal) != 1 for literal in literals):
+    raise SystemExit("expected each installation literal exactly once")
+pattern = re.compile("|".join(map(re.escape, literals)))
+rendered_source = pattern.sub(lambda match: f'"{literals[match[0]]}"', text)
+Path(destination).write_bytes(rendered_source.encode("utf-8"))
+PY
+kora compile "$graph_source" --format json > "$compiled_ir"
+"$kora_python" -I -c '
+import hashlib
+import sys
+from pathlib import Path
+print("compiled_ir_sha256=" + hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+' "$compiled_ir"
+```
+
+Once the ordinary execution installation is ready, use its origin and personal credential through `KORA_URL` and `KORA_TOKEN`. Deploy the saved compiler stdout directly and trigger its exact returned graph version. Require an accepted run for that same version.
 
 ```bash
 graph=live_claude_local_git
 ns=example
-kora deploy "$rendered_ir" --json > "$demo_dir/deploy.json"
+kora deploy "$compiled_ir" --json > "$demo_dir/deploy.json"
 graph_version=$("$kora_python" -I -c '
 import sys
 from pathlib import Path
@@ -198,4 +238,4 @@ kora open "$run_id" --namespace "$ns"
 
 Use the CLI continuation cursor and the browser's earlier-page action if needed. The displayed namespace, run ID, event ID, kind, time, actor and gate attempt ID must match the authorized CLI event row. The page observation time belongs to its own read. The committed event identifies the attempt whose accepted result proved the SHA. Receipt of a bound approval and `run.succeeded` are separate outcomes.
 
-Retain the installed revision, rendered JSON digest, deployed graph version, namespace, run ID, both attempt and artifact version IDs, full verified commit, and matched event identity and attribution. Keep login URLs, codes, cookies, credentials, prompt text, transcripts, and raw artifact payloads out of the evidence. Sign out and stop the console normally. Resolve outstanding approval and resource ownership through the installation lifecycle before disposing of its private files.
+Retain the installed revision, compiler stdout digest, deployed graph version, namespace, run ID, both attempt and artifact version IDs, full verified commit, and matched event identity and attribution. Keep login URLs, codes, cookies, credentials, prompt text, transcripts, and raw artifact payloads out of the evidence. Sign out and stop the console normally. Resolve outstanding approval and resource ownership through the installation lifecycle before disposing of its private files.
