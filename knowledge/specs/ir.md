@@ -439,79 +439,206 @@ Branch conditions and reasons, retry predicates, `approve_when`, event `match` a
 
 ### 7.1 Expression kinds and environments
 
-| field | variables | result | evaluated by | an evaluation error (section 7.7) |
+| Field | Variables | Result | Evaluation owner | Evaluation error |
 |---|---|---|---|---|
-| `branch` `cases[].when` | `inputs`, `params` | `bool` | scheduler, branch pass | fails the branch with `config_error`; its direct targets become `upstream_failed` (section 4.5) |
-| `branch` `cases[].reason`, `else_reason` (evaluated only on a `$fail_attempt` route) | `inputs`, `params` | `string` | scheduler, branch pass | fails the branch with `config_error`; the iteration does not end as `attempt_failed` |
-| `retry.predicate` (node and subgraph) | `outputs`, `inputs`, `params` | `bool` | scheduler, retry handling | no retry; the node keeps its original error class |
-| `runtime.infrastructure_retry.predicate` (first-slice static check) | `params` | `bool` | dormant in the first slice | inapplicable while dormant |
-| `human_input` `approve_when` | `response`, `inputs`, `params` | `bool` | the shared approval transition (direct API response or channel observation) | the request becomes `failed` and the node fails with `config_error` |
-| `wait_event` `event.match` | `payload`, `inputs`, `params` | `bool` | scheduler, wake-ups | the event does not match this wait |
-| `wait_event` `poll.until` | `observation`, `inputs`, `params` | `bool` | scheduler, prepared-observation apply | "not yet": the wait keeps polling |
-| sensor trigger `poll.until` | `observation` | `bool` | scheduler, start-sensor apply | "not yet": no run starts |
+| Branch `cases[].when` | `inputs`, `params` | `bool` | Scheduler branch pass | `config_error` on the branch and `upstream_failed` on its direct targets (section 4.5). |
+| Branch `cases[].reason`, `else_reason` | `inputs`, `params` | `string` | Scheduler branch pass, only on a `$fail_attempt` route | `config_error` on the branch, with no `attempt_failed` outcome for the iteration. |
+| Node or subgraph `retry.predicate` | `outputs`, `inputs`, `params` | `bool` | Scheduler retry handling | No retry. The node keeps its original error class. |
+| `runtime.infrastructure_retry.predicate` | `params` | `bool` | Static check only in the first slice | Inapplicable while dormant. |
+| `human_input` `approve_when` | `response`, `inputs`, `params` | `bool` | Shared approval transition for a direct API response or channel observation | The request becomes `failed` and the node fails with `config_error`. |
+| `wait_event` `event.match` | `payload`, `inputs`, `params` | `bool` | Scheduler wake-ups | The event does not match this wait. |
+| `wait_event` `poll.until` | `observation`, `inputs`, `params` | `bool` | Scheduler prepared-observation apply | The wait keeps polling. |
+| Sensor trigger `poll.until` | `observation` | `bool` | Scheduler start-sensor apply | No run starts. |
 
-- `inputs.<name>` is the node's declared input, bound from the stored projection of the consumed artifact version (section 7.5). An input declared `optional: true`, and `$previous_attempt`, is a non-required member.
-- `outputs.<name>` is an output of the failed attempt, or an export of the failed subgraph attempt, that passed validation and the data bounds. Every member is non-required.
-- `params` are the run parameters, typed by the [effective graph parameter schema](#graph-parameter-schema-omission) and bound from the projection cut at run creation.
-- `response` is the approval form response, typed by `form`, projected and bound-checked when the response is received.
-- `payload` is the inbound event body and `observation` the sensor result. The static checker binds each as `dyn`. Ingress value shape and conversion follow the applicable event and observation contracts.
+[Evaluation errors](#77-evaluation-errors) defines the exceptions for unavailable projections and automatic CLI approval expiry.
 
-The project owner accepted the first-slice infrastructure predicate context on 2026-11-05 under [#775](https://github.com/realkarych/kora/issues/775). The only externally bound variable is `params`. Its type comes from the effective graph parameter schema and the existing parameter checker view and reference roots. The `bool` entry uses the existing section 7.4 static result rule, including `dyn`. Local comprehension names follow the same shadowing rule. A binder named `params` demands that environment, and unavailable schema prerequisites leave dependent checking incomplete. Omission leaves the predicate absent.
+- `inputs` binds each declared input from the consumed version's stored projection (section 7.5).
+  Inputs declared `optional: true` and `$previous_attempt` are non-required members.
+- `outputs` includes validated, in-bounds outputs of a failed attempt or exports of a failed subgraph attempt.
+  Every member is non-required.
+- `params` uses the [effective graph parameter schema](#graph-parameter-schema-omission) and the projection cut at run creation.
+- `response` uses the approval `form` type and is projected and checked against the bounds on receipt.
+- `payload` and `observation` are the inbound event body and sensor result, respectively.
+  The checker binds both as `dyn`.
+  Their own ingress contracts govern value shape and conversion.
 
-Apply this same static and native rule to each applicable authored or configured infrastructure predicate for the graph, including masked settings. Authored diagnostics use the exact `runtime.infrastructure_retry.predicate` path and preserve the original code-point offset when available. Configured failures stay with their trusted configuration owner and use the existing safe refusal boundary, with configured text, private paths and offsets kept out of author-facing diagnostics and logs. The [first-slice disabled policy](first-slice.md#refusal-contract) keeps the predicate dormant and admits zero infrastructure replacements.
+Apply the same static and native validation to every applicable authored or configured infrastructure retry predicate, including settings masked by an override.
+The only external binding is `params`, with its effective parameter type, checker view and reference roots.
+The [static result and shadowing rules](#74-schema-driven-checker) apply, including `dyn` as a result and demand for the parameter environment when a comprehension binder is named `params`.
+Unavailable schema prerequisites leave dependent checking incomplete.
+Omission leaves the predicate absent.
+Authored diagnostics identify `runtime.infrastructure_retry.predicate` and keep the original code-point offset when available.
+The trusted configuration owner handles configured failures through its safe refusal boundary.
+Author-facing diagnostics and logs exclude configured text, private paths and offsets.
+The [disabled first-slice policy](first-slice.md#refusal-contract) keeps the predicate dormant and admits zero infrastructure replacements.
 
 ### 7.2 Parser, limits and canonical rendering
 
-kora's own lexer and recursive-descent parser follow the CEL grammar of cel-spec, without backtracking. Positions are zero-based offsets in Unicode code points into the decoded field value.
+The kora lexer and recursive-descent parser follow the cel-spec grammar without backtracking.
+Offsets start at zero and count Unicode code points in the decoded field.
 
-**Characters and literals** (`IR011`):
+#### Characters and literals
 
-- Identifiers, digits and whitespace are ASCII: an identifier is `[_a-zA-Z][_a-zA-Z0-9]*`, whitespace is space, tab, line feed, form feed and carriage return, and any other character outside a literal or a comment is rejected. kora never accepts a character that CEL's grammar rejects and then rewrites it in the rendering.
-- These code points are rejected anywhere in the expression, inside literals and comments too: C0 controls other than tab, line feed, form feed and carriage return; DEL and the C1 controls; U+2028 and U+2029; the format characters U+00AD, U+0600 to U+0605, U+061C, U+06DD, U+070F, U+0890 and U+0891, U+08E2, U+180E, U+200B to U+200F, U+202A to U+202E, U+2060 to U+206F, U+FEFF, U+FFF9 to U+FFFB, U+110BD, U+110CD, U+13430 to U+1343F, U+1BCA0 to U+1BCA3, U+1D173 to U+1D17A, U+E0001 and U+E0020 to U+E007F (bidirectional, zero-width, tag and other format controls, the Unicode 17 general category Cf); and surrogate code points. The set is pinned here, not read from the running interpreter's Unicode database. Variation selectors are combining marks and stay allowed. An author who needs a rejected character in a string writes its `\u` or `\U` escape.
-- A comment runs from `//` to the next line feed, as in the cel-spec grammar. A carriage return inside a comment that a line feed does not follow is rejected, because editors show it as a line break; a form feed does not end a comment. A raw carriage return inside a string or bytes literal, triple-quoted and raw ones included, is rejected too, because the binding would read it as a line feed; authors write `\r`.
-- Escapes are those of the cel-spec grammar: `\u` and `\U` are valid only in string literals, and an escape denoting a surrogate or a code point beyond U+10FFFF is rejected. The hexadecimal prefix is `0x`.
-- An `int` literal beyond the signed 64-bit range, a `uint` literal beyond 64 bits and a `double` literal whose value is not finite are rejected. A run of unary `!` or of unary `-` is reduced as cel-go and the binding reduce it (decided on [issue #162](https://github.com/realkarych/kora/issues/162)): an even run is dropped and an odd run keeps one operator, so `!!x` and `--x` are `x` and `!!!x` is `!x`. A single `-` directly before an `int` or `double` literal that no selection or index follows is part of the literal, as is such a `-` after a run of `!`, so `-9223372036854775808` and `!-1` hold literals and `-1.f` is the negation of `1.f`. The `-` kept from a longer odd run stays a negation of the unsigned literal, as in the binding, so `---1` is `-(1)` and `--9223372036854775808` and `---9223372036854775808` are rejected because `9223372036854775808` is out of range. The depth rule below still counts every operator of the author text. The binding's unary negation of the smallest integer wraps instead of overflowing, a deviation that typed checks correct by rewriting integer negation (canonical rendering below).
+These character and literal refusals use `IR011`.
 
-**Constructs** (`IR011`): message construction; optional syntax (`.?`, `[?`, `{?`); leading-dot qualified names, which have no meaning without containers; backtick-quoted field selection; two-variable comprehensions (a third argument of `all` or `exists`; a third argument of `filter` or `exists_one` is a malformed macro); a `has()` argument that is not a field selection; a macro iteration variable that is not a simple identifier; a reserved word as an identifier (reserved words stay valid as field names after a dot); and functions outside the standard function table.
+- Outside literals and comments, the grammar uses ASCII.
+  Identifiers match `[_a-zA-Z][_a-zA-Z0-9]*`, digits are ASCII, and whitespace is space, tab, line feed, form feed or carriage return.
+  An input character that CEL rejects is `IR011` even if rendering could remove or rewrite it.
+- Refuse the following anywhere, including literals and comments, with `IR011`.
+  - C0 controls except tab, line feed, form feed and carriage return, plus DEL, C1 controls, U+2028, U+2029 and surrogates.
+  - The pinned Unicode 17 Cf ranges and points U+00AD, U+0600–U+0605, U+061C, U+06DD, U+070F, U+0890–U+0891, U+08E2, U+180E, U+200B–U+200F, U+202A–U+202E, U+2060–U+206F, U+FEFF, U+FFF9–U+FFFB, U+110BD, U+110CD, U+13430–U+1343F, U+1BCA0–U+1BCA3, U+1D173–U+1D17A, U+E0001 and U+E0020–U+E007F.
+    The running interpreter's Unicode database does not determine this set.
+    Variation selectors remain allowed combining marks.
+    Use valid `\u` or `\U` escapes to represent excluded characters in strings.
+- A `//` comment ends at line feed.
+  A carriage return in a comment requires an immediately following line feed, and form feed does not end a comment.
+  Refuse raw carriage return in every string and bytes literal, including raw and triple-quoted forms, since the binding reads it as line feed.
+  Use the `\r` escape for a carriage return.
+- Escapes follow cel-spec.
+  Only strings accept `\u` and `\U`, and escapes for surrogates or values above U+10FFFF are refused.
+  Hexadecimal integers use the `0x` prefix.
+- An `int` must fit signed 64 bits, a `uint` must fit unsigned 64 bits, and a `double` must be finite.
+  An even run of unary `!` or `-` disappears and an odd run keeps one operator.
+  A single `-` immediately before an `int` or `double`, including after a run of `!`, is part of the literal unless selection or indexing follows it.
+  Thus `-9223372036854775808` and `!-1` contain signed literals, and `-1.f` negates `1.f`.
+  A `-` from a longer odd run remains an operator, so `---1` is `-(1)`.
+  Both `--9223372036854775808` and `---9223372036854775808` are invalid because their positive literal exceeds the signed range.
+  The depth check counts all source operators.
 
-**Standard function table.** The global functions `size`, `int`, `uint`, `double`, `string`, `bytes`, `type`, `dyn`, `duration` and `timestamp` with one argument; the methods `size()`, `contains`, `startsWith`, `endsWith` and `matches` with one argument; and the timestamp and duration accessors `getDate`, `getDayOfMonth`, `getDayOfWeek`, `getDayOfYear`, `getFullYear`, `getHours`, `getMilliseconds`, `getMinutes`, `getMonth` and `getSeconds` without arguments. The table is the cel-spec standard library narrowed to what binding 0.10.0 executes: it lacks `bool()`, the global form `matches(s, p)` and the time-zone forms of the accessors, so they are rejected. Gaps that depend on argument types (`int(timestamp)`, `timestamp(int)`, date accessors on durations) are left to the schema-driven checker. Every entry is verified by evaluation in the binding, and every pin change repeats that verification.
+#### Constructs and standard functions
 
-Static limits. An expression or path over any of them is `IR027`, including a `maxLength` violation found by schema validation:
+These construct refusals use `IR011`.
+Refuse message construction, optional syntax (`.?`, `[?`, `{?`), leading-dot qualified names and backtick field selection.
+Refuse reserved words as identifiers and allow them as field names after a dot.
+Refuse two-variable comprehensions, including a third argument to `all` or `exists`.
+A third argument to `filter` or `exists_one` is malformed.
+`has()` requires field selection and macro iteration variables must be simple identifiers.
 
-- At most **4,096 code points**, checked before lexing. `ir.schema.json` carries the same `maxLength`.
-- Syntax-tree depth at most **32**. Depth is measured on the built tree: a leaf has depth 0, and every edge from a node to a child adds one level, so each binary-operator operand, conditional `?:` condition and branch, selection, index operand and index, call receiver and argument, unary operand, list element, map key and value, and macro range and body adds one level. Each explicit parenthesis adds one level too, and a macro body counts once. It is checked on every descent of the parser, before recursing, and as each node is built, so prefix nesting (`((((`, `!!!!`, `----`) stops with `IR027` before any recursion limit and chains a parser builds in a loop (`a + a + …`, `a.b.b…`) count fully.
-- At most **4 comprehension macros** (`all`, `exists`, `exists_one`, `map`, `filter`) per expression, nested at most **2** deep. A macro nests in another when it appears in that macro's body; a macro in another macro's receiver, as in a chain `l.map(…).map(…)`, does not nest.
+| Form | Allowed functions |
+|---|---|
+| One-argument global | `size`, `int`, `uint`, `double`, `string`, `bytes`, `type`, `dyn`, `duration`, `timestamp` |
+| Receiver, no explicit arguments | `size`, `getDate`, `getDayOfMonth`, `getDayOfWeek`, `getDayOfYear`, `getFullYear`, `getHours`, `getMilliseconds`, `getMinutes`, `getMonth`, `getSeconds` |
+| Receiver, one explicit argument | `contains`, `startsWith`, `endsWith`, `matches` |
 
-Lexing, parsing, checking and the cost estimate are linear in the size of the tree. Checking stops at an expression's first error.
+Ordinary functions and arities outside this table are `IR011`, including `bool()`, global `matches(s, p)` and time-zone arguments to accessors.
+The [schema-driven checker](#74-schema-driven-checker) owns receiver and argument type restrictions such as `int(timestamp)`, `timestamp(int)` and date accessors on durations.
+Conformance evaluates every table entry in the pinned binding and repeats that check for every pin change.
 
-The probe measured these thresholds on one macOS machine:
+#### Static limits
 
-- the binding rejects bracket nesting from 96;
-- a chain of about 12,000 selections or additions crashed the process with SIGSEGV on a main thread;
-- on a 256 KiB thread stack, a chain of 300 survived and 1,000 crashed.
+Return `IR027` for an excessive expression or path, including a schema-detected `maxLength` violation.
+Check the **4,096-code-point** limit before lexing.
+The generated IR schema carries the same `maxLength`.
 
-These observations do not establish a crash margin for every admitted expression on the 1 MiB evaluation thread of section 7.6 or on every supported platform. Functional boundary tests remain required on pin changes under the rule above; no full native crash-threshold search is a current gate. A native stall or crash can affect the shared API or scheduler process.
+Syntax-tree depth is at most **32**.
+A leaf has depth zero, and each explicit parenthesis and parent-to-child edge adds one.
+This includes each operand, conditional branch and condition, selection and indexed value and index, call receiver and argument, list element, map key and value, and macro range and body.
+Count each macro body once.
+Check depth before every recursive descent and while building nodes, including prefix runs and chains built in a loop.
 
-**Canonical rendering.** A typed check first rewrites every unary `-` whose operand the checker typed as `int` into a subtraction from the literal `0`, because the binding wraps negation of the minimum integer while its subtraction checks overflow ([issue #372](https://github.com/realkarych/kora/issues/372)); the rendering, its re-parse check, its digest and the estimate are those of the rewritten tree. Negation of a `double` is not rewritten, so `-0.0` keeps its sign, and the untyped check used for binding agreement and conformance keeps the parsed tree. From the checked tree kora writes a canonical text: every operator parenthesized, string literals as double-quoted non-raw literals with only the escapes `\\`, `\"`, `\n`, `\r`, `\t` and `\u`/`\U` for other control and non-ASCII characters, bytes literals the same with `\x` for every byte outside printable ASCII, no comments, single spaces. Validation parses the rendering again with kora's parser and requires the same tree, ignoring grouping parentheses, otherwise `IR011`; this uses only kora's parser, so `kora compile` runs it too. Each node puts at most one pair of brackets around its children, except that a unary operator applied to a numeric literal renders the literal in parentheses, `(-(1))`, so that it does not fold into a negative literal, and a negative literal used as the operand of a selection, index or method is parenthesized. Doubles are rendered in their shortest round-trip form and integers in decimal. The rendering is not held to the author-text limits: its length is at most 16 times the source's (a non-ASCII character in a bytes literal renders as up to four `\xHH` escapes), and its re-parse runs under a depth bound of 2 × 32 + 1 levels, checked before recursion, which keeps its bracket nesting below the binding's bracket limit of 96; the boundary tests compile the maximal rendering of each shape in the binding. The binding compiles only this rendering, never the author's text, so it evaluates exactly the tree kora checked, as rewritten for integer negation. The IR keeps the author's text.
+An expression may use at most **four** comprehension macros (`all`, `exists`, `exists_one`, `map`, `filter`) with at most **two** levels of nesting.
+A macro in another macro's body counts as nested.
+A macro in the receiver of another macro does not, as in `l.map(…).map(…)`.
 
-**Where the binding runs.** Server-side validation (`/validate`, `/plan`, deployment, and `kora_compile` through `/validate`) compiles every rendering with the binding, deduplicated by rendering, and compiles each distinct `matches()` pattern once; a rejection is `IR011`, reported without the binding's message. `kora compile` runs on the author's machine with kora's parser and checker only and never imports the binding ([dsl.md](dsl.md) section 2). Deployment stores the rendering, the projection path sets (section 7.5) and the cost estimate with the graph version, and evaluation never recomputes them.
+Lexing, parsing, checking and estimating cost are linear in tree size.
+Checking stops at the expression's first error.
+Recheck functional bounds when the binding pin changes.
+Full native crash-threshold searches are outside this gate.
+The binding probe establishes no universal crash margin, including on the 1 MiB evaluation thread or across supported platforms.
+An admitted expression can still stall or crash the shared API or Scheduler process. [Dated binding probe](../research/cel-binding-probe-2026-10-19.md#untrusted-expressions)
 
-The internal native pattern check under [issue #712](https://github.com/realkarych/kora/issues/712) verifies one decoded literal. It bounds the literal by the existing expression length limit, renders it as the sole argument of `"".matches()` and verifies that the generated call parses to the expected tree under the existing rendering and regex rules. The binding compiles this checked probe and executes it with no variables. Either exact Boolean confirms compilation of the pattern. Only the pinned binding's `matches` function error during execution confirms rejection. Static probe refusal, compiler failure and unclassified results do not establish a pattern error. The closed result carries neither pattern text nor native diagnostics. The graph validator still owns per-call deduplication, declaration paths and public errors.
+#### Canonical rendering
 
-The internal pattern phase under [issue #723](https://github.com/realkarych/kora/issues/723) takes a bounded tuple of checked CEL sites from a trusted producer. The producer owns each site's typed origin, authored or generated classification and safe exact field path. Preflight visits every child of the checked tree, including unevaluated branches. One explicit caller allowance charges sites, path segments and characters, visited nodes and each decoded literal occurrence. The phase releases the checked trees before it verifies each distinct decoded pattern once through the existing evaluator. It keeps the literal associations only for this call.
+For typed expressions, replace unary minus on an `int` operand with subtraction from integer zero.
+The binding checks subtraction overflow and wraps unary negation of the minimum integer.
+Render, reparse, hash and estimate the rewritten tree.
+Keep unary minus on a `double` operand so `-0.0` retains its sign.
+Untyped checking for binding agreement and conformance uses the parsed tree.
 
-A complete phase supplies at most one `IR011` per authored field for a proven native rejection. Its fixed message and earliest rejected literal offset use the existing diagnostic representation and collector. Invalid inventory, exhausted allowance, incomplete native checking or rejection in a generated expression yield a closed incomplete result. A shared decoded pattern does not erase the distinction between authored and generated sites. Incomplete results supply no partial diagnostics, and operational refusal and cancellation propagate to the caller. This phase does not establish full graph coverage, rendering compilation, public validation or deployment authority.
+Parenthesize operators, use single spaces and omit comments.
+Render string literals as double-quoted and non-raw.
+Use the short escapes `\\`, `\"`, `\n`, `\r` and `\t`.
+Encode other control and non-ASCII characters with `\u` or `\U`.
+Render bytes as non-raw `b"..."` literals with the shared short escapes and use `\xHH` for other bytes outside printable ASCII.
+Render integers in decimal with the `u` suffix for unsigned literals.
+Render doubles in their shortest round-trip form.
+
+The kora parser must recover the same tree, ignoring grouping parentheses, or validation returns `IR011`.
+The local compiler runs this check without the binding.
+Each node adds at most one pair of brackets around its children.
+Keep an additional pair around a numeric literal used as a unary operand, as in `(-(1))`, to prevent signed-literal folding.
+Parenthesize a negative literal when selecting, indexing or calling a method on it.
+
+The rendering may exceed the source limits.
+Its length is at most 16 times the source length, since a source code point in a bytes literal can require four `\xHH` escapes.
+Reparsing has a separate depth limit of `2 × 32 + 1` checked before recursion.
+Boundary tests compile the maximal rendering of each shape in the binding.
+The binding compiles only the checked canonical rendering, and the IR retains the author's text.
+
+#### Local and server validation
+
+The author-side `kora compile` uses the kora parser and checker without importing the binding.
+Stdio `kora_compile` compiles locally and forwards only compiled IR to `/validate`. [DSL compilation](dsl.md#2-compile-step-kora-compile) · [MCP operations](api-and-agent-surface.md#4-mcp-servers-fr-01-dd-28)
+
+For complete server validation, including `/validate`, `/plan` and full deployment validation, compile every distinct canonical rendering and each distinct decoded `matches()` pattern once.
+A proven rejection under the complete public validation rules is reported as `IR011` without the native message.
+
+The [walking-skeleton deployment route](api-and-agent-surface.md#walking-skeleton-graph-deployment-issue-1436) uses the bounded graph check in [section 10](#10-validation-rules-kora-validate).
+That check compiles once per field, including equal renderings at distinct fields, and probes each distinct decoded pattern once.
+The route preserves established authored diagnostics and maps incomplete rendering verification to `API010`.
+Operational refusals retain the route's defined disposition.
+
+Deployment stores the rendering, projection path sets (section 7.5) and cost estimate with the graph version.
+Evaluation reuses those saved facts.
+
+#### Native pattern validation
+
+A decoded literal longer than 4,096 code points leaves the check incomplete.
+Use an admitted literal as the sole argument to `"".matches()`.
+Render the probe under the canonical and regex rules and require the expected parsed tree.
+Compile the checked probe in the binding and run it without variables.
+Either exact Boolean confirms successful pattern compilation.
+Only the pinned binding's `matches` function error during execution establishes pattern rejection.
+Static probe refusal, compiler failure and unclassified results leave the check incomplete.
+The closed result excludes pattern text and native diagnostics.
+
+The graph validator owns per-call deduplication, declaration paths and public errors.
+A trusted producer supplies a bounded tuple of checked sites with typed origin, authored or generated classification and safe exact field paths.
+Preflight visits every child, including unevaluated branches.
+Its caller allowance charges sites, path segments and characters, visited nodes and each decoded literal occurrence.
+Release checked trees before probing each distinct pattern once and keep the associations only for the call.
+
+A complete phase reports at most one `IR011` per authored field with a proven rejection, using a fixed message and the earliest rejected literal offset in the shared collector.
+A shared pattern retains each site's authored or generated classification.
+An invalid inventory, exhausted allowance, incomplete native check or rejected generated pattern returns a closed incomplete result without partial diagnostics.
+Operational refusal and cancellation propagate.
+The phase establishes neither whole-graph coverage nor rendering compilation, public validation or deployment authority.
 
 ### 7.3 Paths
 
-`inputs[*].path`, `binds.vcs_ref`, `binds.gate_digests`, `workspace.from_ref`, `human_input` `context` and `graph.target.key.path` are member-access chains restricted to field selection and indexing, such as `inputs.bundle.facts.change` or `artifacts['implement.change']`. They contain no operators and no calls. This is the one path notation in the IR.
+`inputs[*].path`, `binds.vcs_ref`, `binds.gate_digests`, `workspace.from_ref`, human-input `context` and `graph.target.key.path` use the same IR path notation.
+A path is a chain of field selections and literal indexes, such as `inputs.bundle.facts.change` or `artifacts['implement.change']`.
+Operators and calls are invalid.
 
-- **Parsing.** Paths use the lexer and the length and depth limits of section 7.2: `IR011` for syntax, `IR027` for limits. An index is a non-negative decimal integer literal within the signed 64-bit range or a string literal; a negative, hexadecimal or unsigned index, or an index expression, is `IR011`. A relative path starts with a field name that is not a reserved word, so a key that is not an identifier cannot start one. Resolution keeps its existing codes (`IR002`, `IR003`, `IR005`, `IR020`).
-- **Walking.** The walker treats a missing key, an index beyond the list, and a field or index on a value of another JSON type as absent. It never applies negative indexing.
-- **Resolution.** kora resolves paths with its own walker; a path never reaches the binding.
-- **Roots.** `inputs[*].path` and `graph.target.key.path` are relative to their source value. `binds.*`, `workspace.from_ref` and `context` select a declared input of their own node: the first two parsed steps are the field `inputs` and that input name. Dot and decoded string-index notation are equivalent, with exact case-sensitive membership. A body, caller or sibling input grants no visibility. A bare root, an integer second step, another root or an undeclared input is `IR005` for `binds.*` and `IR002` for workspace/context. Optional declarations are eligible; local binding does not establish a runtime value or its type.
+Paths use the CEL lexer and its length and depth limits.
+Syntax errors are `IR011` and limit violations are `IR027`.
+An index is a non-negative decimal integer in signed 64-bit range or a string literal.
+Negative, hexadecimal, unsigned or computed indexes are `IR011`.
+A relative path starts with a non-reserved field identifier.
 
-`timer` takes a `duration` or an absolute `at` time, never an expression.
+`inputs[*].path` and `graph.target.key.path` start at their source values.
+`binds.*`, `workspace.from_ref` and `context` start at the field `inputs` and then name an input declared by that node.
+Dot notation and decoded string indexes match exact names with case preserved.
+Caller, body and sibling inputs grant no visibility.
+A bare root, integer second step, other root or undeclared input gives `IR005` for `binds.*` and `IR002` for workspace and context.
+Optional declarations qualify for local binding, which establishes no runtime value or type.
+Other resolution errors keep their existing `IR002`, `IR003`, `IR005` or `IR020` codes.
+
+The kora walker resolves the chain without the binding.
+A missing key, out-of-range list index, or field or index applied to an incompatible JSON type is absent.
+The walker never uses negative indexing.
+
+A `timer` takes a `duration` or absolute `at` time without expression evaluation.
 
 ### 7.4 Schema-driven checker
 
