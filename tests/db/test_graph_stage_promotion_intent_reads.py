@@ -36,6 +36,7 @@ from tests.db.test_graph_stage_promotion_snapshot import (
     DOCUMENT_BYTES,
     FIRST,
     expected_intent,
+    observed_queries,
     read,
     seed_documents,
 )
@@ -178,16 +179,23 @@ async def test_unverified_intent_refuses_before_document_projection(
     await damage_native_intent(database, stage_ids[0], damage)
     ledger = ConnectionLedger(database)
 
-    with observed_values(database) as observed:
-        with pytest.raises(GraphStagePromotionSnapshotRejected) as refused:
-            await read(database, binding)
+    sqlite_storage_damage = database.dialect is Dialect.SQLITE and damage in (
+        "text-storage",
+        "integer-storage",
+    )
+
+    with (
+        observed_values(database) as observed,
+        observed_queries(database, before_execution=True) as document_attempts,
+        pytest.raises(GraphStagePromotionSnapshotRejected) as refused,
+    ):
+        await read(database, binding)
 
     assert refused.value.reason is GraphStagePromotionSnapshotFailure.UNVERIFIED
     assert observed == (
-        ["scalars"]
-        if damage in ("address", "payload", "fence", "operation", "generation")
-        else []
+        [] if damage == "width" or sqlite_storage_damage else ["scalars"]
     )
+    assert document_attempts == []
     assert ledger.checkouts == 1
     assert ledger.outstanding == database.units_in_flight() == 0
 

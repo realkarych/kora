@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -31,7 +32,19 @@ from scripts.ci.acquire import (
     fetch,
     main,
     opened_budget,
+    run_attempts,
     run_bounded,
+)
+from scripts.ci.browser_system_packages import (
+    PROOF_SECONDS,
+    RETURN_SECONDS,
+    START_SECONDS,
+    STOP_PHASE_SECONDS,
+    STOP_SECONDS,
+    WORK_SECONDS,
+    AttemptWindow,
+    BrowserPackagesRefused,
+    package_attempt,
 )
 from tests.support.https_fixture import (
     Authority,
@@ -59,7 +72,13 @@ PLANTED_CREDENTIAL = "kora-fixture-credential-value"
 NAME = "fixture"
 ROOT = Path(__file__).resolve().parents[2]
 COMMAND_LIMIT = re.compile(r'acquire\.py"? run (\d+) --')
+BROWSER_SYSTEM_PACKAGES = "python3 -m scripts.ci.acquire browser-system-packages 120"
+BROWSER_OWNERSHIP_WITNESS = (
+    "python3 -m tests.architecture.browser_system_packages_witness"
+)
+PNPM_SETUP = "scripts/ci/setup_scaffold_pnpm.sh"
 FETCHING_SCRIPTS = {
+    PNPM_SETUP: ("pnpm-",),
     "scripts/ci/setup_scaffold_node.sh": ("node-",),
     "scripts/ci/setup_uv_cache.sh": ("uv-", "cpython-"),
     "scripts/ci/check_links.sh": ("lychee-",),
@@ -423,6 +442,134 @@ def test_pinned_artifacts_name_exact_sources_and_hosts() -> None:
     assert MAX_COMMAND_SECONDS + COMMAND_RESERVE_SECONDS < JOB_BUDGET_SECONDS
 
 
+def test_linux_scaffold_pnpm_acquisition_matches_the_project_pin() -> None:
+    package = table(json.loads((ROOT / "web/package.json").read_text()))
+    version = str(table(package["engines"])["pnpm"])
+    artifact = ARTIFACTS[f"pnpm-{version}-linux-x64"]
+
+    assert package["packageManager"] == f"pnpm@{version}"
+    assert f"version={version}\n" in (ROOT / PNPM_SETUP).read_text()
+    assert artifact == Artifact(
+        f"https://github.com/pnpm/pnpm/releases/download/v{version}/pnpm-linux-x64.tar.gz",
+        "pnpm-linux-x64.tar.gz",
+        24_713_030,
+        "3910c3852136bed5bc1511b9137a45fd4357ed6b3970d9d08893641e9005867e",
+        "release-assets.githubusercontent.com",
+        30.0,
+    )
+
+
+def run_scaffold_pnpm(
+    runner_temp: Path, phase: str, environment: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/bash", PNPM_SETUP, phase],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "RUNNER_TEMP": str(runner_temp),
+            "RUNNER_OS": "Linux",
+            "RUNNER_ARCH": "X64",
+            **environment,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+
+def test_corrupt_scaffold_pnpm_archive_refuses_before_publishing(
+    tmp_path: Path,
+) -> None:
+    runner_temp = tmp_path.resolve()
+    cache = runner_temp / "kora-acquisitions"
+    cache.mkdir()
+    (cache / "pnpm-linux-x64.tar.gz").write_bytes(CONTENT)
+    github_env, github_path = runner_temp / "env", runner_temp / "path"
+    github_env.touch()
+    github_path.touch()
+
+    result = run_scaffold_pnpm(
+        runner_temp,
+        "prepare",
+        {"GITHUB_ENV": str(github_env), "GITHUB_PATH": str(github_path)},
+    )
+
+    assert result.returncode == 1
+    assert "failed size or SHA-256 verification" in result.stderr
+    assert github_env.read_bytes() == github_path.read_bytes() == b""
+    assert not tuple(runner_temp.glob("kora-pnpm*"))
+
+
+PNPM_KEY = "node-cache-Linux-x64-pnpm-" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("outcome", "hit", "primary", "matched", "contents", "classification"),
+    [
+        ("success", "true", PNPM_KEY, PNPM_KEY, "populated", "exact hit"),
+        ("success", "false", PNPM_KEY, "", "empty", "cold miss"),
+        ("success", "", "", "", "empty", "cache unavailable"),
+        ("success", "false", PNPM_KEY, "", "missing", "cold miss"),
+        ("success", "", "", "", "missing", "cache unavailable"),
+        ("success", "false", PNPM_KEY, "", "opaque", None),
+        ("success", "", "", "", "opaque", None),
+        ("failure", "", "", "", "empty", None),
+        ("success", "true", PNPM_KEY, "", "populated", None),
+        ("success", "true", PNPM_KEY, f"{PNPM_KEY}-other", "populated", None),
+        ("success", "false", PNPM_KEY, PNPM_KEY, "empty", None),
+        ("success", "false", PNPM_KEY, "", "populated", None),
+        ("success", "false", "", "", "empty", None),
+        ("success", "", "", "", "populated", None),
+        ("success", "", PNPM_KEY, "", "empty", None),
+        ("success", "true", "malformed", "malformed", "populated", None),
+        ("success", "maybe", PNPM_KEY, "", "empty", None),
+    ],
+)
+def test_scaffold_pnpm_cache_requires_exact_hit_or_an_empty_store(
+    tmp_path: Path,
+    outcome: str,
+    hit: str,
+    primary: str,
+    matched: str,
+    contents: str,
+    classification: str | None,
+) -> None:
+    runner_temp = tmp_path.resolve()
+    store = runner_temp / "kora-pnpm-store"
+    versioned_store = store / "v11"
+    store.mkdir()
+    if contents != "missing":
+        versioned_store.mkdir()
+    if contents in {"populated", "opaque"}:
+        (versioned_store / ".partial-cache-content").touch()
+    if contents == "opaque":
+        versioned_store.chmod(0)
+
+    try:
+        result = run_scaffold_pnpm(
+            runner_temp,
+            "check-cache",
+            {
+                "PNPM_CONFIG_STORE_DIR": str(store),
+                "KORA_SCAFFOLD_PNPM_STORE": str(versioned_store),
+                "KORA_PNPM_CACHE_OUTCOME": outcome,
+                "KORA_PNPM_CACHE_HIT": hit,
+                "KORA_PNPM_CACHE_PRIMARY": primary,
+                "KORA_PNPM_CACHE_MATCHED": matched,
+            },
+        )
+    finally:
+        if contents == "opaque":
+            versioned_store.chmod(0o700)
+
+    assert result.returncode == (1 if classification is None else 0)
+    assert result.stdout == (
+        "" if classification is None else f"Scaffold pnpm store: {classification}\n"
+    )
+
+
 def test_job_budget_caps_attempts_across_invocations(
     tmp_path: Path, authority: Authority
 ) -> None:
@@ -540,8 +687,11 @@ def fetch_worst_case(prefix: str) -> float:
 
 def step_worst_cases(run: str) -> list[float]:
     cases = command_worst_cases(run)
+    if BROWSER_SYSTEM_PACKAGES in run:
+        cases.append(worst_case(MAX_COMMAND_SECONDS, COMMAND_RESERVE_SECONDS))
     for script, prefixes in FETCHING_SCRIPTS.items():
-        if script in run:
+        invocation = f"{script} prepare" if script == PNPM_SETUP else script
+        if invocation in run:
             cases.extend(fetch_worst_case(prefix) for prefix in prefixes)
     for marker, script in COMMAND_SCRIPTS.items():
         if marker in run:
@@ -592,6 +742,123 @@ def test_every_job_acquisition_worst_case_fits_its_deadline() -> None:
     assert len(acquiring) >= 10
     assert PLANNED_LANE_JOBS <= {location for location, _, _ in acquiring}
     assert exceeding == []
+
+
+def assert_root_command_is_bounded(command: str, limit: int) -> None:
+    assert "--with-deps" not in command
+    for sudo in re.finditer(r"\bsudo\b", command):
+        timeout = re.match(
+            r'sudo env "PATH=\$PATH" timeout --kill-after=(\d+) (\d+) ',
+            command[sudo.start() :],
+        )
+        assert timeout is not None, command
+        grace, seconds = (int(value) for value in timeout.groups())
+        assert seconds + grace < limit, command
+
+
+def step_running(steps: list[dict[str, object]], command: str) -> int:
+    return next(
+        index for index, step in enumerate(steps) if command in str(step.get("run", ""))
+    )
+
+
+def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
+    workflows = repository_workflows()
+
+    commands = [
+        (line[match.end() :], int(match[1]))
+        for _, job in jobs_of(workflows)
+        for step in step_list(job)
+        for line in str(step.get("run", "")).replace("\\\n", " ").splitlines()
+        for match in COMMAND_LIMIT.finditer(line)
+    ]
+    browser_steps = step_list(job_of(workflows, "ci.yml", "browser"))
+    witness = step_running(browser_steps, BROWSER_OWNERSHIP_WITNESS)
+    system_packages = step_running(browser_steps, BROWSER_SYSTEM_PACKAGES)
+    browser = step_running(browser_steps, "playwright install --only-shell chromium")
+    build = [step.get("name") for step in browser_steps].index(
+        "Check and build browser sources"
+    )
+
+    for command, limit in commands:
+        assert_root_command_is_bounded(command, limit)
+    assert witness < system_packages < browser < build
+    assert browser_steps[witness]["if"] == browser_steps[system_packages]["if"]
+    assert browser_steps[system_packages]["if"] == browser_steps[browser]["if"]
+    assert table(browser_steps[system_packages]["env"])["KORA_BROWSER_PNPM_BIN"] == (
+        "${{ steps.browser_pnpm.outputs.bin_dest }}"
+    )
+    selected_pnpm = next(
+        step for step in browser_steps if step.get("id") == "browser_pnpm"
+    )
+    assert action_of(selected_pnpm) == "pnpm/action-setup"
+    assert (
+        sum(
+            BROWSER_SYSTEM_PACKAGES in str(step.get("run", ""))
+            for _, job in jobs_of(workflows)
+            for step in step_list(job)
+        )
+        == 1
+    )
+    assert START_SECONDS == 5.0
+    assert WORK_SECONDS == 105.0
+    assert STOP_PHASE_SECONDS == 5
+    assert START_SECONDS + WORK_SECONDS + STOP_SECONDS == MAX_COMMAND_SECONDS
+    assert PROOF_SECONDS + RETURN_SECONDS == COMMAND_RESERVE_SECONDS
+
+
+def test_browser_package_attempt_shortens_work_and_reserves_proof() -> None:
+    minimum = START_SECONDS + STOP_SECONDS
+
+    with pytest.raises(BrowserPackagesRefused, match="Insufficient time"):
+        AttemptWindow.allocate(minimum)
+    shortened = AttemptWindow.allocate(minimum + 1)
+
+    assert shortened.work == pytest.approx(1, rel=0, abs=1e-6)
+    assert shortened.settled - shortened.start - shortened.work == pytest.approx(
+        STOP_SECONDS, rel=0, abs=1e-6
+    )
+    assert shortened.prove == shortened.settled + PROOF_SECONDS
+    assert shortened.join == shortened.prove + RETURN_SECONDS
+
+
+def test_browser_package_allowance_does_not_move_the_ledger_cutoff() -> None:
+    cutoff = time.monotonic() + START_SECONDS + STOP_SECONDS + 1
+
+    window = AttemptWindow.allocate(MAX_COMMAND_SECONDS, cutoff)
+
+    assert window.settled == cutoff
+    assert window.prove == cutoff + PROOF_SECONDS
+    assert window.join == window.prove + RETURN_SECONDS
+    assert 0 < window.work <= 1
+
+
+def test_browser_package_attempt_with_insufficient_budget_does_not_retry(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / BUDGET_LEDGER
+    minimum = START_SECONDS + STOP_SECONDS + COMMAND_RESERVE_SECONDS
+    ledger.write_text(str(JOB_BUDGET_SECONDS - minimum))
+    pauses = RecordedPauses()
+    errors = io.StringIO()
+
+    async def attempt(allowance: float) -> str | None:
+        return await package_attempt(("install",), allowance)
+
+    with pytest.raises(BrowserPackagesRefused, match="Insufficient time"):
+        asyncio.run(
+            run_attempts(
+                "browser system packages",
+                MAX_COMMAND_SECONDS,
+                pauses,
+                errors,
+                opened_budget(ledger),
+                attempt,
+            )
+        )
+
+    assert pauses.seconds == []
+    assert errors.getvalue() == ""
 
 
 def action_of(step: dict[str, object]) -> str:
@@ -718,6 +985,39 @@ def test_every_ci_tool_setup_follows_its_verified_cached_acquisition() -> None:
     violations = unverified_tool_setups(workflows)
 
     assert violations == []
+
+
+def test_only_linux_scaffold_uses_the_verified_pnpm_before_cache_and_build() -> None:
+    workflows = repository_workflows()
+    steps = step_list(job_of(workflows, "ci.yml", "scaffold-tests"))
+    node, cache = [
+        index
+        for index, step in enumerate(steps)
+        if action_of(step) == "actions/setup-node"
+    ]
+    prepare = step_running(steps, f"{PNPM_SETUP} prepare")
+    check_cache = step_running(steps, f"{PNPM_SETUP} check-cache")
+    frozen = step_running(steps, "pnpm --dir web install --frozen-lockfile")
+    build = step_running(steps, "KORA_BUILD_OFFLINE=1 uv build --offline")
+
+    assert [
+        location
+        for location, job in jobs_of(workflows)
+        if any(PNPM_SETUP in str(step.get("run", "")) for step in step_list(job))
+    ] == ["ci.yml:scaffold-tests"]
+    assert "pnpm/action-setup" not in {action_of(step) for step in steps}
+    assert node < prepare < cache < check_cache < frozen < build
+    assert all(
+        "if" not in steps[index] for index in (node, prepare, cache, check_cache)
+    )
+    assert table(steps[node]["with"])["node-version-file"] == "web/.node-version"
+    assert table(steps[cache]["with"]) == {
+        "package-manager-cache": False,
+        "cache": "pnpm",
+        "cache-dependency-path": "web/pnpm-lock.yaml",
+    }
+    for index in (check_cache, build):
+        assert f"{PNPM_SETUP} check-selection" in str(steps[index]["run"])
 
 
 def steps_before_static_checks(job: dict[str, object]) -> list[dict[str, object]]:

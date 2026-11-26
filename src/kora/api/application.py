@@ -1,5 +1,5 @@
-from collections.abc import AsyncGenerator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable, Generator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Literal
 
 from fastapi import FastAPI
@@ -27,6 +27,7 @@ from kora.api.routes import (
     ActiveCatalog,
     RouteName,
 )
+from kora.api.run_event_route import RunEventRoute
 from kora.api.run_trigger_route import trigger_handler
 from kora.api.worker_claims_route import WorkerClaimsRoute
 from kora.api.worker_heartbeat_route import WorkerHeartbeatRoute
@@ -34,8 +35,10 @@ from kora.api.worker_history_route import WorkerHistoryRoute
 from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.api.worker_usage_route import WorkerUsageRoute
 from kora.engine.admission_initialization import AdmissionInitialization
+from kora.engine.worker_claim_poll import ClaimOverloaded
 from kora.models.errors import ApiErrorCode, ApiErrorEnvelope
 from kora.models.graphs import DeployRequest, DeployResponse
+from kora.models.run_events import RunEventPage, RunEventsQuery
 from kora.models.runs import AcceptedRun, SkippedRun, TriggerRequest
 from kora.models.worker_claims import WorkerClaimRequest, WorkerClaimResponse
 from kora.models.worker_history import WorkerHistoryQuery
@@ -53,6 +56,27 @@ class Health(BaseModel):
     status: Literal["ok"]
 
 
+class ClaimWorkSlot:
+    def __init__(self) -> None:
+        self._occupied: bool = False
+
+    @contextmanager
+    def for_exchange(self) -> Generator[Callable[[], None]]:
+        acquired = False
+
+        def admit() -> None:
+            nonlocal acquired
+            if self._occupied:
+                raise ClaimOverloaded()
+            self._occupied = acquired = True
+
+        try:
+            yield admit
+        finally:
+            if acquired:
+                self._occupied = False
+
+
 class ApiDispatch:
     def __init__(
         self,
@@ -62,12 +86,14 @@ class ApiDispatch:
         authenticator: Authenticator,
         clock: Clock,
         worker_history: WorkerHistoryRoute | None = None,
+        claim_slot: ClaimWorkSlot | None = None,
     ) -> None:
         self.application = app
         self.catalog = catalog
         self.authenticator = authenticator
         self.clock = clock
         self.worker_history = worker_history
+        self.claim_slot = claim_slot
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -93,7 +119,8 @@ class ApiDispatch:
                     RouteName.USAGE,
                 )
                 else "user",
-                current_authority=matched.name is RouteName.WORKER_CLAIMS,
+                current_authority=matched.name
+                in (RouteName.WORKER_CLAIMS, RouteName.RUN_EVENTS),
             )
             if isinstance(authority, ApiErrorEnvelope):
                 await error_response(authority, method=method)(scope, receive, send)
@@ -151,7 +178,12 @@ class ApiDispatch:
             async def received_body() -> Message:
                 return {"type": "http.request", "body": bytes(body), "more_body": False}
 
-            await self.application(scope, received_body, send)
+            if matched.name is RouteName.WORKER_CLAIMS and self.claim_slot is not None:
+                with self.claim_slot.for_exchange() as admit:
+                    exchange.admit_claim = admit
+                    await self.application(scope, received_body, send)
+            else:
+                await self.application(scope, received_body, send)
         else:
             await self.application(scope, receive, send)
 
@@ -163,12 +195,14 @@ def create_application(
     request_id: Callable[[], str],
     deployment: GraphServices | None = None,
     *,
+    run_events: RunEventRoute | None = None,
     worker_registration: WorkerRegistrationRoute | None = None,
     worker_claims: WorkerClaimsRoute | None = None,
     worker_history: WorkerHistoryRoute | None = None,
     worker_usage: WorkerUsageRoute | None = None,
     worker_heartbeat: WorkerHeartbeatRoute | None = None,
     admission_initialization: AdmissionInitialization | None = None,
+    single_claim: bool = False,
 ) -> ApiExchange:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncGenerator[None]:
@@ -288,6 +322,29 @@ def create_application(
             operation_id="claim_worker",
             response_model=WorkerClaimResponse,
         )
+    if run_events is not None:
+        properties = RunEventsQuery.model_json_schema()["properties"]
+        framework.add_api_route(
+            RouteName.RUN_EVENTS.value,
+            run_events,
+            methods=["GET"],
+            operation_id="list_run_events",
+            response_model=RunEventPage,
+            responses={
+                status: {"model": ApiErrorEnvelope}
+                for status in (401, 403, 404, 409, 422, 500, 503)
+            },
+            openapi_extra={
+                "parameters": [
+                    {
+                        "name": name,
+                        "in": "query",
+                        "schema": properties[name],
+                    }
+                    for name in RunEventsQuery.model_fields
+                ]
+            },
+        )
     if worker_history is not None:
 
         async def history(att: Identifier, request: Request) -> Response:
@@ -347,5 +404,6 @@ def create_application(
         authenticator=authenticator,
         clock=clock,
         worker_history=worker_history,
+        claim_slot=ClaimWorkSlot() if single_claim else None,
     )
     return ApiExchange(framework, diagnostics, request_id)

@@ -131,20 +131,22 @@ async def save_secret_policy(
         )
 
 
-def unresolved_approval() -> JsonObject:
+def unresolved_predicate() -> JsonObject:
     ir = skeleton_ir()
     nodes = cast(
         "dict[str, dict[str, dict[str, object]]]",
         cast("JsonObject", ir["graph"])["nodes"],
     )
-    approve = nodes["approve"]
-    approve["inputs"]["summary"] = {
-        "type": "StructuredOutput",
-        "from": "agent",
-        "output": "summary",
-        "path": "x",
+    gate = nodes["gate"]
+    gate["inputs"] = {
+        "summary": {
+            "type": "StructuredOutput",
+            "from": "agent",
+            "output": "summary",
+            "path": "x",
+        }
     }
-    approve["config"]["approve_when"] = "inputs.summary == 1"
+    gate["retry"] = {"max_attempts": 1, "predicate": "inputs.summary == 1"}
     return ir
 
 

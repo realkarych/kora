@@ -25,6 +25,7 @@ from kora.db.graph_publication_ordinal_v1 import (
     ORDINAL_INVALID_INDEX,
     ORDINAL_VALID_INDEX,
 )
+from kora.db.run_event_page_v1 import SQLITE_EVENT_PAGE_INDEX
 from kora.db.run_input_locator_v1 import (
     SQLITE_RUN_INPUT_LOCATOR_INDEX,
     SQLITE_RUN_LOCATOR_INDEX,
@@ -144,6 +145,7 @@ def include_schema_object(
             SQLITE_RUN_INPUT_LOCATOR_INDEX,
             SQLITE_DEPLOYED_INDEX,
             SQLITE_OWNER_INDEX,
+            SQLITE_EVENT_PAGE_INDEX,
             *(index for _, _, index in LOCATORS),
         )
         and not reflected

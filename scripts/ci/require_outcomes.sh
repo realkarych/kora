@@ -24,7 +24,7 @@ require_scaffold_lane() {
   test "$FINAL_SYNC_OUTCOME" = success
   test "$WORKFLOW_CANCELLED" = false
   case "$KORA_SCAFFOLD_LANE" in
-    general-[1-9]|general-1[0-9]|general-20|storage)
+    general-[1-9]|general-1[0-9]|general-2[0-2]|storage)
       require_test_lane
       test "$PREPARATION_OUTCOME" = skipped
       test "$TEARDOWN_OUTCOME" = skipped
@@ -106,9 +106,11 @@ require_browser_checks() {
   test "$SCOPE_RESULT" = success
   test "$SCOPE_VERIFIED" = true
   if test "$FULL_SCOPE" = false; then
+    test "$BROWSER_PNPM_RESULT" = skipped
     test "$BROWSER_RESULT" = skipped
   else
     test "$FULL_SCOPE" = true
+    test "$BROWSER_PNPM_RESULT" = success
     test "$BROWSER_RESULT" = success
   fi
 }

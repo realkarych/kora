@@ -3,18 +3,21 @@ import errno
 import fcntl
 import json
 import os
+import select
+import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from kora.conformance.capture import captured
 from kora.conformance.common import CONFORMANCE_COMPONENT, utc_now
@@ -36,8 +39,13 @@ from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfigu
 from kora.plugins.runtime.local.spawn import CompletionPipe, runner_command
 from kora.plugins.runtime.local.supervisor import EXIT_FAILED
 from kora.protocols.common import ProtocolContext
+from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.evidence import DispatcherClosure, DispatcherQuiescence
+from kora.protocols.evidence import (
+    DispatcherClosure,
+    DispatcherQuiescence,
+    EvidenceScope,
+)
 from kora.protocols.history import (
     GRANT_HISTORY_LABEL,
     GrantHistoryPage,
@@ -56,14 +64,16 @@ from kora.protocols.identity import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelError
-from kora.runner.identity import NativeIdentityReader
-from kora.runner.peers import kernel_source
+from kora.runner.identity import ArgumentMatch, IdentityState, NativeIdentityReader
+from kora.runner.peers import PeerRefused, kernel_source, live_identity
+from kora.runner.processes import ExitAnchor, SignalResult
 from kora.runner.registry import (
     ADMITTED_JOBS,
     FIRST_GRANT_ARGUMENT,
     HEAD_LIMIT,
     PREFIX_BYTES,
     RETAINED_LIMIT,
+    SOCKET_NAME_LENGTH,
     AttemptKey,
     Completed,
     FirstClosureRecord,
@@ -71,12 +81,14 @@ from kora.runner.registry import (
     FirstGrantLinks,
     FirstGrantRecord,
     RetainedReference,
+    Retired,
     Running,
     Starting,
     TransitionExecutor,
     Unsubmitted,
     model_bytes,
     runner_argv,
+    socket_path,
 )
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.plugins.runtime.local.test_command import (
@@ -88,11 +100,15 @@ from tests.plugins.runtime.local.test_command import (
 from tests.plugins.runtime.local.test_command_observation import unless_busy
 from tests.plugins.runtime.local.test_transfer import live_descriptors
 from tests.support.local_peers import (
+    CONDITION_SECONDS,
     identity_of,
     until,
 )
 from tests.support.local_runners import (
+    PS,
+    SHORT_BASE,
     reap_runners,
+    runner_pids,
     short_directory,
     starting_entry,
     supervised,
@@ -166,6 +182,16 @@ def stamps(*paths: Path) -> tuple[tuple[bytes, int, int, int], ...]:
             (path.read_bytes(), stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns)
         )
     return tuple(output)
+
+
+def unclosed_grant(
+    runtime: LocalRuntime, key: AttemptKey, head_path: Path
+) -> tuple[FirstGrantLinks, bytes]:
+    head = runtime.registry.read(key)
+    assert isinstance(head, FirstGrantHead)
+    assert head.first_grant.closure is None
+    assert not head_path.with_suffix(".first-closure.v1.json").exists()
+    return head.first_grant, head_path.with_suffix(".first-grant.v1.json").read_bytes()
 
 
 def lock_is_free(path: Path) -> None:
@@ -258,6 +284,272 @@ def fifo_identities() -> set[tuple[int, int]]:
     return pipes
 
 
+def pipe_identity(descriptor: int) -> tuple[int, int]:
+    metadata = os.fstat(descriptor)
+    assert stat.S_ISFIFO(metadata.st_mode)
+    return metadata.st_dev, metadata.st_ino
+
+
+def pipe_pending(descriptor: int, identity: tuple[int, int]) -> bool:
+    assert pipe_identity(descriptor) == identity
+    poller = select.poll()
+    poller.register(descriptor, select.POLLIN)
+    return not poller.poll(0)
+
+
+class StartupTimeoutClock(SystemClock):
+    def __init__(self, runtime: LocalRuntime, key: AttemptKey, lock: int) -> None:
+        self.runtime = runtime
+        self.key = key
+        self.lock = lock
+        self.held = False
+        self.cutoff_ns: int | None = None
+        self.reader: int | None = None
+        self.reader_identity: tuple[int, int] | None = None
+        self.observed_ns: int | None = None
+        self.baseline = fifo_identities()
+
+    def monotonic_ns(self) -> int:
+        if not self.held and isinstance(
+            self.runtime.registry.entry(self.key), Starting
+        ):
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.held = True
+        return super().monotonic_ns()
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        observe_readiness = (
+            self.held and self.runtime.launchers.spawning and self.cutoff_ns is None
+        )
+        if not observe_readiness:
+            await super().sleep_until(deadline_ns)
+            return
+        readers: list[int] = []
+        for descriptor in live_descriptors():
+            metadata = os.fstat(descriptor)
+            if (
+                stat.S_ISFIFO(metadata.st_mode)
+                and (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                )
+                not in self.baseline
+            ):
+                readers.append(descriptor)
+        assert len(readers) == 1
+        descriptor = readers[0]
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+        assert flags & os.O_ACCMODE == os.O_RDONLY
+        assert flags & os.O_NONBLOCK
+        assert not os.get_inheritable(descriptor)
+        self.reader = descriptor
+        identity = pipe_identity(descriptor)
+        self.reader_identity = identity
+        self.cutoff_ns = deadline_ns
+        await super().sleep_until(deadline_ns)
+        assert pipe_pending(descriptor, identity)
+        self.observed_ns = super().monotonic_ns()
+
+
+def supervisor_stopped(original: ProcessIdentity) -> bool:
+    state = subprocess.run(
+        [PS, "-p", str(original.pid), "-o", "state="],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=2,
+    )
+    return state.stdout.strip().startswith("T")
+
+
+async def startup_supervisor(path: Path, cutoff_ns: int) -> ProcessIdentity:
+    reader = NativeIdentityReader()
+    endpoint = await connected(str(path), SystemClock(), cutoff_ns)
+    try:
+        original = kernel_source(reader).attest(endpoint, None)
+        assert original.pid > 1
+        assert original.pid not in {os.getpid(), os.getppid()}
+        return original
+    finally:
+        endpoint.close()
+
+
+def signal_startup_supervisor(
+    anchor: ExitAnchor,
+    original: ProcessIdentity,
+    expected: tuple[str, ...],
+    requested: signal.Signals,
+) -> None:
+    reader = NativeIdentityReader()
+    assert reader.carries(original.pid, expected) is ArgumentMatch.EQUAL
+    assert live_identity(reader, original.pid) == original
+    assert anchor.signal(requested) is SignalResult.SENT
+
+
+def resume_startup_supervisor(
+    anchor: ExitAnchor, original: ProcessIdentity, expected: tuple[str, ...]
+) -> bool:
+    if anchor.exited:
+        return True
+    if sys.platform == "darwin":
+        reader = NativeIdentityReader()
+        try:
+            if reader.carries(original.pid, expected) is not ArgumentMatch.EQUAL:
+                return False
+            if live_identity(reader, original.pid) != original:
+                return False
+        except (OSError, PeerRefused):
+            return False
+    return anchor.signal(signal.SIGCONT) is SignalResult.SENT
+
+
+async def hold_startup_writer(
+    runtime: LocalRuntime,
+    clock: StartupTimeoutClock,
+    root: Path,
+    path: Path,
+    pending: asyncio.Task[None],
+) -> None:
+    await until(
+        lambda: pending.done() or (clock.cutoff_ns is not None and path.is_socket())
+    )
+    starting = runtime.registry.entry(clock.key)
+    assert clock.held
+    assert isinstance(starting, Starting)
+    assert not pending.done()
+    descriptor = clock.reader
+    identity = clock.reader_identity
+    cutoff = clock.cutoff_ns
+    assert descriptor is not None
+    assert identity is not None
+    assert cutoff is not None
+    original = await startup_supervisor(path, cutoff)
+    expected = runner_argv(starting.runner_prefix, clock.key, starting.nonce)
+    owner = ExitAnchor(original.pid, direct_child=False)
+    try:
+        assert not owner.unknown
+        assert not owner.exited
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "case": "startup-owner",
+                    "pid": original.pid,
+                    "start": original.start_time,
+                    "socket": str(path),
+                }
+            )
+            + "\n"
+        )
+        sys.stdout.flush()
+        signal_startup_supervisor(owner, original, expected, signal.SIGSTOP)
+        try:
+            await until(lambda: pending.done() or supervisor_stopped(original))
+            assert runner_pids(root) == (original.pid,)
+            stopped_ns = clock.monotonic_ns()
+            assert stopped_ns < cutoff
+            assert not pending.done()
+            assert pipe_pending(descriptor, identity)
+
+            await pending
+
+            assert clock.observed_ns is not None
+            assert clock.observed_ns >= cutoff
+            assert supervisor_stopped(original)
+            assert not owner.exited
+            assert not owner.unknown
+            assert runtime.registry.entry(clock.key) == starting
+            assert fifo_identities() == clock.baseline
+            with pytest.raises(OSError, match=os.strerror(errno.EBADF)) as closed:
+                os.fstat(descriptor)
+            assert closed.value.errno == errno.EBADF
+            assert not runtime.launchers.spawning
+            assert not runtime.launchers.settling
+            assert not runtime.launchers.unsettled
+            assert runner_pids(root) == (original.pid,)
+        finally:
+            await until(lambda: resume_startup_supervisor(owner, original, expected))
+            await until(lambda: owner.reaped or owner.unknown)
+            assert owner.exited
+            assert owner.reaped
+            assert not owner.unknown
+        assert NativeIdentityReader().read(original.pid).state is IdentityState.ABSENT
+        assert runtime.registry.entry(clock.key) == starting
+        assert not path.exists()
+        assert not runner_pids(root)
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "case": "startup-timeout",
+                    "supervisor_pid": original.pid,
+                    "supervisor_start": original.start_time,
+                    "stopped_ns": stopped_ns,
+                    "cutoff_ns": cutoff,
+                    "writer_pending_at_cutoff_ns": clock.observed_ns,
+                    "native_exit": owner.exited,
+                    "native_reap": owner.reaped,
+                    "reader_identity": identity,
+                }
+            )
+            + "\n"
+        )
+    finally:
+        owner.close()
+
+
+async def startup_timeout(
+    runtime: LocalRuntime, ctx: ProtocolContext, root: Path, sockets: Path
+) -> None:
+    key = runtime.registry.key(ATTEMPT)
+    path = Path(socket_path(str(sockets), key.name[:SOCKET_NAME_LENGTH]))
+    deadline = ExecutionDeadline(
+        at=ctx.clock.now() + timedelta(seconds=8),
+        scope_kind="attempt",
+        scope_id=ATTEMPT,
+        clock_uncertainty=timedelta(0),
+        grace=DEADLINE_GRACE,
+    )
+    grant, page, _ = binding(runtime, ctx)
+    await runtime.accept_grant_history(
+        ATTEMPT, grant, page, replace(ctx, deadline=deadline)
+    )
+    workload = command_workload(
+        runtime,
+        ATTEMPT,
+        (sys.executable, "-I", "-c", "pass"),
+        dispatcher_id=grant.dispatcher_id,
+        deadline=TypeAdapter[ExecutionDeadline](ExecutionDeadline).dump_python(
+            deadline, mode="json"
+        ),
+    )
+    lock = os.open(root / "registry" / f"{key.name}.lock", os.O_RDWR)
+    clock = StartupTimeoutClock(runtime, key, lock)
+    pending = asyncio.create_task(
+        expect_refusal(
+            "runner_starting",
+            runtime.submit(workload, replace(ctx, clock=clock, deadline=deadline)),
+        )
+    )
+    try:
+        await hold_startup_writer(runtime, clock, root, path, pending)
+        attempt = attempt_directory(root, runtime, ATTEMPT)
+        records = [
+            json.loads(line)
+            for line in (attempt / "runner.log").read_bytes().splitlines()
+        ]
+        refused = [
+            record
+            for record in records
+            if record.get("event") == "runtime.local.runner.refused"
+        ]
+        assert [record.get("reason") for record in refused] == ["lock"]
+        assert not (attempt / "candidate").exists()
+    finally:
+        try:
+            await asyncio.gather(pending, return_exceptions=True)
+        finally:
+            os.close(lock)
+
+
 async def cancel_admitted_replays(
     runtime: LocalRuntime,
     ctx: ProtocolContext,
@@ -346,6 +638,74 @@ async def closure_storage_full(
     assert not (root / "registry" / f"{key.name}.first-closure.v1.json").exists()
 
 
+async def release_with_contender(
+    runtime: LocalRuntime,
+    handle: Handle,
+    ctx: ProtocolContext,
+    attempt: Path,
+    evidence_paths: tuple[Path, ...],
+) -> None:
+    releases = runtime.releases
+    available_before = releases.available
+    holding = threading.Event()
+    allow_cleanup = threading.Event()
+    allow_contender = threading.Event()
+    key = runtime.registry.key(ATTEMPT)
+    original = runtime.registry.read(key)
+    assert isinstance(original, FirstGrantHead)
+    assert isinstance(original.entry, Completed)
+    assert original.entry.released_at is None
+    before = stamps(*evidence_paths)
+
+    def hold(gate: threading.Event) -> None:
+        holding.set()
+        assert gate.wait(CONDITION_SECONDS)
+
+    async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(releases.run(lambda: hold(allow_cleanup)))
+        try:
+            await until(holding.is_set)
+            first = tasks.create_task(runtime.release(handle, ctx))
+            await until(lambda: len(releases.waiting) == 1)
+            tasks.create_task(releases.run(lambda: hold(allow_contender)))
+            await until(lambda: len(releases.waiting) == 2)
+            contender = tasks.create_task(runtime.release(handle, ctx))
+            await until(lambda: len(releases.waiting) == 3)
+
+            assert not first.done()
+            assert not contender.done()
+            assert attempt.is_dir()
+            assert stamps(*evidence_paths) == before
+
+            allow_cleanup.set()
+            await first
+
+            assert not contender.done()
+            assert len(releases.waiting) == 1
+            assert not attempt.exists()
+            released = runtime.registry.read(key)
+            assert isinstance(released, FirstGrantHead)
+            assert isinstance(released.entry, Completed)
+            assert released.entry.released_at is not None
+            expected = original.entry.model_copy(
+                update={"released_at": released.entry.released_at}
+            )
+            assert released == original.model_copy(update={"entry": expected})
+            after = stamps(*evidence_paths)
+            assert after[1:] == before[1:]
+
+            allow_contender.set()
+            await contender
+        finally:
+            allow_cleanup.set()
+            allow_contender.set()
+
+    assert stamps(*evidence_paths) == after
+    assert not releases.waiting
+    assert not releases.jobs
+    assert releases.available == available_before
+
+
 async def exercise(
     runtime: LocalRuntime,
     ctx: ProtocolContext,
@@ -362,8 +722,19 @@ async def exercise(
     grant_path = head_path.with_suffix(".first-grant.v1.json")
     closure_path = head_path.with_suffix(".first-closure.v1.json")
     attempt = attempt_directory(root, runtime, ATTEMPT)
+    hold_command = not discard and not discard_completion
+    gate_path = root / "command-gate"
     command = "pass"
-    if discard_completion:
+    if hold_command:
+        command = "\n".join(
+            (
+                "import fcntl, os",
+                "os.write(1, b'waiting for gate')",
+                f"with open({str(gate_path)!r}, 'rb') as gate:",
+                "    fcntl.flock(gate, fcntl.LOCK_SH)",
+            )
+        )
+    elif discard_completion:
         command = "\n".join(
             (
                 "import errno, os, stat, sys",
@@ -420,7 +791,9 @@ async def exercise(
     await runtime.workspace_target(ATTEMPT, ctx)
     before_pipes = fifo_identities()
     reader_identity: tuple[int, int] | None = None
+    cancelled_running: Running | None = None
     if discard_completion:
+        retained_grant = (head.first_grant, grant_path.read_bytes())
         pending: asyncio.Task[Handle] | None = None
 
         def cancel_submit() -> None:
@@ -433,15 +806,29 @@ async def exercise(
         )
         with pytest.raises(asyncio.CancelledError):
             await pending
-        assert clock.observed_ready
 
-    handle = await runtime.submit(workload, ctx)
-    if discard_completion:
+        assert clock.observed_ready
+        ready = runtime.registry.entry(key)
+        assert isinstance(ready, Running)
+        cancelled_running = ready
+        assert unclosed_grant(runtime, key, head_path) == retained_grant
         new_pipes = fifo_identities() - before_pipes
         assert len(new_pipes) == 1
         reader_identity = new_pipes.pop()
+
+    handle = await runtime.submit(workload, ctx)
     running = runtime.registry.entry(key)
     assert isinstance(running, Running)
+    if cancelled_running is not None:
+        assert running == cancelled_running
+        assert fifo_identities() - before_pipes == {reader_identity}
+    if hold_command:
+        running_evidence = stamps(head_path, grant_path, lock_path)
+
+        running_intake = await runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+
+        assert running_intake == saved
+        assert stamps(head_path, grant_path, lock_path) == running_evidence
 
     await expect_refusal(
         "workload_busy", runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
@@ -451,7 +838,27 @@ async def exercise(
     assert not closure_path.exists()
     assert isinstance(runtime.registry.entry(key), Running)
 
-    await runtime.start(handle, ctx)
+    if hold_command:
+        output = attempt / "stdout.log"
+        with gate_path.open("wb") as gate:
+            fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            await runtime.start(handle, ctx)
+            await until(
+                lambda: output.exists() and output.read_bytes() == b"waiting for gate"
+            )
+            held = stamps(head_path, grant_path)
+
+            await expect_refusal(
+                "workload_busy",
+                runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx),
+            )
+            await expect_refusal("workload_busy", runtime.quiescence(handle, ctx))
+
+            assert stamps(head_path, grant_path) == held
+            assert not closure_path.exists()
+        await until(lambda: settled_command(attempt / "runner.log"))
+    else:
+        await runtime.start(handle, ctx)
     request = DispatcherQuiescenceRequest(
         op="record_dispatcher_quiescence",
         request_id="first-closure",
@@ -471,6 +878,54 @@ async def exercise(
             ENVELOPE_BYTES,
         )
     assert not closure_path.exists()
+    pre_closure_head = head_path.read_bytes()
+    if hold_command:
+        leaf = FirstClosureRecord(
+            format="local-first-closure/1",
+            closure=DispatcherClosure(
+                quiescence=ack, provenance="registry_acknowledgement", process=None
+            ),
+        )
+        with closure_path.open("xb") as occupied:
+            occupied.write(model_bytes(leaf))
+        closure_path.chmod(0o600)
+        before_collision = stamps(head_path, grant_path, closure_path, lock_path)
+
+        await expect_refusal(
+            "workload_conflict",
+            unless_busy(
+                lambda: runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
+            ),
+        )
+
+        assert (
+            stamps(head_path, grant_path, closure_path, lock_path) == before_collision
+        )
+        closure_path.unlink()
+
+        first_head = FirstGrantHead.model_validate_json(pre_closure_head)
+        changed_entry = running.model_copy(
+            update={"workload_digest": "sha256:" + "a" * 64}
+        )
+        assert changed_entry.workload_digest != running.workload_digest
+        changed_head = first_head.model_copy(update={"entry": changed_entry})
+        fixture_head = head_path.with_suffix(".fixture-head")
+        fixture_head.write_bytes(model_bytes(changed_head))
+        fixture_head.chmod(0o600)
+        fixture_head.replace(head_path)
+        before_retry = stamps(head_path, grant_path, lock_path)
+        try:
+            await expect_refusal(
+                "lineage_unavailable",
+                runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx),
+            )
+
+            assert stamps(head_path, grant_path, lock_path) == before_retry
+            assert not closure_path.exists()
+        finally:
+            fixture_head.write_bytes(pre_closure_head)
+            fixture_head.chmod(0o600)
+            fixture_head.replace(head_path)
     if discard:
         await unless_busy(
             lambda: discard_confirmed_reply(runtime, running, request, ctx)
@@ -479,6 +934,31 @@ async def exercise(
         await unless_busy(
             lambda: runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
         )
+    if hold_command:
+        confirmed_head = head_path.read_bytes()
+        fixture_head = head_path.with_suffix(".fixture-head")
+        fixture_closure = closure_path.with_suffix(".fixture-closure")
+        fixture_head.write_bytes(pre_closure_head)
+        fixture_head.chmod(0o600)
+        fixture_head.replace(head_path)
+        closure_path.rename(fixture_closure)
+        missing_evidence = stamps(head_path, grant_path, lock_path, fixture_closure)
+        try:
+            await expect_refusal(
+                "lineage_unavailable",
+                runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx),
+            )
+
+            assert (
+                stamps(head_path, grant_path, lock_path, fixture_closure)
+                == missing_evidence
+            )
+            assert not closure_path.exists()
+        finally:
+            fixture_closure.replace(closure_path)
+            fixture_head.write_bytes(confirmed_head)
+            fixture_head.chmod(0o600)
+            fixture_head.replace(head_path)
     attached = stamps(head_path, grant_path, closure_path)
     await runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
     lock_is_free(lock_path)
@@ -490,6 +970,10 @@ async def exercise(
 
     await expect_refusal("workload_conflict", runtime.start(handle, ctx))
     await expect_refusal("workload_conflict", runtime.submit(workload, ctx))
+    if hold_command:
+        await expect_refusal(
+            "retirement_unavailable", runtime.retire(ATTEMPT, timedelta(0), ctx)
+        )
     spool_before = tuple(sorted((root / "spools").rglob("*")))
     await expect_refusal(
         "workload_conflict", anext(runtime.transfer_out(handle, "result", ctx))
@@ -557,7 +1041,51 @@ async def exercise(
     else:
         record = await unless_busy(lambda: runtime.quiescence(handle, ctx))
         await until(lambda: recorded_exited(NativeIdentityReader(), running.runner))
-    await runtime.release(handle, ctx)
+
+    if hold_command:
+        completed_head = runtime.registry.read(key)
+        assert isinstance(completed_head, FirstGrantHead)
+        assert isinstance(completed_head.entry, Completed)
+        links = FirstGrantLinks(grant=completed_head.first_grant.grant, closure=None)
+        head_path.write_bytes(
+            model_bytes(completed_head.model_copy(update={"first_grant": links}))
+        )
+        inconsistent = stamps(head_path, grant_path, closure_path, lock_path)
+        try:
+            await expect_refusal(
+                "lineage_unavailable", runtime.workspace_target(ATTEMPT, ctx)
+            )
+            await expect_refusal("lineage_unavailable", runtime.submit(workload, ctx))
+            await expect_refusal(
+                "lineage_unavailable",
+                runtime.accept_grant_history(ATTEMPT, grant, page, ctx),
+            )
+            await expect_refusal("lineage_unavailable", runtime.release(handle, ctx))
+
+            assert (
+                stamps(head_path, grant_path, closure_path, lock_path) == inconsistent
+            )
+            assert attempt.exists()
+        finally:
+            head_path.write_bytes(model_bytes(completed_head))
+
+    completed_evidence = stamps(head_path, grant_path, closure_path)
+
+    await expect_refusal("workload_conflict", runtime.workspace_target(ATTEMPT, ctx))
+    await expect_refusal("workload_conflict", runtime.submit(workload, ctx))
+
+    assert stamps(head_path, grant_path, closure_path) == completed_evidence
+
+    if hold_command:
+        await release_with_contender(
+            runtime,
+            handle,
+            ctx,
+            attempt,
+            (head_path, grant_path, closure_path, lock_path),
+        )
+    else:
+        await runtime.release(handle, ctx)
     completed = runtime.registry.entry(key)
 
     assert isinstance(completed, Completed)
@@ -571,6 +1099,8 @@ async def exercise(
     sentinel.touch(mode=0o600)
     descriptors = open_descriptors()
 
+    await expect_refusal("attempt_retired", runtime.workspace_target(ATTEMPT, ctx))
+    await expect_refusal("attempt_retired", runtime.submit(workload, ctx))
     await cancel_admitted_replays(runtime, ctx, grant, ack, lock_path)
     await runtime.record_dispatcher_quiescence(ATTEMPT, ack, grant, ctx)
     await expect_refusal(
@@ -612,6 +1142,121 @@ async def exercise(
     )
 
     assert not lock_path.exists()
+
+
+async def refuse_missing_intake(
+    runtime: LocalRuntime, ctx: ProtocolContext, root: Path
+) -> None:
+    grant, page, _ = binding(runtime, ctx)
+    key = runtime.registry.key(ATTEMPT)
+    head = root / "registry" / f"{key.name}.json"
+    lock = head.with_suffix(".lock")
+    leaf = head.with_suffix(".first-grant.v1.json")
+    accepted = await runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    original = stamps(head, lock, leaf)
+
+    repeated = await runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+
+    assert accepted.complete
+    assert repeated == accepted
+    assert stamps(head, lock, leaf) == original
+
+    head.unlink()
+    lock.unlink()
+    retained = stamps(leaf)
+
+    await expect_refusal(
+        "lineage_unavailable", runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    )
+
+    assert not head.exists()
+    assert not lock.exists()
+    assert stamps(leaf) == retained
+
+    leaf.unlink()
+    before = tuple((root / "registry").iterdir())
+
+    await expect_refusal(
+        "lineage_unavailable", runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    )
+
+    assert tuple((root / "registry").iterdir()) == before
+    assert not head.exists()
+    assert not lock.exists()
+    assert not leaf.exists()
+
+
+async def verify_intake_lineage(
+    runtime: LocalRuntime, ctx: ProtocolContext, root: Path
+) -> None:
+    grant, page, _ = binding(runtime, ctx)
+    key = runtime.registry.key(ATTEMPT)
+    head = root / "registry" / f"{key.name}.json"
+    lock = head.with_suffix(".lock")
+    leaf = head.with_suffix(".first-grant.v1.json")
+    record = model_bytes(
+        FirstGrantRecord(
+            format="local-first-grant/1", snapshot=page.snapshot, grant=grant
+        )
+    )
+    leaf.write_bytes(record)
+    leaf.chmod(0o600)
+
+    await expect_refusal(
+        "workload_conflict", runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    )
+
+    assert not head.exists()
+    assert lock.exists()
+    assert leaf.read_bytes() == record
+
+    initial = FirstGrantHead(
+        format="local/2",
+        execution_domain_id=key.execution_domain_id,
+        attempt_id=key.attempt_id,
+        entry=Unsubmitted(
+            state="unsubmitted", deadline=ctx.deadline, gate_closed=False
+        ),
+        first_grant=FirstGrantLinks(
+            grant=RetainedReference.describe(record), closure=None
+        ),
+    )
+    deadline = ExecutionDeadline(
+        at=ctx.clock.now() + timedelta(minutes=1),
+        scope_kind="attempt",
+        scope_id=ATTEMPT,
+        clock_uncertainty=timedelta(0),
+        grace=DEADLINE_GRACE,
+    )
+    wrong_entry = Unsubmitted(state="unsubmitted", deadline=deadline, gate_closed=False)
+    wrong_head = initial.model_copy(update={"entry": wrong_entry})
+    head.write_bytes(model_bytes(wrong_head))
+    head.chmod(0o600)
+    wrong_evidence = stamps(head, leaf, lock)
+
+    await expect_refusal(
+        "lineage_unavailable", runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    )
+
+    assert stamps(head, leaf, lock) == wrong_evidence
+
+    head.write_bytes(model_bytes(initial))
+    exact_evidence = stamps(head, leaf, lock)
+
+    accepted = await runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+
+    assert accepted.complete
+    assert accepted.accepted == page.end
+    assert stamps(head, leaf, lock) == exact_evidence
+
+    head.write_bytes(model_bytes(wrong_head))
+    wrong_evidence = stamps(head, leaf, lock)
+
+    await expect_refusal(
+        "lineage_unavailable", runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    )
+
+    assert stamps(head, leaf, lock) == wrong_evidence
 
 
 async def wrong_launch(
@@ -800,12 +1445,82 @@ async def refused_startup(
         dispatcher_id=grant.dispatcher_id,
     )
     key = runtime.registry.key(ATTEMPT)
+    head_path = root / "registry" / f"{key.name}.json"
+    retained_grant = unclosed_grant(runtime, key, head_path)
     readers = fifo_identities()
 
     await expect_refusal("runner_starting", runtime.submit(workload, ctx))
 
     assert fifo_identities() == readers
-    assert isinstance(runtime.registry.entry(key), Starting)
+    starting = runtime.registry.entry(key)
+    assert isinstance(starting, Starting)
+    assert starting.fence is None
+    assert not runtime.launchers.unsettled
+    assert not runner_pids(root)
+    assert unclosed_grant(runtime, key, head_path) == retained_grant
+
+    receipt = await runtime.retire(ATTEMPT, timedelta(0), ctx)
+    retired = runtime.registry.entry(key)
+
+    assert isinstance(retired, Retired)
+    assert retired.receipt == receipt
+    assert receipt.scope is EvidenceScope.NO_RUNNER_STARTED
+    assert not runner_pids(root)
+    assert unclosed_grant(runtime, key, head_path) == retained_grant
+
+
+async def expire_unsubmitted(
+    runtime: LocalRuntime, ctx: ProtocolContext, root: Path
+) -> None:
+    clock = StepClock()
+    deadline = ExecutionDeadline(
+        at=clock.now() + timedelta(seconds=2),
+        scope_kind="attempt",
+        scope_id=ATTEMPT,
+        clock_uncertainty=timedelta(seconds=1),
+        grace=DEADLINE_GRACE,
+    )
+    ctx = replace(ctx, clock=clock, deadline=deadline)
+    grant, page, _ = binding(runtime, ctx)
+    key = runtime.registry.key(ATTEMPT)
+    head_path = root / "registry" / f"{key.name}.json"
+
+    accepted = await runtime.accept_grant_history(ATTEMPT, grant, page, ctx)
+    entry = runtime.registry.entry(key)
+
+    assert accepted.complete
+    assert accepted.accepted == page.end
+    assert isinstance(entry, Unsubmitted)
+    assert entry.deadline == deadline
+    assert not entry.gate_closed
+    retained_grant = unclosed_grant(runtime, key, head_path)
+
+    clock.advance(999_999_000)
+    await runtime.workspace_target(ATTEMPT, ctx)
+    clock.advance(1_000)
+    await expect_refusal("deadline_expired", runtime.workspace_target(ATTEMPT, ctx))
+    expired = runtime.registry.entry(key)
+
+    assert isinstance(expired, Unsubmitted)
+    assert expired.deadline == deadline
+    assert expired.gate_closed
+    assert unclosed_grant(runtime, key, head_path) == retained_grant
+
+    after_expiry = stamps(head_path)
+    clock.offset_ns = 0
+    await expect_refusal("deadline_expired", runtime.workspace_target(ATTEMPT, ctx))
+
+    assert stamps(head_path) == after_expiry
+
+    receipt = await runtime.retire(ATTEMPT, timedelta(0), ctx)
+    retired = runtime.registry.entry(key)
+
+    assert isinstance(retired, Retired)
+    assert retired.receipt == receipt
+    assert receipt.scope is EvidenceScope.NO_RUNNER_STARTED
+    assert not attempt_directory(root, runtime, ATTEMPT).exists()
+    assert not runner_pids(root)
+    assert unclosed_grant(runtime, key, head_path) == retained_grant
 
 
 async def original_worker(root: Path, sockets: Path, case: str) -> None:
@@ -826,6 +1541,14 @@ async def original_worker(root: Path, sockets: Path, case: str) -> None:
                 await closure_storage_full(runtime, ctx, root)
             elif case == "startup-refusal":
                 await refused_startup(runtime, ctx, root)
+            elif case == "startup-timeout":
+                await startup_timeout(runtime, ctx, root, sockets)
+            elif case == "missing-intake":
+                await refuse_missing_intake(runtime, ctx, root)
+            elif case == "intake-lineage":
+                await verify_intake_lineage(runtime, ctx, root)
+            elif case == "expiry":
+                await expire_unsubmitted(runtime, ctx, root)
             elif case == "observer":
                 await leave_running(runtime, ctx, root)
             elif case in {"shutdown", "shutdown-completion"}:
@@ -844,17 +1567,31 @@ async def original_worker(root: Path, sockets: Path, case: str) -> None:
         finally:
             await runtime.close()
         observed = capture.finish()
+        if case == "normal":
+            release_counts = [
+                event.get("removed")
+                for event in observed
+                if event.get("event") == "runtime.local.release"
+                and event.get("outcome") == "released"
+            ]
+            assert len(release_counts) == 2
+            first_removed, contender_removed = release_counts
+            assert isinstance(first_removed, int)
+            assert first_removed > 0
+            assert contender_removed == 0
+            assert runtime.releases.joined
         events = [
             event
             for event in observed
             if event.get("event") == "runtime.local.first_grant"
         ]
-        if case == "startup-refusal":
-            assert any(
-                event.get("event") == "runtime.local.spawn"
-                and event.get("outcome") == "ended"
+        if case in {"startup-refusal", "startup-timeout"}:
+            expected = "ended" if case == "startup-refusal" else "timeout"
+            assert [
+                event["outcome"]
                 for event in observed
-            )
+                if event.get("event") == "runtime.local.spawn"
+            ] == [expected]
         for value in (
             str(root),
             "original-worker",
@@ -873,7 +1610,15 @@ async def original_worker(root: Path, sockets: Path, case: str) -> None:
         assert ("intake", "confirmed", True) in outcomes
         if case in {"normal", "lost", "completion-lost"}:
             assert ("closure", "confirmed", True) in outcomes
-        if case not in {"launch", "observer", "startup-refusal"}:
+        if case not in {
+            "expiry",
+            "intake-lineage",
+            "launch",
+            "missing-intake",
+            "observer",
+            "startup-refusal",
+            "startup-timeout",
+        }:
             assert ("closure", "refused", True) in outcomes
 
 
@@ -972,6 +1717,24 @@ def test_first_local_grant_closure_replays_after_lost_reply(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
 
 
+def test_first_local_grant_does_not_recreate_missing_confirmed_intake(
+    tmp_path: Path,
+) -> None:
+    root = state_root(tmp_path)
+
+    result = run_worker(root, "missing-intake")
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_first_local_grant_retry_requires_exact_intake_lineage(tmp_path: Path) -> None:
+    root = state_root(tmp_path)
+
+    result = run_worker(root, "intake-lineage")
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_first_local_grant_releases_after_lost_normal_completion(
     tmp_path: Path,
 ) -> None:
@@ -1041,6 +1804,29 @@ def test_first_local_grant_startup_refusal_reaches_eof_and_closes_reader(
     result = run_worker(root, "startup-refusal")
 
     assert result.returncode == 0, result.stderr
+
+
+def test_first_local_grant_expiry_and_retirement_preserve_original_grant(
+    tmp_path: Path,
+) -> None:
+    root = state_root(tmp_path)
+
+    result = run_worker(root, "expiry")
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_first_local_grant_startup_timeout_holds_original_writer() -> None:
+    base = Path(tempfile.mkdtemp(prefix="k1773-", dir=SHORT_BASE)).resolve()
+    root = state_root(base)
+    sockets = base / "sockets"
+
+    result = start_worker(root, sockets, "startup-timeout")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not runner_pids(root)
+    shutil.rmtree(base)
+    sys.stdout.write(result.stdout)
 
 
 @pytest.mark.parametrize("case", ["shutdown", "shutdown-completion"])

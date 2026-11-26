@@ -49,6 +49,7 @@ from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import AgentExecution
+from kora.protocols.identity import ProcessIdentity
 from kora.protocols.policy import Policy
 from kora.protocols.runtime import (
     CommandObservation,
@@ -79,12 +80,18 @@ from kora.runner.identity import NativeIdentityReader
 from kora.runner.journal import RunningJournal
 from kora.runner.native_io import observed
 from kora.runner.registry import (
+    AttemptKey,
     ControlFileRef,
     Submitter,
     synchronize,
     unlink_if_present,
 )
-from kora.runner.session_result import bounded_read, prepare_observation
+from kora.runner.session_result import (
+    FinalizationOrigin,
+    FinalizationReferences,
+    bounded_read,
+    prepare_observation,
+)
 
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
 AGENT: Final[EventSpec] = CATALOG.register(
@@ -217,7 +224,10 @@ class AgentSession:
         sources: AgentSources,
         identities: NativeIdentityReader,
         prepare_result: ResultPreparation = prepare_observation,
+        *,
+        registration: tuple[AttemptKey, ProcessIdentity] | None = None,
     ) -> None:
+        self._registration = registration
         self._prepare_result = prepare_result
         self._launch_cleanup: asyncio.Task[None] | None = None
         self._launches: LocalLaunches | None = None
@@ -290,7 +300,11 @@ class AgentSession:
                     policy = self._policy(admitted.execution)
                     asyncio.run_coroutine_threadsafe(
                         self._begin(
-                            admitted.workload, admitted.execution, workspace, policy
+                            admitted.workload,
+                            admitted.execution,
+                            workspace,
+                            policy,
+                            submitter,
                         ),
                         self._loop,
                     ).result()
@@ -371,6 +385,7 @@ class AgentSession:
         execution: AgentExecution,
         workspace: WorkspaceRef,
         policy: Policy,
+        submitter: Submitter,
     ) -> None:
         if self._fenced:
             raise delivery_error("journal_unavailable")
@@ -422,14 +437,20 @@ class AgentSession:
             ctx=self._context(workload.attempt_id),
             registry=self._diagnostics.registry,
             clock=self._clock,
-            log=self._diagnostics.logger(HOST_COMPONENT),
+            log=self._diagnostics.logger(HOST_COMPONENT).bind(
+                attempt_id=workload.attempt_id
+            ),
             secret_scope=self._scope,
             prepare_result=self._prepare_result,
         )
         host = AgentHost(services, self._journal, control, self._candidate)
         self._host = host
         try:
-            host.start(workload, workspace)
+            host.start(
+                workload,
+                workspace,
+                origin=self._finalization_origin(workload, submitter),
+            )
         except KoraProtocolError as error:
             self._fail(error.code)
             try:
@@ -440,6 +461,25 @@ class AgentSession:
         with self._lock:
             self._stage = _Stage.RUNNING
         self._finished = self._loop.create_task(self._session_finished(host))
+
+    def _finalization_origin(
+        self, workload: Workload, submitter: Submitter
+    ) -> FinalizationOrigin | None:
+        if self._registration is None:
+            return None
+        key, supervisor = self._registration
+        if (
+            key.attempt_id != workload.attempt_id
+            or key.execution_domain_id != workload.execution_domain_id
+        ):
+            return None
+        return FinalizationOrigin(
+            attempt_id=key.attempt_id,
+            execution_domain_id=key.execution_domain_id,
+            submitter=submitter,
+            supervisor=supervisor,
+            request_digest=workload.execution_request_digest,
+        )
 
     async def _session_finished(self, host: AgentHost) -> None:
         try:
@@ -512,7 +552,7 @@ class AgentSession:
             namespace_id=CONTEXT_NAMESPACE,
             run_id=None,
             attempt_id=attempt_id,
-            logger=self._log,
+            logger=self._log.bind(attempt_id=attempt_id),
             secrets=None,
             secret_admission=None,
             request_digest=None,
@@ -787,6 +827,19 @@ class AgentSession:
         if reference is None:
             raise delivery_error("session_unobserved")
         return reference
+
+    def session_finalization(self, submitter: Submitter) -> FinalizationReferences:
+        result = self.session_observation(submitter)
+        host = self._host
+        sibling = None if host is None else host.finalization_reference()
+        if sibling is None:
+            raise delivery_error("session_unobserved")
+        return FinalizationReferences(
+            checked_result=result,
+            finalization=ControlFileRef(
+                name=sibling.name, size=sibling.size, digest=sibling.digest
+            ),
+        )
 
     def completion(self) -> Completion:
         finished = self._finished

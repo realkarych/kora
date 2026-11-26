@@ -97,6 +97,7 @@ CLIENT_CONFIGURATION_PREFIX: str = "kora: invalid client configuration"
 MCP_EXTRA_REQUIRED: str = "kora: the stdio MCP server requires the kora[mcp] extra"
 MCP_DISTRIBUTIONS: frozenset[str] = frozenset({"mcp", "mcp_types"})
 API_HARNESS_VARIABLE: str = "KORA_API_HARNESS"
+API_WORKER_UNCERTAINTY_VARIABLE: str = "KORA_API_WORKER_CLOCK_UNCERTAINTY_US"
 POSTGRES_SERVING_OVERRIDES: frozenset[str] = frozenset(
     {
         "PGDATABASE",
@@ -790,6 +791,7 @@ def serve_api(
         return api_dependency_refusal()
 
     from kora.api.exchange import COMPONENT
+    from kora.api.installed_scheduler import FIRST_CLAIM, SCHEDULER_VARIABLE
     from kora.api.serving import ServingRefusal, refuse
     from kora.db.connection import (
         DatabaseConfigurationError,
@@ -802,6 +804,13 @@ def serve_api(
         settings = read_database_settings(environment)
     except DatabaseConfigurationError:
         return refuse(log, ServingRefusal.DATABASE_CONFIGURATION, EXIT_CONFIGURATION)
+    scheduler = environment.get(SCHEDULER_VARIABLE)
+    if scheduler is not None and (
+        scheduler != FIRST_CLAIM
+        or settings.dialect is not Dialect.SQLITE
+        or harness != "claude"
+    ):
+        return refuse(log, ServingRefusal.SCHEDULER_CONFIGURATION, EXIT_CONFIGURATION)
     if settings.dialect is Dialect.POSTGRESQL:
         if harness is not None and not installed_versions(cel_requirement):
             return api_dependency_refusal()
@@ -828,12 +837,22 @@ def serve_api(
             log, ServingRefusal.POSTGRESQL_ACTIVATION_UNAVAILABLE, EXIT_CONFIGURATION
         )
 
-    return serve_sqlite_api(settings, harness, port, diagnostics, log)
+    return serve_sqlite_api(
+        settings,
+        harness,
+        environment.get(API_WORKER_UNCERTAINTY_VARIABLE),
+        scheduler is not None,
+        port,
+        diagnostics,
+        log,
+    )
 
 
 def serve_sqlite_api(
     settings: "DatabaseSettings",
     harness: str | None,
+    worker_uncertainty: str | None,
+    scheduler_enabled: bool,
     port: int,
     diagnostics: ProcessDiagnostics,
     log: ComponentLogger,
@@ -841,17 +860,44 @@ def serve_sqlite_api(
     from kora.api.application import create_application
     from kora.api.exchange import ApiExchange
     from kora.api.graph_services import GraphServices, deployment_selection
-    from kora.api.serving import ServingFailure, ServingRefusal, refuse, serve_sqlite
+    from kora.api.installed_scheduler import installed_root_admission
+    from kora.api.installed_worker import installed_worker_profile
+    from kora.api.run_event_route import RunEventRoute
+    from kora.api.serving import (
+        ServingFailure,
+        ServingRefusal,
+        ServingScheduler,
+        refuse,
+        serve_sqlite,
+    )
+    from kora.api.worker_claims_route import WorkerClaimsRoute
+    from kora.api.worker_registration_route import WorkerRegistrationRoute
     from kora.db.graph_value_json import GraphValueRejected
     from kora.db.identifiers import IdentifierGenerator
+    from kora.engine.admission_initialization import AdmissionInitialization
+    from kora.engine.worker_claim_poll import WorkerClaimPoll
     from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
     from kora.protocols.errors import KoraProtocolError
     from kora.protocols.loading import load_provider
     from kora.protocols.metadata import ProtocolName
+    from kora.scheduler.loop import first_claim_scheduler
 
     clock = SystemClock()
+    worker = None
+    if worker_uncertainty is not None:
+        worker = installed_worker_profile(worker_uncertainty)
+        if worker is None or harness != "claude":
+            reason = (
+                ServingRefusal.SCHEDULER_CONFIGURATION
+                if scheduler_enabled
+                else ServingRefusal.WORKER_CONFIGURATION
+            )
+            return refuse(log, reason, EXIT_CONFIGURATION)
+    if scheduler_enabled and worker is None:
+        return refuse(log, ServingRefusal.SCHEDULER_CONFIGURATION, EXIT_CONFIGURATION)
     preparer = None
     selection = None
+    capabilities = LocalRuntimeConfiguration(state_root=None).capabilities()
     if harness is not None:
         if harness != "claude":
             return refuse(log, ServingRefusal.DOMAIN_CONFIGURATION, EXIT_CONFIGURATION)
@@ -866,9 +912,7 @@ def serve_sqlite_api(
             UnicodeDecodeError,
         ):
             return refuse(log, ServingRefusal.DOMAIN_CONFIGURATION, EXIT_CONFIGURATION)
-        selection = deployment_selection(
-            harness, LocalRuntimeConfiguration(state_root=None).capabilities()
-        )
+        selection = deployment_selection(harness, capabilities)
 
     def application(database: "Database") -> ApiExchange:
         provider = load_provider(
@@ -877,18 +921,63 @@ def serve_sqlite_api(
         factory = cast(
             "Callable[[JsonObject, Database], Authenticator]", provider.implementation
         )
+        identifiers = IdentifierGenerator(clock.now)
         deployment = (
             None
             if preparer is None or selection is None
-            else GraphServices(
-                database, preparer, selection, IdentifierGenerator(clock.now)
-            )
+            else GraphServices(database, preparer, selection, identifiers)
         )
+        registration = claims = initialization = None
+        if worker is not None:
+            runtimes = {"local": capabilities}
+            registration = WorkerRegistrationRoute(
+                database, runtimes, clock, diagnostics
+            )
+            claims = WorkerClaimsRoute(
+                WorkerClaimPoll(
+                    database,
+                    runtimes,
+                    clock,
+                    worker.limits,
+                    worker.uncertainty,
+                )
+            )
+            initialization = AdmissionInitialization(database, clock, identifiers.new)
         return create_application(
-            factory({}, database), diagnostics, clock, new_instance_id, deployment
+            factory({}, database),
+            diagnostics,
+            clock,
+            new_instance_id,
+            deployment,
+            run_events=RunEventRoute(database, clock),
+            worker_registration=registration,
+            worker_claims=claims,
+            admission_initialization=initialization,
+            single_claim=worker is not None,
         )
 
-    return serve_sqlite(settings, port, log, application, preparer=preparer)
+    def scheduler(database: "Database") -> ServingScheduler:
+        if worker is None or selection is None:
+            raise ServingFailure(ServingRefusal.SCHEDULER_CONFIGURATION)
+        admission = installed_root_admission(
+            database,
+            worker.limits,
+            clock.now,
+            IdentifierGenerator(clock.now),
+            selection,
+            capabilities,
+        )
+        return first_claim_scheduler(admission, read_seconds=worker.limits.read_seconds)
+
+    return serve_sqlite(
+        settings,
+        port,
+        log,
+        application,
+        preparer=preparer,
+        worker_startup=worker is not None,
+        make_scheduler=scheduler if scheduler_enabled else None,
+    )
 
 
 def cel_check() -> CheckResult:
@@ -1110,6 +1199,23 @@ def compose_application(
             as_json,
         )
 
+    @app.command(name="events", help="Read a finite page of saved run events.")
+    def events(
+        run: str,
+        namespace: str | None = typer.Option(None, "--namespace"),
+        limit: str | None = typer.Option(None, "--limit"),
+        cursor: str | None = typer.Option(None, "--cursor"),
+        follow: bool = typer.Option(
+            False, "--follow", help="Unavailable in this profile."
+        ),
+        as_json: bool = typer.Option(False, "--json", help="Print the API response."),
+    ) -> None:
+        from kora.cli.events import events_command
+
+        events_command(
+            environment, diagnostics, run, namespace, limit, cursor, follow, as_json
+        )
+
     @app.command(name="mcp", help="Serve the kora MCP tools over stdio.")
     def serve_mcp_command(
         server: Annotated[McpServerName, typer.Option("--server")],
@@ -1237,6 +1343,7 @@ def main(
         "conformance.lifetime",
         "engine",
         "mcp",
+        "scheduler",
     ):
         CATALOG.register_component(component)
     try:

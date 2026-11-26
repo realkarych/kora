@@ -82,6 +82,11 @@ from kora.db.graph_version_resource_owner_v1 import (
 )
 from kora.db.promotion_admission_v1 import TABLE_NAME as PROMOTION_ADMISSION_TABLE
 from kora.db.promotion_admission_v1 import promotion_admission_elements
+from kora.db.run_event_page_v1 import (
+    SQLITE_EVENT_KEYS,
+    SQLITE_EVENT_PAGE_INDEX,
+    SQLITE_EVENT_SCOPE,
+)
 from kora.db.run_input_locator_v1 import (
     SQLITE_RUN_INPUT_KEY,
     SQLITE_RUN_INPUT_LOCATOR_INDEX,
@@ -924,6 +929,13 @@ event: Table = Table(
     Index("ix_event_run_id_id", "run_id", "id"),
     CheckConstraint(EVENT_NAMESPACE_SCOPE, name="namespace_scope"),
 )
+Index(
+    SQLITE_EVENT_PAGE_INDEX,
+    event.c.namespace_id,
+    event.c.run_id,
+    *(literal_column(key, String()) for key in SQLITE_EVENT_KEYS),
+    sqlite_where=literal_column(SQLITE_EVENT_SCOPE),
+).ddl_if(dialect="sqlite")
 
 provider_pause: Table = Table(
     "provider_pause",

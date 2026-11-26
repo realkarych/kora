@@ -3,64 +3,25 @@ import shlex
 from http.client import HTTPConnection
 from pathlib import Path
 from socket import create_connection
-from typing import Final
 
 import pytest
 
 from tests.plugins.harness.claude.contained import assert_no_outbound
+from tests.plugins.harness.claude.scripted_assertions import (
+    SCRIPTED,
+    SEEDED,
+    assert_diagnostics,
+    event_data,
+    prepare_scenario,
+)
 from tests.plugins.harness.claude.scripted_model import (
     KEY,
     ScriptedState,
-    mapping,
     objects,
     serve,
     stop_server,
 )
 from tests.plugins.harness.claude.test_session_isolation import run_scenario
-
-PROMPT: Final[str] = "conformance"
-SCRIPTED: Final[str] = "scripted-bytes\n"
-SEEDED: Final[str] = "seeded-bytes\n"
-
-
-def prepare_scenario(root: Path) -> tuple[Path, Path, Path]:
-    workspace, account, markers = (
-        root / name for name in ("workspace", "account", "markers")
-    )
-    for path in (workspace, account, markers):
-        path.mkdir()
-    (workspace / "seeded.txt").write_text(SEEDED)
-    return workspace, account, markers
-
-
-def event_data(report: dict[str, object], kind: str) -> list[dict[str, object]]:
-    events = objects(report["events"])
-    assert events is not None
-    found: list[dict[str, object]] = []
-    for value in events:
-        event = mapping(value)
-        assert event is not None
-        if event["kind"] == kind:
-            data = mapping(event["data"])
-            assert data is not None
-            found.append(data)
-    return found
-
-
-def assert_diagnostics(report: dict[str, object], outcome: str, target: Path) -> None:
-    records = objects(report["diagnostics"])
-    assert records is not None
-    finished = [
-        record
-        for value in records
-        if (record := mapping(value)) is not None
-        and record.get("event") == "harness.claude.session_finished"
-    ]
-    assert len(finished) == 1
-    assert finished[0]["outcome"] == outcome
-    rendered = json.dumps(records)
-    for secret in (KEY, PROMPT, SCRIPTED, str(target)):
-        assert json.dumps(secret)[1:-1] not in rendered
 
 
 def count_tokens(connection: HTTPConnection, api_key: str) -> int:
@@ -119,63 +80,6 @@ def test_scripted_server_settles_a_request_that_is_waiting_for_its_body(
     finally:
         if thread.is_alive():
             stop_server(server, thread)
-
-
-def test_scripted_claude_write_changes_the_file_when_allowed(tmp_path: Path) -> None:
-    workspace, account, markers = prepare_scenario(tmp_path)
-    target = workspace / "target.txt"
-
-    report = run_scenario(
-        tmp_path,
-        workspace,
-        account,
-        markers,
-        [("Write", {"file_path": str(target), "content": SCRIPTED})],
-    )
-
-    assert_no_outbound(report)
-    assert report["cause"] == "completed"
-    assert report["error_class"] is None
-    assert report["unauthorized_requests"] == 0
-    assert target.read_text() == SCRIPTED
-    assert (workspace / "seeded.txt").read_text() == SEEDED
-    calls = event_data(report, "tool_call")
-    results = event_data(report, "tool_result")
-    assert len(calls) == len(results) == 1
-    assert calls[0]["tool"] == "Write"
-    assert results[0]["tool_use_id"] == calls[0]["tool_use_id"]
-    assert results[0]["is_error"] is False
-    assert event_data(report, "permission_denied") == []
-    assert_diagnostics(report, "completed", target)
-    assert set(objects(report["clients"]) or []) == {"127.0.0.1"}
-
-
-def test_scripted_claude_write_leaves_the_file_untouched_when_denied(
-    tmp_path: Path,
-) -> None:
-    workspace, account, markers = prepare_scenario(tmp_path)
-    target = workspace / "target.txt"
-
-    report = run_scenario(
-        tmp_path,
-        workspace,
-        account,
-        markers,
-        [("Write", {"file_path": str(target), "content": SCRIPTED})],
-        denied_tool="Write",
-    )
-
-    assert_no_outbound(report)
-    assert report["cause"] == "completed"
-    assert report["error_class"] is None
-    assert not target.exists()
-    denials = event_data(report, "permission_denied")
-    assert len(denials) == 1
-    assert denials[0]["source"] == "policy"
-    assert denials[0]["tool"] == "Write"
-    assert (workspace / "seeded.txt").read_text() == SEEDED
-    assert_diagnostics(report, "completed", target)
-    assert set(objects(report["clients"]) or []) == {"127.0.0.1"}
 
 
 def test_scripted_claude_decision_failure_leaves_the_file_untouched(

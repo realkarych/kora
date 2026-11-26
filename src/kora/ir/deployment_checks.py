@@ -10,6 +10,7 @@ from kora.ir.agent_secrets import (
 from kora.ir.approval_defaults import validate_approval_defaults
 from kora.ir.approval_predicates import validate_approval_response_predicates
 from kora.ir.branch_expressions import validate_branch_expressions
+from kora.ir.cli_approval_installation import cli_approval_installation_findings
 from kora.ir.config import AgentConfig, CommandConfig
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import Diagnostic
@@ -30,7 +31,7 @@ from kora.ir.secret_aliases import validate_secret_aliases
 from kora.ir.subgraph_interfaces import validate_subgraph_interfaces
 from kora.ir.target_parameter_types import validate_known_target_parameter_types
 from kora.ir.tool_policies import validate_tool_policies
-from kora.ir.topology import Node
+from kora.ir.topology import HumanInputNode, Node
 from kora.ir.trigger_expressions import validate_sensor_trigger_expressions
 from kora.ir.type_declarations import validate_type_declarations
 from kora.ir.type_schemas import validate_type_schemas
@@ -125,6 +126,19 @@ def _pass_outcomes(
     )
 
 
+def node_refusal(
+    code: str, message: str, path: Path, node: Node, name: str
+) -> Diagnostic:
+    return Diagnostic(
+        code=code,
+        message=message,
+        path=path,
+        location=safe_source(node.source),
+        node=name,
+        hint=HARNESS_HINT if code == "IR018" else INSTALLATION_HINT,
+    )
+
+
 class InstallationChecks:
     def __init__(self, selection: DeploymentSelection) -> None:
         self.selection = selection
@@ -133,16 +147,7 @@ class InstallationChecks:
     def refuse(
         self, code: str, message: str, path: Path, node: Node, name: str
     ) -> None:
-        self.collector.add(
-            Diagnostic(
-                code=code,
-                message=message,
-                path=path,
-                location=safe_source(node.source),
-                node=name,
-                hint=HARNESS_HINT if code == "IR018" else INSTALLATION_HINT,
-            )
-        )
+        self.collector.add(node_refusal(code, message, path, node, name))
 
     def node(self, node: Node, name: str, path: Path) -> None:
         config = node.config
@@ -201,6 +206,22 @@ def installation_findings(
     return checks.collector.finish()
 
 
+def approval_installation_findings(document: GraphDocument) -> DiagnosticCollection:
+    collector = DiagnosticCollector()
+    for name, node in document.graph.nodes.items():
+        if not isinstance(node, HumanInputNode):
+            continue
+        for suffix, message in cli_approval_installation_findings(
+            node, document.graph.nodes
+        ):
+            collector.add(
+                node_refusal(
+                    "IR028", message, ("graph", "nodes", name, *suffix), node, name
+                )
+            )
+    return collector.finish()
+
+
 def merge_diagnostics(
     collections: tuple[DiagnosticCollection, ...],
 ) -> DiagnosticCollection:
@@ -232,6 +253,7 @@ def check_deployment_document(
     outcomes = (
         *_pass_outcomes(document),
         (installation_findings(document, selection), True),
+        (approval_installation_findings(document), True),
         (agent_secret_findings(document, runtimes, policy), True),
         (network_policy_findings(document, runtimes, policy), True),
     )

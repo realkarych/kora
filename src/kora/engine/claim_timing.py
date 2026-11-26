@@ -14,6 +14,10 @@ class BeyondTimestamp(Enum):
     VALUE = "beyond_timestamp"
 
 
+class ClaimDeadlineCrossed(DeadlineRecordRejected):
+    pass
+
+
 ClaimTimeout = int | BeyondTimestamp | None
 
 
@@ -39,6 +43,8 @@ def first_claim_deadline(
     run_timeout: ClaimTimeout,
     attempt_timeout: ClaimTimeout,
     uncertainty: timedelta,
+    *,
+    admitted_at: datetime | None = None,
 ) -> ExecutionDeadline | None:
     if not is_utc(run_started_at) or not is_utc(now) or uncertainty < timedelta(0):
         raise DeadlineRecordRejected()
@@ -60,6 +66,14 @@ def first_claim_deadline(
         return None
     at, kind, identity = min(candidates, key=lambda entry: entry[0])
     if at > LATEST_US:
+        if (
+            kind == "attempt"
+            and admitted_at is not None
+            and is_utc(admitted_at)
+            and type(attempt_timeout) is int
+            and duration_us(admitted_at - EARLIEST) + attempt_timeout <= LATEST_US
+        ):
+            raise ClaimDeadlineCrossed()
         raise DeadlineRecordRejected()
     return ExecutionDeadline(
         at=EARLIEST + timedelta(microseconds=at),

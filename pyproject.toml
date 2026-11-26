@@ -75,6 +75,10 @@ claude = [
     "claude-agent-sdk==0.2.168",
     "kora[mcp]",
 ]
+github-app = [
+    "cryptography==50.0.2",
+    "pyjwt[crypto]==2.15.1",
+]
 mcp = [
     "mcp==2.3.0",
 ]
@@ -242,6 +246,7 @@ dev = [
     "claude-agent-sdk==0.2.168",
     "cryptography==50.0.2",
     "jsonschema==4.26.0",
+    "pyjwt[crypto]==2.15.1",
     "pyright==1.1.414",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",

@@ -31,6 +31,9 @@ __all__ = [
 ]
 
 
+EMPTY_LAYERS = PolicyLayers(ToolPolicy(), ToolPolicy())
+
+
 def make_adapter(
     workspace: Path,
     ctx: ProtocolContext,
@@ -38,6 +41,8 @@ def make_adapter(
     *,
     max_retries: int = 0,
     binding: str = "claude-test",
+    layers: PolicyLayers = EMPTY_LAYERS,
+    protected_paths: tuple[str, ...] = (),
 ) -> ClaudeHarness:
     scope = CallScope(
         "claude",
@@ -50,8 +55,8 @@ def make_adapter(
             branch=None,
         ),
         "conformance",
-        PolicyLayers(ToolPolicy(), ToolPolicy()),
-        (),
+        layers,
+        protected_paths,
         output_format,
     )
     return ClaudeHarness(

@@ -479,3 +479,16 @@ async def hosted(
     host.start(world.workload(deadline=deadline, **changes), world.workspace())
     await host.finished()
     return host, await host.stop()
+
+
+class GatedScript(SignalledScript):
+    def __init__(self, source: SignalledScript) -> None:
+        super().__init__(source.header, source.listed)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def steps(self) -> AsyncGenerator[Step]:
+        self.entered.set()
+        await self.release.wait()
+        async for item in super().steps():
+            yield item

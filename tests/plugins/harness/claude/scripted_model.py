@@ -20,10 +20,14 @@ def sse(events: list[tuple[str, dict[str, object]]]) -> bytes:
 
 
 def tool_stream(
-    model: str, name: str, payload: dict[str, object], index: int = 0
+    model: str,
+    name: str,
+    payload: dict[str, object],
+    index: int = 0,
+    conversation: str = "",
 ) -> bytes:
     message: dict[str, object] = {
-        "id": f"msg_scripted_tool_{index}",
+        "id": f"msg_scripted_tool_{conversation}{index}",
         "type": "message",
         "role": "assistant",
         "content": [],
@@ -42,7 +46,7 @@ def tool_stream(
                     "index": 0,
                     "content_block": {
                         "type": "tool_use",
-                        "id": f"toolu_scripted_{index}",
+                        "id": f"toolu_scripted_{conversation}{index}",
                         "name": name,
                         "input": {},
                     },
@@ -73,9 +77,9 @@ def tool_stream(
     )
 
 
-def end_stream(model: str) -> bytes:
+def end_stream(model: str, request_id: int = 0) -> bytes:
     message: dict[str, object] = {
-        "id": "msg_scripted_end",
+        "id": f"msg_scripted_end_{request_id}",
         "type": "message",
         "role": "assistant",
         "content": [],
@@ -145,8 +149,14 @@ def tool_results(document: dict[str, object]) -> list[dict[str, object]]:
 
 
 class ScriptedState:
-    def __init__(self, calls: list[tuple[str, dict[str, object]]]) -> None:
+    def __init__(
+        self,
+        calls: list[tuple[str, dict[str, object]]],
+        subagent_calls: list[tuple[str, dict[str, object]]] | None = None,
+    ) -> None:
         self.calls = calls
+        self.subagent_calls = [] if subagent_calls is None else subagent_calls
+        self.server_tool_requests: list[list[str]] = []
         self.bodies: list[str] = []
         self.paths: list[str] = []
         self.clients: list[str] = []
@@ -259,12 +269,27 @@ class ScriptedHandler(BaseHTTPRequestHandler):
             return
         model = parsed.get("model")
         model_name = model if isinstance(model, str) else "claude-sonnet-4-5"
+        tools = [mapping(value) or {} for value in objects(parsed.get("tools")) or []]
+        server_tools = sorted(
+            name
+            for tool in tools
+            if tool.get("type") not in (None, "custom")
+            and isinstance(name := tool.get("name"), str)
+        )
+        with server.state.lock:
+            request_id = len(server.state.server_tool_requests)
+            server.state.server_tool_requests.append(server_tools)
+        has_client_tool = any(tool.get("type") in (None, "custom") for tool in tools)
+        subagent = "cc_is_subagent=true" in json.dumps(parsed.get("system"))
+        calls = server.state.subagent_calls if subagent else server.state.calls
         index = len(tool_results(parsed))
-        if index >= len(server.state.calls):
-            payload = end_stream(model_name)
+        if not has_client_tool or index >= len(calls):
+            payload = end_stream(model_name, request_id)
         else:
-            name, inputs = server.state.calls[index]
-            payload = tool_stream(model_name, name, inputs, index)
+            name, inputs = calls[index]
+            payload = tool_stream(
+                model_name, name, inputs, index, "subagent_" if subagent else ""
+            )
         self._send(200, payload, "text/event-stream")
 
     def _record(self, server: ScriptedServer, host: str, authorized: bool) -> None:

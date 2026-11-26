@@ -43,6 +43,10 @@ class AttemptCapacityRefused(ValueError):
         super().__init__("physical attempt capacity is unavailable")
 
 
+class AttemptCapSourceChanged(AttemptCapacityRefused):
+    pass
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class PreparedGraphCaps:
     scope: GraphResourceScope
@@ -115,7 +119,7 @@ async def _check(
         return recovery
     source = await read_graph_cap_source(connection, scope.graph_id)
     if source is None or source.version_id != caps.scope.version_id:
-        raise AttemptCapacityRefused()
+        raise AttemptCapSourceChanged()
     policy = await connection.scalar(
         select(namespace.c.policy).where(namespace.c.id == scope.namespace_id)
     )
@@ -167,6 +171,9 @@ async def check_attempt_capacity(
     except asyncio.CancelledError as error:
         clear_snapshot_error(error)
         raise
+    except AttemptCapSourceChanged:
+        del context, runtime, caps, global_limit, runtime_limit
+        raise_safe(AttemptCapSourceChanged())
     except (SQLAlchemyError, ValueError, TypeError, RecursionError, OverflowError):
         del context, runtime, caps, global_limit, runtime_limit
         raise_safe(AttemptCapacityRefused())

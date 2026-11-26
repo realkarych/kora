@@ -2,13 +2,16 @@ import re
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.tables import attempt, run
 from kora.db.types import SQLITE
 from kora.engine.deadline_records import duration_us
 from kora.engine.expiry_context import ExpiryContext, bounded_json
+from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.run_promotion_read import (
     ManualPromotionHeader,
+    PromotionReadLimits,
     admitted_promotion_receipt,
     sqlite_record_width,
 )
@@ -64,18 +67,36 @@ class ExpiryRun(BoundaryModel):
     trigger: ManualPromotionHeader
     limits: RunLimits
 
+    def due_at(self, now: datetime) -> bool:
+        return (
+            self.status == "running"
+            and self.started_at is not None
+            and (
+                self.deadline_expired_at is not None
+                or timeout_reached(self.started_at, now, self.limits.timeout)
+            )
+        )
+
 
 async def read_expiry_run(context: ExpiryContext) -> ExpiryRun | None:
-    connection, scope, limits = context.connection, context.scope, context.limits
-    receipt = await admitted_promotion_receipt(
-        connection, scope, context.run_id, limits
+    return await read_expiry_run_source(
+        context.connection, context.scope, context.run_id, context.limits
     )
+
+
+async def read_expiry_run_source(
+    connection: AsyncConnection,
+    scope: GraphResourceScope,
+    run_id: str,
+    limits: PromotionReadLimits,
+) -> ExpiryRun | None:
+    receipt = await admitted_promotion_receipt(connection, scope, run_id, limits)
     if receipt is None:
         return None
     if connection.dialect.name == SQLITE:
         fits = await connection.scalar(
             select(sqlite_record_width(list(run.c)) <= limits.parent_bytes).where(
-                run.c.id == context.run_id
+                run.c.id == run_id
             )
         )
         if fits is not True:
@@ -89,7 +110,7 @@ async def read_expiry_run(context: ExpiryContext) -> ExpiryRun | None:
             bounded_json(run.c.trigger, limits.parent_bytes).label("trigger"),
             bounded_json(run.c.limits, limits.parent_bytes).label("limits"),
         ).where(
-            run.c.id == context.run_id,
+            run.c.id == run_id,
             run.c.namespace_id == scope.namespace_id,
             run.c.graph_id == scope.graph_id,
             run.c.graph_version_id == scope.version_id,

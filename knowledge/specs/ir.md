@@ -278,7 +278,7 @@ A subagent is a closed record with required strict string `name`, `description` 
 
 `workspace.from_ref` names an input path holding a `VcsRef`; when that artifact is present the checkout uses its recorded commit, otherwise `rev`, so a gate runs on exactly the commit the evidence names. A `fresh_with_feedback` attempt is the one path that checks out the branch of the previous attempt's `VcsRef` at its current head instead ([scheduler.md](scheduler.md) section 7). `permission_mode` values: `plan`, `accept_edits`, `dont_ask`, `bypass`. `sandbox` values: `read_only`, `workspace_write`, `full_access`. The harness mapping tables in [protocols.md](protocols.md) say which flag each becomes and which fields a harness cannot honour (compile-time warning, FR-3.3). Harness API keys reach the session as environment variables in MVP; a per-attempt credential proxy is the runtime capability `credential_proxy`, implemented post-MVP (DD-23, DD-30).
 
-`tool_policy` is the input to the **policy protocol** ([protocols.md](protocols.md) section 12, DD-29) and the only tool-permission field in IR 1.0: the DSL's `allowed_tools` and `disallowed_tools` compile into it. The harness's pre-tool-call hook asks the session runner before every tool call the harness does not reject itself; the runner evaluates the namespace's `tool_policy` (set by the platform team) and the node's per layer: a deny from either stops the call, every layer with a non-empty `allow` must match, so a node never widens a namespace allow list, and order inside an array has no effect; a denied call is recorded as a `permission_denied` session event on the `AgentSession`. A call a harness permission rule denies is blocked without reaching the runner and, on an adapter that reports such denials, is recorded from the harness's report with `source: harness`; a call a built-in tool's own input validation rejects never runs and is an ordinary failed tool result, not a denial ([protocols.md](protocols.md) sections 3 and 12). The one exception to the policy is the harness's output channel: on `claude` the adapter allows the synthetic `StructuredOutput` tool of a node with `output_schema` without evaluating either policy, under the conditions of [protocols.md](protocols.md) section 3 (ADR-0009, amended 2026-10-19). Patterns use kora's own grammar and bounds, stated in [protocols.md](protocols.md) section 12 with where it differs from each harness; a shell call with a form on section 12's closed indirection list matches every governing `Bash` deny and no allow pattern. The field is inherited through the preset layers. Every file-edit tool of the harness (section 12's file-edit family) is denied on `protected_paths` (DD-34) for every agent node of the graph. MVP ships the `allow_deny` implementation; Cedar or OPA arrive as plugins without an IR change.
+`tool_policy` is the input to the **policy protocol** ([protocols.md](protocols.md) section 12, DD-29) and the only tool-permission field in IR 1.0: the DSL's `allowed_tools` and `disallowed_tools` compile into it. The harness's policy mechanism asks the session runner before every covered tool call the harness permits, through the Claude hook or [Codex native approval](codex-execution-profile.md#required-tool-policy-activation); the runner evaluates the namespace's `tool_policy` (set by the platform team) and the node's per layer: a deny from either stops the call, every layer with a non-empty `allow` must match, so a node never widens a namespace allow list, and order inside an array has no effect; a denied call is recorded as a `permission_denied` session event on the `AgentSession`. A call a harness permission rule denies is blocked without reaching the runner and, on an adapter that reports such denials, is recorded from the harness's report with `source: harness`; a call a built-in tool's own input validation rejects never runs and is an ordinary failed tool result, not a denial ([protocols.md](protocols.md) sections 3 and 12). The one exception to the policy is the harness's output channel: on `claude` the adapter allows the synthetic `StructuredOutput` tool of a node with `output_schema` without evaluating either policy, under the conditions of [protocols.md](protocols.md) section 3 (ADR-0009, amended 2026-10-19). Patterns use kora's own grammar and bounds, stated in [protocols.md](protocols.md) section 12 with where it differs from each harness; a shell call with a form on section 12's closed indirection list matches every governing `Bash` deny and no allow pattern. The field is inherited through the preset layers. Every file-edit tool of the harness (section 12's file-edit family) is denied on `protected_paths` (DD-34) for every agent node of the graph. MVP ships the `allow_deny` implementation; Cedar or OPA arrive as plugins without an IR change.
 
 **Protected paths** (DD-34): `runtime.protected_paths` plus the node's `protected_paths` list gate scripts, build files, test directories and tooling configuration. Each entry is a path glob (issue #233): a relative path with `/` separators, at most 4,096 characters and 32 segments, with no empty, `.` or `..` segment and no NUL or control character. `*` matches within one segment, and `**` as a whole segment matches zero or more segments; `?`, `[`, `]`, `{`, `}`, `\` and a `**` inside a longer segment are refused. A leading `~`, a searched piece (every piece of a segment but the last) longer than 96 characters in its case-folded form, and a `*` that touches a character of nonzero combining class in the decomposed or the case-folded form (canonical reordering could move another mark of a name across it) are refused too, and the globs of one call hold at most 8,192 pieces, 64 KiB and 16,384 characters outside ASCII together. Every pattern ends in an implicit `**`, so `tests` protects every file under `tests/`. Both sides compare in canonical caseless form (NFD, case folded, then NFD again, so a glob prefix compares in decomposed form and also covers a name whose next character carries a combining mark), on every platform, with the interpreter's Unicode case tables; a name a filesystem treats as equal beyond canonical caseless equivalence (a case pair newer than those tables, an ignorable code point, compatibility normalization) is caught only by the gate-time check below. The combined runtime and node list a call carries is at most 64 globs. Checking the globs and that bound when the IR is validated is pending work item 3; until then an invalid list surfaces at the first tool call as `protected_paths_invalid`, which fails closed. `kora.ir.globs` implements the syntax for the policy and the executor alike. Before a command gate runs, the preparation phase of its attempt compares the paths changed between the base commit and the candidate commit (the `changed_paths` capture of the checkout plan, [protocols.md](protocols.md) section 4) with those paths and fails the attempt with class `protected_path_modified` on a match; no second checkout is made.
 
@@ -286,7 +286,7 @@ A subagent is a closed record with required strict string `name`, `description` 
 
 The [first-slice chain](first-slice.md#refusal-contract) uses direct CLI bindings to its published `VcsRef` and command `CommandResult`, as in [dependency-upgrade.ir.yaml](examples/dependency-upgrade.ir.yaml). A ReviewBundle is an optional context artifact, not a requirement for this CLI path; its fact/narrative ownership remains unchanged when used.
 
-The [local CLI context contract](cli-approval-opening.md#1-source-and-opening) under #1737 defines an installation refusal for unsupported authored input and context selections in the walking skeleton. It retains ordinary IR path checking and the authored field.
+The [local CLI context contract](cli-approval-opening.md#1-source-and-opening) under #1737 defines an installation refusal for unsupported authored input and context selections in the walking skeleton. It retains ordinary IR path checking and the authored field. The installation and manual-start check is implemented under #1851 with `test_cli_approval_rechecks_exact_authored_context`; the fresh locked recheck at opening remains with #1447.
 
 Only an absent `form` selects the built-in default form:
 
@@ -401,6 +401,7 @@ A loop is a subgraph with `retry.max_attempts > 1`. Rules materialised in the IR
 
 - A node inside the body can end the attempt with `fail_attempt`: a `branch` case whose `to` is the reserved target `$fail_attempt` with a `reason` expression. The attempt ends `failed` with error class `attempt_failed`.
 - Sub-graph attempt N+1 receives the subgraph's inputs plus `$previous_attempt`, a built-in `PreviousAttempt` artifact: `{subgraph_attempt: N, reason, error_class, artifacts: {<node_id>.<output>: <artifact ref>}}`. A node receives it only by declaring an input with `from: $previous_attempt`, so the dependency is visible in the graph. In the control plane a sub-graph attempt is the `subgraph_attempt` integer on the node instances; the word "attempt" alone always means a runtime submission ([data-model.md](data-model.md) section 5).
+- [PreviousAttempt revision 1](artifacts/PreviousAttempt.md) fixes the detached value, canonical identity and reference format under [#1860](https://github.com/realkarych/kora/issues/1860). The live declaration, saved CEL routes and execution consumers require their separately qualified support. The first-slice refusal remains in force.
 - Nodes permitted by section 4.5 to use `attempt_invariant: true` are not re-run in sub-graph attempt N+1; their earlier artifact version is reused and lineage records the reuse.
 - `limits` on the subgraph (timeout, budget) span all sub-graph attempts; `limits` on body nodes apply per node attempt. `retry.max_attempts` on the subgraph counts sub-graph attempts; body nodes keep their own node-level retries inside each.
 - Artifacts of every sub-graph attempt are retained; the previous ones are marked `superseded` when a new sub-graph attempt starts (FR-4.5).
@@ -438,395 +439,904 @@ Branch conditions and reasons, retry predicates, `approve_when`, event `match` a
 
 ### 7.1 Expression kinds and environments
 
-| field | variables | result | evaluated by | an evaluation error (section 7.7) |
+| Field | Variables | Result | Evaluation owner | Evaluation error |
 |---|---|---|---|---|
-| `branch` `cases[].when` | `inputs`, `params` | `bool` | scheduler, branch pass | fails the branch with `config_error`; its direct targets become `upstream_failed` (section 4.5) |
-| `branch` `cases[].reason`, `else_reason` (evaluated only on a `$fail_attempt` route) | `inputs`, `params` | `string` | scheduler, branch pass | fails the branch with `config_error`; the iteration does not end as `attempt_failed` |
-| `retry.predicate` (node and subgraph) | `outputs`, `inputs`, `params` | `bool` | scheduler, retry handling | no retry; the node keeps its original error class |
-| `runtime.infrastructure_retry.predicate` (first-slice static check) | `params` | `bool` | dormant in the first slice | inapplicable while dormant |
-| `human_input` `approve_when` | `response`, `inputs`, `params` | `bool` | the shared approval transition (direct API response or channel observation) | the request becomes `failed` and the node fails with `config_error` |
-| `wait_event` `event.match` | `payload`, `inputs`, `params` | `bool` | scheduler, wake-ups | the event does not match this wait |
-| `wait_event` `poll.until` | `observation`, `inputs`, `params` | `bool` | scheduler, prepared-observation apply | "not yet": the wait keeps polling |
-| sensor trigger `poll.until` | `observation` | `bool` | scheduler, start-sensor apply | "not yet": no run starts |
+| Branch `cases[].when` | `inputs`, `params` | `bool` | Scheduler branch pass | `config_error` on the branch and `upstream_failed` on its direct targets (section 4.5). |
+| Branch `cases[].reason`, `else_reason` | `inputs`, `params` | `string` | Scheduler branch pass, only on a `$fail_attempt` route | `config_error` on the branch, with no `attempt_failed` outcome for the iteration. |
+| Node or subgraph `retry.predicate` | `outputs`, `inputs`, `params` | `bool` | Scheduler retry handling | No retry. The node keeps its original error class. |
+| `runtime.infrastructure_retry.predicate` | `params` | `bool` | Static check only in the first slice | Inapplicable while dormant. |
+| `human_input` `approve_when` | `response`, `inputs`, `params` | `bool` | Shared approval transition for a direct API response or channel observation | The request becomes `failed` and the node fails with `config_error`. |
+| `wait_event` `event.match` | `payload`, `inputs`, `params` | `bool` | Scheduler wake-ups | The event does not match this wait. |
+| `wait_event` `poll.until` | `observation`, `inputs`, `params` | `bool` | Scheduler prepared-observation apply | The wait keeps polling. |
+| Sensor trigger `poll.until` | `observation` | `bool` | Scheduler start-sensor apply | No run starts. |
 
-- `inputs.<name>` is the node's declared input, bound from the stored projection of the consumed artifact version (section 7.5). An input declared `optional: true`, and `$previous_attempt`, is a non-required member.
-- `outputs.<name>` is an output of the failed attempt, or an export of the failed subgraph attempt, that passed validation and the data bounds. Every member is non-required.
-- `params` are the run parameters, typed by the [effective graph parameter schema](#graph-parameter-schema-omission) and bound from the projection cut at run creation.
-- `response` is the approval form response, typed by `form`, projected and bound-checked when the response is received.
-- `payload` is the inbound event body and `observation` the sensor result. The static checker binds each as `dyn`. Ingress value shape and conversion follow the applicable event and observation contracts.
+[Evaluation errors](#77-evaluation-errors) defines the exceptions for unavailable projections and automatic CLI approval expiry.
 
-The project owner accepted the first-slice infrastructure predicate context on 2026-11-05 under [#775](https://github.com/realkarych/kora/issues/775). The only externally bound variable is `params`. Its type comes from the effective graph parameter schema and the existing parameter checker view and reference roots. The `bool` entry uses the existing section 7.4 static result rule, including `dyn`. Local comprehension names follow the same shadowing rule. A binder named `params` demands that environment, and unavailable schema prerequisites leave dependent checking incomplete. Omission leaves the predicate absent.
+- `inputs` binds each declared input from the consumed version's stored projection (section 7.5).
+  Inputs declared `optional: true` and `$previous_attempt` are non-required members.
+- `outputs` includes validated, in-bounds outputs of a failed attempt or exports of a failed subgraph attempt.
+  Every member is non-required.
+- `params` uses the [effective graph parameter schema](#graph-parameter-schema-omission) and the projection cut at run creation.
+- `response` uses the approval `form` type and is projected and checked against the bounds on receipt.
+- `payload` and `observation` are the inbound event body and sensor result, respectively.
+  The checker binds both as `dyn`.
+  Their own ingress contracts govern value shape and conversion.
 
-Apply this same static and native rule to each applicable authored or configured infrastructure predicate for the graph, including masked settings. Authored diagnostics use the exact `runtime.infrastructure_retry.predicate` path and preserve the original code-point offset when available. Configured failures stay with their trusted configuration owner and use the existing safe refusal boundary, with configured text, private paths and offsets kept out of author-facing diagnostics and logs. The [first-slice disabled policy](first-slice.md#refusal-contract) keeps the predicate dormant and admits zero infrastructure replacements.
+Apply the same static and native validation to every applicable authored or configured infrastructure retry predicate, including settings masked by an override.
+The only external binding is `params`, with its effective parameter type, checker view and reference roots.
+The [static result and shadowing rules](#74-schema-driven-checker) apply, including `dyn` as a result and demand for the parameter environment when a comprehension binder is named `params`.
+Unavailable schema prerequisites leave dependent checking incomplete.
+Omission leaves the predicate absent.
+Authored diagnostics identify `runtime.infrastructure_retry.predicate` and keep the original code-point offset when available.
+The trusted configuration owner handles configured failures through its safe refusal boundary.
+Author-facing diagnostics and logs exclude configured text, private paths and offsets.
+The [disabled first-slice policy](first-slice.md#refusal-contract) keeps the predicate dormant and admits zero infrastructure replacements.
 
 ### 7.2 Parser, limits and canonical rendering
 
-kora's own lexer and recursive-descent parser follow the CEL grammar of cel-spec, without backtracking. Positions are zero-based offsets in Unicode code points into the decoded field value.
+The kora lexer and recursive-descent parser follow the cel-spec grammar without backtracking.
+Offsets start at zero and count Unicode code points in the decoded field.
 
-**Characters and literals** (`IR011`):
+#### Characters and literals
 
-- Identifiers, digits and whitespace are ASCII: an identifier is `[_a-zA-Z][_a-zA-Z0-9]*`, whitespace is space, tab, line feed, form feed and carriage return, and any other character outside a literal or a comment is rejected. kora never accepts a character that CEL's grammar rejects and then rewrites it in the rendering.
-- These code points are rejected anywhere in the expression, inside literals and comments too: C0 controls other than tab, line feed, form feed and carriage return; DEL and the C1 controls; U+2028 and U+2029; the format characters U+00AD, U+0600 to U+0605, U+061C, U+06DD, U+070F, U+0890 and U+0891, U+08E2, U+180E, U+200B to U+200F, U+202A to U+202E, U+2060 to U+206F, U+FEFF, U+FFF9 to U+FFFB, U+110BD, U+110CD, U+13430 to U+1343F, U+1BCA0 to U+1BCA3, U+1D173 to U+1D17A, U+E0001 and U+E0020 to U+E007F (bidirectional, zero-width, tag and other format controls, the Unicode 17 general category Cf); and surrogate code points. The set is pinned here, not read from the running interpreter's Unicode database. Variation selectors are combining marks and stay allowed. An author who needs a rejected character in a string writes its `\u` or `\U` escape.
-- A comment runs from `//` to the next line feed, as in the cel-spec grammar. A carriage return inside a comment that a line feed does not follow is rejected, because editors show it as a line break; a form feed does not end a comment. A raw carriage return inside a string or bytes literal, triple-quoted and raw ones included, is rejected too, because the binding would read it as a line feed; authors write `\r`.
-- Escapes are those of the cel-spec grammar: `\u` and `\U` are valid only in string literals, and an escape denoting a surrogate or a code point beyond U+10FFFF is rejected. The hexadecimal prefix is `0x`.
-- An `int` literal beyond the signed 64-bit range, a `uint` literal beyond 64 bits and a `double` literal whose value is not finite are rejected. A run of unary `!` or of unary `-` is reduced as cel-go and the binding reduce it (decided on [issue #162](https://github.com/realkarych/kora/issues/162)): an even run is dropped and an odd run keeps one operator, so `!!x` and `--x` are `x` and `!!!x` is `!x`. A single `-` directly before an `int` or `double` literal that no selection or index follows is part of the literal, as is such a `-` after a run of `!`, so `-9223372036854775808` and `!-1` hold literals and `-1.f` is the negation of `1.f`. The `-` kept from a longer odd run stays a negation of the unsigned literal, as in the binding, so `---1` is `-(1)` and `--9223372036854775808` and `---9223372036854775808` are rejected because `9223372036854775808` is out of range. The depth rule below still counts every operator of the author text. The binding's unary negation of the smallest integer wraps instead of overflowing, a deviation that typed checks correct by rewriting integer negation (canonical rendering below).
+These character and literal refusals use `IR011`.
 
-**Constructs** (`IR011`): message construction; optional syntax (`.?`, `[?`, `{?`); leading-dot qualified names, which have no meaning without containers; backtick-quoted field selection; two-variable comprehensions (a third argument of `all` or `exists`; a third argument of `filter` or `exists_one` is a malformed macro); a `has()` argument that is not a field selection; a macro iteration variable that is not a simple identifier; a reserved word as an identifier (reserved words stay valid as field names after a dot); and functions outside the standard function table.
+- Outside literals and comments, the grammar uses ASCII.
+  Identifiers match `[_a-zA-Z][_a-zA-Z0-9]*`, digits are ASCII, and whitespace is space, tab, line feed, form feed or carriage return.
+  An input character that CEL rejects is `IR011` even if rendering could remove or rewrite it.
+- Refuse the following anywhere, including literals and comments, with `IR011`.
+  - C0 controls except tab, line feed, form feed and carriage return, plus DEL, C1 controls, U+2028, U+2029 and surrogates.
+  - The pinned Unicode 17 Cf ranges and points U+00AD, U+0600–U+0605, U+061C, U+06DD, U+070F, U+0890–U+0891, U+08E2, U+180E, U+200B–U+200F, U+202A–U+202E, U+2060–U+206F, U+FEFF, U+FFF9–U+FFFB, U+110BD, U+110CD, U+13430–U+1343F, U+1BCA0–U+1BCA3, U+1D173–U+1D17A, U+E0001 and U+E0020–U+E007F.
+    The running interpreter's Unicode database does not determine this set.
+    Variation selectors remain allowed combining marks.
+    Use valid `\u` or `\U` escapes to represent excluded characters in strings.
+- A `//` comment ends at line feed.
+  A carriage return in a comment requires an immediately following line feed, and form feed does not end a comment.
+  Refuse raw carriage return in every string and bytes literal, including raw and triple-quoted forms, since the binding reads it as line feed.
+  Use the `\r` escape for a carriage return.
+- Escapes follow cel-spec.
+  Only strings accept `\u` and `\U`, and escapes for surrogates or values above U+10FFFF are refused.
+  Hexadecimal integers use the `0x` prefix.
+- An `int` must fit signed 64 bits, a `uint` must fit unsigned 64 bits, and a `double` must be finite.
+  An even run of unary `!` or `-` disappears and an odd run keeps one operator.
+  A single `-` immediately before an `int` or `double`, including after a run of `!`, is part of the literal unless selection or indexing follows it.
+  Thus `-9223372036854775808` and `!-1` contain signed literals, and `-1.f` negates `1.f`.
+  A `-` from a longer odd run remains an operator, so `---1` is `-(1)`.
+  Both `--9223372036854775808` and `---9223372036854775808` are invalid because their positive literal exceeds the signed range.
+  The depth check counts all source operators.
 
-**Standard function table.** The global functions `size`, `int`, `uint`, `double`, `string`, `bytes`, `type`, `dyn`, `duration` and `timestamp` with one argument; the methods `size()`, `contains`, `startsWith`, `endsWith` and `matches` with one argument; and the timestamp and duration accessors `getDate`, `getDayOfMonth`, `getDayOfWeek`, `getDayOfYear`, `getFullYear`, `getHours`, `getMilliseconds`, `getMinutes`, `getMonth` and `getSeconds` without arguments. The table is the cel-spec standard library narrowed to what binding 0.10.0 executes: it lacks `bool()`, the global form `matches(s, p)` and the time-zone forms of the accessors, so they are rejected. Gaps that depend on argument types (`int(timestamp)`, `timestamp(int)`, date accessors on durations) are left to the schema-driven checker. Every entry is verified by evaluation in the binding, and every pin change repeats that verification.
+#### Constructs and standard functions
 
-Static limits. An expression or path over any of them is `IR027`, including a `maxLength` violation found by schema validation:
+These construct refusals use `IR011`.
+Refuse message construction, optional syntax (`.?`, `[?`, `{?`), leading-dot qualified names and backtick field selection.
+Refuse reserved words as identifiers and allow them as field names after a dot.
+Refuse two-variable comprehensions, including a third argument to `all` or `exists`.
+A third argument to `filter` or `exists_one` is malformed.
+`has()` requires field selection and macro iteration variables must be simple identifiers.
 
-- At most **4,096 code points**, checked before lexing. `ir.schema.json` carries the same `maxLength`.
-- Syntax-tree depth at most **32**. Depth is measured on the built tree: a leaf has depth 0, and every edge from a node to a child adds one level, so each binary-operator operand, conditional `?:` condition and branch, selection, index operand and index, call receiver and argument, unary operand, list element, map key and value, and macro range and body adds one level. Each explicit parenthesis adds one level too, and a macro body counts once. It is checked on every descent of the parser, before recursing, and as each node is built, so prefix nesting (`((((`, `!!!!`, `----`) stops with `IR027` before any recursion limit and chains a parser builds in a loop (`a + a + …`, `a.b.b…`) count fully.
-- At most **4 comprehension macros** (`all`, `exists`, `exists_one`, `map`, `filter`) per expression, nested at most **2** deep. A macro nests in another when it appears in that macro's body; a macro in another macro's receiver, as in a chain `l.map(…).map(…)`, does not nest.
+| Form | Allowed functions |
+|---|---|
+| One-argument global | `size`, `int`, `uint`, `double`, `string`, `bytes`, `type`, `dyn`, `duration`, `timestamp` |
+| Receiver, no explicit arguments | `size`, `getDate`, `getDayOfMonth`, `getDayOfWeek`, `getDayOfYear`, `getFullYear`, `getHours`, `getMilliseconds`, `getMinutes`, `getMonth`, `getSeconds` |
+| Receiver, one explicit argument | `contains`, `startsWith`, `endsWith`, `matches` |
 
-Lexing, parsing, checking and the cost estimate are linear in the size of the tree. Checking stops at an expression's first error.
+Ordinary functions and arities outside this table are `IR011`, including `bool()`, global `matches(s, p)` and time-zone arguments to accessors.
+The [schema-driven checker](#74-schema-driven-checker) owns receiver and argument type restrictions such as `int(timestamp)`, `timestamp(int)` and date accessors on durations.
+Conformance evaluates every table entry in the pinned binding and repeats that check for every pin change.
 
-The probe measured these thresholds on one macOS machine:
+#### Static limits
 
-- the binding rejects bracket nesting from 96;
-- a chain of about 12,000 selections or additions crashed the process with SIGSEGV on a main thread;
-- on a 256 KiB thread stack, a chain of 300 survived and 1,000 crashed.
+Return `IR027` for an excessive expression or path, including a schema-detected `maxLength` violation.
+Check the **4,096-code-point** limit before lexing.
+The generated IR schema carries the same `maxLength`.
 
-These observations do not establish a crash margin for every admitted expression on the 1 MiB evaluation thread of section 7.6 or on every supported platform. Functional boundary tests remain required on pin changes under the rule above; no full native crash-threshold search is a current gate. A native stall or crash can affect the shared API or scheduler process.
+Syntax-tree depth is at most **32**.
+A leaf has depth zero, and each explicit parenthesis and parent-to-child edge adds one.
+This includes each operand, conditional branch and condition, selection and indexed value and index, call receiver and argument, list element, map key and value, and macro range and body.
+Count each macro body once.
+Check depth before every recursive descent and while building nodes, including prefix runs and chains built in a loop.
 
-**Canonical rendering.** A typed check first rewrites every unary `-` whose operand the checker typed as `int` into a subtraction from the literal `0`, because the binding wraps negation of the minimum integer while its subtraction checks overflow ([issue #372](https://github.com/realkarych/kora/issues/372)); the rendering, its re-parse check, its digest and the estimate are those of the rewritten tree. Negation of a `double` is not rewritten, so `-0.0` keeps its sign, and the untyped check used for binding agreement and conformance keeps the parsed tree. From the checked tree kora writes a canonical text: every operator parenthesized, string literals as double-quoted non-raw literals with only the escapes `\\`, `\"`, `\n`, `\r`, `\t` and `\u`/`\U` for other control and non-ASCII characters, bytes literals the same with `\x` for every byte outside printable ASCII, no comments, single spaces. Validation parses the rendering again with kora's parser and requires the same tree, ignoring grouping parentheses, otherwise `IR011`; this uses only kora's parser, so `kora compile` runs it too. Each node puts at most one pair of brackets around its children, except that a unary operator applied to a numeric literal renders the literal in parentheses, `(-(1))`, so that it does not fold into a negative literal, and a negative literal used as the operand of a selection, index or method is parenthesized. Doubles are rendered in their shortest round-trip form and integers in decimal. The rendering is not held to the author-text limits: its length is at most 16 times the source's (a non-ASCII character in a bytes literal renders as up to four `\xHH` escapes), and its re-parse runs under a depth bound of 2 × 32 + 1 levels, checked before recursion, which keeps its bracket nesting below the binding's bracket limit of 96; the boundary tests compile the maximal rendering of each shape in the binding. The binding compiles only this rendering, never the author's text, so it evaluates exactly the tree kora checked, as rewritten for integer negation. The IR keeps the author's text.
+An expression may use at most **four** comprehension macros (`all`, `exists`, `exists_one`, `map`, `filter`) with at most **two** levels of nesting.
+A macro in another macro's body counts as nested.
+A macro in the receiver of another macro does not, as in `l.map(…).map(…)`.
 
-**Where the binding runs.** Server-side validation (`/validate`, `/plan`, deployment, and `kora_compile` through `/validate`) compiles every rendering with the binding, deduplicated by rendering, and compiles each distinct `matches()` pattern once; a rejection is `IR011`, reported without the binding's message. `kora compile` runs on the author's machine with kora's parser and checker only and never imports the binding ([dsl.md](dsl.md) section 2). Deployment stores the rendering, the projection path sets (section 7.5) and the cost estimate with the graph version, and evaluation never recomputes them.
+Lexing, parsing, checking and estimating cost are linear in tree size.
+Checking stops at the expression's first error.
+Recheck functional bounds when the binding pin changes.
+Full native crash-threshold searches are outside this gate.
+The binding probe establishes no universal crash margin, including on the 1 MiB evaluation thread or across supported platforms.
+An admitted expression can still stall or crash the shared API or Scheduler process. [Dated binding probe](../research/cel-binding-probe-2026-10-19.md#untrusted-expressions)
 
-The internal native pattern check under [issue #712](https://github.com/realkarych/kora/issues/712) verifies one decoded literal. It bounds the literal by the existing expression length limit, renders it as the sole argument of `"".matches()` and verifies that the generated call parses to the expected tree under the existing rendering and regex rules. The binding compiles this checked probe and executes it with no variables. Either exact Boolean confirms compilation of the pattern. Only the pinned binding's `matches` function error during execution confirms rejection. Static probe refusal, compiler failure and unclassified results do not establish a pattern error. The closed result carries neither pattern text nor native diagnostics. The graph validator still owns per-call deduplication, declaration paths and public errors.
+#### Canonical rendering
 
-The internal pattern phase under [issue #723](https://github.com/realkarych/kora/issues/723) takes a bounded tuple of checked CEL sites from a trusted producer. The producer owns each site's typed origin, authored or generated classification and safe exact field path. Preflight visits every child of the checked tree, including unevaluated branches. One explicit caller allowance charges sites, path segments and characters, visited nodes and each decoded literal occurrence. The phase releases the checked trees before it verifies each distinct decoded pattern once through the existing evaluator. It keeps the literal associations only for this call.
+For typed expressions, replace unary minus on an `int` operand with subtraction from integer zero.
+The binding checks subtraction overflow and wraps unary negation of the minimum integer.
+Render, reparse, hash and estimate the rewritten tree.
+Keep unary minus on a `double` operand so `-0.0` retains its sign.
+Untyped checking for binding agreement and conformance uses the parsed tree.
 
-A complete phase supplies at most one `IR011` per authored field for a proven native rejection. Its fixed message and earliest rejected literal offset use the existing diagnostic representation and collector. Invalid inventory, exhausted allowance, incomplete native checking or rejection in a generated expression yield a closed incomplete result. A shared decoded pattern does not erase the distinction between authored and generated sites. Incomplete results supply no partial diagnostics, and operational refusal and cancellation propagate to the caller. This phase does not establish full graph coverage, rendering compilation, public validation or deployment authority.
+Parenthesize operators, use single spaces and omit comments.
+Render string literals as double-quoted and non-raw.
+Use the short escapes `\\`, `\"`, `\n`, `\r` and `\t`.
+Encode other control and non-ASCII characters with `\u` or `\U`.
+Render bytes as non-raw `b"..."` literals with the shared short escapes and use `\xHH` for other bytes outside printable ASCII.
+Render integers in decimal with the `u` suffix for unsigned literals.
+Render doubles in their shortest round-trip form.
+
+The kora parser must recover the same tree, ignoring grouping parentheses, or validation returns `IR011`.
+The local compiler runs this check without the binding.
+Each node adds at most one pair of brackets around its children.
+Keep an additional pair around a numeric literal used as a unary operand, as in `(-(1))`, to prevent signed-literal folding.
+Parenthesize a negative literal when selecting, indexing or calling a method on it.
+
+The rendering may exceed the source limits.
+Its length is at most 16 times the source length, since a source code point in a bytes literal can require four `\xHH` escapes.
+Reparsing has a separate depth limit of `2 × 32 + 1` checked before recursion.
+Boundary tests compile the maximal rendering of each shape in the binding.
+The binding compiles only the checked canonical rendering, and the IR retains the author's text.
+
+#### Local and server validation
+
+The author-side `kora compile` uses the kora parser and checker without importing the binding.
+Stdio `kora_compile` compiles locally and forwards only compiled IR to `/validate`. [DSL compilation](dsl.md#2-compile-step-kora-compile) · [MCP operations](api-and-agent-surface.md#4-mcp-servers-fr-01-dd-28)
+
+For complete server validation, including `/validate`, `/plan` and full deployment validation, compile every distinct canonical rendering and each distinct decoded `matches()` pattern once.
+A proven rejection under the complete public validation rules is reported as `IR011` without the native message.
+
+The [walking-skeleton deployment route](api-and-agent-surface.md#walking-skeleton-graph-deployment-issue-1436) uses the bounded graph check in [section 10](#10-validation-rules-kora-validate).
+That check compiles once per field, including equal renderings at distinct fields, and probes each distinct decoded pattern once.
+The route preserves established authored diagnostics and maps incomplete rendering verification to `API010`.
+Operational refusals retain the route's defined disposition.
+
+Deployment stores the rendering, projection path sets (section 7.5) and cost estimate with the graph version.
+Evaluation reuses those saved facts.
+
+#### Native pattern validation
+
+A decoded literal longer than 4,096 code points leaves the check incomplete.
+Use an admitted literal as the sole argument to `"".matches()`.
+Render the probe under the canonical and regex rules and require the expected parsed tree.
+Compile the checked probe in the binding and run it without variables.
+Either exact Boolean confirms successful pattern compilation.
+Only the pinned binding's `matches` function error during execution establishes pattern rejection.
+Static probe refusal, compiler failure and unclassified results leave the check incomplete.
+The closed result excludes pattern text and native diagnostics.
+
+The graph validator owns per-call deduplication, declaration paths and public errors.
+A trusted producer supplies a bounded tuple of checked sites with typed origin, authored or generated classification and safe exact field paths.
+Preflight visits every child, including unevaluated branches.
+Its caller allowance charges sites, path segments and characters, visited nodes and each decoded literal occurrence.
+Release checked trees before probing each distinct pattern once and keep the associations only for the call.
+
+A complete phase reports at most one `IR011` per authored field with a proven rejection, using a fixed message and the earliest rejected literal offset in the shared collector.
+A shared pattern retains each site's authored or generated classification.
+An invalid inventory, exhausted allowance, incomplete native check or rejected generated pattern returns a closed incomplete result without partial diagnostics.
+Operational refusal and cancellation propagate.
+The phase establishes neither whole-graph coverage nor rendering compilation, public validation or deployment authority.
 
 ### 7.3 Paths
 
-`inputs[*].path`, `binds.vcs_ref`, `binds.gate_digests`, `workspace.from_ref`, `human_input` `context` and `graph.target.key.path` are member-access chains restricted to field selection and indexing, such as `inputs.bundle.facts.change` or `artifacts['implement.change']`. They contain no operators and no calls. This is the one path notation in the IR.
+`inputs[*].path`, `binds.vcs_ref`, `binds.gate_digests`, `workspace.from_ref`, human-input `context` and `graph.target.key.path` use the same IR path notation.
+A path is a chain of field selections and literal indexes, such as `inputs.bundle.facts.change` or `artifacts['implement.change']`.
+Operators and calls are invalid.
 
-- **Parsing.** Paths use the lexer and the length and depth limits of section 7.2: `IR011` for syntax, `IR027` for limits. An index is a non-negative decimal integer literal within the signed 64-bit range or a string literal; a negative, hexadecimal or unsigned index, or an index expression, is `IR011`. A relative path starts with a field name that is not a reserved word, so a key that is not an identifier cannot start one. Resolution keeps its existing codes (`IR002`, `IR003`, `IR005`, `IR020`).
-- **Walking.** The walker treats a missing key, an index beyond the list, and a field or index on a value of another JSON type as absent. It never applies negative indexing.
-- **Resolution.** kora resolves paths with its own walker; a path never reaches the binding.
-- **Roots.** `inputs[*].path` and `graph.target.key.path` are relative to their source value. `binds.*`, `workspace.from_ref` and `context` select a declared input of their own node: the first two parsed steps are the field `inputs` and that input name. Dot and decoded string-index notation are equivalent, with exact case-sensitive membership. A body, caller or sibling input grants no visibility. A bare root, an integer second step, another root or an undeclared input is `IR005` for `binds.*` and `IR002` for workspace/context. Optional declarations are eligible; local binding does not establish a runtime value or its type.
+Paths use the CEL lexer and its length and depth limits.
+Syntax errors are `IR011` and limit violations are `IR027`.
+An index is a non-negative decimal integer in signed 64-bit range or a string literal.
+Negative, hexadecimal, unsigned or computed indexes are `IR011`.
+A relative path starts with a non-reserved field identifier.
 
-`timer` takes a `duration` or an absolute `at` time, never an expression.
+`inputs[*].path` and `graph.target.key.path` start at their source values.
+`binds.*`, `workspace.from_ref` and `context` start at the field `inputs` and then name an input declared by that node.
+Dot notation and decoded string indexes match exact names with case preserved.
+Caller, body and sibling inputs grant no visibility.
+A bare root, integer second step, other root or undeclared input gives `IR005` for `binds.*` and `IR002` for workspace and context.
+Optional declarations qualify for local binding, which establishes no runtime value or type.
+Other resolution errors keep their existing `IR002`, `IR003`, `IR005` or `IR020` codes.
+
+The kora walker resolves the chain without the binding.
+A missing key, out-of-range list index, or field or index applied to an incompatible JSON type is absent.
+The walker never uses negative indexing.
+
+A `timer` takes a `duration` or absolute `at` time without expression evaluation.
 
 ### 7.4 Schema-driven checker
 
-Types come from the saved type closure (section 2.1). It is resolved lazily and memoized within one validation, so recursive `$ref` structures are checked in bounded time. Each input is typed from the producer's effective saved output contract at its call site.
+#### Schema types and bounds
 
-A schema is mapped after resolving `$ref` and a single-schema `allOf`. Its type then comes from `type`, or, when `type` is absent, from its keywords: `properties` means an object, `items` or `prefixItems` an array, and `enum` or `const` the JSON type of their values. The first matching row wins:
+Resolve types lazily from the saved closure (section 2.1) and memoize them within the validation.
+Type each input at its call site under the producer's effective saved output contract.
+Follow local JSON pointers within their document and cross-type references only through the saved closure.
+A `$ref` or single-schema `allOf` takes the target's type, independent of sibling keywords.
+
+The type comes from `type` or, when absent, the applicable schema keywords.
+`properties` can infer an object, `items` or `prefixItems` an array, and `enum` or `const` the JSON type of their values.
+Apply the first matching row.
 
 | JSON Schema | CEL type |
 |---|---|
-| pure `type: null`, `const: null` or `enum: [null]` under `kora.structured-output-view.v1` | existing `NULL` / `null_type`; produced null remains distinct from absence |
-| `type: [T, "null"]`, `anyOf`/`oneOf` of `T` and `null`, or an `enum` of one type plus `null` | nullable `T`, following CEL wrapper types; when `T` is already nullable, that same nullable type, so no nullable type wraps another |
-| object with `properties` | record of the declared fields, with the `required` set; `additionalProperties` types index reads |
-| object without `properties`, or with only `patternProperties` | `map(string, V)`; `V` from `additionalProperties` or `patternProperties`, else `dyn` |
-| string, or an `enum` or `const` of strings | `string`, with its allowed values |
-| integer | `int` |
-| number, or an `enum` or `const` of numbers | `double` (`int` under `type: integer`) |
-| boolean | `bool` |
-| array with `items` | `list(T)`; with `prefixItems` or without `items`, `list(dyn)` |
-| a `type` array of several non-null types, any other `anyOf`, `oneOf` or multi-schema `allOf`, an `enum` of mixed types, the boolean schema `true`, a schema with no type, keyword or `$ref` | `dyn` |
+| Pure `type: null`, `const: null` or `enum: [null]` under `kora.structured-output-view.v1` | Existing `NULL` / `null_type`. Produced null stays distinct from absence. |
+| `type: [T, "null"]`, `anyOf` or `oneOf` of `T` and `null`, or an `enum` of one type plus `null` | Nullable `T` under CEL wrapper types. An already nullable `T` stays the same. |
+| Object with `properties` | Record of declared fields and their `required` flags. Additional properties type index reads. |
+| Object without `properties`, including an object with only `patternProperties` | `map(string, V)`. Determine `V` by the undeclared-key rules below. |
+| String, or `enum` or `const` of strings | `string` with its allowed values |
+| Integer | `int` |
+| Number, or `enum` or `const` of numbers | `double`, or `int` under `type: integer` |
+| Boolean | `bool` |
+| Array | `list(T)` with `items`. With `prefixItems` or without `items`, use `list(dyn)`. |
+| Several non-null `type` members, other `anyOf`, `oneOf` or multi-schema `allOf`, mixed `enum`, Boolean schemas, pure null outside the saved view, or no type, keyword or `$ref` | `dyn` |
 
-The checker uses `dyn` for `payload` and `observation`. The following rules apply to dynamic checking.
+An object with `additionalProperties: false` and no `patternProperties` admits no undeclared key.
+When `patternProperties` is absent, an undeclared key uses the `additionalProperties` type.
+With exactly one pattern and `additionalProperties: false`, use that pattern's type.
+All other open cases use `dyn`.
+Apply the same rules to the value type of a map without `properties`.
 
-- dot selection on `payload`, `observation` or another `dyn` value is allowed and needs no guard, and a missing key is the evaluation error `missing_field`; a schema-typed `map(string, V)` is read by index, guarded by `in` like an open object's extra keys;
-- a `dyn` operand satisfies the same-type rule for `==`;
-- a `dyn` result passes checking and is checked for exact `bool` (or `string`) when evaluated.
+A nested schema object's `$id` is a closure fault, including on a JSON pointer's route.
+A map member named `$id` inside `properties`, `$defs` or a similar map does not declare a schema resource.
+Malformed keywords, unresolved references and noncanonical pointer indexes are also `IR022` before CEL checking.
+Visit each schema object at most once per root and view, resolving chains without interpreter recursion.
+Recursive, shared and deeply nested closures use counted linear steps.
+A failed mapping or failed caller resolver leaves no partial types.
 
-These rules give `IR011`, reported at the expression's YAML path and offset:
+`SchemaTypes.variable` yields a type and its value bound.
+A list's element limit is the smaller of `maxItems` and 1,000.
+A string's UTF-8 limit is the smaller of four bytes per `maxLength` code point and 16 KiB.
+Derived element bounds follow `items` and the additional-property type, and field bounds follow `properties`, under the same reference, single-`allOf`, nullable and view rules as type mapping.
+Other kinds' size keywords, siblings of `$ref`, `prefixItems` positions and multi-type schemas tighten nothing.
+Every declared bound retains 4,096 bytes and 256 values.
+Declare a child bound only if it tightens something below the parent.
+Revisiting an open recursive mapping declares no bound there, so recursive bounds stay acyclic and can only loosen.
+When a record has a tightened additional-property bound, declare a bound for every property, using data defaults for untightened or recursive properties.
+Otherwise an undeclared field would use the additional-element bound.
+A read `maxItems` or `maxLength` that is not a non-negative integer is a schema closure fault (`IR022`).
+Keywords that the mapper never reads are outside this check.
 
-- **Identifiers and fields.**
-  - An unknown identifier is rejected. `inputs` and `outputs` may appear only under field selection.
-  - A dot selection of a field outside `properties` is an unknown field, also on an object that allows additional properties. Undeclared keys of an open object are read only by index, `x['key']`.
-  - A comprehension variable that shadows an environment variable is rejected.
-- **Enum literals.** A string literal compared with an `enum`-typed value must be one of its allowed values.
-- **Numbers.**
-  - `==` and `!=` require the same type, so `int == double` is rejected, as in the cel-go and cel-cpp checkers.
-  - Ordering across `int`, `uint` and `double` is allowed.
-  - Arithmetic that mixes numeric types needs `double()` or `int()`.
-- **Optional fields.** Reading a non-required field without a guard on the same path is rejected.
-  - The guards are:
-    - `has(p)` as any conjunct to the left of the read in an `&&` chain;
-    - `!has(p)` as any disjunct to the left of the read in an `||` chain;
-    - `has(p)` as the condition of `?:` for its true branch.
-  - `'k' in x` guards `x['k']` in the same positions.
-  - The parent of a `has()` operand must itself be present or guarded, as in `has(a.b) && has(a.b.c) && a.b.c`.
-- **Null.** A comparison with `null` yields `bool`. Selection, ordering, arithmetic or a call on a `null` value is an evaluation error.
-- **`size()`** on a `string` or a `dyn` value is rejected while the binding counts UTF-8 bytes instead of code points.
-- **`matches()`** takes a string-literal pattern only, checked by the parser of section 7.2. kora parses the pattern in a closed subset of the binding's regular-expression syntax:
-  - **Supported:** literal characters and escaped ASCII punctuation other than `<` and `>`; the escapes `\n`, `\t`, `\r`, `\f`, `\v`, `\a`, `\xHH` and `\x{H…}`; `.`; the class escapes `\d`, `\D`, `\w`, `\W`, `\s` and `\S`; `\p{…}` and `\P{…}`, or their one-letter forms, for the Unicode classes of the class-size table (`L`, `Lu`, `Ll`, `N`, `Nd`, `P`, `S`, `Z`, `Greek`, `Latin`, `Han`, `Cyrillic`); bracketed classes, negated or not, with ranges and nested bracketed classes; the anchors `^`, `$`, `\b`, `\B`, `\A` and `\z`; capturing, non-capturing and named groups, each name unique within the pattern and starting with a letter or underscore; the flags `i`, `m` and `s`, with at most one `-` that a flag follows; alternation; and the repetitions `*`, `+`, `?`, `{n}`, `{n,}` and `{n,m}`, each optionally lazy.
-  - **Rejected** (`IR011`): every other construct, among them verbose mode `(?x)`, the flags `U`, `u` and `R`, look-around, backreferences, `\Q…\E`, `\<` and `\>` (word-boundary assertions in the binding), POSIX classes, class set operations (`&&`, `--`, `~~`), a range that starts or ends at a class escape, and Unicode classes outside the table.
-  - **Nesting.** Groups and bracketed classes share one nesting counter of at most 32, checked before the parser recurses.
-  - **Size estimate.** Pattern units are a positive fixed base plus the maximum of atom/class/repetition units and a syntax-character floor. Each atom uses the provisional class-size tables pinned under `kora.execution.v1`. Empty patterns, sibling empty captures, empty alternatives and flag-only groups therefore retain a nonzero charge. The base and syntax-character coefficients are each 1. An `i` flag anywhere in the pattern applies the case-insensitive weights to the whole pattern. A bracketed class is charged the sum of its members' weights, and a negated one at least the weight of `.`; a range that reaches beyond ASCII and a negated Unicode class are also charged at least the weight of `.`. A repetition multiplies by its upper bound, or by its lower bound plus one when it is unbounded (so `+` multiplies by two and `*` by one), and adds a fixed overhead.
+Binding verifies that each JSON kind matches its declared CEL type and otherwise returns `invalid_value`.
+Numbers feed `int`, `uint` and `double`, strings feed `string`, booleans feed `bool`, and null feeds `null`.
+Arrays feed lists and objects feed maps or records.
+A nullable type also accepts `null`, and `dyn` accepts every JSON kind.
+These checks enforce types inferred by keyword even when the JSON Schema admits other kinds.
+A child type preserves the CEL type of every parent property, so `number` to `integer` narrowing is `IR003` (section 2.1).
 
-  A pattern over the nesting limit or the provisional estimate cap of 1,048,576 is `IR027`. The tables, base, syntax floor and cap remain unchanged under the lightweight validation of section 7.6; they are not a calibrated native-memory or compiled-size envelope. The server-side compile also compiles the pattern in the binding.
-- **Result type.** The result must have the field's type from section 7.1.
+#### Environments, selections and guards
 
-**Settled cases** (decided on [issue #330](https://github.com/realkarych/kora/issues/330)). Where the table and rules above leave a case open:
+The checker receives the variable types, the required result type and the roots that require field selection.
+It rejects unknown identifiers and a comprehension variable that shadows an environment variable.
+`inputs` and `outputs` appear only under field selection.
+`payload` and `observation` are `dyn`.
+Dot selection on `dyn` needs no guard and a missing key gives `missing_field` at evaluation.
+A `dyn` operand satisfies the same-type equality rule.
+A `dyn` result is checked for exact `bool` or `string` when evaluated.
 
-- **Mapping.** Pure null outside `kora.structured-output-view.v1`, and the boolean schema `false`, are `dyn`. `$ref` and a single-schema `allOf` take their target's type; sibling keywords do not change it. Local references are JSON pointers within their document and cross-type references resolve only through the saved closure. A `$id` on a schema object below a document root, also one a JSON pointer passes through (a member of `properties`, `$defs` or a similar map named `$id` is not a resource), a malformed keyword, an unresolvable reference and a pointer index that is not canonical are closure faults the validator reports as `IR022` before checking. Mapping resolves every reference chain and visits every schema object at most once per document root and view, and never recurses on the interpreter stack, so recursive, repeatedly referenced and deeply nested closures map in counted linear steps; a failed mapping, including a failure of the caller's resolver, leaves no partial types behind.
-- **Additional and pattern properties.** An object with `additionalProperties: false` and no `patternProperties` declares no further keys. Otherwise an undeclared key has the `additionalProperties` type when there are no `patternProperties`, the single pattern's type when `additionalProperties` is `false` and exactly one pattern exists, and `dyn` in every other case; a map without `properties` takes its value type the same way. This replaces reading a map's value type from `patternProperties` alone, which keys outside the pattern would not satisfy.
-- **Conversion checks JSON kinds.** Before evaluation, conversion refuses a value whose JSON kind does not match its declared CEL type with `invalid_value` (section 7.7): numbers for `int`, `uint` and `double`, strings, booleans, `null`, arrays for lists and objects for maps and records; a nullable type also admits `null`, and `dyn` admits any kind. Keyword-inferred object and array types therefore hold for every bound value even though JSON Schema validation alone admits other kinds there.
-- **Schema-tightened bounds** ([issue #374](https://github.com/realkarych/kora/issues/374)). With each CEL type the mapping derives the variable's value bound: a schema whose type maps to a list declares an element count of the smaller of `maxItems` and 1,000, and one whose type maps to `string` declares a UTF-8 length of the smaller of four bytes per `maxLength` code point and 16 KiB. Element bounds follow `items` and the additional-properties type, field bounds follow `properties`, through the same reference, single-`allOf`, nullable and view rules as the types; a keyword on another type, a sibling of `$ref`, `prefixItems` positions and a schema of several types tighten nothing. Byte and value counts are never tightened: every declared bound keeps the 4,096 bytes and 256 values of the data bounds. A node declares children only when something below it is tightened, and a node reached again while its own mapping is open (a recursive reference) declares nothing, so recursive closures never produce cyclic bounds and only loosen. A record whose additional-properties bound is tightened declares every property, an untightened or recursive one at the data bounds, because an undeclared field reads the element bound. A `maxItems` or `maxLength` that is not a non-negative integer on a schema the mapping classifies is a closure fault (`IR022`); keywords the mapping never reads, such as siblings of `$ref`, are not checked here. `SchemaTypes.variable` returns the type and bound together.
-- **Environment.** The checker receives each variable's CEL type, the field's required result type and the roots that may appear only under field selection. `payload` and `observation` enter as `dyn`, which gives them the unguarded dot selection above.
-- **Undeclared keys.** A literal-key index read of an undeclared key on an object that declares no further keys is an unknown field. Otherwise the read has the undeclared-key type above and needs a guard, as the key is optional.
-- **Guards.** A guard and a read match on a section 7.3 path: field selections and literal indexes from the same variable or comprehension binding, where a field and a string key of the same name are the same step, so `has(x.f)` and `'f' in x` guard both `x.f` and `x['f']`. A dynamic-key read of a map or object needs no guard: it reads the whole subtree (section 7.5) and a missing key is the evaluation error `missing_field`. A read whose operand is not a path, such as an element of a list literal, cannot be guarded. Guard facts compose: the true facts of `has(p)` are `p`, of a literal `'k' in x` are `x['k']`, of `a && b` the union and of `!a` the false facts of `a`; the false facts of `a || b` are the union and of `!a` the true facts of `a`. The right operand of `&&` sees the true facts of its left operand, the right operand of `||` the false facts of its left operand, and the true branch of `?:` the true facts of its condition; facts stay valid inside comprehension bodies.
-- **Null.** `==` and `!=` with `null` accept a nullable, `null` or `dyn` operand only; presence is tested with `has()`. Selection, ordering, arithmetic and calls on a nullable value are checked against its inner type. A nullable result is not the required `bool` or `string`.
-- **Maps and joins.** Dot selection on any map, schema-typed or literal, is an unknown field; maps are read by index. Every map literal key is `int`, `uint`, `bool`, `string` or `dyn`, and so is the left operand of `in` on a map; a repeated literal key is `IR011`, because the binding keeps the last value where cel-spec fails. List indexes are `int` or `dyn`; map indexes match the key type. Heterogeneous list and map literal elements and `?:` branches join to `dyn`, and `T` with `null` to nullable `T`.
-- **Equality and literals.** Scalars compare only with the same kind, and a string with allowed values compares with any string; a list compares with a list and a map or object with a map or object; `dyn` compares with anything. Enum literals are checked in `==`, `!=` and the list-literal elements of `in`.
-- **Overloads.** Operators and functions follow the cel-spec standard overloads restricted to what the binding evaluates correctly: `int(timestamp)`, `timestamp(int)`, `string(bool)`, `duration + timestamp`, the date accessors and `getMilliseconds()` of a duration are absent, and unary `-` and `getMilliseconds()` do not accept a `dyn` operand, where the binding negates booleans and returns a duration's total milliseconds; all of these are `IR011`. `string()` of time values, accessor time zones, invalid UTF-8 in `string(bytes)`, time ranges, error absorption, iteration order, repeated map keys computed from data and mixed `int` and `uint` keys reached through `dyn` remain the deviations of section 7.8.
-- **Diagnostics.** The `IR011` reasons are `unknown_identifier`, `root_not_selected`, `unknown_field`, `shadowed_variable`, `unknown_enum_value`, `no_matching_overload`, `unguarded_optional`, `string_size`, `repeated_map_key` and `wrong_result_type`, each with a fixed message and the code-point offset of the failing node; a wrong result type is reported at offset 0. CEL types carry field names and enum values from the schemas, so consumers never log them or place them in diagnostics.
+On a record, dot selection requires a declared field.
+Open records expose undeclared keys only by index, with the undeclared-key type.
+A literal read of an undeclared key on a closed record is an unknown field.
+Read maps only by index.
+Dot selection on a map, including a literal map, gives `unknown_field`.
+A list index is `int` or `dyn`, and a map index matches the map's key type.
+A literal-key map read needs the `in` guard used for an open record's extra keys.
+A dynamic-key read of a map or object projects the complete subtree and needs no guard.
+A missing key in such a read gives `missing_field`.
 
-A child type must keep the CEL type of every parent property: assignability (`IR003`, section 2.1) rejects a child that narrows `number` to `integer`.
+A non-required read needs a guard on the same path.
+A guard matches field selections and literal indexes from the same variable or comprehension binding, with dot and equivalent string-key steps treated alike.
+Thus `has(x.f)` and `'f' in x` guard both `x.f` and `x['f']`.
+An operand without a path, such as a list literal, cannot be guarded.
+A `has()` parent must be present or already guarded, as in `has(a.b) && has(a.b.c) && a.b.c`.
 
-**Prepared environments** ([issue #376](https://github.com/realkarych/kora/issues/376)). The library's `prepare(environment, meter)` returns an opaque sealed `PreparedEnvironment`; `check_typed` accepts it or the existing `Environment`. Preparation validates every variable, including unused ones, validates shared type nodes once and converts source bounds once with counted work. It snapshots the outer variable mapping into a private dictionary. Nested types and source-bound graphs remain trusted kora-builder data and must not change after preparation; copying the mapping does not make those graphs immutable. Malformed preparation raises `BoundError`. Reusing a prepared environment preserves diagnostics, integer-negation rewriting, renderings, digests and complete estimates of an unprepared check.
+The true facts of `has(p)` are `p`.
+The true facts of a literal-key `'k' in x` are `x['k']`.
+The true facts of `a && b` and false facts of `a || b` are their respective unions.
+Negation exchanges true and false facts.
+The right operand of `&&` sees true facts of the left and the right of `||` sees false facts.
+The true branch of `?:` sees the condition's true facts.
+Facts remain valid inside comprehensions.
 
-Diagnostics use the [shared representation and collection contract](diagnostics.md): canonical segmented document paths, code-point offsets and optional source locations. Keep one diagnostic per expression; the enclosing collection owns deterministic path/offset ordering, error and warning bounds and separate omitted counts. An offset is preserved only while the final safe path still identifies the exact expression field.
+#### Type and overload rules
+
+- An `enum` string literal used with an enum-typed value must be allowed by that enum.
+  Check literals in `==`, `!=` and the list-literal elements of `in`.
+- Equality compares scalars of the same kind, lists with lists, and maps or objects with maps or objects.
+  A string with allowed values compares with any string, and `dyn` compares with any kind.
+  Ordering can mix `int`, `uint` and `double`.
+  Arithmetic across numeric types needs an explicit `double()` or `int()` conversion.
+- `==` and `!=` with `null` yield `bool` and require a nullable, `null` or `dyn` operand.
+  Check presence with `has()`.
+  Check selection, ordering, arithmetic and calls against the inner type of a nullable operand.
+  At evaluation these operations on a null value fail, with two admitted calls.
+  `type(null)` returns `null_type` and `dyn(null)` returns `null`.
+  A nullable result does not satisfy a required `bool` or `string`.
+- Map literal keys and the left operand of map `in` are `int`, `uint`, `bool`, `string` or `dyn`.
+  A repeated literal key gives `IR011`.
+  Heterogeneous list and map elements and `?:` branches join to `dyn`.
+  `T` joined with `null` yields nullable `T`.
+- `size()` rejects `string` and `dyn` while the binding sizes strings in UTF-8 bytes.
+  Operators and functions use the supported cel-spec overloads.
+  Exclude `int(timestamp)`, `timestamp(int)`, `string(bool)`, `duration + timestamp`, duration date accessors and duration `getMilliseconds()`.
+  Unary minus and `getMilliseconds()` reject a `dyn` operand because of native Boolean negation and total duration milliseconds.
+  These exclusions are `IR011`.
+  Time strings, time zones, invalid UTF-8 in `string(bytes)`, time ranges, error absorption, iteration order, repeated computed map keys and mixed `int`/`uint` keys reached through `dyn` retain their [conformance rules](#78-conformance).
+- The result must satisfy the field type in [section 7.1](#71-expression-kinds-and-environments).
+
+#### Literal regular expressions
+
+`matches()` takes a string literal under the [parser and native check](#72-parser-limits-and-canonical-rendering).
+The static pattern grammar allows these constructs.
+
+- Literal characters and escaped ASCII punctuation except `<` and `>`.
+- `\n`, `\t`, `\r`, `\f`, `\v`, `\a`, `\xHH`, `\x{H…}`, and dot.
+- `\d`, `\D`, `\w`, `\W`, `\s`, `\S`, plus `\p{…}` and `\P{…}` and their one-letter forms.
+  The class-size table covers `L`, `Lu`, `Ll`, `N`, `Nd`, `P`, `S`, `Z`, `Greek`, `Latin`, `Han` and `Cyrillic`.
+- Bracketed classes, including negation, ranges and nested classes.
+- Anchors `^`, `$`, `\b`, `\B`, `\A` and `\z`.
+- Capturing, non-capturing and named groups, with names unique within the pattern and beginning with a letter or underscore.
+- Flags `i`, `m` and `s`, with at most one `-` followed by a flag.
+- Alternation and repetitions `*`, `+`, `?`, `{n}`, `{n,}` and `{n,m}`, each optionally lazy.
+
+All other constructs are `IR011`, including `(?x)`, flags `U`, `u` and `R`, look-around, backreferences, `\Q…\E`, `\<` and `\>`, POSIX classes, class set operations (`&&`, `--`, `~~`), ranges with a class escape endpoint and Unicode classes outside the table.
+Groups and bracketed classes share a nesting limit of 32, checked before recursion.
+
+Estimate pattern units as a fixed base plus the larger of atom/class/repetition units and the syntax-character floor.
+The base and syntax-character coefficients are both 1, so empty patterns, sibling empty captures, empty alternatives and flag-only groups carry nonzero charges.
+Use the provisional class-size tables pinned under `kora.execution.v1`.
+Any `i` flag selects case-insensitive weights for the entire pattern.
+Charge a bracketed class by the sum of member weights, with a dot-weight minimum for a negated class.
+A range extending beyond ASCII and a negated Unicode class also have that minimum.
+A bounded repetition multiplies by the greater of its upper bound and one, and then adds fixed overhead.
+An unbounded one uses lower bound plus one and the same overhead.
+For example, `+` multiplies by two and `*` by one.
+Exceeding the 32 nesting limit or the provisional 1,048,576-unit cap is `IR027`.
+The tables, base, syntax floor and cap carry over under the lightweight validation of section 7.6.
+The estimate does not establish native memory or compiled size.
+
+#### Prepared environments and diagnostics
+
+`prepare(environment, meter)` supplies a sealed opaque `PreparedEnvironment` to `check_typed`, which also accepts the unprepared `Environment`.
+Validate every variable, including unused variables, and validate shared type nodes and convert source bounds once under the meter.
+Snapshot the outer mapping into a private dictionary.
+Nested types and source-bound graphs are trusted kora-builder data and must remain unchanged after preparation.
+Malformed preparation raises `BoundError`.
+Prepared and plain checks have identical diagnostics, integer-negation rewriting, renderings, digests and complete estimates.
+
+Static typing refuses with `IR011` at the expression path and the failing node's code-point offset.
+The fixed reasons are `unknown_identifier`, `root_not_selected`, `unknown_field`, `shadowed_variable`, `unknown_enum_value`, `no_matching_overload`, `unguarded_optional`, `string_size`, `repeated_map_key` and `wrong_result_type`.
+Wrong result type uses offset 0.
+Schema field names and enum values in CEL types stay outside logs and diagnostics.
+Report one finding per expression under the [shared diagnostic contract](diagnostics.md), with optional source locations and an offset only while the final safe segmented path still identifies the exact field.
+The enclosing collector owns deterministic path/offset order, error and warning bounds and their separate omitted counts.
 
 ### 7.5 Projections and typed conversion
 
-**Projection path sets.** Deployment freezes the normalized set for run parameters and for every saved output declaration in the [CEL projection path section](data-model.md#saved-cel-projection-path-sets). Unread declarations have explicit empty sets. The [saved CEL expression facts](data-model.md#saved-cel-expression-facts) separately preserve checker-local reads. Under the first-slice disabled retry binding, checked authored retry reads remain local facts and contribute no runtime projection paths.
+#### Saved projection paths
 
-Expression-local `payload`, `observation` and approval `response` reads retain their own consumers and lifetimes. Form-response ingress checks the approval condition's local reads and the entire frozen response-output path set. The latter represents reads of that output through artifact routes.
+Freeze a normalized [path set](data-model.md#saved-cel-projection-path-sets) at deployment for run parameters and for each saved output declaration.
+Save an explicit empty set for an unread declaration.
+Keep checker-local reads in [saved expression facts](data-model.md#saved-cel-expression-facts).
+Under the disabled first-slice retry binding, authored retry reads remain local facts and contribute no runtime projection paths.
 
-- **Notation.** A frozen path set is a pair of sorted lists, `whole` and `presence`. Paths are relative to the variable: `.name` selects a field, `['k']` a map key or non-identifier field, `[*]` every list element, and the empty string the whole variable. String keys use single-quoted literals with canonical escapes; keyword and reserved names use brackets. The parser round-trips generated canonical paths under the rendering-length bound, including escaped non-BMP keys. Whole paths subsume the same path's presence and every deeper path. A presence ancestor may coexist with a deeper read; it never discards the selected descendants.
-- **Composition.** Paths compose through every route by which a value reaches an expression:
-  - `inputs[*].path`;
-  - `$inputs` forwarding into a body;
-  - the fan-out element, which becomes `[*]` on the mapped list;
-  - `collect` and subgraph exports;
-  - `$params`, cut from the validated run parameter object;
-  - `$previous_attempt`, including `artifacts['n.o']`, whose paths compose into the earlier iteration's output.
-- **Binding routes.** Resolve the producer through the exact pinned graph binding. Compose parsed steps by removing the selected input or output name before prefixing a supported selector. Preserve root presence for a presence-only read of that selected value. An ordinary retry's `outputs.<name>` resolves to the node's own output or the body's declared export. Follow every matching caller declaration of a shared body and include internal routes of unused bodies. For collections and exports, propagate requirements to the applicable children with wildcard steps where the mapping requires them. The synthetic `PreviousAttempt` value owns its metadata projection. Prior-artifact reads contribute to the earlier output declarations, and whole or dynamic prior-attempt reads require the complete applicable route set.
-- **Coverage.** The initial implementation scope is direct `params` reads and same-body direct artifact input bindings. Selected paths, list-position translation, reserved sources, wrappers, collection/export and previous-attempt routes require complete supported derivation before contributing to a section. Refuse an uncovered route before new effects. Apply the pinned producer view before every cut.
-- **Whole subtrees.** A dynamic index, a comprehension range and a whole-value read or operation project the whole subtree at their path. A literal integer index into a typed list projects `[*]` followed by the remaining path; an integer index into `dyn` projects the operand whole. A path read only through `has()`, or a key of a map or record tested only by a literal-string-key `in`, projects its presence; a `dyn` operand of `in` projects its whole subtree. Selection and index receivers alone do not mark an ancestor whole. Index expressions and external-variable reads inside comprehensions retain their own paths; scoped comprehension reads are covered by their whole range.
+Expression-local `payload`, `observation` and approval `response` reads keep their own consumers and lifetimes.
+Form-response ingress checks the condition's local reads and the complete frozen response-output path set, which represents separate reads through artifact routes.
 
-**Library extraction and cutting** ([issue #375](https://github.com/realkarych/kora/issues/375)). A typed checked expression exposes an immutable per-variable `projections` mapping of frozen `PathSet(whole, presence)` values; the untyped `check` has an empty mapping. Both prepared and unprepared environments produce the same path sets. Extraction preserves exact integer-index guard identities separately from wildcard projection steps. Its intern/read tables are local to one check, and normalized tries are temporary. Canonical ASCII paths are sorted by character distribution with a bounded alphabet; key, prefix, rendering and sorting work is counted.
+A path set has sorted `whole` and `presence` lists relative to a variable.
+`.name` selects a field, `['k']` a map key or non-identifier field, `[*]` each list element, and the empty string the whole variable.
+Use single-quoted keys with canonical escapes, including brackets for keyword and reserved names.
+Generated canonical paths, including escaped non-BMP keys, round-trip under the rendering-length bound.
+A whole path subsumes presence there and all deeper paths.
+A presence ancestor can coexist with deeper reads and preserves them.
 
-`cut(value, path_set, meter)` is an iterative library walk over JSON values. It copies whole reads, skips absent keys, and cuts list elements under `[*]` without changing list cardinality or positions. A presence-only terminal keeps the empty value of the stored value's JSON kind: `""`, integer `0`, float `0.0`, `[]` or `{}`; booleans and `null` remain unchanged. If a value's kind cannot support the next step, the walk keeps that kind's empty value, preserving selection errors on `dyn` data. Whole numeric reads retain their original kind and signed zero. The result never grows relative to the source.
+Compose paths through `inputs[*].path`, body forwarding via `$inputs`, a fan-out element as `[*]` on the mapped list, `collect`, and subgraph exports.
+`$params` reads use the validated run parameters.
+`$previous_attempt` reads of `artifacts['n.o']` compose into the earlier iteration's output.
 
-The full validated producer may exceed the evaluation data bounds when the selected projection fits. The cut checks canonical bytes, value occurrences, depth, string and container bounds incrementally while constructing its output, using iterator frames rather than a source-sized pending frontier; whole copies use the same bounded walk. Exceeding an output bound, reaching a cycle while copying, or copying a non-JSON scalar raises a content-free `BoundError`; unsupported JSON kinds and subclasses are refused before walking them. This does not add a full-producer evaluation quota or validate unused source descendants. The library equivalence test compares consistently converted full and cut values in the binding's admitted reference domain, including missing selections and wrong kinds within `dyn`; larger-original/small-projection behavior has separate cutting coverage.
+Resolve each producer through the exact pinned graph binding.
+Remove the selected input or output name before prefixing the supported selector.
+Keep root presence for a presence-only read of that value.
+An ordinary retry's `outputs.<name>` resolves to the node's own output or the body's declared export.
+Follow all matching caller declarations of a shared body and internal routes of unused bodies.
+Propagate collection and export requirements to their applicable children, with wildcard steps where required.
+The synthetic `PreviousAttempt` owns its metadata projection.
+Earlier artifact reads contribute to the exact earlier output declarations, and whole or dynamic previous-attempt reads require the complete applicable route set.
 
-This library implementation does not freeze or persist deployment path sets, compose projections through graph edges, cut producers, bind stored projections, enforce `AgentSession` policy or choose a numeric persistence codec. Those activation requirements below retain their implementing owners.
+The initial path composer supports direct `params` reads and same-body direct artifact input bindings.
+Selected paths, list-position translation, reserved sources, wrappers, collection/export and previous-attempt routes require complete supported derivation before contributing to a path set.
+Refuse uncovered routes before new effects.
+Use the pinned producer view before each cut.
 
-**Cutting and storing.** Every projection is cut once, by whichever step produces its value. For `AgentSession`, whose stored payload is the transcript, the projectable fields remain its fixed session-metadata allowlist: harness name and installed version, session id, billing class, normalized usage with completeness and derived cost/basis, turn count, integer millisecond duration, stop reason and worker/image provenance. The exact flattened fields, nested exclusions and checker schema are frozen as [kora.agent-session-view.v1](artifacts/AgentSession.cel-policy.json), bound into the saved effective contract. Core constructs this fixed view from the validated logical value before cutting deployment-frozen paths. Denials, transcript content/references/descriptors/capture/availability, opaque vendor evidence and observation/price identities cannot enter it through whole, dynamic, forwarded, collection/export or previous-attempt reads. The permitted metadata projection survives transcript expiry and remains distinct from the separately saved `summary`; a missing or mismatched projection is unavailable, never recomputed from current behavior. Reading an excluded field is `IR011`. CEL needs no `transcripts` capability.
+#### Extracting and cutting projections
 
-- **Uploaded outputs.** An uploaded output is cut when it is validated at upload, including a staged target-source output (ADR-0019).
-- **Scheduler-produced outputs.** Each is cut by the owner producing it: a `human_input` response, a `wait_event` payload output, a `PreviousAttempt`, a fan-out collection and a subgraph export. A collection or export is prepared from its children's stored original cuts under the destination's frozen view and path set, then applied only after the transition rechecks its exact current owner and input identities. No storage I/O or full JSON work happens inside a scheduler transaction. Each child's original and converted logical cuts independently fit 4 KiB and 256 values; its complete [version-1 record](data-model.md#lossless-artifact-cel-projection-storage) fits 8,515 encoded bytes. At most 1,000 children require at most 8,515,000 cumulative encoded bytes acquired one child at a time, not 1,000 retained decoded records. Acquire, check and release each child while retaining only the bounded destination, fixed child references and current-child state. Stop at the first original or converted destination bound; charge all visited encoded bytes, checking/conversion work and source metadata. One re-cut counts as progress under the existing allowance. This accounting grants no new aggregate caller allowance or route activation; actual acquisition admission and current-owner checks remain required.
-- **Run parameters.** Run creation cuts from the validated parameter object under the exact pinned parameter path set. For [versioned run input storage](data-model.md#1323-run-input-storage), save the original unconverted cut with the run. Perform the required typed conversions and original and converted data checks before acceptance. Evaluation binds only the saved cut under the verified pinned types and existing conversion rules. Each applicable expression binds the same result as the corresponding conversion of the admitted full value. For a nonempty runtime parameter path set, the detached manual-start check uses the same parameter mapper as static checking to verify the original and converted CEL data bounds for the pinned parameter view.
+A dynamic index, comprehension range or whole-value use reads the whole subtree at its path.
+A literal integer index into a typed list projects `[*]` followed by the remaining path.
+An integer index into `dyn` projects its operand whole.
+A path read only through `has()` contributes presence.
+A literal-string key tested by `in` contributes presence for a map or record.
+A `dyn` operand of `in` contributes its whole subtree.
+Selection and index receivers alone leave the ancestor without a whole read.
+Keep the paths for index expressions and external variables read inside comprehensions.
+The whole range covers reads of the local comprehension binding.
 
-kora cuts artifact projections from the validated value, converts as described below and checks the data bounds of section 7.6. The [lossless version-1 representation](data-model.md#lossless-artifact-cel-projection-storage), accepted under #1633, stores both cuts as one native byte value in the metadata database under the explicit CEL derived owner; the artifact's legacy projection column contains only a marker. A projection keeps its artifact's retention class: the artifact-payload period, forever for reference-only types, and for `AgentSession` the lifetime of its session metadata, which outlives the transcript ([data-model.md](data-model.md) section 10). Listings never load projections.
+Each typed check exposes an immutable per-variable `projections` map of frozen `PathSet(whole, presence)` values.
+Untyped `check` returns an empty map, and prepared and unprepared environments yield the same typed paths.
+Keep exact integer-index guard identities separate from wildcard projection steps.
+Intern and read tables belong to one check, and normalized tries are temporary.
+Sort canonical ASCII paths by character distribution with a bounded alphabet.
+Count key, prefix, rendering and sorting work.
 
-Affected StructuredOutput projections preserve original and converted numeric kind, binary64 signed zero and NUL-bearing strings/keys through that exact representation on both databases. Canonical payload bytes alone do not establish projection fidelity. The #1637 detached producer/checker implements same-call effective validation, original cutting and byte checking, with `test_cel_projection_number_kinds_round_trip` and the library composition tests. It adds no migration, native acquisition or accepting writer. Work items 4/8/10 still supply their actual ownership/acquisition evidence before activation. Complete effective validation and cutting use the same checked output binding in one preparation; standalone model validity or an unassociated validation result is insufficient. Original/converted bounds and collection/export re-cutting remain required.
+`cut(value, path_set, meter)` walks JSON iteratively.
+It copies whole reads, skips absent keys and cuts `[*]` elements without changing list positions or cardinality.
+A presence-only terminal uses the empty value of the original JSON kind (`""`, integer `0`, float `0.0`, `[]` or `{}`).
+Booleans and `null` stay unchanged.
+If a kind cannot support the next step, keep its empty value so a `dyn` selection still fails.
+Whole numeric reads retain original kind and signed zero, and the result never grows relative to the source.
 
-Collection/export projections must equal conversion of the admitted full value under each destination's frozen checker view, including downstream whole-subtree and presence reads. Re-cut the stored original value before applying the destination's conversion; retaining only the already converted values is insufficient. An integer-view child containing `-0.0` converts to int `0`, but collection into `List[StructuredOutput]` with dyn items must still bind double `-0.0`. A number-view child containing integer `9007199254740993` must export that exact integer into an integer-view wrapper, rather than reconstruct it from rounded double `9007199254740992.0`. Both cases extend `test_cel_projection_matches_full_binding` and `test_cel_projection_composes_through_collect_and_exports`. Every re-cut keeps the existing original/converted bounds and saved views; it cannot recover pre-admission source tokens, load storage in a transaction or consult current schemas. The selected representation retains only the admitted cut, never the full original payload. Collection/export ownership, native acquisition and overhead evidence remain implementation gates under work items 4/8/10.
+A validated producer may exceed the evaluation bounds if the selected projection fits.
+Enforce canonical bytes, value counts, depth, strings and containers as the cut grows.
+Iterator frames keep the pending frontier for whole and partial cuts independent of source size.
+Exceeding a cut bound, a cycle in copied data or a non-JSON scalar raises a content-free `BoundError`.
+Refuse unsupported JSON kinds and subclasses before walking them.
+Unused source descendants stay outside this cut and evaluation quota and receive no validation from it.
+Existing equivalence coverage compares consistently converted full and cut values in the admitted native domain, including missing and wrong-kind `dyn` selections, and separately checks a large original with a small cut.
+Freezing, graph composition, producer cutting, stored binding, `AgentSession` policy and the storage codec remain with their own owners.
 
-**Binding.** Evaluation binds only stored projections.
+#### Producer and storage rules
 
-- **Absent and unavailable.** A path missing from the value is absent in the projection, as it would be in the payload. A projection that is itself unavailable is the error kind `projection_unavailable`, never absent data. A projection is unavailable when retention has deleted it, when it was never cut, or when it was cut under a different path set. Version-1 availability belongs to its matching CEL derived owner; a present primary payload or marker cannot revive it. Its retention class follows the artifact's rules, except that an `AgentSession` projection, which holds only session metadata, stays available after its transcript expires.
-- **Summaries.** The artifact type's `summary` serves API and console views and is never visible to CEL ([protocols.md](protocols.md) section 8).
-- **`payload` and `observation`.** They are projected once per event or observation and per frozen path-set digest, by a bounded walker, and the bounds are checked against that path set. A wait's result therefore never depends on which other waits are open. The projection is a disposable cache bounded by entry count, released when the event's batches finish, and recomputed after a restart.
+The owner producing a value cuts its projection once.
+Upload cuts during validation, including staged target-source outputs (ADR-0019).
+The Scheduler producer owns the cuts for a `human_input` response, `wait_event` payload output, `PreviousAttempt`, fan-out collection or subgraph export.
 
-**Conversion.** It follows the producer's saved contract:
+For a collection or export, re-cut each child's stored original value under the destination's frozen view and path set before converting.
+The result must equal conversion of the admitted full value under that view, including whole-subtree and presence reads.
+An integer view can convert original `-0.0` to `0`.
+A destination with `dyn` items must still see double `-0.0`.
+A number view can round integer `9007199254740993` to double `9007199254740992.0`.
+An integer-view export still receives the exact original integer.
+Keep the existing full-versus-cut and composition checks for both cases.
+Re-cutting uses only the stored original cut and saved views, without recovering pre-admission tokens or reading live schemas.
 
-- **Integers.** `integer` becomes `int`, and `1.0` becomes `1`.
-- **Numbers.** `number` becomes `double`.
-- **Values without a schema** (`payload`, `observation`, `dyn` subtrees). Every JSON number becomes `double`, as in CEL's JSON mapping.
-- **Strings.** They stay strings, whatever their `format`.
-- **Schema defaults** are not filled in.
+Each child's original and converted logical cuts independently fit 4 KiB and 256 values.
+One complete [version-1 record](data-model.md#lossless-artifact-cel-projection-storage) fits 8,515 bytes and at most 1,000 children contribute up to 8,515,000 encoded bytes.
+Acquire, check and release one child at a time, holding only the bounded destination, fixed child references and current child state.
+Stop at the first original or converted destination bound.
+Charge visited encoded bytes, checking, conversion and source metadata.
+A re-cut counts as progress under the existing allowance.
+Acquisition requires its existing aggregate caller admission.
+The scheduler transaction performs no storage I/O or full JSON work.
+Before applying, recheck the exact current transition owner and all input identities.
+The accounting neither activates a route nor supplies the required owner, native acquisition and overhead evidence of work items 4/8/10.
 
-**Invalid values at entry.** Required CEL conversion refuses a value outside signed 64-bit range under `integer`, a nonfinite `number`/`dyn` conversion or data over a section 7.6 bound. Under the saved `kora.structured-output-view.v1` binding, standalone artifact admission separately permits the [StructuredOutput numerical domain](artifacts/StructuredOutput.md#2-numerical-values-and-canonical-bytes), including larger unprojected integers; required conversion still fails explicitly, never truncating. Unrelated contracts keep their existing entry rules. Direct and polled approvals and run-parameter ingress retain the independently stricter entry checks below, including unused integer fields:
+Run creation cuts validated parameters under the pinned path set.
+For [versioned run inputs](data-model.md#1323-run-input-storage), save the original unconverted cut with the run after checking required conversions and original and converted bounds.
+Bind only that saved cut under its verified types and conversion rules, with the same result each expression would obtain from the admitted full value.
+For a nonempty detached manual-start path set, use the static parameter mapper to check the pinned view's original and converted bounds.
 
-- an output fails with `artifact_invalid`;
-- a direct form response, and run parameters at trigger, webhook start and rerun, are refused with `API003`, and the static `params` of cron, sensor and graph triggers are `IR027` at deployment;
-- a polled channel response is not applied, the request stays `pending`, and a diagnostic is recorded ([scheduler.md](scheduler.md) section 16.3).
+Artifact preparation cuts from the validated value, converts under the pinned view and checks section 7.6's bounds.
+The [version-1 encoding](data-model.md#lossless-artifact-cel-projection-storage) stores the original and converted cuts together as native bytes in the CEL derived owner.
+The legacy projection column holds a marker.
+Affected StructuredOutput cuts retain original and converted numeric kind, binary64 signed zero and NUL-bearing strings and keys on both databases.
+Complete effective validation and cutting use the same checked output binding in one preparation.
+Canonical payload bytes, standalone model validity or detached unassociated validation results cannot prove projection fidelity.
+The detached checker validates the value and encoding under the existing view. [Detached preparation evidence](../research/artifact-cel-projection-producer-2026-11-15.md)
+Existing [StructuredOutput activation checks](artifacts/StructuredOutput.md#5-verification-and-activation) retain actual acquisition and producer evidence, including round-trip numeric kinds, native ownership and source integration.
 
-These narrower approval rules also remain in the [API approvals contract](api-and-agent-surface.md). For delayed event/observation/approval producers, StructuredOutput preservation begins at the selected typed snapshot admitted from the retained source. Existing `inbound_event.payload`, `wait.observation` and `approval_request.response` normalization before that boundary is unchanged; no original numeric token or already normalized signed zero is recovered. The producer freezes the admitted artifact once rather than recomputing it through current providers. Both-database source-to-output cases and the harness absence-versus-null gate are assigned in the [activation table](artifacts/StructuredOutput.md#5-verification-and-activation).
+Projections follow the matching artifact's retention class (data-model section 10).
+The artifact-payload retention applies to payloads, reference-only types retain indefinitely, and `AgentSession` retains for the lifetime of its session metadata.
+Listings never load projections.
 
-**The FR-2.5 example.** In the IR it reads `inputs.review.verdict == "approved" && inputs.bench.cpu < inputs.baseline.cpu * 0.85`.
+#### AgentSession projection
 
-- With `cpu` declared `number`, a stored `100` becomes `100.0`, so both operands of `*` are `double`.
-- With `cpu` declared `integer`, the checker rejects `int * double` and the author writes `double(inputs.baseline.cpu) * 0.85`.
-- Without conversion, the binding fails with `TypeError` whenever the JSON value happens to be whole (probe).
+Core constructs [`kora.agent-session-view.v1`](artifacts/AgentSession.cel-policy.json) from the validated logical value before applying deployment-frozen paths.
+The saved effective contract binds its exact fields, nested exclusions and checker schema.
+It allows harness name/version, session ID, billing class, normalized usage with completeness and derived cost/basis, turn count, integer millisecond duration, stop reason and worker/image provenance.
+It excludes denials, transcript content, references, descriptors, capture and availability, opaque vendor evidence and observation/price identities.
+Whole, dynamic, forwarded, collected, exported and previous-attempt reads retain those exclusions.
+An excluded field is `IR011`.
+No `transcripts` capability is needed for the metadata projection.
+It outlives transcript expiry and stays distinct from the saved `summary`.
+
+#### Binding and conversion
+
+Evaluation binds only stored projections for saved values.
+A missing key remains absent.
+A missing, expired or mismatched projection yields `projection_unavailable`.
+For version 1 the exact matching CEL derived owner controls availability.
+A present primary payload or legacy marker cannot revive the projection or permit recomputation through current behavior.
+Artifact `summary` serves API and console, outside CEL. [Artifact type protocol](protocols.md#8-artifact-type-fr-4143)
+
+Project `payload` and `observation` once per event or observation and frozen path-set digest.
+A bounded walker checks that set's bounds, independent of other open waits.
+Keep a disposable entry-count-bounded cache, release it when the event's batches finish and recompute after a restart.
+
+Use the producer's saved contract for conversion.
+`integer` yields `int`, including whole input `1.0` as `1`.
+`number` yields `double`.
+Every JSON number in schema-free `payload`, `observation` or a `dyn` subtree yields `double`.
+Strings remain strings for every `format`, and schema defaults leave values unchanged.
+
+Required conversion refuses out-of-range signed 64-bit integers, nonfinite `number` or `dyn` results and section 7.6 bound violations.
+Standalone artifact admission under `kora.structured-output-view.v1` separately permits the [standalone numerical domain](artifacts/StructuredOutput.md#2-numerical-values-and-canonical-bytes), including large integers outside the projection.
+Required conversions of those values still fail without truncation.
+Other contracts retain their entry rules.
+Direct and polled approvals and run-parameter ingress keep their stricter entry checks, including unused integer fields.
+
+- An output fails with `artifact_invalid`.
+- A direct form response or a run parameter at trigger, webhook start or rerun is refused with `API003`.
+- A static cron, sensor or graph-trigger `params` refusal at deployment is `IR027`.
+- A refused polled response is unapplied, retains `pending` and records a diagnostic ([Scheduler](scheduler.md) section 16.3).
+
+Delayed event, observation and approval producers preserve StructuredOutput numbers from the selected typed snapshot admitted from retention.
+The earlier `inbound_event.payload`, `wait.observation` and `approval_request.response` normalization stays in force.
+The snapshot cannot reconstruct source numeric tokens or a sign of zero already normalized.
+Freeze the admitted artifact once, independent of current providers.
+Verify the source-to-output legs on both databases.
+The separate harness gate covers absence versus explicit null. [StructuredOutput activation](artifacts/StructuredOutput.md#5-verification-and-activation)
+
+**FR-2.5 example.**
+In `inputs.review.verdict == "approved" && inputs.bench.cpu < inputs.baseline.cpu * 0.85`, a stored `100` becomes `100.0` for a `number` schema and both multiplication operands are `double`.
+With `integer`, `int * double` is refused and the author uses `double(inputs.baseline.cpu) * 0.85`.
+Without typed conversion, whole JSON numbers raised `TypeError` in the probe. [Binding probe](../research/cel-binding-probe-2026-10-19.md)
 
 ### 7.6 Data bounds, cost and evaluation
 
-**Data bounds.** They apply after projection to each stored projection, and to the aggregate of all referenced variables before and after typed conversion. Count every referenced root and every scalar/container occurrence; map keys contribute canonical bytes, not value count:
+#### Data admission
 
-| bound | limit |
+Apply the bounds to each stored projection and to the aggregate of referenced variables before and after typed conversion.
+Count all referenced roots and each scalar or container occurrence.
+Map keys count toward canonical bytes, with no extra value count.
+
+| Bound | Limit |
 |---|---|
-| total size of the bound values, and of each stored projection | 4 KiB (4,096 bytes) of canonical JSON |
-| total scalar/container values, and values in each stored projection | 256 |
-| list length | 1,000 elements |
-| string length | 16 KiB of UTF-8 |
-| nesting depth | 32 |
-| map size | 1,000 keys |
+| Aggregate size and each stored projection | 4 KiB (4,096 bytes) of canonical JSON |
+| Aggregate scalar and container values, and values in each projection | 256 |
+| List length | 1,000 elements |
+| Map size | 1,000 keys |
+| String length | 16 KiB of UTF-8 |
+| Nesting depth | 32 |
 
-Where each bound is checked:
+Check all bounds when cutting a stored projection (section 7.5), including the entire fan-out `over` list and each element.
+Apply the following outcomes when a bound is exceeded.
 
-- **At the cut.** Every stored projection is checked against every bound where it is cut (section 7.5). For a fan-out `over` list, each element is checked as well as the list. Over a bound:
-  - the producer fails with `artifact_invalid`, including a scheduler-produced collection, export, wait payload output or `PreviousAttempt`, whose producing node fails;
-  - a form response is checked when it is received, against the paths of `approve_when` and of every consumer of its output: a direct response is refused with `API003` and a polled one stays `pending`;
-  - run parameters are refused with `API003` at trigger, webhook start and rerun, and the static `params` of cron, sensor and graph triggers are checked at deployment (`IR027`).
-- **At binding.** Both original and converted aggregate bytes and value counts are checked. An original aggregate that exceeds a bound is refused before copying the root that crosses it, even when numeric conversion would shrink it. The checked expression carries the declared bound of every variable its estimate used (section 7.4, schema-tightened bounds), and binding checks each converted value against it after conversion's JSON-kind check, so a value of another kind stays `invalid_value`: a list or map with more entries than a declared element count, or a string longer in UTF-8 than a declared string length, at any depth the bound declares, is refused, so the estimate holds for every bound value whatever produced it. Declared byte and value counts are enforced only through the aggregate data bounds; the schema mapping never tightens them, and an environment builder must keep them at the data bounds for the estimate to hold. Over a bound, the evaluation error kind is `bound_exceeded`. Unreferenced inputs are neither copied nor charged.
-- **`payload` and `observation`**, at projection. Over a bound, the result is an evaluation error with the meaning of section 7.7.
+- Producers fail with `artifact_invalid`, including the nodes producing a scheduler collection, export, wait payload output or `PreviousAttempt`.
+- A form response must fit the paths read by `approve_when` and by every consumer of the output.
+  Refuse a direct response with `API003` and keep a polled request `pending`.
+- Refuse run parameters with `API003` at trigger, webhook start or rerun.
+  Refuse static `params` for cron, sensor and graph triggers with `IR027` at deployment.
+- Check `payload` and `observation` at projection.
+  A bound violation is an evaluation error under section 7.7.
 
-**Cost estimate.** At validation the checker computes each expression's worst-case cost from its tree and the size bounds of its variables; a smaller `maxItems` or `maxLength` in a schema tightens the bounds (section 7.4, schema-tightened bounds). The estimate has two dimensions:
+Before conversion, iteratively check exact JSON types, finite numbers, Unicode scalar values and the data bounds.
+Bind and charge only referenced roots.
+Refuse the original aggregate before copying a root that would cross its bound, even if conversion would shrink it.
+Check aggregate bytes and values again after conversion.
+The caller supplies the saved, validated projection bounds and schema types.
+Integer schema values bind as signed 64-bit integers, including integral JSON floats, and number and schema-less numeric values bind as finite doubles.
+`Record.extra` types undeclared keys.
+Bind missing `outputs` as an empty map and return `projection_unavailable` for any other missing referenced projection.
 
-- **Steps.** The work charged by the table below.
-- **Memory.** A logical estimate over converted data and peak live intermediate sizes, with a provisional fixed allowance and multiplier. It does not measure native representation, allocator overhead or process RSS.
+A checked expression carries the declared bounds used by its estimate.
+First check each value's JSON kind against the declared type so a mismatch is `invalid_value`.
+Then validate declared element counts and UTF-8 string lengths at every depth covered by the bound.
+A violation is `bound_exceeded`.
+Only the aggregate data bounds enforce declared byte and value counts.
+The schema mapper does not tighten those counts, and environment builders keep them at the data bounds to preserve the estimate.
 
-An expression over either dimension of the budget is `IR027`. The charges model the pinned binding's observed complexity, with provisional coefficients:
+#### Estimated work and memory
 
-| charge | proportional to |
+Validation estimates each expression's worst case from its tree and variable bounds.
+A smaller `maxItems` or `maxLength` tightens the applicable bound under section 7.4.
+Steps charge work, and memory estimates converted data and peak live intermediate sizes with a fixed provisional allowance and multiplier.
+An expression over either budget is `IR027`.
+The estimates do not measure native representation, allocator overhead or RSS.
+
+| Charge | Proportional to |
 |---|---|
-| each evaluation | a fixed base, plus the bound size and value count of every top-level variable the expression references; the evaluator binds exactly those (the binding converts all bound data on every call) |
-| a node visit | one unit |
-| `all`, `exists`, `exists_one` | the range's bound length times the body's charge; nested macros multiply |
-| `map`, `filter` | the square of the range's bound length (binding 0.10.0), plus the range length times the body's charge |
-| `+` on an operand that may be a string, bytes, list or `dyn` value; list and map literals | the result size and value count, the sums over the operands, which propagate to every consumer |
-| result size and element count of `map` and `filter` | for `map`, the range length times the body's result size; `filter` over a list keeps the list's bounds, and over a map, a record or `dyn` it yields a list of the iterated keys or elements, with the range's total size and value count and the iterated element bound; the element count of both is the range length |
-| comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`, `in` | the operand sizes and value counts |
-| conversions and string functions | the operand size |
-| `matches()` | kora's size estimate of its literal pattern, for compiling on every call, plus that estimate times the subject length for matching; the compiled pattern also counts toward memory |
-| a compile on a cache miss | the canonical rendering's length |
-| projection work in a scheduler transaction (re-cutting a collection, projecting an event); charged to the allowance only, not to an expression | the bytes read and written |
+| Evaluation | Fixed base plus bound sizes and value counts for the referenced top-level variables, which the binding converts on each call |
+| Node visit | One weighted visit |
+| `all`, `exists`, `exists_one` | Range bound length times body charge, multiplying for nested macros |
+| `map`, `filter` | Square of the range bound length for binding 0.10.0, plus range length times body charge |
+| `+` if either operand may be a string, bytes, list or `dyn`, and list/map literals | Result size and value count summed over operands and carried to consumers |
+| `map` and `filter` results | Range length for the element count. `map` also multiplies body result size by range length. `filter` preserves a list's bounds. Over a map, record or `dyn`, its list of iterated keys or elements uses range total size, value count and the iterated element bound. |
+| `==`, `!=`, `<`, `<=`, `>`, `>=`, `in` | Operand sizes and value counts |
+| Conversions and string functions | Operand size |
+| `matches()` | Literal pattern estimate for compilation on each call, plus that estimate times subject length for matching. The compiled pattern also counts toward memory. |
+| Compile on a cache miss | Canonical rendering length |
+| Scheduler transaction projection, including collection re-cut and event projection | Bytes read and written. Charge only to the transaction allowance. |
 
-**Bounds and arithmetic.**
+Every comprehension also charges its iteration weight times the range bound length.
 
-- **Hereditary bounds.** Each variable carries a bound: its total size in bytes of canonical JSON, its value count, its element count, its string length, and a bound for its elements or for each declared field. An element or field without its own bound inherits its parent's size and value count, and the element count and string length of the data bounds. Every bound on a cycle of declared bounds (a strongly connected component of more than one bound, or a bound that contains itself) loses all its declared children, which are then inherited. Converting from the leaves up, a bound whose converted subtree would be deeper than the nesting bound of 32 also loses its declared children, so no converted bound nests deeper than 32. Both rules depend only on the bounds, never on where an expression reaches them. Selecting a declared field reads that field's bound, and selecting any other field reads the element bound. An index whose key is a string literal naming a declared field reads that field's bound; any other index into a value with declared fields, and the element of a join of values of which either declares fields, inherit from the parent instead, because the element bound need not cover the declared fields. The environment must be a plain `dict` with string names. Each entry the expression references must be exactly a `Variable` whose type is a closed structure of exact instances (not subclasses) of the CEL type classes of this section, with record fields in a plain `dict` of string names and `RecordField` values whose `required` is a bool, no nullable type wrapping another nullable type, and cycles allowed, and each bound is read once, before anything is derived from it: it must be exactly a `ValueBound` (not a subclass), with non-negative integer sizes, fields held in a plain `dict` with string names and value-bound children, and a declared child must be no larger than its parent in bytes and value count and within the data bounds' element count and string length. An estimate that reaches a bound breaking this raises `BoundError`, an error of the environment's builder rather than a diagnostic, because inheriting from such a parent could lower the estimate. The whole bound and type of every variable the expression references are examined; the entries of variables it does not reference are not. The environment is plain data from kora's own builder, not author input, so `BoundError` reports a builder defect. The default bound of a variable uses 4,096 canonical bytes and 256 values, with the independent per-container and per-string ceilings in the data-bound table. The aggregate limits can dominate those ceilings.
-- **Joined element bounds.** The element bound of a list literal, a concatenation or a conditional joins its operands' element bounds, using the inherited bound for an operand that declares none or that declares fields, whatever the static type. A range of type `dyn` iterates over the join of its element bound (the inherited bound when it declares fields) and a key bound, a map or record over its keys. A join keeps a type only when both sides have the same type object or the same primitive kind; otherwise it is `dyn`, so a join never compares type structures. The schema-driven checker therefore builds one type object per schema node, so that equal types from one closure are identical.
-- **Canonical result sizes.** Empty list/map literals and zero-length comprehension results occupy two canonical bytes. A `string()` conversion allows up to six canonical bytes per input byte, covering escaped controls and replacement characters from invalid UTF-8, including a `dyn` operand, plus the scalar allowance. These sizes propagate through collections, concatenation, comprehensions, comparisons and pattern subjects.
-- **Affine results.** A size computed inside a comprehension is affine in the iteration variable's size, so the total over the range is bounded by the range's own total rather than by the element count times the largest element: `l.map(x, x)` is bounded by the size of `l`.
-- **Typed charges.** A charge follows the value's type: `+` on two typed numbers is a node visit, and on anything that may be a string, bytes, list or `dyn` value it is a concatenation. Unless both sides are typed strings, bytes or lists, the result of `+` is charged at least the size of a scalar, so a `dyn` operand never makes an addition look cheaper than its typed form.
-- **Arithmetic.** The estimate is one post-order pass in exact integer arithmetic. Each bound object of the environment is converted once per estimate, iteratively, so the estimate's work is linear in the expression and in the number of bound objects and declared fields of the environment. Memory is checked before steps, so an expression over both reports the memory dimension. Memory adds `memory_base` exactly once, then applies `memory_byte` to converted bound data once and every value an operation allocates; a reference to a variable or to part of a value allocates nothing. The provisional `memory_base` is 0 and `memory_byte` is 1; neither has been fitted to resident-memory measurements.
+Each variable bound carries canonical bytes, value count, element count, string length and any declared element and field bounds.
+An undeclared child inherits the parent's bytes and value count and the global element and string ceilings.
+A cycle, including a self-cycle, discards all declared children of its member bounds, which then use inheritance.
+Convert from leaves up and discard children of a converted bound whose subtree would exceed depth 32.
+These rules depend only on the bounds.
+A declared field selection or literal-string index uses the field bound.
+Other selections use the element bound.
+An index other than a literal declared field, when fields exist, inherits the parent bound.
+A join's element inherits from a parent with declared fields, because its element bound need not cover those fields.
 
-**Provisional budget and regression target.**
+The environment is trusted builder data in a plain `dict` with string names.
+Each referenced entry is an exact `Variable` with a closed graph of exact CEL type instances.
+A record uses a plain `dict` of strings and `RecordField` values with Boolean `required`.
+Type cycles are allowed, and nullable types cannot wrap nullable types.
+Read each bound once before deriving anything from it.
+It is an exact `ValueBound` with non-negative integer sizes and a plain string-keyed `dict` of child bounds.
+A child cannot exceed its parent's bytes or value count or the global element and string ceilings.
+The estimate examines the entire type and bound of each referenced variable and treats a reached malformed bound as the builder error `BoundError`.
+The default variable bound uses 4,096 canonical bytes and 256 values alongside the independent container and string limits, which aggregate limits may dominate.
 
-- The steps budget is **100,000,000,000,000 logical charge units**, ten times the previous provisional budget. All fourteen time weights remain unchanged. The memory budget remains **16 MiB (16,777,216 logical estimated bytes)** with the provisional base and multiplier above. Neither dimension is a calibrated bound on elapsed time or RSS.
-- The observed coarse regression target is **100 ms per evaluation interval** on the reference CI runner. The [compact protocol](../research/cel-cost-calibration-2026-10-22.md#current-compact-regression-protocol) measures ten fixed cases, each in a fresh child, with one cold cache miss and three warm cache hits through `Evaluator.evaluate`. Each of the forty intervals must be at most 100,000,000 ns. The interval includes binding, queueing, cache-miss compilation when needed, native execution and result delivery; expression checking and evaluator startup precede it, and result assertions follow it. This is neither an interruption deadline nor a bound for every admitted expression.
-- The selected initial data bounds are 4,096 canonical bytes and 256 values in both original and converted aggregates. The [qualified smaller-bound result](../research/cel-cost-calibration-2026-10-22.md#qualified-smaller-bound-result) records the conversion evidence. The provisional `kora.execution.v1` exception ends at the first successful durable production graph-version commit containing a [saved estimate](data-model.md#saved-cel-expression-facts), including an estimate of a dormant authored field. An empty inventory or an uncommitted result precedes this boundary. Later data-bound or cost-rule changes require a new execution semantics identity.
-- The golden corpus pins provisional estimate outputs. The compact regression and golden checks replace exhaustive time/memory fitting and crash-margin calibration as the pre-consumer validation gate under [issue #167](https://github.com/realkarych/kora/issues/167). Projections and real consumer integration remain prerequisites for author-expression consumers; schema-driven checking landed under [issue #337](https://github.com/realkarych/kora/issues/337) and [issue #330](https://github.com/realkarych/kora/issues/330), and the correction of minimum-int unary negation under [issue #372](https://github.com/realkarych/kora/issues/372). The independently tested evaluator infrastructure of [issue #166](https://github.com/realkarych/kora/issues/166) does not activate those consumers.
-- The weights and provisional regex tables belong to `kora.execution.v1`, under the pin rule at the start of section 7. Their values have not been established by full numerical calibration.
+The element bound of a list literal joins the bounds of its whole element values.
+Concatenation and conditionals join operand element bounds, using inheritance for an operand that lacks an element bound or declares fields, regardless of its static type.
+A map or record range iterates over keys.
+A `dyn` range iterates over the join of its key and element bounds, with inheritance for an operand with declared fields.
+A type join keeps a type only for the same object or primitive kind and otherwise gives `dyn`.
+It does not compare structures.
+The checker reuses one type object per schema node in a closure.
 
-The logical memory dimension rejects compounding concatenation inside sequential `map` operations. Four of them, each joining sixteen copies of a 2 KiB element of a list with `maxItems: 1`, denote 128 MiB while fitting every static limit and the initial input-data bounds.
+Empty list and map literals and zero-length comprehension results use two canonical bytes.
+`string()` allows six canonical bytes per input byte plus the scalar allowance, including escaped controls and invalid-UTF-8 replacements for `dyn`.
+This bound flows into collections, concatenations, comprehensions, comparisons and pattern subjects.
+A comprehension size is affine in the iteration variable's size, so the range's own total bounds the sum over iterations, as in `l.map(x, x)`.
+Adding two typed numbers costs a node visit.
+Other additions that may concatenate charge the result as such.
+Unless both operands are typed strings, bytes or lists, charge at least a scalar so `dyn` cannot reduce the corresponding typed charge.
 
-**Evaluation.** It runs in the API and scheduler processes, inside the existing short transactions ([scheduler.md](scheduler.md) section 2).
+Estimate once in post-order with exact integer arithmetic.
+Convert each bound object once, iteratively, for work linear in the expression, bound objects and declared fields.
+Check memory before steps to determine the reported dimension.
+Apply `memory_base` once and `memory_byte` to converted data once and to each value allocated by an operation.
+Referencing a variable or part of one allocates nothing.
+Provisional `memory_base` is 0 and `memory_byte` is 1.
+These coefficients have no resident-memory calibration.
 
-- **The evaluation thread.** Each process has one dedicated long-lived evaluation thread with a stack of at least 1 MiB, shared by every in-process standalone instance the process starts. The process owns it: it is a daemon thread released when the process exits, and stopping one instance rejects only that instance's queued jobs. Startup sets the thread stack size, creates the thread and restores the previous setting, so no other thread is affected.
-  - It runs one job at a time.
-  - Evaluations requested from inside a transaction take priority over server-side compile jobs. Compile work is submitted one expression at a time, so an evaluation waits for at most one compile, whose length and pattern size the static limits bound.
-  - At shutdown, queued jobs are rejected and the job in flight finishes, since it holds the GIL and cannot be interrupted. The logical budget and observed 100 ms target do not bound that wait; an external supervisor's kill remains the hard limit. Stopping an embedded standalone (`kora test`, `run_scenario`, `kora_test`) waits for that job the same way and never exits the host process. A cancelled caller discards its result.
-- **The compiled-program cache.** The process worker owns a least-recently-used cache keyed by the canonical rendering digest and expression YAML path. Defaults are 128 entries and 131,072 summed rendering characters. A hit verifies the stored rendering; a miss reparses the canonical rendering before `Binding.compile(checked)`. Validation compiles return a small outcome without entering the cache. A compile on a miss is charged to the allowance.
-- **No interruption.** The binding holds the GIL while it parses or evaluates and cannot be interrupted (probe). Static admission and the compact regression reduce exposure but do not guarantee a bound on GIL hold, API response time or scheduler transaction duration. An admitted expression can still stall or crash the shared process.
+#### Provisional budget and qualification
 
-**Evaluator infrastructure admission.** Each process accepts at most 32 evaluation jobs and 32 validation compiles, including in-flight work and completed results awaiting delivery. A batch contains at most 16 evaluations. The shared outstanding charge is at most 8 MiB; it accounts for detached converted values, renderings, bounded metadata and result retention. Both validation and evaluation include the checked expression's retained bound snapshot: 256 bytes of fixed overhead, 1,024 bytes per distinct bound node, 128 bytes per declared field, 256 bytes per referenced variable and eight bytes per code point in each retained field or variable name. Shared bound nodes are counted once within an expression; separate requests each retain their own charge. The snapshot copies the estimator's effective bounds after cycle and depth normalization, retains no source type or original bound graph, clamps scalar limits to the global data bounds and exposes read-only field maps. Changing builder dictionaries after checking cannot change admission. Snapshot construction is iterative, memoized and counted, without another conversion of the source graph. Result growth that cannot fit the shared charge returns the operational `busy` refusal. This charge is an ownership bound, not a measurement of native memory. At most 128 handles are admitted. Pending lifecycle reports also consume new-handle admission; they are bounded by 256 because each handle can produce one timeout and one completed-close report. YAML paths are bounded to 1,024 characters and event identifiers to 128; checked renderings to 65,536. These internal limits precede the first product consumer and are configurable through `Settings`.
+The steps budget is **100,000,000,000,000 logical charge units**.
+The memory budget remains **16 MiB (16,777,216 logical estimated bytes)**.
+All fourteen time weights and the provisional regex tables belong to `kora.execution.v1` under section 7's pin rule.
+The budgets give neither elapsed-time nor RSS guarantees.
 
-Each native pattern probe occupies one of the same validation slots and retains only its checked rendering across admission. Its charge is the larger of 1,024 bytes for the reply and four times the rendering length. A decoded code point takes at most ten rendering characters and the fixed call takes 14. Evaluation keeps priority over queued probes. The probe uses the existing delivery, cancellation and close rules, and its program never enters the cache.
+The observed coarse regression target is **100 ms per evaluation interval** on the reference CI runner.
+The [compact protocol](../research/cel-cost-calibration-2026-10-22.md#current-compact-regression-protocol) runs ten fixed cases, each in a fresh child, through one cold cache miss and three warm cache hits in `Evaluator.evaluate`.
+Checking and evaluator startup precede each child's measurements, and result assertions follow each interval.
+The interval covers binding, queueing, compilation on a miss, native execution and delivery.
+The original comparison said each interval must be at most 100,000,000 ns.
+Record every observation and its exceedance flag as a diagnostic under the [approved verification classification](../research/approved-verification-audit-2026-10-29.md#numerical-observations).
+Keep forty calls with exact result checks, logical and resource checks, ten-second child deadlines and the 240-second suite watchdog.
+The timing observations establish no interruption limit or latency guarantee.
 
-Before conversion, an iterative walk checks exact JSON types, finite numbers, Unicode scalar values, 32 levels of nesting, 1,000 entries per list or map, 16 KiB UTF-8 strings, 4 KiB of canonical JSON and 256 values. Conversion copies only referenced variables; both original and converted representations must fit the aggregate byte and value bounds. Integer schema fields bind as signed 64-bit integers, accepting integral JSON floats; number and schema-less numeric values bind as finite doubles. Missing `outputs` binds as an empty map; another missing referenced projection is `projection_unavailable`. The caller supplies the saved, validated schema types and projection bounds; the declared value bounds come with the checked expression. `Record.extra` carries the type of undeclared keys (section 7.4), and conversion refuses a value whose JSON kind differs from its declared type with `invalid_value`.
+The provisional exception ends with the first successful durable production graph-version commit containing a [saved estimate](data-model.md#saved-cel-expression-facts), including a dormant authored field.
+An empty inventory or uncommitted result does not cross that boundary.
+Later data-bound or cost-rule changes require a new execution semantics identity.
+The [conversion evidence](../research/cel-cost-calibration-2026-10-22.md#qualified-smaller-bound-result) records the initial bound qualification.
 
-Preparation also constructs the immutable normalized bound snapshots once, preserving distinct per-variable roots and shared descendants. Checked expressions reuse only their referenced snapshot roots and retain no source type, original bound graph or converter. Each expression still calculates its exact charge by a counted traversal of its reachable normalized metadata union; sharing snapshot nodes between expressions does not reduce any request's independent admission charge. Under the [owner-approved #376 amendment](https://github.com/realkarych/kora/issues/376#issuecomment-6475511099), total work is `O(T + B + L + sum(U_i))`: `T` includes environment enumeration and shared type validation, `B` includes source-bound conversion and normalized snapshot construction, `L` is total expression-checking work, and `U_i` counts the distinct reachable normalized nodes, field edges and name code points for expression `i`. Repeated expressions over a large shared bound graph can therefore still require expression-count times reachable-bound-size work. The original universal additive-work criterion is replaced by this explicit weaker bound, not established. Validator-scale admission and `test_cel_validation_work_bounded` remain with work item 3; this library change activates no consumer.
+The golden corpus pins provisional estimates.
+Required compact functional and admission checks and the golden checks supply bounded pre-consumer qualification.
+The 100 ms comparison is diagnostic, including where older coverage descriptions refer to its former gate.
+Author expressions still require the schema-driven checker, projections, minimum-int negation correction and actual consumer integration.
+Evaluator infrastructure alone grants no consumer activation.
 
-Both validation and evaluation also charge the checked expression's retained projection metadata under the same 8 MiB outstanding owner. The separate `projection_bytes` charge leaves `bound_bytes` unchanged: zero for an empty mapping; otherwise 256 fixed bytes, 256 bytes and eight bytes per name code point for each variable, and 128 bytes and eight bytes per canonical path character for each whole/presence path. Only immutable mappings and path tuples/strings are retained; extraction/cutting tries are temporary. Separate submissions each retain their full charge and release it through existing delivery, cancellation and close ownership. This is a conservative logical metadata charge, not an RSS measurement; no limit, refusal meaning or deadline is relaxed.
+Logical memory catches compounded concatenation within sequential macros.
+For example, four `map` calls each joining sixteen copies of a 2 KiB element from a list with `maxItems: 1` denote 128 MiB while fitting static and input-data limits.
 
-An `Evaluator` belongs to its creating event loop. Closing a handle rejects its queued jobs, waits for its in-flight and undelivered work, and leaves other handles and the shared worker usable. Its default one-second close deadline returns `close_timed_out`; it cannot interrupt native work. A cancelled queued job never executes; an in-flight cancellation discards the result. Closed loops release their retained jobs; stopped open loops remain charged until delivery or close. An unmapped worker fault closes admission permanently, settles waiting callers and releases the cache. The worker starts in an empty context, and the process owner loads the binding without the creating request's context.
+#### Worker, cache and closure
 
-**Evaluation allowance.** The installation limits the sum of logical charges evaluated in one scheduler transaction; the default is 100,000,000,000,000 charge units, and it may never be set below one expression's steps budget. This is a work-accounting threshold, not a wall-time bound. Its consumer integration remains pending.
+For runtime consumers, evaluation runs inside the API and Scheduler's existing short transactions. [Scheduler](scheduler.md)
+One process-owned long-lived daemon thread with at least 1 MiB of stack serves all in-process standalone instances.
+During startup, the evaluator holds its own lock while setting the process-wide default stack size, starting the worker and restoring the previous default.
+The worker starts in an empty context and the process owner loads the binding without inheriting request context.
+It runs one job at a time.
+Transaction evaluations take precedence over queued server compiles and probes.
+Submit compile work one expression at a time so an evaluation waits for at most one in-flight compile, whose source and pattern sizes are statically bounded.
 
-- **Scope.** The allowance applies to every scheduler transaction that evaluates CEL: the branch pass, retry handling, wake-ups and prepared-observation apply.
-- **Progress.** Each transaction evaluates at least one expression. When the allowance is used up, the pass commits what it has decided, leaves `needs_scheduling` set for the rest and moves on, rotating across runs and namespaces.
-- **Events.** One inbound event is matched against open waits in batches, per run and under that run's lock.
-- **Order, not results.** The allowance changes when work happens, never how an expression evaluates. Deferred work may cross a wait's expiry, which the existing expiry rules then decide.
-- **Configuration.** It is installation configuration rather than execution semantics.
-- **API evaluations.** An evaluation in the API (`approve_when`) is outside the allowance and is admitted under the per-expression logical budget; that budget establishes no response deadline.
+The worker owns a least-recently-used cache keyed by rendering digest and expression YAML path.
+By default it allows 128 entries and 131,072 summed rendering characters.
+A hit verifies the rendering, and a miss reparses it before `Binding.compile(checked)`.
+Charge compilation on a miss to the allowance.
+Validation compiles return a small outcome without entering the cache, and pattern probes never cache their programs.
+
+An `Evaluator` belongs to its creating event loop.
+Stopping one instance or closing a handle rejects only its own queued jobs, waits for its in-flight and undelivered work and leaves other handles and the worker usable.
+The default one-second close deadline returns `close_timed_out`.
+Queued cancellations prevent execution, and in-flight cancellations discard the result.
+After cancellation, event-loop closure or `close_timed_out`, a running job stays charged until all its native work settles.
+Closed loops release work that is no longer running, and stopped open loops remain charged until delivery or close.
+An unmapped worker fault permanently closes admission, settles waiting callers and releases the cache.
+
+Embedded standalone shutdown (`kora test`, `run_scenario`, `kora_test`) follows handle closure without exiting the host.
+The daemon belongs to the process until it exits.
+The native binding holds the GIL during compile and evaluation and cannot be interrupted.
+A supervisor kill is the hard limit.
+Static admission, logical budgets and compact timing observations do not establish GIL dwell, API response or transaction duration limits.
+An admitted expression can stall or crash the shared process.
+
+#### Outstanding ownership
+
+| Per-process admission | Limit |
+|---|---|
+| Evaluation jobs | 32 |
+| Validation compiles, including native probes | 32 |
+| Evaluations per batch | 16 |
+| Outstanding charge | 8 MiB |
+| Handles | 128 |
+| Pending lifecycle reports | Required bound of twice the configured handle capacity, 256 by default |
+| YAML path, event ID and checked rendering | 1,024, 128 and 65,536 characters respectively |
+
+Job counts include in-flight work and completed results waiting for delivery.
+Charge detached values, renderings, bounded metadata and result retention to the shared owner.
+Result growth that would exceed the shared outstanding charge limit returns operational `busy`.
+Pending lifecycle reports count toward new-handle admission, with up to one timeout and one completed-close report per handle.
+The evaluation and validation job, outstanding charge, batch and handle limits listed above are `Settings` defaults.
+The YAML path, event ID and rendering maxima are fixed.
+The [lifetime method](../research/cel-evaluator-lifetime-2026-10-21.md#method-amendment-dated-2026-10-28-process-wide-rss-spans-and-hop-latency-become-diagnostics) governs native validation-compile qualification at its recorded trigger.
+
+Validation and evaluation charge the checked expression's effective bound snapshot.
+`bound_bytes` counts 256 fixed bytes, 1,024 per distinct bound node, 128 per declared field, 256 per referenced variable and eight per retained name code point.
+The immutable snapshot uses bounds after cycle and depth normalization and clamps scalar limits to the global data bounds.
+Its field maps are read-only and it retains no source type, original bound graph or converter.
+Builder dictionary changes cannot alter admission.
+Construction is iterative, memoized and counted without reconverting the source.
+Preparation constructs normalized snapshots once, preserving distinct per-variable roots and shared descendants.
+Each expression retains its referenced roots and charges its exact reachable metadata union once per expression.
+Each submission pays independently, including when snapshots share nodes.
+
+Under the [approved preparation bound](https://github.com/realkarych/kora/issues/376#issuecomment-6475511099), total work is `O(T + B + L + sum(U_i))`.
+`T` covers enumeration and shared type validation, `B` source-bound conversion and normalization, `L` expression checking and `U_i` the distinct reachable normalized nodes, field edges and name code points for expression `i`.
+Repeated expressions can still cost their count times reachable metadata size.
+Validator-scale admission and its required evidence remain with work item 3.
+
+Both operation families also charge `projection_bytes` separately without altering `bound_bytes`.
+The projection charge is zero if empty.
+Otherwise charge 256 fixed bytes, 256 bytes plus eight per name code point for each variable and 128 bytes plus eight per canonical path character for each whole or presence path.
+Retain only immutable mappings, path tuples and strings.
+Extraction and cutting tries are temporary.
+Every submission releases its own charge through delivery, cancellation or close.
+These are logical ownership charges and establish no native-memory or RSS measure.
+
+A native pattern probe takes one validation slot and retains only its checked rendering at admission.
+Charge the greater of 1,024 reply bytes and four times rendering length.
+Each decoded code point takes at most ten rendering characters and the fixed call takes 14.
+Evaluation keeps priority and delivery, cancellation and close use the shared rules.
+
+#### Scheduler allowance
+
+Consumer integration is pending.
+The installation limits logical CEL work per Scheduler transaction, defaulting to 100,000,000,000,000 charge units and never below one expression's steps budget.
+This is installation configuration and establishes no wall-time limit.
+Apply it to branch, retry, wake-up and prepared-observation evaluation.
+Each transaction evaluates at least one expression.
+At exhaustion, commit decisions, keep `needs_scheduling` for the rest and rotate across runs and namespaces.
+Match an inbound event in batches under each run's lock.
+The allowance affects order, and existing expiry rules decide waits whose work is deferred past expiry.
+The API admits `approve_when` under the per-expression logical budget independently of the allowance.
+That budget establishes no response deadline.
 
 ### 7.7 Evaluation errors
 
-**Error kinds.**
+#### Classification
 
-- From the binding's documented exception classes:
+Catch the binding's errors only around binding calls.
+Conversion runs outside those handlers.
+The process resolves the binding's exact panic class at startup and refuses startup if it cannot do so.
+That class derives from `BaseException`.
+`CancelledError`, `KeyboardInterrupt` and `SystemExit` propagate.
 
-  | binding exception | error kind |
-  |---|---|
-  | `KeyError` | `missing_field` |
-  | `TypeError` | `no_overload`, which includes selection on `null` |
-  | `IndexError` | `index_out_of_range` |
-  | `ZeroDivisionError` | `division_by_zero` |
-  | `OverflowError` | `overflow` |
-  | `RuntimeError` at execution | `invalid_argument`: a function received a value it cannot accept, such as an unparseable string in `int()`, `uint()`, `double()`, `timestamp()` or `duration()`, or a `dyn` value of a kind the function does not take ([issue #373](https://github.com/realkarych/kora/issues/373)) |
+| Binding exception at execution | Error kind |
+|---|---|
+| `KeyError` | `missing_field` |
+| `TypeError` | `no_overload`, including selection on `null` |
+| `IndexError` | `index_out_of_range` |
+| `ZeroDivisionError` | `division_by_zero` |
+| `OverflowError` | `overflow` |
+| `RuntimeError` | `invalid_argument`, for instance an unparseable conversion string or a `dyn` value of an unsupported kind |
 
-- Raised by kora itself:
-  - `bound_exceeded`;
-  - `number_out_of_range`;
-  - `invalid_value` for values outside exact JSON types or Unicode scalar strings, or whose JSON kind does not match the declared CEL type (section 7.4);
-  - `wrong_result_type`: anything that is not exactly `bool`, or `string` for reasons; Python truthiness never applies;
-  - `projection_unavailable`.
-- `internal_fault`, logged at ERROR, covers everything the checker should already have prevented: a `ValueError` at execution, any failure to compile the checked rendering (`runtime_error` among them), the binding's panic at compile or execution, and a rendering that does not re-parse to the checked tree or that collides in the program cache (`unmapped`). The pinned binding raises the same `RuntimeError` for an undeclared identifier and for a `matches()` pattern it cannot compile, both at execution; kora prevents both before evaluation (the checker, `projection_unavailable` for a missing root, and the pattern subset and its size cap, with the server-side pattern compile added when the API validates), so such a kora defect would surface as `invalid_argument` rather than `internal_fault`.
+kora also returns `bound_exceeded`, `number_out_of_range`, `invalid_value`, `wrong_result_type` and `projection_unavailable`.
+`invalid_value` covers non-exact JSON types, non-scalar strings and JSON kinds inconsistent with the declared CEL type.
+The required result is exactly `bool`, or `string` for reasons, without coercing Python truthiness.
 
-**Catching.** Exceptions are caught narrowly, around the binding call only; kora's own conversion code runs outside that handler.
+An `internal_fault` is logged at ERROR.
+Its fault is `value_error` for native `ValueError` at compilation or execution, `runtime_error` for compile `RuntimeError`, `panic` for native panic at either stage, and `unmapped` for checked-tree re-parse failure or cache collision.
+An undeclared identifier or native pattern rejection could also raise execution `RuntimeError`, which still maps to `invalid_argument`.
+The checker, required projections and server-side pattern validation exclude those inputs before evaluation.
 
-- The parser panic class is a `BaseException`. It is resolved exactly when the process starts, and a process that cannot resolve it refuses to start.
-- `CancelledError`, `KeyboardInterrupt` and `SystemExit` are never caught.
+#### Record
 
-**The error record.** A recorded error has these fields:
+The evaluator's internal error record has these fields.
 
-- **`kind`**: one of the kinds above.
-- **`field`**: the YAML path of the expression.
-- **`offset`**: set only when kora itself locates the fault, null for kinds the binding raises.
-- **`event_id`**: for a `match` error, the inbound event's identifier.
-- **`observed_at`**: for an `until` error, the time of the observation.
-- **`at`**: when the error was recorded, from the injected clock.
-- **`fault`**: null except for `internal_fault`, where it is one of the closed classes `value_error`, `runtime_error`, `panic` or `unmapped`; never a native message or an arbitrary exception type.
+| Field | Content |
+|---|---|
+| `kind` | An error kind above |
+| `field` | The expression's YAML path |
+| `offset` | The location only when kora finds it itself, null for native errors |
+| `event_id` | The inbound event ID for a `match` error |
+| `observed_at` | The observation time for an `until` error |
+| `at` | Record time from the injected clock |
+| `fault` | Null except for `internal_fault`, where it is `value_error`, `runtime_error`, `panic` or `unmapped` |
 
-A node that fails because of an evaluation error fails with `config_error`, reason `cel_evaluation_error`, and carries this record in its details.
+A node failed by an evaluation error has class `config_error`, reason `cel_evaluation_error` and an evaluation error in its failure details.
 
-**Meaning per kind**, beyond section 7.1:
+#### Effect on consumers
 
-- **`approve_when`** is evaluated only after the response has passed the staleness, commit and digest, and approver checks (section 4.2). A response refused by those checks is never evaluated. On an error:
-  - the response is kept with the request, and the request becomes `failed` ([data-model.md](data-model.md) section 4);
-  - `approval.responded` records `applied: true` and the error record;
-  - the channel is closed with `notify(resolved)` linking the canonical status, which shows `failed`;
-  - the node fails with `config_error`.
+The effect rules below extend [section 7.1](#71-expression-kinds-and-environments).
 
-  The [automatic expiry exception](cli-approval-opening.md#3-expiry-and-retained-response) under #1737 uses the same safe CEL error record in node-failure facts while preserving an expired request and scheduler audit. The exception preserves human response and legacy error fields.
+- Evaluate `approve_when` only after the response passes staleness, commit, digest and approver checks (section 4.2).
+  On evaluation error, retain the response, set the request to `failed` and record `applied: true` with the error in `approval.responded`.
+  Fail the node with `config_error`.
+  Close the channel with `notify(resolved)` linking the canonical failed status.
+  The failed request gives no approval and a subsequent response is recorded with `applied: false`.
+  The direct API returns HTTP 200 with the request's status.
+  The [automatic expiry path](cli-approval-opening.md#3-expiry-and-retained-response) preserves an expired request and scheduler audit, attaching the same safe CEL error to the node failure.
+  Its request evaluation-error field stays empty, and ordinary human response and legacy error fields retain their behavior.
+- Evaluate `retry.predicate` only with attempts remaining and a retryable class listed in `retry_on`.
+  `infrastructure` and `provider_limited` consume no attempts and never evaluate it.
+  Every `outputs.*` read needs a `has()` guard.
+  Record a predicate error on the node's failure event.
+- Evaluate each event and wait pair at most once, including false results and errors.
+  Apply the existing event eligibility rules.
+  Under the run lock, pass 6 verifies the exact open wait before writing a `match` error.
+  The evaluating transaction records `event_evaluation` together with any consumption.
+  An open wait with an eligible, unevaluated event keeps `needs_scheduling` set.
+- An `until` error counts as a successful dispatch observation, consumes the token and uses the normal next interval without degrading the integration.
+  A start binding consumes no occurrence or cursor and writes no `trigger.*` event.
+  Write the error only from the current claim. [Scheduler](scheduler.md)
+- Store the last `match` or `until` error on the wait or start binding for API and console reads.
+- `projection_unavailable` fails the owning node with `config_error`, including a wait, because a missing or expired projection cannot become available again.
+  For `retry.predicate`, it prevents a retry and retains the original class.
 
-  A `failed` request never counts as approval, and a later response is recorded with `applied: false`. A direct API response returns HTTP 200 with the request's status.
-- **`retry.predicate`** is evaluated only when the class is retryable, listed in `retry_on` and attempts remain. It is never evaluated for `infrastructure` or `provider_limited`, which do not consume attempts. Every `outputs.*` read needs a `has()` guard (section 7.4). An error is recorded on the node's failure event.
-- **`match`.** Each event and wait pair is evaluated at most once, whether the result is false or an error. The evaluating transaction inserts an `event_evaluation` row for the pair ([data-model.md](data-model.md) section 2), together with any consumption. An event is eligible for a wait under the existing matching rules, and an open wait with an eligible event it has not evaluated keeps its run's `needs_scheduling` set. A `match` error is written in that pass-6 transaction, after the exact open wait is verified under the run lock.
-- **`until`.** An error counts as a successful observation for dispatch: the token is consumed, the next poll keeps the normal interval and the integration is not degraded ([scheduler.md](scheduler.md) section 16). A start binding consumes no occurrence or cursor and writes no `trigger.*` event. An `until` error is written only from the current claim.
-- **Recording external errors.** The last `match` or `until` error is stored on the wait or the start binding and is visible in the API and the console.
-- **Unavailable inputs.** `projection_unavailable` fails the owning node with `config_error` for every kind, waits included, because an expired or missing projection never becomes available again. The one exception is `retry.predicate`, where it means no retry and the node keeps its original class, like any predicate error.
+#### Safe content
 
-**Safe content.** Error records stored on a node failure, a wait, a start binding, an approval request or an event, and every error the API returns, carry only the fields above. The evaluator returns frozen error values across the thread boundary; operational refusals are raised on the caller loop with both cause and context cleared, including when called from inside another exception handler. They never carry expression text, bound values, binding messages, chained exceptions or panic payloads. Diagnostics follow the same rule ([observability.md](observability.md) section 5), including at DEBUG. The evaluating component emits them, the scheduler or the API, and deduplicates them on the wait, binding or node, the field and the kind.
+Stored evaluation errors use only the field set defined for the owning record in the data model, including node failures, waits, start bindings, approval requests and events. [Data model](data-model.md)
+Public evaluation errors carry only the fields allowed by the applicable API contract. [Public evaluation errors](api-and-agent-surface.md#external-observation-and-delivery-diagnostics-adr-0021)
+The evaluator returns frozen error values across its thread boundary.
+It raises operational refusals on the caller loop with cause and context cleared, including inside another exception handler.
+Errors and diagnostics exclude expression text, values, native messages, exception chains and panic payloads, including at DEBUG.
+The API or Scheduler component that evaluates emits diagnostics and deduplicates them by wait, binding or node, field and kind. [Observability](observability.md)
 
 ### 7.8 Conformance
 
-The cel-spec conformance suite runs in CI against the binding, through a hand-written reader of the textproto subset its selected files use, with no protobuf dependency.
+CI runs the binding against the vendored cel-spec textproto subset without a protobuf dependency.
+The corpus and licence remain byte-identical to the pinned upstream commit under a SHA-256 manifest validated in CI.
+The [vendoring record](../research/cel-conformance-data-2026-10-20.md) identifies the source, full commit and digests.
 
-- **Vendoring.** The files are vendored under `tests/` at a pinned cel-spec commit, with the upstream licence. Their source URL, full commit SHA and digest are recorded in `knowledge/research/` when the suite is added.
-- **Selection.** Explicit include and exclude lists name the files. Excluded are `dynamic` and `namespace` (message types and containers), `macros2` (two-variable comprehensions), `proto2`, `proto3`, `wrappers` and `enums` (message types), `optionals`, `unknowns`, `type_deduction` and every extension file. Within the included files, explicit entries name each case, or a whole section, that kora rejects, with the feature it needs and the diagnostic reason kora gives: message types and qualified type names, backtick-quoted fields, unescaped control characters in literals, the narrowed standard functions and functions outside the standard library.
-- **Integrity.** The files are byte-identical to the upstream commit, and a test checks them and the licence against a manifest of SHA-256 digests.
-- **Known deviations.** Every case `kora.cel` accepts runs through the binding with its bindings (a `google.protobuf.Duration` binding is decoded from its seconds and nanoseconds to microseconds, the binding's resolution), and its typed result is compared with the expected value. A case where binding 0.10.0 disagrees with cel-spec is listed in `tests/cel/conformance/deviations.py` with its category and the binding's exact outcome, so the test fails when a deviation disappears or changes; a deviation is never skipped. The comparison binds `int` and `uint` alike, because the binding returns both as Python integers, accepts any error where cel-spec expects one, checks an expected timestamp by type only, does not check the sign of a zero double, compares a type value by its name, which is how the binding returns it, looks up an expected map key by Python equality, so the key's kind among `bool`, `int` and `uint` is not checked, and cuts expected and bound durations to microseconds. Measured under [issue #165](https://github.com/realkarych/kora/issues/165), 37 of 1,005 cases deviate:
-  - **string size in bytes**: `size()` of a string counts UTF-8 bytes;
-  - **mixed numeric keys**: `int`, `uint` and `double` values of equal value are not interchangeable as keys: an `int` or `uint` key misses the entry of the other kind, a `double` map key, list index or `in` test raises a type error, and maps with such keys compare unequal;
-  - **error absorption**: `all()` returns the first error instead of a later `false`;
-  - **negated boolean**: `-false` is `true` instead of an error; on `dyn` data that is a silently wrong value, a case for the schema-driven checker;
-  - **wrapping negation**: `-(-9223372036854775808)` wraps instead of overflowing; a typed check rewrites integer negation into subtraction (section 7.2), so checked author expressions overflow as cel-spec requires;
-  - **invalid UTF-8**: `string()` of invalid UTF-8 bytes substitutes the replacement character instead of failing;
-  - **time ranges**: `duration()` of a string beyond cel-spec's range of a signed 64-bit count of nanoseconds (about ±292 years) clamps to that bound instead of failing, so `duration('9300000000s') == duration('9400000000s')` is `true`; sums of durations and differences of timestamps exceed the bound unchecked; a timestamp string whose UTC offset carries it outside the years 1 to 9999 is accepted, while other timestamps beyond that range are refused;
-  - **time formatting**: `string()` of a timestamp or a duration uses another format than cel-spec;
-  - **duration accessors**: `getMilliseconds()` of a duration returns the whole duration in milliseconds rather than its millisecond component;
-  - **missing overloads**: `int(timestamp)`, `timestamp(int)` and `duration + timestamp` fail at evaluation; the conformance cases on `timestamp(timestamp(…))` and on comparing a timestamp with `null` deviate because they build their timestamps with `timestamp(int)`;
-  - **qualified names**: variables named with dots and qualified type names such as `google.protobuf.Timestamp` are not resolved;
-  - **repeated map keys**: a map literal with a repeated key keeps the last value instead of failing.
+The [selection manifest](../../tests/cel/conformance/selection.py) names every included and excluded file.
+It excludes `dynamic`, `namespace`, two-variable `macros2`, message-type `proto2`, `proto3`, `wrappers` and `enums`, `optionals`, `unknowns`, `type_deduction` and all extension files.
+For included files, each exclusion entry identifies a case or a section, its required feature and exact refusal reason.
+Features include message types and qualified names, backtick fields, raw control characters in literals, unavailable narrowed functions and functions outside the standard library.
 
-  Iterating over a map visits its keys in an order that changes between evaluations, so `map()` and `filter()` over a map return their elements in an arbitrary order. The timestamp accessors read the calendar fields in the UTC offset written in the timestamp string rather than in UTC, so `timestamp('2020-12-31T23:00:00-05:00').getFullYear()` is 2020 for an instant in 2021; no included conformance case covers it. The time ranges, time formatting, duration and timestamp accessors, missing overloads, repeated map keys and iteration order are recorded for the schema-driven checker and the evaluator ([issue #166](https://github.com/realkarych/kora/issues/166)).
-- **Reader and parser.** The reader has two layers: a closed generic textproto syntax that parses whole files, and a typed case model that fails on any field outside the subset the selected files use. Every included case also runs through kora's parser and canonical rendering: a case without an entry must be accepted, a listed case must give exactly its listed reason, and every entry must match a case.
+The reader parses each whole file with closed generic textproto syntax.
+A typed case model rejects fields outside the supported subset.
+Every included case passes through kora's parser and canonical renderer.
+Unlisted cases must be accepted, listed refusals must produce the exact reason and each exclusion entry must match a case.
+
+Each accepted fixture runs its upstream text and bindings in the native evaluator and compares the typed result.
+This is a conformance path. Production uses checked renderings and the fixed pattern probe under section 7.2.
+Decode bound and expected durations to microseconds from seconds and nanoseconds.
+The binding returns `int` and `uint` as Python integers, so compare their values alike.
+Check timestamps by type, type values by name and expected map keys by Python equality, which does not distinguish `bool`, `int` and `uint` key kinds.
+Accept any error for an expected error and do not compare a zero double's sign.
+
+For the pinned binding 0.10.0, record deviations from cel-spec in the [deviation manifest](../../tests/cel/conformance/deviations.py) with their category and exact binding outcome.
+Run the cases and fail if a recorded deviation disappears or changes.
+The [dated binding evidence](../research/cel-stack-2026-10-21.md) records the measured corpus and deviation counts.
+
+| Category | Binding behavior |
+|---|---|
+| String size | `size()` of a string counts UTF-8 bytes. |
+| Mixed numeric keys | Equal `int` and `uint` keys miss each other's entries, and maps with those keys compare unequal. A `double` map key, list index or membership test raises a type error. |
+| Error absorption | `all()` returns an earlier error even if a later value is false. |
+| Negated boolean | `-false` is true, which gives a silently wrong result on `dyn` without the checker. |
+| Wrapping negation | Negating the minimum signed 64-bit integer wraps. Typed integer negation uses subtraction and overflows as required (section 7.2). |
+| Invalid UTF-8 | `string()` substitutes replacement characters for invalid bytes. |
+| Time ranges | `duration()` from a string clamps to the signed 64-bit nanosecond range. For example, `duration('9300000000s') == duration('9400000000s')` is true. Duration sums and timestamp differences can exceed the range unchecked. A timestamp string can reach past years 1–9999 via its UTC offset, while other out-of-range timestamps are refused. |
+| Time formatting | `string()` of a timestamp or duration uses a different format from cel-spec. |
+| Duration accessor | `getMilliseconds()` returns total duration milliseconds. |
+| Missing overloads | `int(timestamp)`, `timestamp(int)` and `duration + timestamp` fail. The nested timestamp conversion and timestamp/null comparison cases use `timestamp(int)` to build their timestamp. |
+| Qualified names | Dotted variable names and qualified type names such as `google.protobuf.Timestamp` are unresolved. |
+| Repeated keys | A map literal with repeated keys keeps the last value. |
+
+Map key order varies between evaluations, so `map()` and `filter()` over a map return elements in arbitrary order.
+Timestamp accessors read calendar fields in the offset given in the timestamp string.
+For example, `timestamp('2020-12-31T23:00:00-05:00').getFullYear()` returns 2020 for a UTC instant in 2021.
+The included corpus has no case for that behavior.
+These binding limits inform the checker and evaluator rules above.
 
 ### 7.9 Future contracts
 
@@ -839,7 +1349,7 @@ The parser, checker, cost estimate and textproto reader are unit-tested, as AGEN
 - `test_cel_rejects_non_literal_regex_pattern`: the literal rule; the backreference leg at server-side validation waits for the API.
 - `test_cel_regex_compile_cost_bounded`: the nesting and cap legs in `kora.cel`; the `kora compile` and `/validate` legs and compiling each distinct pattern once wait for the DSL and the API.
 
-Under [issue #373](https://github.com/realkarych/kora/issues/373) a `RuntimeError` at execution maps to `invalid_argument`, and `test_cel_invalid_argument_is_not_an_internal_fault` is active. The evaluator conversion, native error mapping, exact result types, thread priority/cancellation/close, bounded cache, safe diagnostics and resource-lifetime legs are active under [issue #166](https://github.com/realkarych/kora/issues/166). Under [issue #167](https://github.com/realkarych/kora/issues/167), `tests/cel/test_cel_cost_regression.py` adds the active provisional golden corpus and budget/specification consistency checks, and `tests/measurements/test_cel_cost_regression.py` adds the compact 100 ms measurement gate. They establish no full calibration or crash margin. The projection, API, scheduler and DSL legs stay `pending implementation` with the work items that own them in the implementation plan.
+Under [issue #373](https://github.com/realkarych/kora/issues/373) a `RuntimeError` at execution maps to `invalid_argument`, as covered by `test_cel_maps_only_documented_native_errors`. The evaluator conversion, native error mapping, exact result types, thread priority/cancellation/close, bounded cache, safe diagnostics and resource-lifetime legs are active under [issue #166](https://github.com/realkarych/kora/issues/166). Under [issue #167](https://github.com/realkarych/kora/issues/167), `tests/cel/test_cel_cost_regression.py` adds the active provisional golden corpus and budget/specification consistency checks, and `tests/measurements/test_cel_cost_regression.py` adds the compact 100 ms measurement gate. They establish no full calibration or crash margin. The projection, API, scheduler and DSL legs stay `pending implementation` with the work items that own them in the implementation plan.
 
 The schema-driven checker of section 7.4 landed under [issue #337](https://github.com/realkarych/kora/issues/337) (`kora.cel.schema`, the schema-to-CEL-type mapping) and [issue #330](https://github.com/realkarych/kora/issues/330) (`kora.cel.checker` and `check_typed`), applied to an environment its caller builds. These rows are active: `test_cel_rejects_unknown_field`, `test_cel_rejects_non_boolean_approve_when`, `test_cel_rejects_unknown_enum_literal`, `test_cel_rejects_mixed_int_double_equality`, `test_cel_rejects_unguarded_optional_field`, `test_cel_rejects_string_size`, `test_cel_recursive_closure_checked_in_bounded_time` and the rows added below for the schema mapping and the checker. The checker legs of `test_cel_converts_json_numbers_to_schema_types`, `test_cel_dyn_selection_needs_no_guard` and `test_cel_dyn_result_requires_exact_bool` are in `tests/cel/test_cel_checker.py` under the same names, beside their evaluator legs in `tests/cel_eval/`. The untyped `check` remains the syntax and cost entry of binding agreement and conformance; every author-expression consumer uses `check_typed`. Building environments from a graph document (the type closure at each call site, StructuredOutput effective views, `AgentSession` summary fields and the `inputs`, `outputs`, `params` and `response` roots), `test_cel_child_type_keeps_parent_cel_types` and `test_cel_examples_pass_checker` stay with work item 3 and the remaining #138 contracts; projections stay pending. Schema-tightened estimate bounds and their binding check landed under [issue #374](https://github.com/realkarych/kora/issues/374): `test_cel_cost_estimate_rejects_compounding_concatenation` is active in full, its `maxItems` leg building the variable from a schema, and the rows added below for schema bounds are active. Under [issue #372](https://github.com/realkarych/kora/issues/372) typed checks rewrite integer negation (section 7.2): `test_cel_typed_negation_of_minimum_int_overflows`, `test_cel_typed_rendering_rewrites_integer_negation`, `test_cel_typed_estimate_is_of_the_rewritten_tree`, `test_cel_typed_rendering_stays_within_the_reparse_bounds` and `test_cel_widest_typed_negation_compiles_in_binding` are active, `test_cel_typed_check_is_linear_in_steps` covers integer negations, and the checker leg of `test_cel_limits_at_boundary_compile_in_binding` is `test_cel_typed_limits_at_boundary_compile_in_binding`.
 
@@ -932,8 +1442,8 @@ Under [issue #375](https://github.com/realkarych/kora/issues/375), the library l
 | `test_cel_dyn_result_requires_exact_bool` | `observation.body.ready` returning `"false"` is `wrong_result_type`, never true |
 | `test_cel_evaluation_allowance_yields_between_batches` | at the allowance, the pass commits, leaves `needs_scheduling` set and serves another run of another namespace; each transaction evaluates at least one expression; the rest continues after a restart |
 | `test_cel_binding_exceptions_map_to_error_kinds` | each documented binding exception maps to its kind, with a null `offset`; unparseable strings in the conversion functions and `dyn` arguments of another kind are `invalid_argument` |
-| `test_cel_invalid_argument_is_not_an_internal_fault` | a `RuntimeError` at execution is `invalid_argument` with a null `fault`, while a compile failure and a `ValueError` at execution stay `internal_fault` with their fault classes |
-| `test_cel_maps_only_documented_native_errors` | each native exception maps to its documented kind and fault, the parser panic to `internal_fault` with the fault `panic`, and the error carries neither the native message nor its cause |
+| `test_cel_invalid_argument_is_not_an_internal_fault` | a `RuntimeError` or `ValueError` raised during compilation is `internal_fault` with fault `runtime_error` or `value_error`, respectively. The error omits the native message. |
+| `test_cel_maps_only_documented_native_errors` | native execution exceptions map to their documented kinds and faults, including `RuntimeError` to `invalid_argument` with a null fault and `ValueError` to `internal_fault` with fault `value_error`. A parser panic maps to `internal_fault` with fault `panic`. The error omits the native message and its cause. |
 | `test_cel_cancellation_propagates_through_evaluation` | `asyncio.CancelledError`, `KeyboardInterrupt` and `SystemExit` raised during evaluation still propagate |
 | `test_cel_persisted_errors_exclude_values` | no stored, returned or logged error carries expression text, values or binding messages. This includes binding messages that contain payload keys, DEBUG output and exception chains, in every sink: wait, binding, approval, event, API, CLI, MCP and logs |
 | `test_cel_evaluation_error_reads_parity` | the error record appears in node, trigger-binding and approval reads, the Python client, CLI `--json`, MCP output and the TypeScript client |
@@ -1022,7 +1532,19 @@ Before the first author-expression consumer, the compact regression and golden c
 
 ### 7.10 Prompt templates
 
-Prompt templates (`prompt`, `system_prompt_append`, `cmd` elements) are **Jinja2 in a sandboxed environment** (DD-11): the full template language, the variable names of section 7.1 (the CEL projections of section 7.5 do not apply to templates), no filesystem loaders, no imports or includes, no access to Python attributes beyond the bound data. Templates are rendered once when the nonsecret execution request is sealed before preparation/execution effects; the attempt owns the saved rendered content and availability state. Recovery reads that content and never re-renders over current data (ADR-0018). Run parameters that arrive from a webhook may be used in prompts but never inside `cmd` elements or `workspace.rev` (`IR016`).
+Run full Jinja2 in a sandbox for `prompt`, `system_prompt_append` and each `cmd` element (DD-11).
+Use the variable names in [section 7.1](#71-expression-kinds-and-environments) without applying CEL projections.
+The sandbox disallows filesystem loaders, imports, includes and Python attribute access beyond the bound data.
+
+Seal the authoritative rendered content once in the nonsecret execution request before preparation or execution effects.
+The Worker prepares a proposal and the API independently derives and compares the complete result before upload readiness or the first inline seal.
+A first seal of a ready upload uses its checked identity.
+The attempt owns the saved content and availability, and seal replay and recovery reuse the recorded bytes.
+The [execution request contract](execution-request.md#3-trusted-derivation-and-finite-admission) owns renderer admission and actual stop controls.
+Seal activation belongs to #1453, and upload-to-ready rendering belongs to #1640. [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md)
+
+A graph with a webhook trigger may use run parameters in prompts.
+Using them in a `cmd` element or `workspace.rev` is `IR016` for that graph.
 
 ## 8. Triggers (FR-6.2)
 

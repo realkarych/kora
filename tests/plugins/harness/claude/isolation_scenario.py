@@ -2,14 +2,18 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import mkdtemp
 
 from kora.conformance.capture import captured
 from kora.conformance.common import utc_now
 from kora.conformance.harness import ConformancePolicy, ConformanceSink, Trace
+from kora.ir import ToolPolicy
 from kora.observability import LoggingSettings
 from kora.plugins.harness.claude.session import COMPONENT
+from kora.plugins.policy.allow_deny import AllowDenyPolicy
+from kora.protocols.common import ProtocolContext
 from kora.protocols.policy import (
     PolicyClient,
     PolicyDecision,
@@ -51,6 +55,33 @@ def scripted_calls(value: object) -> list[tuple[str, dict[str, object]]]:
     return calls
 
 
+@dataclass
+class AllowDenyClient:
+    ctx: ProtocolContext
+    provider: AllowDenyPolicy = field(default_factory=AllowDenyPolicy)
+    decisions: list[dict[str, object]] = field(default_factory=lambda: [])
+
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+    ) -> PolicyDecision:
+        decision = await self.provider.decide(
+            request, layers, protected_paths, self.ctx
+        )
+        self.decisions.append(
+            {
+                "tool_use_id": request.tool_use_id,
+                "tool": request.tool,
+                "subagent": request.agent_id is not None,
+                "allow": decision.allow,
+                "reason": decision.reason,
+            }
+        )
+        return decision
+
+
 class RaisingPolicy:
     async def decide(
         self,
@@ -83,10 +114,27 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
     cancel_marker = config.get("cancel_marker")
     assert isinstance(contained, bool)
     assert isinstance(denied_tool, str)
-    assert policy_name in ("conformance", "raising")
+    assert policy_name in ("conformance", "raising", "allow_deny")
     assert cancel_marker is None or isinstance(cancel_marker, str)
     before = network_counters() if contained else None
-    state = ScriptedState(scripted_calls(config["calls"]))
+    permission_mode = config.get("permission_mode", "dont_ask")
+    assert isinstance(permission_mode, str)
+    layer_config = mapping(config.get("layers", {}))
+    assert layer_config is not None
+    layers = PolicyLayers(
+        ToolPolicy.model_validate(layer_config.get("namespace", {})),
+        ToolPolicy.model_validate(layer_config.get("node", {})),
+    )
+    paths = objects(config.get("protected_paths", []))
+    assert paths is not None
+    protected_paths: list[str] = []
+    for path in paths:
+        assert isinstance(path, str)
+        protected_paths.append(path)
+    state = ScriptedState(
+        scripted_calls(config["calls"]),
+        scripted_calls(config.get("subagent_calls", [])),
+    )
     server, thread, base_url = serve(state)
     launches = ScriptedLaunches(
         Path(mkdtemp(prefix="ki", dir="/tmp")), Path(workspace), base_url
@@ -95,10 +143,19 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
     try:
         with captured(COMPONENT, LoggingSettings(), "isolation", utc_now) as capture:
             clock = SystemClock()
-            adapter = make_adapter(Path(workspace), context_for(capture, clock))
+            ctx = context_for(capture, clock)
+            adapter = make_adapter(
+                Path(workspace),
+                ctx,
+                layers=layers,
+                protected_paths=tuple(protected_paths),
+            )
             sink = ConformanceSink(None, Trace())
+            recording = AllowDenyClient(ctx)
             policy: PolicyClient = (
-                RaisingPolicy()
+                recording
+                if policy_name == "allow_deny"
+                else RaisingPolicy()
                 if policy_name == "raising"
                 else ConformancePolicy(denied_tool, sink.trace)
             )
@@ -113,7 +170,12 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
                 )
                 try:
                     result = await adapter.run(
-                        session_spec(adapter), policy, sink, launches
+                        session_spec(
+                            adapter, config={"permission_mode": permission_mode}
+                        ),
+                        policy,
+                        sink,
+                        launches,
                     )
                     if watcher is not None:
                         await watcher
@@ -133,6 +195,7 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
             )
             config_settings = launches.placements["harness_config"] / "settings.json"
             report: dict[str, object] = {
+                "decisions": recording.decisions,
                 "config_settings": config_settings.read_text()
                 if config_settings.exists()
                 else None,
@@ -174,6 +237,8 @@ async def scenario(config: dict[str, object]) -> dict[str, object]:
             stop_server(server, thread)
     bodies, clients, unauthorized = state.observed_requests()
     report.update(requests=bodies, clients=clients, unauthorized_requests=unauthorized)
+    with state.lock:
+        report["server_tool_requests"] = list(state.server_tool_requests)
     report["leftover"] = await released(
         workspace, clock, clock.monotonic_ns() + 5_000_000_000
     )

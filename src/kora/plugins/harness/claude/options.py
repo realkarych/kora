@@ -17,7 +17,7 @@ class ClaudeSessionOptions(BoundaryModel):
     model: str | None = None
     system_prompt_append: str | None = None
     permission_mode: Literal["plan", "accept_edits", "dont_ask", "bypass"] = "dont_ask"
-    max_turns: Annotated[StrictInt, Field(ge=1)]
+    max_turns: Annotated[StrictInt, Field(ge=1, le=TRACKING_CEILING)]
     output_schema: JsonObjectField | None = None
 
 

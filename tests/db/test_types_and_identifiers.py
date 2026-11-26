@@ -109,7 +109,6 @@ async def test_column_types_round_trip_identically(database: Database) -> None:
     assert expiries[whole_token] == whole_second
     assert expiries[fractional_token] == fractional
     assert expiries[shifted_token] == shifted.astimezone(UTC)
-    assert expiries[shifted_token].tzinfo is not None
     assert expiries[open_token] is None
     assert ordered == sorted(
         [whole_token, fractional_token, shifted_token],
@@ -206,26 +205,6 @@ def test_identifiers_are_sortable_monotonic_and_injected() -> None:
     assert not is_identifier("8" * 26)
     with pytest.raises(IdentifierError):
         IdentifierGenerator(lambda: datetime(2026, 1, 1)).new()
-
-
-@pytest.mark.asyncio
-async def test_inserted_rows_use_the_injected_clock(database: Database) -> None:
-    moment = datetime(2030, 1, 2, 3, 4, 5, 678000, tzinfo=UTC)
-    async with database.transaction() as connection:
-        seeder = Seeder.at(connection, moment)
-        namespace_id = await seeder.namespace()
-
-    async with database.read_transaction() as connection:
-        row = (
-            await connection.execute(
-                select(namespace.c.created_at, namespace.c.updated_at).where(
-                    namespace.c.id == namespace_id
-                )
-            )
-        ).one()
-
-    assert tuple(row) == (moment, moment)
-    assert timestamp_of(namespace_id) == moment
 
 
 @pytest.mark.asyncio

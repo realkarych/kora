@@ -1,0 +1,22 @@
+{
+  "name": "PreviousAttempt",
+  "builtin_revision": "1",
+  "schema": "urn:kora:artifact:PreviousAttempt",
+  "parent": null,
+  "behavior": {
+    "validation": "kora.previous-attempt-validation.v1",
+    "digest_fields": "kora.json-payload.v1",
+    "summary": "kora.json-payload.v1"
+  },
+  "validation": {
+    "max_raw_json_bytes": 1048576,
+    "max_canonical_json_bytes": 1048576,
+    "max_json_depth": 3,
+    "max_artifact_entries": 17771
+  },
+  "canonicalization": "kora.structured-json.v1",
+  "digest_selection": [
+    ""
+  ],
+  "schema_sha256": "07d9e6e7e22334039584177116f56b8239c21a495633cf740caeda66097a7fd7"
+}

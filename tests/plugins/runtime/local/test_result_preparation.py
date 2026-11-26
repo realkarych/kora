@@ -3,6 +3,7 @@ import errno
 import os
 import threading
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Final, Literal
 from weakref import ReferenceType, ref
@@ -10,34 +11,56 @@ from weakref import ReferenceType, ref
 import pytest
 from pydantic import TypeAdapter
 
-from kora.conformance.capture import Capture
+from kora.conformance.capture import Capture, captured
 from kora.conformance.common import context_for, kora_capture
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.vcs_ref_json import canonical_bytes
+from kora.observability import Level, LoggingSettings
+from kora.observability.context import bound_scope
 from kora.plugins.harness.fake.adapter import NAME, SESSION_ID, VERSION
 from kora.plugins.runtime.local.agent import AgentSources
+from kora.plugins.runtime.local.channel import PRE_ATTACH_BYTES, FrameType, read_request
 from kora.plugins.runtime.local.completed import recorded_exited
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, rebound
 from kora.protocols.deadlines import ExecutionDeadline
+from kora.protocols.harness import AgentExecution
 from kora.protocols.runtime import SessionObservation, Workload
-from kora.runner.agent import STOP_DEADLINE_NS, NativeResultWork
+from kora.protocols.vcs import WorkspaceRef
+from kora.runner.agent import STOP_DEADLINE_NS, HostedHarness, NativeResultWork
+from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.journal import BatchAppend, JournalAppendOutcome, RunningJournal
 from kora.runner.native_io import NativeIOBusy
 from kora.runner.peers import kernel_source
-from kora.runner.registry import CompletedResult, ControlFileRef, Registry
+from kora.runner.registry import (
+    AttemptKey,
+    CompletedResult,
+    ControlFileRef,
+    Registry,
+    Submitter,
+)
 from kora.runner.session_result import (
+    FINALIZATION_NAME,
     LEGACY_RESULT_NAME,
     RESULT_DIRECTORY,
     RESULT_NAME,
+    FinalizationImplementation,
+    FinalizationOrigin,
+    FinalizationReferences,
     PreparedObservation,
     digest_of,
     prepare_observation,
+    read_finalization,
 )
 from kora.runner.session_result_encoding import ResultEncoder
-from kora.testing.local import unless_busy
+from kora.testing.local import (
+    TESTING_PRICE_TABLE,
+    script_chunks,
+    script_item,
+    unless_busy,
+)
 from kora.testing.runner import AllowDenyPolicies
 from kora.testing.script import FakeScript
 from tests.plugins.harness.fake.fake_support import result
@@ -57,7 +80,10 @@ from tests.plugins.runtime.local.test_completion import (
 )
 from tests.plugins.runtime.local.testing_support import attempt, composition
 from tests.runner.agent_support import (
+    FAKE_SPEC,
+    FIXED_NOW,
     FakeResolver,
+    GatedScript,
     ObservedFakeHarness,
     SteppedClock,
     make_world,
@@ -71,7 +97,7 @@ from tests.runner.test_session_result_protection import observation
 from tests.support.local_delivery import delivery_server
 from tests.support.local_peers import CONDITION_SECONDS, identity_of, until
 from tests.support.local_runners import short_directory, submitted, written
-from tests.support.local_runtime import private_directory, protocol_error
+from tests.support.local_runtime import Identifiers, private_directory, protocol_error
 
 __all__ = ["kora_capture"]
 
@@ -129,6 +155,14 @@ async def test_session_observation_replays_checked_result_after_runner_exit(
         await until(lambda: recorded_exited(NativeIdentityReader(), entry.runner))
         completed = await local.runtime.session_observation(handle, local.ctx)
         completed_bytes = (control / RESULT_NAME).read_bytes()
+        before_live_proof = await protocol_error(
+            local.runtime.session_finalization(handle, local.ctx)
+        )
+        await protocol_error(
+            collected(
+                local.runtime.transfer_out(handle, FINALIZATION_NAME, local.ctx), files
+            )
+        )
         await protocol_error(
             collected(local.runtime.transfer_out(handle, RESULT_NAME, local.ctx), files)
         )
@@ -172,9 +206,60 @@ async def test_session_observation_replays_checked_result_after_runner_exit(
     assert expected.result.output is not None
     assert expected.result.output.source == "structured_output"
     assert expected.result.output.value == value
-    assert legacy.code == unowned.code == "session_unobserved"
+    assert legacy.code == unowned.code == before_live_proof.code == "session_unobserved"
     assert files == []
     assert retained_quiescence == quiescence
+    assert not control.exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_session_finalization_keeps_ordinary_result_on_optional_failure(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    source = scripted_output({"value": "ordinary checked output"})
+    async with composition(tmp_path, kora_capture) as local:
+        work = await local.workload("attempt-1", source)
+        runtime, ctx = local.runtime, local.ctx
+        handle = await runtime.submit(work, ctx)
+        buffer = source.serialise()
+        await runtime.transfer_in(
+            handle, script_item(buffer), script_chunks(buffer), ctx
+        )
+        control = attempt(local) / "control" / RESULT_DIRECTORY
+        control.mkdir(mode=0o700, parents=True, exist_ok=True)
+        sibling = control / FINALIZATION_NAME
+        planted = b'{"candidate":"unowned"}'
+        sibling.write_bytes(planted)
+
+        await unless_busy(lambda: runtime.start(handle, ctx))
+        source_refused = await protocol_error(
+            unless_busy(lambda: runtime.session_finalization(handle, ctx))
+        )
+        live = await runtime.session_observation(handle, ctx)
+        payload = (control / RESULT_NAME).read_bytes()
+        remaining = sibling.read_bytes()
+        await unless_busy(lambda: runtime.quiescence(handle, ctx))
+        entry = completed_entry(runtime)
+        await until(lambda: recorded_exited(NativeIdentityReader(), entry.runner))
+        retained = await runtime.session_observation(handle, ctx)
+        await runtime.release(handle, ctx)
+
+    assert source_refused.code == "session_unobserved"
+    assert (
+        retained
+        == live
+        == observation(
+            {"value": "ordinary checked output"},
+            harness=NAME,
+            session_id=SESSION_ID,
+            installed_version=VERSION,
+        )
+    )
+    assert entry.result is not None
+    assert entry.result.ref == ControlFileRef(
+        name=RESULT_NAME, size=len(payload), digest=digest_of(payload)
+    )
+    assert remaining == planted
     assert not control.exists()
 
 
@@ -284,8 +369,12 @@ async def test_session_result_scan_settles_on_cancel_and_shutdown(
 ) -> None:
     clock = SteppedClock()
     binding = TypeAdapter(ExecutionDeadline).dump_python(deadline(120), mode="json")
-    work = detached_workload({"deadline": binding} if expires else {})
-    resolver = FakeResolver(script([CHECKOUT_SCRIPT]), context_for(kora_capture))
+    work = detached_workload(
+        {"deadline": binding if expires else None, "session_spec": FINALIZATION_SPEC}
+    )
+    resolver = FinalizationResolver(
+        script([CHECKOUT_SCRIPT]), context_for(kora_capture)
+    )
     sources = AgentSources(resolver, AllowDenyPolicies())
     held = HeldPreparation()
     registry = kora_capture.diagnostics.registry
@@ -297,7 +386,15 @@ async def test_session_result_scan_settles_on_cancel_and_shutdown(
         )
         try:
             async with agent_session(
-                tmp_path, kora_capture, sources, clock, prepare_result=held
+                tmp_path,
+                kora_capture,
+                sources,
+                clock,
+                prepare_result=held,
+                registration=(
+                    AttemptKey(work.execution_domain_id, work.attempt_id),
+                    identity_of(os.getpid()),
+                ),
             ) as (session, attempt_path):
                 reader = NativeIdentityReader(clock=clock)
                 server = ControlServer(
@@ -324,6 +421,7 @@ async def test_session_result_scan_settles_on_cancel_and_shutdown(
                     await until(held.entered.is_set)
                     control = attempt_path / "control"
                     original_control = descriptors_for(control)
+                    assert resolver.adapters
                     while_held = (registry.count(), registry.retained_bytes())
                     retained = held.retained_work()
                     before_stop = code_of_call(
@@ -390,6 +488,7 @@ async def test_session_result_scan_settles_on_cancel_and_shutdown(
                     for event in journal_events(attempt_path / "journal.jsonl")
                 }
                 assert "runner.session_spec" in after_drain
+                assert not (control / RESULT_DIRECTORY / FINALIZATION_NAME).exists()
                 assert "runner.session_result" not in after_drain
                 assert "runner.session_failed" not in after_drain
         finally:
@@ -403,8 +502,15 @@ async def test_result_prepared_before_deadline_and_returned_late_stays_unpublish
 ) -> None:
     clock = SteppedClock()
     binding = TypeAdapter(ExecutionDeadline).dump_python(deadline(120), mode="json")
-    fields = {**agent_fields(), "deadline": binding}
-    resolver = FakeResolver(script([CHECKOUT_SCRIPT]), context_for(kora_capture))
+    fields = {
+        **agent_fields(),
+        "deadline": binding,
+        "session_spec": FINALIZATION_SPEC,
+    }
+    expected_domain = Identifiers()()
+    resolver = FinalizationResolver(
+        script([CHECKOUT_SCRIPT]), context_for(kora_capture)
+    )
     sources = AgentSources(resolver, AllowDenyPolicies())
     held = HeldPreparation(hold_completed=True)
 
@@ -412,7 +518,17 @@ async def test_result_prepared_before_deadline_and_returned_late_stays_unpublish
         return submitted(runtime, "attempt-1", **fields)
 
     async with (
-        agent_session(tmp_path, kora_capture, sources, clock, prepare_result=held) as (
+        agent_session(
+            tmp_path,
+            kora_capture,
+            sources,
+            clock,
+            prepare_result=held,
+            registration=(
+                AttemptKey(expected_domain, "attempt-1"),
+                identity_of(os.getpid()),
+            ),
+        ) as (
             session,
             path,
         ),
@@ -424,6 +540,7 @@ async def test_result_prepared_before_deadline_and_returned_late_stays_unpublish
             workload=work_for,
         ) as live,
     ):
+        assert live.work.execution_domain_id == expected_domain
         journal = path / "journal.jsonl"
         result_file = path / "control" / RESULT_DIRECTORY / RESULT_NAME
         try:
@@ -450,6 +567,7 @@ async def test_result_prepared_before_deadline_and_returned_late_stays_unpublish
             held.return_gate.set()
             await until(session.result_work_settled)
             file_after_return = result_file.exists()
+            sibling_after_return = result_file.with_name(FINALIZATION_NAME).exists()
             reference_after_return = session.result_reference()
             after_return = tuple(event.kind for event in journal_events(journal))
             quiescence = await unless_busy(lambda: answered(live, clock))
@@ -469,6 +587,7 @@ async def test_result_prepared_before_deadline_and_returned_late_stays_unpublish
     assert held.thread is not None
     assert not held.thread.is_alive()
     assert not file_after_return
+    assert not sibling_after_return
     assert reference_after_return is None
     assert "runner.session_spec" in after_return
     assert "runner.session_result" not in after_return
@@ -514,16 +633,170 @@ async def test_native_result_work_rejects_a_second_admission_and_unwinds_on_stop
     assert not held.thread.is_alive()
 
 
+class FinalizationResolver(FakeResolver):
+    def resolve(
+        self, execution: AgentExecution, workspace: WorkspaceRef
+    ) -> HostedHarness:
+        return replace(
+            super().resolve(execution, workspace),
+            no_capture=FinalizationImplementation(name="fake", version="fake-1"),
+        )
+
+
+def finalization_origin(work: Workload) -> FinalizationOrigin:
+    return FinalizationOrigin(
+        attempt_id=work.attempt_id,
+        execution_domain_id=work.execution_domain_id,
+        submitter=SUBMITTER,
+        supervisor=identity_of(os.getpid()),
+        request_digest=work.execution_request_digest,
+    )
+
+
+FINALIZATION_SPEC: Final[JsonObject] = {
+    **FAKE_SPEC,
+    "price_table_id": TESTING_PRICE_TABLE.id,
+    "price_table": TESTING_PRICE_TABLE.model_dump(mode="json"),
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("intervention", ["cancel", "abandoned_waiter"])
+async def test_agent_session_finalization_measures_the_adapter_and_logs_fixed_outcome(
+    tmp_path: Path,
+) -> None:
+    clock = SteppedClock()
+    gated = GatedScript(script([CHECKOUT_SCRIPT]))
+    with captured(
+        "runner.agent",
+        LoggingSettings(level=Level.DEBUG),
+        "finalization-tests",
+        lambda: FIXED_NOW,
+    ) as capture:
+        world = make_world(tmp_path, capture)
+        resolver = FinalizationResolver(gated, context_for(capture))
+        host = world.host(resolver, clock=clock)
+        work = world.workload(session_spec=FINALIZATION_SPEC)
+        try:
+            with bound_scope(attempt_id=work.attempt_id):
+                host.start(work, world.workspace(), origin=finalization_origin(work))
+                await asyncio.wait_for(gated.entered.wait(), CONDITION_SECONDS)
+
+                await clock.advance_to(17_999_999)
+                gated.release.set()
+                await host.finished()
+                result_ref = host.result_reference()
+                sibling = host.finalization_reference()
+                assert result_ref is not None
+                assert sibling is not None
+                facts = read_finalization(
+                    world.control,
+                    FinalizationReferences(
+                        checked_result=ControlFileRef(
+                            name=result_ref.name,
+                            size=result_ref.size,
+                            digest=result_ref.digest,
+                        ),
+                        finalization=ControlFileRef(
+                            name=sibling.name,
+                            size=sibling.size,
+                            digest=sibling.digest,
+                        ),
+                    ),
+                )
+        finally:
+            gated.release.set()
+            await host.stop()
+            world.close()
+        records = capture.finish()
+
+    (event,) = (
+        record
+        for record in records
+        if record.get("event") == "runner.agent.finalization"
+    )
+    assert facts.duration_ms == 17
+    assert event["level"] == "DEBUG"
+    assert event["attempt_id"] == work.attempt_id
+    assert event["outcome"] == "sealed"
+    assert (
+        not {
+            "digest",
+            "capture",
+            "price_table_id",
+            "session_id",
+            "transcript",
+            "process",
+        }
+        & event.keys()
+    )
+
+
+class WaitingFinalizationServer(ControlServer):
+    request_received: asyncio.Event
+    peer_closed: asyncio.Event
+
+    async def _attached(
+        self, channel: BoundedChannel, submitter: Submitter, observational: bool
+    ) -> None:
+        cutoff = self._clock.monotonic_ns() + int(CONDITION_SECONDS * SECOND)
+        frames = {FrameType.JSON.value: PRE_ATTACH_BYTES}
+        _, payload = await channel.read_typed_frame(cutoff, frames)
+        request = read_request(payload)
+        assert request is not None
+        assert request.op == "session_finalization"
+        self.request_received.set()
+        try:
+            await channel.read_typed_frame(cutoff, frames)
+        except ChannelError as error:
+            if error.reason is not ChannelFailure.CLOSED:
+                raise
+            self.peer_closed.set()
+
+
+@pytest.mark.asyncio
+async def test_agent_session_finalization_reader_closes_with_local_runtime(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with delivery_server(
+        tmp_path, kora_capture, server_type=WaitingFinalizationServer
+    ) as live:
+        server = live.server
+        assert isinstance(server, WaitingFinalizationServer)
+        server.request_received = asyncio.Event()
+        server.peer_closed = asyncio.Event()
+        handle = live.runtime.registry.key(live.work.attempt_id).handle()
+        reading = asyncio.create_task(
+            live.runtime.session_finalization(handle, live.ctx)
+        )
+        try:
+            await asyncio.wait_for(server.request_received.wait(), CONDITION_SECONDS)
+
+            await live.runtime.close()
+            read_ended_at_close = reading.done()
+            await asyncio.wait_for(server.peer_closed.wait(), CONDITION_SECONDS)
+        finally:
+            if not reading.done():
+                reading.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await reading
+
+    assert read_ended_at_close
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "intervention", ["cancel", "earlier_stop_then_cancel", "abandoned_waiter", "fence"]
+)
 async def test_result_work_survives_protocol_cancel_and_abandoned_waiter(
     tmp_path: Path,
     kora_capture: Capture,
-    intervention: Literal["cancel", "abandoned_waiter"],
+    intervention: Literal[
+        "cancel", "earlier_stop_then_cancel", "abandoned_waiter", "fence"
+    ],
 ) -> None:
     world = make_world(tmp_path, kora_capture)
     kora_capture.scope.admit("registered-value")
-    resolver = FakeResolver(
+    resolver = FinalizationResolver(
         script([CHECKOUT_SCRIPT]),
         context_for(kora_capture),
         adapter_type=ObservedFakeHarness,
@@ -532,36 +805,62 @@ async def test_result_work_survives_protocol_cancel_and_abandoned_waiter(
     host = world.host(resolver, prepare_result=held)
 
     try:
-        host.start(world.workload(), world.workspace())
+        work = world.workload(session_spec=FINALIZATION_SPEC)
+        host.start(work, world.workspace(), origin=finalization_origin(work))
         await until(held.entered.is_set)
         adapter = resolver.adapters[0]
         assert isinstance(adapter, ObservedFakeHarness)
         sink = adapter.runner_sink
         assert sink is not None
-        if intervention == "cancel":
-            waiter = asyncio.create_task(host.cancel())
-            await until(lambda: sink.cause() == "cancel")
-        else:
+        cancel_waiter: asyncio.Task[None] | None = None
+        if intervention in ("cancel", "earlier_stop_then_cancel"):
+            expected_cause = "cancel"
+            if intervention == "earlier_stop_then_cancel":
+                expected_cause = "max_events"
+                sink.terminate("max_events")
+            cancel_started = asyncio.Event()
+
+            async def cancel() -> None:
+                cancel_started.set()
+                await host.cancel()
+
+            cancel_waiter = asyncio.create_task(cancel())
+            await cancel_started.wait()
+            assert sink.cause() == expected_cause
+        elif intervention == "abandoned_waiter":
             waiter = asyncio.create_task(host.finished())
             asyncio.get_running_loop().call_soon(waiter.cancel)
             with pytest.raises(asyncio.CancelledError):
                 await waiter
         in_flight = not host.result_work_settled() and not held.fenced()
+        if intervention == "fence":
+            host.fence()
+            await until(held.fenced)
+            assert not host.result_work_settled()
         cause = sink.cause()
         held.release()
         await host.finished()
-        if intervention == "cancel":
-            await waiter
+        if cancel_waiter is not None:
+            await cancel_waiter
         published = host.result_reference()
+        sibling = host.finalization_reference()
     finally:
         held.release()
         released = await host.stop()
         world.close()
 
     assert in_flight
-    assert cause == ("cancel" if intervention == "cancel" else None)
-    assert published is not None
-    assert world.kinds().count("runner.session_result") == 1
+    expected_causes = {
+        "cancel": "cancel",
+        "fence": "cancel",
+        "earlier_stop_then_cancel": "max_events",
+    }
+    assert cause == expected_causes.get(intervention)
+    assert (published is None) == (intervention == "fence")
+    assert (sibling is not None) == (intervention == "abandoned_waiter")
+    assert world.kinds().count("runner.session_result") == (
+        0 if intervention == "fence" else 1
+    )
     assert held.calls == 1
     assert host.result_work_settled()
     assert held.encoder is not None
@@ -597,10 +896,13 @@ async def test_late_durable_result_append_does_not_publish_reference(
     clock = SteppedClock()
     journal = DeadlineCrossingAppend(world.journal, clock)
     host = world.host(
-        world.resolver(script([CHECKOUT_SCRIPT])), journal=journal, clock=clock
+        FinalizationResolver(script([CHECKOUT_SCRIPT]), context_for(kora_capture)),
+        journal=journal,
+        clock=clock,
     )
     try:
-        host.start(world.workload(deadline=deadline(120)), world.workspace())
+        work = world.workload(deadline=deadline(120), session_spec=FINALIZATION_SPEC)
+        host.start(work, world.workspace(), origin=finalization_origin(work))
 
         await host.finished()
         await host.stop()
@@ -611,6 +913,8 @@ async def test_late_durable_result_append_does_not_publish_reference(
     assert (world.root / "control" / RESULT_DIRECTORY / RESULT_NAME).is_file()
     assert clock.monotonic_ns() == DEADLINE_NS
     assert host.result_reference() is None
+    assert host.finalization_reference() is None
+    assert not (world.root / "control" / RESULT_DIRECTORY / FINALIZATION_NAME).exists()
     assert host.result_work_settled()
 
 

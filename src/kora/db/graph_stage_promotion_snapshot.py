@@ -34,10 +34,6 @@ from kora.db.graph_stage_promotion_intent_reads import (
     read_graph_stage_promotion_intent_scalars,
     read_intent_text_width_factor,
 )
-from kora.db.graph_stage_promotion_layout import (
-    GraphStagePromotionLayout,
-    observe_graph_stage_promotion_layout,
-)
 from kora.db.graph_stage_promotion_projection import (
     MAX_PROMOTION_PAIR_BYTES,
     PromotionDocumentProjectionRejected,
@@ -166,12 +162,6 @@ async def _collect(
     _require_time(deadline)
     preparation = await read_graph_preparation_settlement(connection, binding)
     if preparation is None:
-        raise _unverified()
-    _require_time(deadline)
-    if (
-        await observe_graph_stage_promotion_layout(connection)
-        is not GraphStagePromotionLayout.VERIFIED
-    ):
         raise _unverified()
     _require_time(deadline)
     inventory = await read_graph_stage_inventory(

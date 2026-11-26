@@ -4,7 +4,7 @@
 - Reviewed: line by line and accepted by the project owner, 2026-11-22
 - Decider: project owner
 - Refines: [ADR-0013](0013-implementation-stack.md), serving dependencies
-- Related: [ADR-0002](0002-ai-first-api-and-thin-clients.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0026](0026-package-layers.md), [issue #1755](https://github.com/realkarych/kora/issues/1755)
+- Related: [ADR-0002](0002-ai-first-api-and-thin-clients.md), [ADR-0003](0003-scheduler-and-workers-over-http.md#decision), [ADR-0026](0026-package-layers.md), [issue #1755](https://github.com/realkarych/kora/issues/1755)
 
 ## Context
 

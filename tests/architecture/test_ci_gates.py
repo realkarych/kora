@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.ci.lane_plan import MAXIMUM_LANES
 from tests.support.workflows import table, workflow_document
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +37,7 @@ LANE_OUTCOMES = {
     "general-8": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "general-10": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "general-20": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    f"general-{MAXIMUM_LANES}": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "local-runtime": WITHOUT_STATIC_CHECKS,
     STATIC_CHECK_LANE: {
@@ -46,7 +48,7 @@ LANE_OUTCOMES = {
 }
 UNPLANNED_LANES = (
     "general-0",
-    "general-21",
+    f"general-{MAXIMUM_LANES + 1}",
     "general-01",
     "general-",
     "conformance",
@@ -85,9 +87,15 @@ EDITORIAL_INPUTS = {
         "WORKFLOW_CANCELLED",
     ),
     "cel-measurements": tuple(CEL_SUCCESS),
-    "browser": (*SCOPE, "FULL_SCOPE", "BROWSER_RESULT", "CANCELLED"),
+    "browser": (
+        *SCOPE,
+        "FULL_SCOPE",
+        "BROWSER_PNPM_RESULT",
+        "BROWSER_RESULT",
+        "CANCELLED",
+    ),
 }
-GateCase = tuple[str, dict[str, str], bool]
+GateCase = tuple[str, dict[str, str]]
 
 
 def run_gate(
@@ -171,6 +179,7 @@ def test_outcome_gate_refuses_malformed_requirements(
     values: dict[str, str | None] = {
         **REQUIREMENTS,
         "first_outcome": "success",
+        "BROWSER_PNPM_RESULT": "success",
         "BROWSER_RESULT": "success",
         "FULL_SCOPE": "true",
         "CANCELLED": "false",
@@ -191,11 +200,9 @@ def lane_completion_cases() -> dict[str, GateCase]:
     cases: dict[str, GateCase] = {}
     for lane in LANE_OUTCOMES:
         complete = expected_lane_outcomes(lane)
-        cases[f"{lane}-complete"] = (lane, complete, True)
         cases[f"{lane}-workflow-cancelled"] = (
             lane,
             {**complete, "WORKFLOW_CANCELLED": "true"},
-            False,
         )
         steps = {f: v for f, v in complete.items() if f != "STATIC_OUTCOME"}
         for field, expected in steps.items():
@@ -204,23 +211,19 @@ def lane_completion_cases() -> dict[str, GateCase]:
                     cases[f"{lane}-{field}-{outcome or 'empty'}"] = (
                         lane,
                         {**complete, field: outcome},
-                        False,
                     )
     for lane in UNPLANNED_LANES:
         cases[f"unplanned-{lane}-profile"] = (
             lane,
             expected_lane_outcomes("general-1"),
-            False,
         )
     cases["unknown-local-runtime-profile"] = (
         "unknown",
         expected_lane_outcomes("local-runtime"),
-        False,
     )
     cases["empty-general-profile"] = (
         "",
         expected_lane_outcomes("general-1"),
-        False,
     )
     return cases
 
@@ -229,12 +232,12 @@ LANE_COMPLETION_CASES = lane_completion_cases()
 
 
 @pytest.mark.parametrize(
-    ("lane", "outcomes", "passes"),
+    ("lane", "outcomes"),
     list(LANE_COMPLETION_CASES.values()),
     ids=list(LANE_COMPLETION_CASES),
 )
 def test_lane_completion_rejects_every_incomplete_outcome(
-    tmp_path: Path, lane: str, outcomes: dict[str, str], passes: bool
+    tmp_path: Path, lane: str, outcomes: dict[str, str]
 ) -> None:
     values: dict[str, str | None] = {
         "WORKFLOW_CANCELLED": "false",
@@ -244,7 +247,23 @@ def test_lane_completion_rejects_every_incomplete_outcome(
 
     result = run_gate(["scaffold-lane"], values, tmp_path / "output")
 
-    assert (result.returncode == 0) is passes
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("upload", ["success", "skipped"])
+def test_penultimate_general_lane_requires_uploaded_evidence(
+    tmp_path: Path, upload: str
+) -> None:
+    values: dict[str, str | None] = {
+        **expected_lane_outcomes("general-1"),
+        "KORA_SCAFFOLD_LANE": f"general-{MAXIMUM_LANES - 1}",
+        "UPLOAD_OUTCOME": upload,
+        "WORKFLOW_CANCELLED": "false",
+    }
+
+    result = run_gate(["scaffold-lane"], values, tmp_path / "output")
+
+    assert (result.returncode == 0) is (upload == "success")
 
 
 def static_check_gate(
@@ -319,8 +338,7 @@ def test_scaffold_join_refuses_failed_cancelled_skipped_or_missing_evidence(
         (None, "skipped", False),
     ]
     + [
-        (event, result, result == "success")
-        for event in ("schedule", "workflow_dispatch")
+        ("workflow_dispatch", result, result == "success")
         for result in ("success", "skipped", "failure", "cancelled", "")
     ],
 )
@@ -438,24 +456,38 @@ def test_required_measurement_gate_fails_closed(
 
 
 @pytest.mark.parametrize(
-    ("full_scope", "browser", "cancelled", "passes"),
+    ("full_scope", "pnpm", "browser", "cancelled", "passes"),
     [
-        ("true", "success", "false", True),
-        ("true", "failure", "false", False),
-        ("true", "skipped", "false", False),
-        ("true", "cancelled", "false", False),
-        ("true", "success", "true", False),
-        ("false", "skipped", "false", True),
-        ("false", "success", "false", False),
-        ("false", "skipped", "true", False),
+        ("true", "success", "success", "false", True),
+        ("true", "success", "failure", "false", False),
+        ("true", "success", "skipped", "false", False),
+        ("true", "success", "cancelled", "false", False),
+        ("true", "success", "success", "true", False),
+        ("true", "failure", "success", "false", False),
+        ("true", "cancelled", "success", "false", False),
+        ("true", "skipped", "success", "false", False),
+        ("true", None, "success", "false", False),
+        ("false", "skipped", "skipped", "false", True),
+        ("false", "skipped", "success", "false", False),
+        ("false", "skipped", "skipped", "true", False),
+        ("false", "success", "skipped", "false", False),
+        ("false", "failure", "skipped", "false", False),
+        ("false", "cancelled", "skipped", "false", False),
+        ("false", None, "skipped", "false", False),
     ],
 )
 def test_browser_status_requires_its_checks_or_editorial_skip(
-    tmp_path: Path, full_scope: str, browser: str, cancelled: str, passes: bool
+    tmp_path: Path,
+    full_scope: str,
+    pnpm: str | None,
+    browser: str,
+    cancelled: str,
+    passes: bool,
 ) -> None:
     values: dict[str, str | None] = {
         **SCOPE,
         "FULL_SCOPE": full_scope,
+        "BROWSER_PNPM_RESULT": pnpm,
         "BROWSER_RESULT": browser,
         "CANCELLED": cancelled,
     }

@@ -1,12 +1,13 @@
 import asyncio
-from collections.abc import Generator
-from contextlib import closing, contextmanager
+from collections.abc import AsyncGenerator, Callable, Generator
+from contextlib import ExitStack, asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from time import monotonic
 from typing import cast
 
 import pytest
-from sqlalchemy import Connection, event, insert, select, update
+from sqlalchemy import Connection, Engine, event, insert, select, update
 from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.util.concurrency import await_
 from starlette.types import ASGIApp, Message
@@ -561,6 +562,106 @@ async def latch_legacy_wait(
     return run_id, wait_id
 
 
+@dataclass
+class HandoffWriterTimes:
+    now: Callable[[], float]
+    driver: DBAPIConnection | None = None
+    events: list[tuple[str, float]] = field(default_factory=list[tuple[str, float]])
+    overflow: bool = False
+
+    def record(self, label: str) -> None:
+        if len(self.events) < 12:
+            self.events.append((label, self.now()))
+        else:
+            self.overflow = True
+
+    def checkout(self, driver: DBAPIConnection, *arguments: object) -> None:
+        self.driver = driver
+        self.record("checkout")
+
+    def begin_return(self, connection: Connection) -> None:
+        paired = (
+            self.driver is not None
+            and connection.connection.dbapi_connection is self.driver
+        )
+        self.record("raw_begin_return" if paired else "unpaired_begin_return")
+
+    def checkin(self, driver: DBAPIConnection | None, *arguments: object) -> None:
+        self.driver = None
+
+    def install(self, stack: ExitStack, engine: Engine) -> None:
+        stack.callback(self.checkin, None)
+        for event_name, observer in (
+            ("checkout", self.checkout),
+            ("begin", self.begin_return),
+            ("checkin", self.checkin),
+        ):
+            event.listen(engine, event_name, observer)
+            stack.callback(event.remove, engine, event_name, observer)
+
+    def note(self, deadline: float) -> str:
+        items = " ".join(
+            f"{name}={round((deadline - at) * 1000)}" for name, at in self.events
+        )
+        return f"{items} overflow={self.overflow}"
+
+
+class HandoffTimes:
+    def __init__(self) -> None:
+        self.loop_offset: float = asyncio.get_running_loop().time() - monotonic()
+        self.phases: dict[str, float] = {}
+        self.original: HandoffWriterTimes = HandoffWriterTimes(self.now)
+        self.secondary: HandoffWriterTimes = HandoffWriterTimes(self.now)
+        self.sqlite: bool = False
+
+    def now(self) -> float:
+        return monotonic() + self.loop_offset
+
+    def mark(self, phase: str) -> None:
+        self.phases[phase] = self.now()
+
+    @contextmanager
+    def writers(self, original: Database, secondary: Database) -> Generator[None]:
+        with ExitStack() as stack:
+            if original.dialect is Dialect.SQLITE:
+                self.sqlite = True
+                self.original.install(stack, original.writer_engine.sync_engine)
+                self.secondary.install(stack, secondary.writer_engine.sync_engine)
+            yield
+
+    @asynccontextmanager
+    async def watchdog(self) -> AsyncGenerator[None]:
+        timer = asyncio.timeout(10)
+        nested_timeout = False
+        try:
+            async with timer:
+                self.mark("entered")
+                try:
+                    yield
+                except TimeoutError:
+                    nested_timeout = True
+                    raise
+        except TimeoutError as error:
+            deadline = timer.when()
+            if not nested_timeout and timer.expired() and deadline is not None:
+                error.add_note(self.note(deadline))
+            raise
+
+    def note(self, deadline: float) -> str:
+        phases = " ".join(
+            f"{name}={round((deadline - at) * 1000)}"
+            for name, at in self.phases.items()
+        )
+        rows = [f"Claim handoff remaining milliseconds: {phases}"]
+        if self.sqlite:
+            rows += [
+                "SQLite native begin start unobserved.",
+                f"Original writer: {self.original.note(deadline)}",
+                f"Secondary writer: {self.secondary.note(deadline)}",
+            ]
+        return "\n".join(rows)[:1024]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interrupted", [False, True])
 async def test_run_latch_denies_competing_claim_and_live_heartbeat_before_cascade(
@@ -574,37 +675,47 @@ async def test_run_latch_denies_competing_claim_and_live_heartbeat_before_cascad
     delivery = await first_poll.poll(case.query, case.principal)
     assert delivery is not None
     query, principal = await contender(database, case)
-    await hold_target(database, case)
     other = narrow_database(database)
     cutoff = START + timedelta(seconds=1)
     clock.moment = cutoff
     hold = HeldExpiryContinuation(database, clock, START)
     concurrent_poll = poller(other, clock)
     fresh = case.query.model_copy(update={"claim_id": "expiry"})
+    times = HandoffTimes()
 
     try:
-        with hold.installed():
-            async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+        await hold_target(other, case)
+        with times.writers(database, other), hold.installed():
+            async with times.watchdog(), asyncio.TaskGroup() as tasks:
                 original = tasks.create_task(first_poll.poll(fresh, case.principal))
                 try:
                     await hold.entered.wait()
+                    times.mark("held")
                     pending = await state(other)
+                    times.mark("pending_snapshot_return")
                     replayed = await concurrent_poll.poll(case.query, case.principal)
+                    times.mark("replay_return")
                     after_replay = await state(other)
+                    times.mark("replay_snapshot_return")
                     beat = await heartbeat(
                         other, case, clock, heartbeat_body(delivery.system)
                     )
+                    times.mark("heartbeat_return")
+                    times.mark("rival_entry")
                     rival = await concurrent_poll.poll(query, principal)
+                    times.mark("rival_return")
                     if interrupted:
                         original.cancel()
                 finally:
                     hold.release.set()
+                    times.mark("release")
                 if interrupted:
                     with pytest.raises(asyncio.CancelledError):
                         await original
                     result = None
                 else:
                     result = await original
+                times.mark("continuation_settled")
         final = await state(database)
     finally:
         await other.close()

@@ -45,10 +45,10 @@ PENDING_LEGS: dict[str, str] = {
     "scripted-model": "#1388 trust-check and no-network sub-issue",
 }
 POLICY_LEGS: dict[str, str] = {
-    "namespace-deny": "test_structured_output_closed_exception",
-    "mcp-structured-output": "test_structured_output_closed_exception",
-    "subagent-structured-output": "test_structured_output_closed_exception",
-    "without-output-format": "test_structured_output_closed_exception",
+    "namespace-deny": "test_adapter_exception_order",
+    "mcp-structured-output": "test_adapter_exception_order",
+    "subagent-structured-output": "test_adapter_exception_order",
+    "without-output-format": "test_adapter_exception_order",
 }
 
 

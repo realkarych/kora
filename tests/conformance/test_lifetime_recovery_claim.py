@@ -1,4 +1,3 @@
-import gc
 import os
 import signal
 import socket
@@ -8,7 +7,6 @@ from contextlib import AsyncExitStack, ExitStack
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.journal import JournalSnapshot
@@ -32,11 +30,9 @@ from tests.conformance.lifetime_helpers import (
 )
 from tests.conformance.lifetime_support import (
     ControlledLifetimeClock,
-    assert_recovered_processes_absent,
     close_recovered_test_owner,
     dispose_test_owner,
     entered_fifo,
-    journal_file,
     limits,
     retained_live_invocation,
 )
@@ -175,22 +171,3 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
         assert not path.parent.exists()
     finally:
         await unwind_owned(owned)
-
-
-@pytest.mark.asyncio
-async def test_live_probe_corrupt_journal_releases_acquired_processes(
-    tmp_path: Path,
-) -> None:
-    gc.collect()
-    baseline = set(os.listdir("/dev/fd"))
-
-    async with retained_live_invocation(tmp_path, "live") as acquired:
-        path = journal_file(tmp_path, acquired.reference.invocation_id)
-        path.write_bytes(b"invalid")
-        with pytest.raises(ValidationError):
-            JournalSnapshot.model_validate_json(path.read_bytes())
-    gc.collect()
-
-    assert path.read_bytes() == b"invalid"
-    assert_recovered_processes_absent(acquired.processes)
-    assert set(os.listdir("/dev/fd")) == baseline

@@ -78,7 +78,7 @@ def _summary(deployed: DeployedGraphVersion) -> str:
     )
 
 
-def _report(
+def report(
     diagnostics: ProcessDiagnostics,
     finished: EventSpec,
     call: Callable[[], Coroutine[None, None, Result]],
@@ -120,7 +120,7 @@ def deploy_command(
         settings = read_client_settings(environment, CLI_CREDENTIAL_VARIABLE)
         return await _deploy(settings.url, settings.token, path, diagnostics)
 
-    _report(
+    report(
         diagnostics,
         DEPLOY_FINISHED,
         call,
@@ -175,7 +175,7 @@ def trigger_command(
         ) as client:
             return await client.trigger(namespace, options.graph, request, key)
 
-    _report(
+    report(
         diagnostics,
         TRIGGER_FINISHED,
         call,

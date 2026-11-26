@@ -7,10 +7,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.api.graph_deployment import PreparedDeployment
+from kora.api.graph_deployment_limits import DEPLOYMENT, IR_BYTES
+from kora.api.graph_execution_preparation import (
+    PreparedGraphDeploymentInputs,
+    prepare_graph_deployment_inputs,
+)
 from kora.api.run_trigger_limits import START_PREPARATION
 from kora.cel_eval.thread import Evaluator
 from kora.db.connection import Database
 from kora.db.graph_deployment_reads import graph_id_by_name
+from kora.db.graph_value_json import TextBudget, render_object
 from kora.db.identifiers import IdentifierGenerator
 from kora.db.tables import (
     event,
@@ -37,6 +43,7 @@ from kora.engine.start_records import (
 )
 from kora.ir.agent_secrets import NamespaceSecretPolicy
 from kora.ir.deployment_checks import DeploymentSelection
+from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.json import JsonObject
 from kora.protocols.authentication import Principal
 from tests.api.deployment_cases import (
@@ -44,6 +51,7 @@ from tests.api.deployment_cases import (
     DEFAULT_POLICY,
     GRAPH,
     SELECTION,
+    SELECTORS,
     prepared,
     principal,
     publish,
@@ -53,6 +61,8 @@ from tests.api.deployment_cases import (
 )
 from tests.db.seed import FakeClock
 from tests.engine.graph_output_cases import child
+from tests.support.output_bindings import publication_binding
+from tests.support.parameter_bindings import parameter_binding
 
 KEY = "start-request-1"
 StartResult = StartAcceptance | StartRefusal | InstallationRefusal
@@ -66,7 +76,7 @@ class DeployedGraph:
     user: Principal
 
 
-async def _graph_id(database: Database, namespace_id: str) -> str:
+async def graph_id(database: Database, namespace_id: str) -> str:
     async def unit(connection: AsyncConnection) -> str | None:
         return await graph_id_by_name(connection, namespace_id, GRAPH)
 
@@ -107,7 +117,7 @@ async def deploy(
     )
     return DeployedGraph(
         namespace_id,
-        await _graph_id(database, namespace_id),
+        await graph_id(database, namespace_id),
         published.graph_version_id,
         principal(namespace_id, token_id),
     )
@@ -235,3 +245,49 @@ async def start_rows(database: Database) -> dict[str, list[dict[str, object]]]:
             ) as result:
                 rows[name] = [dict(row) for row in result.mappings()]
     return rows
+
+
+def section(changes: JsonObject, name: str) -> JsonObject:
+    return child(changes, name) if name in changes else {}
+
+
+async def prepare_legacy_approval(
+    evaluator: Evaluator, changes: JsonObject
+) -> PreparedDeployment:
+    ir = skeleton_ir()
+    approval = child(ir, "graph", "nodes", "approve")
+    child(approval, "config").update(section(changes, "config"))
+    child(approval, "inputs", "gate").update(section(changes, "input"))
+    child(approval, "inputs").update(section(changes, "inputs"))
+    inputs = await prepare_graph_deployment_inputs(
+        render_object(ir, TextBudget(IR_BYTES)),
+        (),
+        evaluator,
+        binding=publication_binding(),
+        parameter_binding=parameter_binding(),
+        selectors=SELECTORS,
+        storage_identity=None,
+        limits=DEPLOYMENT,
+    )
+    assert isinstance(inputs, PreparedGraphDeploymentInputs)
+    return PreparedDeployment(
+        GRAPH,
+        inputs,
+        inputs.logical.digests.ir_digest,
+        DiagnosticCollection((), (), 0, 0),
+        DEFAULT_POLICY,
+    )
+
+
+async def publish_legacy_approval(
+    database: Database, evaluator: Evaluator, changes: JsonObject
+) -> DeployedGraph:
+    deployment = await prepare_legacy_approval(evaluator, changes)
+    namespace_id, token_id = await seeded_namespace(database)
+    published = await publish(database, deployment, namespace_id, token_id)
+    return DeployedGraph(
+        namespace_id,
+        await graph_id(database, namespace_id),
+        published.graph_version_id,
+        principal(namespace_id, token_id),
+    )

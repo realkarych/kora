@@ -1,8 +1,6 @@
-import json
-
 import pytest
 
-from tests.ir.standard_schema_cases import decide, source
+from tests.ir.standard_schema_cases import decide
 
 
 def nested(depth: int) -> object:
@@ -10,19 +8,6 @@ def nested(depth: int) -> object:
     for _ in range(depth):
         value = [value]
     return value
-
-
-def padded_source(target: int) -> dict[str, object]:
-    chunks = [""] * 17
-    candidate = source(True, metadata=chunks)
-    empty = len(json.dumps(candidate, ensure_ascii=True, separators=(",", ":")))
-    remaining = target - empty
-    for index in range(len(chunks)):
-        count = min(remaining, 65536)
-        chunks[index] = "x" * count
-        remaining -= count
-    assert remaining == 0
-    return candidate
 
 
 @pytest.mark.parametrize("delta", [-1, 0, 1])

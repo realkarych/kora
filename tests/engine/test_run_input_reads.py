@@ -11,6 +11,7 @@ from sqlalchemy import Connection, event, func, insert, select, update
 from sqlalchemy.engine.interfaces import DBAPICursor
 from sqlalchemy.util.concurrency import await_
 
+from kora.api.installed_worker import installed_worker_profile
 from kora.db.connection import Database, Dialect
 from kora.db.migrations import upgrade_database
 from kora.db.run_input_reads import (
@@ -509,7 +510,9 @@ async def test_run_input_read_admits_maximum_values_before_driver_transfer(
     projection = wide if oversized is RunInputField.PROJECTION else exact
     params = wide if oversized is RunInputField.PARAMS else exact
     binding = await seed(database, projection=projection, params=params)
-    limits = replace(LIMITS, projection=MAX_PARAMS_BYTES)
+    profile = installed_worker_profile("2000")
+    assert profile is not None
+    limits = profile.limits.snapshot.inputs
     ledger = ConnectionLedger(database)
 
     async with database.read_snapshot() as connection:

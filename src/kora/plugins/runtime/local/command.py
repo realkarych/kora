@@ -99,6 +99,7 @@ from kora.runner.journal import (
 )
 from kora.runner.native_io import NativeExecutor, NativeIOUnresolved, observed
 from kora.runner.registry import ControlFileRef, Submitter, synchronize
+from kora.runner.session_result import FinalizationReferences
 
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
 COMMAND: Final[EventSpec] = CATALOG.register(
@@ -1397,6 +1398,9 @@ class CommandSession:
         with self._lock:
             if self._execution != submitter:
                 raise delivery_error("execution_unauthorized")
+        raise delivery_error("workload_kind_unavailable")
+
+    def session_finalization(self, submitter: Submitter) -> FinalizationReferences:
         raise delivery_error("workload_kind_unavailable")
 
     def note_output(self, outcome: str, started: int) -> None:

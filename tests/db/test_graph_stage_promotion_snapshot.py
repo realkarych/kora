@@ -130,21 +130,27 @@ async def read(
 
 
 @contextmanager
-def observed_projections(database: Database) -> Generator[list[str]]:
+def observed_queries(
+    database: Database,
+    *,
+    before_execution: bool = False,
+    fragment: str | None = " AS intent_present",
+) -> Generator[list[str]]:
     seen: list[str] = []
 
     def capture(
         connection: object, cursor: object, statement: str, *arguments: object
     ) -> None:
-        if " AS intent_present" in statement:
+        if fragment is None or fragment in statement:
             seen.append(statement)
 
     engine = database.reader_engine.sync_engine
-    event.listen(engine, "after_cursor_execute", capture)
+    phase = "before_cursor_execute" if before_execution else "after_cursor_execute"
+    event.listen(engine, phase, capture)
     try:
         yield seen
     finally:
-        event.remove(engine, "after_cursor_execute", capture)
+        event.remove(engine, phase, capture)
 
 
 @pytest.mark.asyncio
@@ -154,7 +160,10 @@ async def test_promotion_snapshot_returns_exact_complete_detached_batch(
     binding, stage_ids = await seed_documents(database)
     ledger = ConnectionLedger(database)
 
-    with observed_projections(database) as projections:
+    with (
+        observed_queries(database) as projections,
+        observed_queries(database, before_execution=True, fragment=None) as statements,
+    ):
         snapshot = await read(database, binding)
 
     assert snapshot.preparation.state == "open"
@@ -172,6 +181,19 @@ async def test_promotion_snapshot_returns_exact_complete_detached_batch(
         GraphStagePromotionDocuments(stage_ids[2], None, None, None),
     )
     assert len(projections) == len(stage_ids) == 3
+    assert not any(
+        marker in statement.casefold()
+        for statement in statements
+        for marker in (
+            "sqlite_schema",
+            "pragma_table_xinfo",
+            "pragma_index_list",
+            "pragma_index_xinfo",
+            "query_only",
+            "pg_catalog.pg_",
+            "pg_catalog.current_setting('transaction_isolation'",
+        )
+    )
     assert ledger.checkouts == 1
     assert ledger.outstanding == database.units_in_flight() == 0
 
@@ -186,7 +208,7 @@ async def test_promotion_snapshot_distinguishes_empty_from_unknown_binding(
     wrong = replace(binding, namespace_id=other_namespace)
     ledger = ConnectionLedger(database)
 
-    with observed_projections(database) as projections:
+    with observed_queries(database, before_execution=True, fragment=None) as statements:
         empty = await read(database, binding, max_stages=0, max_document_bytes=0)
         with pytest.raises(GraphStagePromotionSnapshotRejected) as refused:
             await read(database, wrong)
@@ -196,7 +218,7 @@ async def test_promotion_snapshot_distinguishes_empty_from_unknown_binding(
         empty.inventory.stages == empty.inventory.occurrences == empty.documents == ()
     )
     assert refused.value.reason is GraphStagePromotionSnapshotFailure.UNVERIFIED
-    assert projections == []
+    assert not any("graph_deployment_stage_promotion_" in sql for sql in statements)
     assert ledger.checkouts == 2
     assert ledger.outstanding == database.units_in_flight() == 0
 
@@ -208,10 +230,10 @@ async def test_promotion_snapshot_refuses_incomplete_batch_privately(
     binding, _ = await seed_documents(database)
     ledger = ConnectionLedger(database)
 
-    with observed_projections(database) as stage_queries:
+    with observed_queries(database) as stage_queries:
         with pytest.raises(GraphStagePromotionSnapshotRejected) as count_refused:
             await read(database, binding, max_stages=2)
-    with observed_projections(database) as byte_queries:
+    with observed_queries(database) as byte_queries:
         try:
             raise RuntimeError(PRIVATE)
         except RuntimeError:
@@ -238,7 +260,7 @@ async def test_promotion_snapshot_refuses_incomplete_batch_privately(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("damage", ["layout", "document", "orphan"])
+@pytest.mark.parametrize("damage", ["missing_relation", "document", "orphan"])
 async def test_promotion_snapshot_refuses_actual_corrupt_storage(
     database: Database, damage: str
 ) -> None:
@@ -249,12 +271,25 @@ async def test_promotion_snapshot_refuses_actual_corrupt_storage(
         await corrupt_snapshot_source(database, stage_ids[1], damage)
     ledger = ConnectionLedger(database)
 
-    with observed_projections(database) as projections:
-        with pytest.raises(GraphStagePromotionSnapshotRejected) as refused:
-            await read(database, binding)
+    with (
+        observed_queries(database, before_execution=True) as attempted,
+        observed_queries(database) as completed,
+        pytest.raises(GraphStagePromotionSnapshotRejected) as refused,
+    ):
+        await read(database, binding)
 
     assert refused.value.reason is GraphStagePromotionSnapshotFailure.UNVERIFIED
-    assert len(projections) == (0 if damage == "layout" else 2)
+    assert str(refused.value) == "graph stage promotion snapshot unverified"
+    assert refused.value.__cause__ is refused.value.__context__ is None
+    if damage == "missing_relation":
+        assert len(attempted) == 1
+        assert completed == []
+        assert "graph_deployment_stage_promotion_settlement" not in "".join(
+            format_exception(refused.value)
+        )
+    else:
+        assert attempted == completed
+        assert len(completed) == 2
     assert ledger.checkouts == 1
     assert ledger.outstanding == database.units_in_flight() == 0
 
@@ -290,7 +325,7 @@ async def corrupt_snapshot_source(
     database: Database, stage_id: str, damage: str
 ) -> None:
     async with database.transaction() as connection:
-        if damage == "layout":
+        if damage == "missing_relation":
             await connection.exec_driver_sql(
                 "DROP TABLE graph_deployment_stage_promotion_settlement"
             )
@@ -394,7 +429,7 @@ async def test_promotion_snapshot_deadline_ends_wait_before_a_native_slot_is_fre
             await held.enter_async_context(narrow.read_transaction())
         deadline = asyncio.get_running_loop().time() + REFUSAL_DEADLINE_SECONDS
 
-        with observed_projections(narrow) as projections:
+        with observed_queries(narrow) as projections:
             task = asyncio.create_task(
                 read_graph_stage_promotion_snapshot(
                     narrow,

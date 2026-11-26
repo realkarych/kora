@@ -1,7 +1,7 @@
 import asyncio
 import os
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 import pytest
 
@@ -11,6 +11,7 @@ from kora.ir import ErrorClass
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.harness.fake import FakeHarness
+from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import (
@@ -20,7 +21,12 @@ from kora.protocols.harness import (
     SessionResult,
     SessionSpec,
 )
-from kora.protocols.policy import PolicyClient
+from kora.protocols.policy import (
+    PolicyClient,
+    PolicyDecision,
+    PolicyLayers,
+    ToolCallRequest,
+)
 from kora.protocols.runtime import (
     SessionFailedObservation,
     SessionObservation,
@@ -584,3 +590,61 @@ def test_refusing_launches_reject_every_allocation(tmp_path: Path) -> None:
         run(launches.allocate(LaunchInputs(environment={}, cwd=tmp_path)))
 
     assert raised.value.code == "launch_rejected"
+
+
+class DerivedDecision(PolicyDecision):
+    pass
+
+
+class InvalidDecisionPolicy(RaisingPolicy):
+    def __init__(self, decision: object) -> None:
+        self.decision = decision
+
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        return cast("PolicyDecision", self.decision)
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [{"allow": True, "reason": "allowed"}, DerivedDecision(True, "allowed"), None],
+    ids=["mapping", "subclass", "none"],
+)
+def test_policy_failure_denies_invalid_decision(
+    tmp_path: Path, kora_capture: Capture, decision: object
+) -> None:
+    world = make_world(tmp_path, kora_capture)
+    source = script([turn("m1"), shell("call-1", "ls"), result()])
+
+    try:
+        host, released = run(
+            hosted(world, source, policy=InvalidDecisionPolicy(decision))
+        )
+        observation = observed(world, host)
+    finally:
+        world.close()
+
+    assert isinstance(observation, SessionResultObservation)
+    assert observation.result.stop_reason == "policy_error"
+    assert observation.result.error_class is ErrorClass.CONFIG_ERROR
+    assert [
+        record["data"]
+        for record in world.records()
+        if record["kind"] == "permission_denied"
+    ] == [
+        {
+            "tool": "Bash",
+            "tool_use_id": "call-1",
+            "source": "harness",
+            "pattern": None,
+            "code": "policy_error",
+        }
+    ]
+    assert "tool_result" not in world.kinds()
+    assert released == SETTLED
+    assert journal_threads_exited()

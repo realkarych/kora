@@ -8,6 +8,7 @@
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: DD-13, DD-15, requirements decision 18 (the worker part), DD-36 (claim response, lease and polling defaults)
 - Related: ADR-0001, ADR-0004, ADR-0007, ADR-0011, ADR-0013
+- Installed SQLite staging amendment under [#1780](https://github.com/realkarych/kora/issues/1780), reviewed line by line and accepted by the project owner on 2026-11-22. [Owner acceptance](https://github.com/realkarych/kora/issues/1780#issuecomment-7082988581)
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
@@ -23,6 +24,10 @@ The first drafts let workers write to the metadata database directly as well as 
 **Inherited lifecycle deadlines** ([ADR-0022](0022-inherited-execution-deadlines.md)). The first executing claim fixes the earliest node, enclosing-subgraph and run deadline before preparation. Runtime/common executors enforce it in their own placements, including pre-submit worker-host preparation and late publication; this does not move harness event/budget/stall enforcement to the worker. Expiry has fixed nominal interruption and 30-second escalation thresholds, never renewed on adoption, and does not prove termination or release reservations.
 
 **One path to the control plane.** A worker talks to the HTTP API and only to the API, outbound, with a service token bound to a runtime and a namespace list (FR-8.9). There is no direct-SQL path and no database credential on a worker. `kora standalone` runs api, scheduler and a local worker as coroutines in one process on SQLite; its worker uses the same API client over an in-process ASGI transport, so nothing exists only in standalone mode (NFR-0.1).
+
+**Installed SQLite staging exception.** With `KORA_API_SCHEDULER=first-claim`, one foreground `kora api` process may host the Scheduler on a dedicated, prepared SQLite staging database. The profile requires `KORA_API_HARNESS=claude` and a valid `KORA_API_WORKER_CLOCK_UNCERTAINTY_US`. An absent Scheduler setting leaves scheduling disabled in `kora api`. An invalid or incompatible selection exits with status 78 before opening the database or binding the listener. The profile applies a deployment-wide physical-attempt admission limit of one through the existing capacity writer. It settles saved expiry and recovers due leases before listening, then uses durable metadata to resume polling and admit the initial root of an accepted manual-trigger run after a restart. The serving process owns Scheduler shutdown through actual settlement of its original database work. A Worker remains a separate HTTP client using its scoped service token, and the first Claim retains its existing authority.
+
+**Isolated walking-skeleton exception.** The [ADR-0001 amendment](0001-own-control-plane.md#isolated-walking-skeleton-verification-amendment-of-2026-11-25) allows one live test API in the owned Linux ext4 guest to host two successive Scheduler instances on its own managed SQLite database. Join the old Scheduler before starting the new one. Both lifetimes stay inside the same API process and its guarded database scope. Worker and LocalRuntime supervisor remain separate from the API. The Worker reaches metadata only through authenticated HTTP. This exception grants no installed or production placement authority.
 
 **Durable scheduling discovery.** Each run has one durable boolean `needs_scheduling`. Every graph-relevant transition sets it in the same transaction, under the run lock; creation initializes it true. Ordinary discovery queries marked runs without a timestamp cutoff and revisits them in finite rotating batches. `updated_at` and notifications are diagnostic/latency aids, not correctness cursors. Under the same run lock, the scheduler clears the marker only after a fresh check that no local pass can currently progress; checking and acknowledgement share a transaction. Work remaining at the ten-round cap retains the marker. Restart uses the same durable predicate.
 
@@ -43,7 +48,7 @@ Timed waits/admission rechecks, pending promotion, observations/delivery, deadli
 ## Alternatives considered
 
 - **Workers with direct database access.** Rejected: an adopter's worker in a closed network would need database credentials and an inbound route, and two write paths double the fencing surface.
-- **A single process.** Rejected for the platform: the scheduler must be stateless and replaceable (NFR-1.2) and workers must scale per runtime and sit in other networks. It survives only as `kora standalone`.
+- **A single process.** Rejected for the platform: the scheduler must be stateless and replaceable (NFR-1.2) and workers must scale per runtime and sit in other networks. The authorized same-process layouts are `kora standalone`, the installed SQLite staging exception and the isolated walking-skeleton exception in this [decision](#decision).
 - **Timestamp or sequence watermarks as the sole discovery mechanism.** Rejected: a transaction may commit after a scan with a timestamp or allocated sequence behind its cursor. A notification is not durable continuation.
 - **Recurring sweeps of all active runs.** Not selected: a durable marker avoids repeated evaluation of unchanged waiting runs; its complete transactional marking and acknowledgement obligations are explicit in the specifications.
 - **Leases without an epoch.** Rejected: a worker that lost its lease could still write.

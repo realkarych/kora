@@ -831,9 +831,10 @@ async def test_recorded_launcher_cannot_claim_another_capability(
             assert second.capability is not None
             assert (second.cli_path.parent / "capability").exists()
             await first.kill()
-            await second.kill()
             await asyncio.wait_for(first.ended(), 15)
             await asyncio.wait_for(child.wait(), 15)
+            await second.kill()
+            await second.ended()
             await until(lambda: server.connections == 0)
         finally:
             if child.returncode is None:

@@ -1,0 +1,81 @@
+{
+  "graph": {
+    "id": "skeleton",
+    "namespace": "example",
+    "nodes": {
+      "agent": {
+        "config": {
+          "harness": "claude",
+          "prompt": "Summarize the repository.",
+          "workspace": {
+            "repo": "local"
+          }
+        },
+        "kind": "agent",
+        "outputs": {
+          "session": {
+            "type": "AgentSession"
+          },
+          "summary": {
+            "type": "StructuredOutput"
+          }
+        }
+      },
+      "approve": {
+        "config": {
+          "channel": "cli",
+          "on_expiry": "fail",
+          "timeout": "1h"
+        },
+        "inputs": {
+          "gate": {
+            "from": "gate",
+            "output": "result",
+            "type": "CommandResult"
+          }
+        },
+        "kind": "human_input",
+        "outputs": {
+          "response": {
+            "type": "StructuredOutput"
+          }
+        }
+      },
+      "gate": {
+        "config": {
+          "cmd": [
+            "/usr/bin/true"
+          ],
+          "workspace": {
+            "repo": "local"
+          }
+        },
+        "depends_on": [
+          "agent"
+        ],
+        "kind": "command",
+        "outputs": {
+          "result": {
+            "type": "CommandResult"
+          }
+        }
+      }
+    }
+  },
+  "ir_version": "1.0",
+  "runtime": {
+    "runtime": "local",
+    "vcs": "git"
+  },
+  "type_contracts": {
+    "AgentSession": {
+      "builtin_revision": "1"
+    },
+    "CommandResult": {
+      "builtin_revision": "1"
+    },
+    "StructuredOutput": {
+      "builtin_revision": "1"
+    }
+  }
+}

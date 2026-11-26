@@ -1,10 +1,14 @@
 from dataclasses import dataclass
 from typing import Literal
+from typing import cast as type_cast
 
-from sqlalchemy import Text, and_, case, cast, func, literal, select
+from sqlalchemy import Text, and_, case, cast, column, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import Select
 
+from kora.db.identifiers import is_identifier
+from kora.db.run_input_parent import run_input_parent_statement
 from kora.db.tables import (
     graph,
     graph_version,
@@ -14,10 +18,11 @@ from kora.db.tables import (
     run_inputs,
     run_promotion_admission,
 )
-from kora.db.types import SQLITE
+from kora.db.types import IDENTIFIER_LENGTH, POSTGRESQL, SQLITE
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.engine.run_materialization import PreparedRunMaterialization
+from kora.engine.run_queue import POSTGRES_QUEUE_PROBE, SQLITE_QUEUE_PROBE
 from kora.engine.start_capacity import Overlap
 from kora.engine.start_records import (
     MAX_RECEIPT_BYTES,
@@ -64,6 +69,90 @@ def sqlite_record_width(columns: list[ColumnElement[object]]) -> ColumnElement[i
     )
 
 
+def _admitted_promotion(
+    run_id: str, limits: PromotionReadLimits
+) -> ColumnElement[bool]:
+    fields = run_promotion_admission.c
+    return and_(
+        fields.run_id == run_id,
+        fields.version == 1,
+        fields.run_bytes > 0,
+        fields.run_bytes <= limits.parent_bytes,
+        fields.receipt_bytes > 0,
+        fields.receipt_bytes <= limits.receipt_row_bytes,
+    )
+
+
+async def read_pending_promotion_scope(
+    connection: AsyncConnection, run_id: str, limits: PromotionReadLimits
+) -> GraphResourceScope | None:
+    fields = run_promotion_admission.c
+    identities = (
+        fields.namespace_id,
+        fields.graph_id,
+        fields.graph_version_id,
+        fields.receipt_id,
+    )
+    statement = select(
+        *(
+            case((func.octet_length(field) <= 2 * IDENTIFIER_LENGTH, field))
+            for field in identities
+        )
+    ).where(_admitted_promotion(run_id, limits))
+    with await connection.execute(statement) as result:
+        row = result.one_or_none()
+    if row is None or not all(
+        type(value) is str and is_identifier(value) for value in row
+    ):
+        return None
+    namespace_id, graph_id, version_id, _ = type_cast(
+        tuple[str, str, str, str], tuple(row)
+    )
+    parent = run_input_parent_statement(
+        connection.dialect.name,
+        namespace_id,
+        graph_id,
+        version_id,
+        run_id,
+        max_parent_bytes=limits.parent_bytes,
+    )
+    if not isinstance(parent, Select):
+        raise TypeError("the run input parent must be a select statement")
+    matched: object = await connection.scalar(
+        type_cast("Select[bool]", parent).where(
+            column("status", Text()) == "pending",
+            column("started_at").is_(None),
+            column("deadline_expired_at").is_(None),
+        )
+    )
+    if matched is not True:
+        return None
+    overlap = await connection.scalar(
+        select(
+            case(
+                (
+                    func.octet_length(cast(run.c.trigger, Text()))
+                    <= limits.parent_bytes,
+                    run.c.trigger["overlap"].as_string(),
+                )
+            )
+        ).where(run.c.id == run_id)
+    )
+    if overlap == "queue":
+        probe = (
+            POSTGRES_QUEUE_PROBE
+            if connection.dialect.name == POSTGRESQL
+            else SQLITE_QUEUE_PROBE
+        )
+        with await connection.execute(
+            probe,
+            {"namespace_id": namespace_id, "graph_id": graph_id, "run_id": run_id},
+        ) as result:
+            if any(result.one()):
+                return None
+    return GraphResourceScope(namespace_id, graph_id, version_id)
+
+
 async def admitted_promotion_receipt(
     connection: AsyncConnection,
     scope: GraphResourceScope,
@@ -72,15 +161,10 @@ async def admitted_promotion_receipt(
 ) -> str | None:
     fields = run_promotion_admission.c
     statement = select(fields.receipt_id).where(
-        fields.run_id == run_id,
+        _admitted_promotion(run_id, limits),
         fields.namespace_id == scope.namespace_id,
         fields.graph_id == scope.graph_id,
         fields.graph_version_id == scope.version_id,
-        fields.version == 1,
-        fields.run_bytes > 0,
-        fields.run_bytes <= limits.parent_bytes,
-        fields.receipt_bytes > 0,
-        fields.receipt_bytes <= limits.receipt_row_bytes,
     )
     value: object = await connection.scalar(statement)
     return value if type(value) is str else None

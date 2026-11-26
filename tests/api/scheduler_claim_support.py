@@ -79,12 +79,17 @@ class SchedulerClaimCase:
     request: WorkerClaimRequest
 
 
-async def service_identity(database: Database, namespace_id: str) -> AuthenticationCase:
+async def service_identity(
+    database: Database,
+    namespace_id: str,
+    *,
+    credential: str = BEARER,
+    owner: str = "scheduler-handoff-worker",
+) -> AuthenticationCase:
     with_grant = NamespaceGrant(namespace_id=namespace_id, transcripts=False)
-    owner = "scheduler-handoff-worker"
     async with database.transaction() as writer:
         token_id = await Seeder(writer).token(
-            sha256(BEARER.encode()).hexdigest(), kind="service", owner=owner
+            sha256(credential.encode()).hexdigest(), kind="service", owner=owner
         )
         await writer.execute(
             update(api_token)
@@ -94,7 +99,7 @@ async def service_identity(database: Database, namespace_id: str) -> Authenticat
             )
         )
     return AuthenticationCase(
-        RequestInfo("Bearer " + BEARER),
+        RequestInfo("Bearer " + credential),
         Principal(
             token_id=token_id,
             kind="service",

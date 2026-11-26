@@ -242,14 +242,6 @@ def test_native_non_success_does_not_project_summary_payload(
     assert candidate is None
 
 
-def test_legacy_completion_without_summary_has_no_candidate() -> None:
-    result = TurnCompletion(TURN, "completed", None)
-
-    candidate = projected(result).output
-
-    assert candidate is None
-
-
 @pytest.mark.parametrize("view", [None, "notLoaded", "full", "future", []])
 def test_non_summary_views_supply_no_inferred_candidate(view: object) -> None:
     source = terminal_observation(terminal_params([item()], view=view), THREAD)

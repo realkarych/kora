@@ -6,13 +6,22 @@ from claude_agent_sdk._cli_version import __cli_version__
 from packaging.specifiers import SpecifierSet
 
 from kora.conformance.capture import Capture
+from kora.conformance.harness import (
+    CONFORMANCE_PRICE_TABLE,
+    ConformancePolicy,
+    ConformanceSink,
+    NoLaunches,
+    Trace,
+)
 from kora.ir import ErrorClass
+from kora.ir.config import NodeLimits
 from kora.ir.json import JsonObject
 from kora.plugins.harness.claude.adapter import ClaudeSummary
 from kora.plugins.harness.claude.configuration import CLI_VERSION, SDK_VERSION
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import RunnerCause, RunnerOutcome
+from kora.protocols.harness import RunnerCause, RunnerOutcome, SessionFile, SessionSpec
 from kora.protocols.time import SystemClock
+from kora.runner.calls import TRACKING_CEILING
 from tests.plugins.harness.claude.test_claude_conformance import make_adapter
 from tests.plugins.harness.claude.test_replay_events import (
     claude_capture as claude_capture,
@@ -22,6 +31,7 @@ from tests.plugins.harness.claude.test_replay_events import (
     init_fields,
     projector,
 )
+from tests.plugins.harness.claude.test_session_lifecycle import session_spec
 
 
 @pytest.mark.parametrize("known_first", [False, True])
@@ -94,55 +104,107 @@ def test_finalise_preserves_failure_before_output_validation(
     )
 
 
+PENDING_LEGS = {
+    "runtime-verification-precedes-application": "#199 runtime verification",
+    "codex": "#772 Codex closed session specification",
+}
+BUILD_REFUSALS = (
+    "skills",
+    "subagents",
+    "mcp_servers",
+    "sandbox",
+    "network_policy",
+    "hooks",
+    "unknown",
+    "trust_repo_config",
+    "budget_usd",
+)
+RUN_REFUSALS: JsonObject = {
+    "env": {"PRIVATE": "private-value"},
+    "ANTHROPIC_API_KEY": "private-key",
+    "cli_path": "/private/cli",
+    "hooks": {"PreToolUse": []},
+    "can_use_tool": "private-callback",
+    "setting_sources": ["project"],
+    "strict_mcp_config": False,
+    "stderr": "private-stderr",
+    "max_turns": TRACKING_CEILING + 1,
+    "permission_mode": "default",
+}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "key",
+    "case",
     [
-        "skills",
-        "subagents",
-        "mcp_servers",
-        "sandbox",
-        "network_policy",
-        "hooks",
-        "unknown",
-        "trust_repo_config",
+        *[f"build-{key}" for key in BUILD_REFUSALS],
+        *[f"run-{key}" for key in RUN_REFUSALS],
+        "run-files",
+        "preserve-1",
+        "preserve-3",
+        "preserve-100000",
     ],
 )
-def test_session_spec_refuses_unsupported_configuration(
-    claude_capture: Capture, key: str
-) -> None:
-    from tests.plugins.harness.claude.test_session_lifecycle import session_spec
-
+async def test_session_spec_is_closed(claude_capture: Capture, case: str) -> None:
     adapter = make_adapter(Path("/work"), context_for(claude_capture, SystemClock()))
+    phase, _, key = case.partition("-")
+    limits = NodeLimits(budget_usd=1) if key == "budget_usd" else NodeLimits()
+    sink = ConformanceSink(None, Trace())
+    policy = ConformancePolicy("Forbidden", sink.trace)
+    launches = NoLaunches()
+    valid = session_spec(adapter)
+    if phase == "run":
+        if key == "files":
+            altered = valid.model_copy(
+                update={
+                    "files": (
+                        SessionFile(
+                            name="unrequested",
+                            digest="sha256:" + "0" * 64,
+                            placement="mcp_config",
+                            storage_ref=None,
+                        ),
+                    )
+                }
+            )
+        else:
+            altered = valid.model_copy(
+                update={"options": valid.options | {key: RUN_REFUSALS[key]}}
+            )
+        spec = SessionSpec.model_validate(altered.model_dump(mode="json"))
+    else:
+        spec = valid
 
-    with pytest.raises(KoraProtocolError) as error:
-        session_spec(adapter, config={key: True})
+    if phase == "preserve":
+        maximum = int(key)
+
+        preserved = session_spec(
+            adapter,
+            NodeLimits(max_events=maximum),
+            {
+                "prompt": "ignored",
+                "permission_mode": "plan",
+                "trust_repo_config": False,
+            },
+        )
+
+        assert preserved.prompt == "conformance"
+        assert preserved.options["max_turns"] == maximum
+        assert preserved.options["permission_mode"] == "plan"
+        assert preserved.price_table == CONFORMANCE_PRICE_TABLE.model_dump(mode="json")
+        assert preserved.files == ()
+        assert preserved.resume_handle is None
+        return
+
+    if phase == "build":
+        with pytest.raises(KoraProtocolError) as error:
+            session_spec(adapter, limits, {} if key == "budget_usd" else {key: True})
+    else:
+        with pytest.raises(KoraProtocolError) as error:
+            await adapter.run(spec, policy, sink, launches)
 
     assert error.value.code == "config_error"
     assert error.value.details == {}
-
-
-@pytest.mark.parametrize("maximum", [1, 3, 100000])
-def test_session_spec_preserves_sealed_inputs(
-    claude_capture: Capture, maximum: int
-) -> None:
-    from kora.conformance.harness import CONFORMANCE_PRICE_TABLE
-    from kora.ir.config import NodeLimits
-    from tests.plugins.harness.claude.test_session_lifecycle import session_spec
-
-    adapter = make_adapter(Path("/work"), context_for(claude_capture, SystemClock()))
-
-    spec = session_spec(
-        adapter,
-        NodeLimits(max_events=maximum),
-        {"prompt": "ignored", "permission_mode": "plan", "trust_repo_config": False},
-    )
-
-    assert spec.prompt == "conformance"
-    assert spec.options["max_turns"] == maximum
-    assert spec.options["permission_mode"] == "plan"
-    assert spec.price_table == CONFORMANCE_PRICE_TABLE.model_dump(mode="json")
-    assert spec.files == ()
-    assert spec.resume_handle is None
 
 
 def test_claude_policy_coverage_matches_section_12(claude_capture: Capture) -> None:

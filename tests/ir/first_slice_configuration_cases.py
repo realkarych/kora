@@ -55,3 +55,11 @@ def chain_document(
             },
         }
     )
+
+
+def installable_chain_nodes() -> dict[str, dict[str, object]]:
+    nodes = chain_nodes()
+    nodes["approve"]["inputs"] = {
+        "gate": {"type": "CommandResult", "from": "gate", "output": "result"}
+    }
+    return nodes

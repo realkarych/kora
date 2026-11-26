@@ -52,6 +52,7 @@ from kora.plugins.runtime.local.channel import (
     read_transfer,
     read_transfer_bytes,
     receive_section,
+    session_finalization_envelope,
     session_result_envelope,
     status_envelope,
     transfer_cutoff,
@@ -119,6 +120,7 @@ from kora.runner.registry import (
     refusal,
     takeover_cell,
 )
+from kora.runner.session_result import FinalizationReferences
 
 Result = TypeVar("Result")
 
@@ -283,6 +285,17 @@ def session_read(session: WorkloadSession, submitter: Submitter) -> ControlFileR
     return session.session_observation(submitter)
 
 
+def finalization_read(
+    session: WorkloadSession, submitter: Submitter
+) -> FinalizationReferences:
+    return session.session_finalization(submitter)
+
+
+finalization_answer: Final[Answer[FinalizationReferences]] = Answer(
+    "session_unobserved", finalization_read, session_finalization_envelope
+)
+
+
 command_answer: Final[Answer[CommandObservation]] = Answer(
     "command_unobserved", command_read, observation_envelope
 )
@@ -384,6 +397,7 @@ class ControlServer:
         self._completed = asyncio.Event()
         self._completing = asyncio.Lock()
         self._first_intent: RetainedReference | None = None
+        self._first_head_digest: str | None = None
         self._first_confirmed = False
         self._record: NormalCompletionQuiescence | None = None
         self.completion_head: FirstGrantHead | None = None
@@ -619,6 +633,15 @@ class ControlServer:
                         observational,
                         request.request_id,
                         session_answer,
+                    )
+                    return
+                elif request.op == "session_finalization":
+                    await self._send_answer(
+                        channel,
+                        submitter,
+                        observational,
+                        request.request_id,
+                        finalization_answer,
                     )
                     return
                 else:
@@ -1001,19 +1024,19 @@ class ControlServer:
             same_grant = model_bytes(request.grant) == model_bytes(grant)
             if not same_grant or not key.matches_closure(ack, grant):
                 raise delivery_error("workload_conflict")
-            record = model_bytes(
-                FirstClosureRecord(
-                    format="local-first-closure/1",
-                    closure=DispatcherClosure(
-                        quiescence=ack,
-                        provenance="registry_acknowledgement",
-                        process=None,
-                    ),
-                )
+            closure = DispatcherClosure(
+                quiescence=ack, provenance="registry_acknowledgement", process=None
             )
+            leaf = FirstClosureRecord(format="local-first-closure/1", closure=closure)
+            record = model_bytes(leaf)
             ref = RetainedReference.describe(record)
             saved = registry.linked_closure(key, head, grant)
-            if self._first_intent is not None and self._first_intent != ref:
+            if self._first_confirmed and saved is None:
+                raise delivery_error("lineage_unavailable")
+            if self._first_intent not in (None, ref) or (
+                saved is not None
+                and (self._first_intent is None or model_bytes(saved) != record)
+            ):
                 raise delivery_error("workload_conflict")
             if not self._first_confirmed:
                 if (
@@ -1023,19 +1046,19 @@ class ControlServer:
                 ):
                     raise delivery_error("workload_busy")
                 self._session.first_closure_ready()
-            if saved is not None:
-                if self._first_intent != ref or model_bytes(saved) != record:
-                    raise delivery_error("workload_conflict")
-                if not self._first_confirmed:
-                    registry.synchronize_evidence(key, "first-closure")
-            else:
                 links = FirstGrantLinks(grant=head.first_grant.grant, closure=ref)
-                updated = FirstGrantHead.model_validate(
+                head = FirstGrantHead.model_validate(
                     {**head.model_dump(), "first_grant": links}
                 )
-                self._first_intent = ref
-                registry.put_evidence(key, updated, "first-closure", record)
-            self._first_confirmed = True
+                head_digest = hashlib.sha256(model_bytes(head)).hexdigest()
+                if self._first_head_digest not in (None, head_digest):
+                    raise delivery_error("lineage_unavailable")
+                if saved is None:
+                    self._first_intent, self._first_head_digest = ref, head_digest
+                    registry.put_evidence(key, head, "first-closure", record)
+                else:
+                    registry.synchronize_evidence(key, "first-closure")
+                self._first_confirmed = True
 
         try:
             if observational:

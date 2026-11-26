@@ -90,7 +90,7 @@ class ExpiryContext:
         if type(self.attempt_bytes) is not int or self.attempt_bytes <= 0:
             raise ValueError("attempt read admission must be positive")
 
-    def require_capacity(self, runtime: str | None = None) -> None:
+    def capacity_scopes(self, runtime: str | None) -> tuple[Scope, ...]:
         scopes = (
             Scope(ScopeKind.GLOBAL),
             Scope(ScopeKind.NAMESPACE, (self.scope.namespace_id,)),
@@ -98,7 +98,10 @@ class ExpiryContext:
         )
         if runtime is not None:
             scopes += (Scope(ScopeKind.RUNTIME, (runtime,)),)
-        self.locks.require(self.run_id, scopes)
+        return scopes
+
+    def require_capacity(self, runtime: str | None = None) -> None:
+        self.locks.require(self.run_id, self.capacity_scopes(runtime))
 
     async def mark(self, now: datetime) -> None:
         await self.connection.execute(

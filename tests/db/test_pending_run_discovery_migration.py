@@ -70,8 +70,8 @@ async def test_pending_discovery_migration_recovers_without_backfill(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0021",
-            "0033",
-            12,
+            "run_event_metadata_0034",
+            13,
         )
         assert repeated.steps == 0
         assert after == before

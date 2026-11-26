@@ -1,26 +1,35 @@
 import asyncio
 import json
+from enum import Enum
 from pathlib import Path
-from typing import Final
+from typing import Annotated, Final, Literal, get_args, get_origin
 
 import pytest
+from pydantic import BaseModel
 
 from kora.conformance.capture import Capture
+from kora.ir.cost import Money
 from kora.ir.json import CanonicalBudget, JsonObject, spend_string
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability.redaction import MASK, SecretRegistry
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.harness import MAX_TEXT_BYTES
+from kora.protocols.harness import EVENT_ADAPTER, MAX_TEXT_BYTES, NormalisedEvent
+from kora.protocols.secret_value import registered_forms
 from kora.protocols.time import SystemClock
 from kora.runner.calls import TRACKING_CEILING
 from kora.runner.journal import JournalAppendOutcome, RunningJournal
 from kora.runner.liveness import watch_liveness
 from kora.runner.sink import (
+    ADAPTER_KINDS,
+    IDENTIFIER_FIELDS,
     MAX_ERROR_EVENTS,
     MAX_RECORD_BYTES,
     QUEUE_RECORDS,
+    TEXT_FIELDS,
+    Liveness,
     RunnerSink,
 )
+from tests.plugins.harness.fake.fake_support import observation
 from tests.runner.agent_support import (
     FailingWriter,
     HeldWriter,
@@ -565,3 +574,203 @@ async def test_open_call_tracking_stays_bounded_during_termination() -> None:
 
     assert cause == "max_events"
     assert not calls_open
+
+
+FIXED_FORMAT_STRING_TYPES: Final[tuple[object, ...]] = (Money,)
+
+
+def annotation_models(annotation: object) -> set[type[BaseModel]]:
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return {annotation}
+    arguments = get_args(annotation)
+    if get_origin(annotation) is Annotated:
+        return annotation_models(arguments[0])
+    return {model for argument in arguments for model in annotation_models(argument)}
+
+
+def holds_free_string(annotation: object) -> bool:
+    if annotation in FIXED_FORMAT_STRING_TYPES or get_origin(annotation) is Literal:
+        return False
+    if isinstance(annotation, type):
+        return issubclass(annotation, str) and not issubclass(annotation, Enum)
+    arguments = get_args(annotation)
+    if get_origin(annotation) is Annotated:
+        return holds_free_string(arguments[0])
+    return any(holds_free_string(argument) for argument in arguments)
+
+
+def test_event_content_is_bounded_and_classified_identifier_fields_cover_models() -> (
+    None
+):
+    events = annotation_models(NormalisedEvent)
+    seen_fields: set[str] = set()
+    unclassified: set[tuple[str, str, str]] = set()
+    kinds: set[str] = set()
+
+    for event in events:
+        kind = str(get_args(event.model_fields["kind"].annotation)[0])
+        kinds.add(kind)
+        data_models = annotation_models(event.model_fields["data"].annotation)
+        pending = set(data_models)
+        visited: set[type[BaseModel]] = set()
+        while pending:
+            model = pending.pop()
+            if model in visited:
+                continue
+            visited.add(model)
+            for name, field in model.model_fields.items():
+                seen_fields.add(name)
+                annotation = field.rebuild_annotation()
+                pending.update(annotation_models(annotation))
+                if (
+                    holds_free_string(annotation)
+                    and name not in IDENTIFIER_FIELDS
+                    and not (model in data_models and name == TEXT_FIELDS.get(kind))
+                ):
+                    unclassified.add((kind, model.__name__, name))
+
+    assert len(events) == 10
+    assert kinds == ADAPTER_KINDS
+    assert unclassified == set()
+    assert IDENTIFIER_FIELDS <= seen_fields
+
+
+@pytest.mark.parametrize(
+    ("kind", "field"),
+    [
+        ("session_started", "session_id"),
+        ("session_started", "harness_version"),
+        ("session_started", "plugins_digest"),
+        ("session_started", "mcp_sources"),
+        ("turn", "message_id"),
+        ("turn", "agent_id"),
+        ("tool_call", "tool_use_id"),
+        ("tool_call", "tool"),
+        ("tool_call", "agent_id"),
+        ("tool_result", "tool_use_id"),
+        ("permission_denied", "tool"),
+        ("permission_denied", "tool_use_id"),
+        ("permission_denied", "pattern"),
+        ("usage", "message_id"),
+        ("usage", "agent_id"),
+        ("usage", "model"),
+        ("usage", "observation_id"),
+        ("usage", "coverage"),
+        ("provider_limited", "model"),
+        ("provider_limited", "vendor_group"),
+        ("provider_limited", "binding"),
+        ("provider_retrying", "model"),
+        ("result", "subtype"),
+        ("result", "terminal_reason"),
+        ("error", "code"),
+    ],
+)
+@pytest.mark.parametrize("spelling", registered_forms('identifier-secret-"\\'))
+def test_event_content_is_bounded_and_classified_secret_identifier(
+    tmp_path: Path, kora_capture: Capture, kind: str, field: str, spelling: str
+) -> None:
+    attempt = private_directory(tmp_path / "attempt")
+    journal = RunningJournal(attempt, SystemClock())
+    kora_capture.scope.admit('identifier-secret-"\\')
+    identifier = f"prefix-{spelling}-suffix"
+    event_data: dict[str, JsonObject] = {
+        "session_started": {
+            "session_id": "session",
+            "harness_version": "fake-1",
+            "billing_class": "api_key",
+            "plugins_digest": "sha256:" + "0" * 64,
+            "mcp_sources": [],
+        },
+        "turn": turn(),
+        "tool_call": {
+            "tool": "Bash",
+            "tool_use_id": "clean-call",
+            "output_channel": False,
+        },
+        "tool_result": {
+            "tool_use_id": "clean-call",
+            "is_error": False,
+            "truncated": False,
+        },
+        "permission_denied": {
+            "tool": "Bash",
+            "tool_use_id": "clean-call",
+            "source": "policy",
+            "pattern": "node.deny.0",
+            "code": "denied",
+        },
+        "usage": observation("m1", 1).model_dump(mode="json"),
+        "provider_limited": {
+            "retry_after": None,
+            "scope": "rate",
+            "vendor_group": None,
+            "model": "model",
+            "binding": "binding",
+        },
+        "provider_retrying": {"model": "model", "retry_number": 1},
+        "result": {"subtype": "success", "is_error": False, "terminal_reason": None},
+        "error": {"code": "harness_failed", "truncated": False},
+    }
+    data = event_data[kind]
+    constrained_identifiers = {
+        "code": "identifier_secret_code",
+        "subtype": "identifier_secret_subtype",
+        "terminal_reason": "identifier_secret_terminal_reason",
+        "plugins_digest": "sha256:" + "a" * 64,
+        "pattern": "node.deny.1785",
+    }
+    if field in constrained_identifiers:
+        identifier = constrained_identifiers[field]
+        kora_capture.scope.admit(identifier)
+    if field == "coverage":
+        coverage = data["coverage"]
+        assert isinstance(coverage, dict)
+        data["coverage"] = {**coverage, "observation_id": identifier}
+    elif field == "mcp_sources":
+        data[field] = [identifier]
+    else:
+        data[field] = identifier
+    EVENT_ADAPTER.validate_python(
+        {"i": 0, "at": SystemClock().now(), "kind": kind, "data": data}
+    )
+    kora_capture.scope.admit("policy_error")
+    fixed_denial: JsonObject = {
+        "tool": "Bash",
+        "tool_use_id": "clean-call",
+        "source": "harness",
+        "pattern": None,
+        "code": "policy_error",
+    }
+
+    async def emitted() -> tuple[
+        KoraProtocolError, Liveness, Liveness, int, tuple[bool, bool]
+    ]:
+        sink = sink_for(journal, kora_capture.diagnostics.registry)
+        before = sink.liveness()
+        try:
+            with pytest.raises(KoraProtocolError) as raised:
+                sink.emit(kind, data)
+            after = sink.liveness()
+            omitted = sink.omitted()
+            sink.emit("permission_denied", fixed_denial)
+            return raised.value, before, after, omitted, await drained(sink)
+        finally:
+            sink.close()
+
+    try:
+        refusal, before, after, omitted, complete = run(emitted())
+    finally:
+        journal.close()
+        attempt.close()
+
+    assert after == before
+    assert omitted == 0
+    assert refusal.code == "event_refused"
+    assert refusal.details == {}
+    assert refusal.__cause__ is None
+    assert identifier not in str(refusal)
+    records = journal_records(tmp_path / "attempt")
+    assert [(record["kind"], record["data"]) for record in records] == [
+        ("permission_denied", fixed_denial)
+    ]
+    assert complete == (True, True)

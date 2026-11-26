@@ -25,6 +25,8 @@ from tests.plugins.harness.claude.test_replay_events import (
     claude_capture as claude_capture,
 )
 
+PENDING_LEGS = {"codex": "#772 Codex adapter exception order"}
+
 
 def hook_input(tool: str, agent_id: str | None = None) -> PreToolUseHookInput:
     value: PreToolUseHookInput = {
@@ -136,26 +138,39 @@ async def test_concurrent_policy_rechecks_event_limit(claude_capture: Capture) -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tool", "output_format", "agent", "allowed", "decisions"),
+    ("tool", "output_format", "agent", "allowed", "decisions", "exhausted"),
     [
-        ("StructuredOutput", True, None, True, 0),
-        ("mcp__x__StructuredOutput", True, None, False, 1),
-        ("StructuredOutput", False, None, False, 1),
-        ("StructuredOutput", True, "subagent", False, 1),
+        pytest.param(
+            "StructuredOutput", True, None, True, 0, False, id="output-channel"
+        ),
+        pytest.param(
+            "mcp__x__StructuredOutput", True, None, False, 1, False, id="mcp-name"
+        ),
+        pytest.param(
+            "StructuredOutput", False, None, False, 1, False, id="no-output-format"
+        ),
+        pytest.param(
+            "StructuredOutput", True, "subagent", False, 1, False, id="subagent"
+        ),
+        pytest.param(
+            "StructuredOutput", True, None, False, 0, True, id="output-after-max-events"
+        ),
+        pytest.param("Bash", True, None, False, 0, True, id="bash-after-max-events"),
     ],
 )
-async def test_structured_output_closed_exception(
+async def test_adapter_exception_order(
     claude_capture: Capture,
     tool: str,
     output_format: bool,
     agent: str | None,
     allowed: bool,
     decisions: int,
+    exhausted: bool,
 ) -> None:
     adapter = make_adapter(
         Path("/work"), context_for(claude_capture, SystemClock()), output_format
     )
-    sink = ConformanceSink(None, Trace())
+    sink = ConformanceSink(1 if exhausted else None, Trace())
     events = ClaudeEvents(
         sink,
         SecretRegistry(),
@@ -167,23 +182,40 @@ async def test_structured_output_closed_exception(
     )
     events.observe_init(init_fields())
     stops: list[RunnerCause] = []
+    denied_tool = "Forbidden" if exhausted else tool
     bridge = PolicyBridge(
-        adapter.scope, ConformancePolicy(tool, sink.trace), sink, events, stops.append
+        adapter.scope,
+        ConformancePolicy(denied_tool, sink.trace),
+        sink,
+        events,
+        stops.append,
     )
-    events.assistant("message", agent, (TextPiece("before callback"),))
+    if exhausted:
+        events.assistant("message", None, ())
+        events.flush()
+    else:
+        events.assistant("message", agent, (TextPiece("before callback"),))
 
     reply = await asyncio.create_task(
         bridge.hook(hook_input(tool, agent), "call", {"signal": None})
     )
-    events.assistant("message", agent, (ToolPiece(tool, "call"),))
-    events.tool_result("call", not allowed, "done")
-    events.finish()
+    if not exhausted:
+        events.assistant("message", agent, (ToolPiece(tool, "call"),))
+        events.tool_result("call", not allowed, "done")
+        events.finish()
 
     assert reply.get("hookSpecificOutput") == {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow" if allowed else "deny",
         "permissionDecisionReason": "kora",
     }
+    assert "call" in events.calls.decided_ids
+    if exhausted:
+        assert all(
+            kind not in {"tool_call", "decide", "permission_denied"}
+            for kind, _ in sink.trace.entries
+        )
+        return
     assert sum(kind == "decide" for kind, _ in sink.trace.entries) == decisions
     calls = [event for event in sink.events if event.kind == "tool_call"]
     assert len(calls) == 1
@@ -195,49 +227,6 @@ async def test_structured_output_closed_exception(
         assert sink.trace.entries.index(("decide", "call")) < sink.trace.entries.index(
             ("tool_result", "call")
         )
-
-
-@pytest.mark.asyncio
-async def test_deny_after_max_events(claude_capture: Capture) -> None:
-    adapter = make_adapter(
-        Path("/work"), context_for(claude_capture, SystemClock()), True
-    )
-    sink = ConformanceSink(1, Trace())
-    events = ClaudeEvents(
-        sink,
-        SecretRegistry(),
-        binding="claude-test",
-        max_retries=2,
-        output_format=True,
-        check_deadline=lambda: None,
-        observed_at=lambda: WHEN,
-    )
-    events.observe_init(init_fields())
-    events.assistant("message", None, ())
-    events.flush()
-    stops: list[RunnerCause] = []
-    bridge = PolicyBridge(
-        adapter.scope,
-        ConformancePolicy("Forbidden", sink.trace),
-        sink,
-        events,
-        stops.append,
-    )
-
-    reply = await asyncio.create_task(
-        bridge.hook(hook_input("StructuredOutput"), "call", {"signal": None})
-    )
-
-    assert reply.get("hookSpecificOutput") == {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "deny",
-        "permissionDecisionReason": "kora",
-    }
-    assert all(
-        kind not in {"tool_call", "decide", "permission_denied"}
-        for kind, _ in sink.trace.entries
-    )
-    assert "call" in events.calls.decided_ids
 
 
 @pytest.mark.asyncio

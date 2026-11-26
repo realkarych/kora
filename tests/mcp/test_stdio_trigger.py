@@ -89,7 +89,7 @@ async def test_mcp_trigger(
     )
     assert b"private-params" not in stderr
     assert deployed.code == 0
-    assert [tool["name"] for tool in tools] == ["kora_trigger"]
+    assert [tool["name"] for tool in tools] == ["kora_trigger", "kora_runs"]
     assert accepted.get("isError") is not True
     assert (content["outcome"], content["status"]) == ("accepted", "pending")
     assert cast("str", content["run_id"]).startswith("run_")

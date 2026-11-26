@@ -66,6 +66,8 @@ async def promotion_from_http(
     deployed: DeployResponse,
     clock: FakeClock,
     identifiers: IdentifierGenerator,
+    *,
+    key: str = KEY,
 ) -> tuple[PromotionCase, CheckedExecutionContract]:
     run_id = accepted.run_id.removeprefix("run_")
     version_id = accepted.graph_version_id.removeprefix("gv_")
@@ -80,7 +82,7 @@ async def promotion_from_http(
         receipt_id = await reader.scalar(
             select(inbound_event.c.id).where(
                 inbound_event.c.namespace_id == namespace_id,
-                inbound_event.c.idempotency_key == KEY,
+                inbound_event.c.idempotency_key == key,
             )
         )
         assert isinstance(graph_id, str)

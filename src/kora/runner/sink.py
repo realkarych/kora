@@ -8,7 +8,13 @@ from typing import Final, Protocol, TypeVar
 
 from pydantic import ValidationError
 
-from kora.ir.json import CanonicalBudget, JsonObject, JsonShapeError, spend_string
+from kora.ir.json import (
+    CanonicalBudget,
+    JsonObject,
+    JsonShapeError,
+    JsonValue,
+    spend_string,
+)
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability.redaction import SecretRegistry
 from kora.protocols.deadlines import duration_ns
@@ -26,6 +32,11 @@ from kora.protocols.harness import (
 from kora.protocols.time import Clock
 from kora.runner.calls import TRACKING_CEILING, EventCount
 from kora.runner.journal import BatchAppend, JournalAppendOutcome
+from kora.runner.session_result_encoding import (
+    ResultContainsSecret,
+    ResultMatcher,
+    string_body,
+)
 
 ADAPTER_KINDS: Final[frozenset[str]] = frozenset(
     {
@@ -46,6 +57,28 @@ TEXT_FIELDS: Final[dict[str, str]] = {
     "tool_result": "content",
     "error": "text",
 }
+IDENTIFIER_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "session_id",
+        "harness_version",
+        "plugins_digest",
+        "mcp_sources",
+        "message_id",
+        "agent_id",
+        "tool",
+        "tool_use_id",
+        "pattern",
+        "observation_id",
+        "model",
+        "vendor_group",
+        "binding",
+        "subtype",
+        "terminal_reason",
+        "code",
+    }
+)
+
+
 JOURNAL_CAP_BYTES: Final[int] = 268_435_456
 MAX_RECORD_BYTES: Final[int] = 65_536
 QUEUE_BYTES: Final[int] = 4 * 1_048_576
@@ -112,6 +145,19 @@ def adapter_record(item: Record | Gap | asyncio.Event) -> bool:
 
 def refused(code: str) -> KoraProtocolError:
     return KoraProtocolError(code, "the adapter event is refused", False, {})
+
+
+def identifier_values(kind: str, data: JsonObject) -> Generator[str]:
+    for field, value in data.items():
+        if field == "coverage" and isinstance(value, dict):
+            yield from identifier_values(kind, value)
+        elif field in IDENTIFIER_FIELDS and not (
+            kind == "permission_denied" and field == "code"
+        ):
+            values: list[JsonValue] = value if isinstance(value, list) else [value]
+            for identifier in values:
+                if isinstance(identifier, str):
+                    yield identifier
 
 
 async def settled_by(
@@ -183,6 +229,13 @@ class RunnerSink:
                 }
             )
         except ValidationError:
+            raise refused("event_refused") from None
+        identifiers = event.data.model_dump(mode="json")
+        matcher = ResultMatcher(self._registry.snapshot().values, threading.Event())
+        try:
+            for identifier in identifier_values(kind, identifiers):
+                matcher.check(identifier, string_body(identifier))
+        except ResultContainsSecret:
             raise refused("event_refused") from None
         with self._state:
             self._last_event_ns = self._clock.monotonic_ns()

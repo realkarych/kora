@@ -43,8 +43,12 @@ def run_scenario(
     *,
     contained: bool = sys.platform == "linux",
     denied_tool: str = "Forbidden",
-    policy: Literal["conformance", "raising"] = "conformance",
+    policy: Literal["conformance", "raising", "allow_deny"] = "conformance",
     cancel_marker: str | None = None,
+    permission_mode: str = "dont_ask",
+    subagent_calls: list[tuple[str, dict[str, object]]] | None = None,
+    layers: dict[str, object] | None = None,
+    protected_paths: tuple[str, ...] = (),
 ) -> dict[str, object]:
     config = root / "scenario.json"
     report = root / "result.json"
@@ -59,6 +63,10 @@ def run_scenario(
                 "denied_tool": denied_tool,
                 "policy": policy,
                 "cancel_marker": cancel_marker,
+                "permission_mode": permission_mode,
+                "subagent_calls": subagent_calls or [],
+                "layers": layers or {},
+                "protected_paths": protected_paths,
             }
         )
     )

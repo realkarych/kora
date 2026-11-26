@@ -1,17 +1,20 @@
-from typing import cast
+from collections.abc import Awaitable
+from typing import Literal, cast
 
 from mcp import types
 from mcp.server import ServerRequestContext
-from pydantic import ValidationError
+from pydantic import StrictInt, StrictStr, ValidationError
 
 from kora.client import ApiError, ClientError, KoraClient
-from kora.client.transport import IDEMPOTENCY_KEY
+from kora.client.transport import IDEMPOTENCY_KEY, ListedRunEvents, TriggeredRun
 from kora.ir.json import JsonObject
 from kora.mcp.results import MCP_COMPONENT, TOOL_FINISHED, tool_result, usage_error
+from kora.models.errors import WireRecord
 from kora.models.runs import TriggerRequest
 from kora.observability import ProcessDiagnostics
 
 TRIGGER_TOOL = "kora_trigger"
+RUNS_TOOL = "kora_runs"
 TRIGGER_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
@@ -44,13 +47,21 @@ OPTIONAL = frozenset(
 )
 
 
+class EventArguments(WireRecord):
+    mode: Literal["events"]
+    namespace: StrictStr
+    run_id: StrictStr
+    limit: StrictInt | None = None
+    cursor: StrictStr | None = None
+
+
 class OperatingTools:
     def __init__(self, client: KoraClient, diagnostics: ProcessDiagnostics) -> None:
         self.client = client
         self.logger = diagnostics.logger(MCP_COMPONENT)
 
-    def finished(self, outcome: str, code: str) -> None:
-        self.logger.emit(TOOL_FINISHED, tool=TRIGGER_TOOL, outcome=outcome, code=code)
+    def finished(self, tool: str, outcome: str, code: str) -> None:
+        self.logger.emit(TOOL_FINISHED, tool=tool, outcome=outcome, code=code)
 
     async def list_tools(
         self,
@@ -63,7 +74,12 @@ class OperatingTools:
                     name=TRIGGER_TOOL,
                     description=TRIGGER_DESCRIPTION,
                     input_schema=TRIGGER_SCHEMA,
-                )
+                ),
+                types.Tool(
+                    name=RUNS_TOOL,
+                    description="Read one finite page of a run’s saved events.",
+                    input_schema=EventArguments.model_json_schema(),
+                ),
             ]
         )
 
@@ -73,6 +89,22 @@ class OperatingTools:
         params: types.CallToolRequestParams,
     ) -> types.CallToolResult:
         arguments = params.arguments or {}
+        if params.name == RUNS_TOOL:
+            try:
+                events = EventArguments.model_validate(arguments)
+            except ValidationError:
+                return usage_error(
+                    "Call kora_runs in events mode with a namespace and run ID."
+                )
+            return await self.invoke(
+                RUNS_TOOL,
+                self.client.list_run_events(
+                    events.namespace,
+                    events.run_id,
+                    limit=None if events.limit is None else str(events.limit),
+                    cursor=events.cursor,
+                ),
+            )
         namespace, graph = arguments.get("namespace"), arguments.get("graph")
         key = arguments.get("idempotency_key")
         if params.name != TRIGGER_TOOL or (set(arguments) - OPTIONAL) != {
@@ -96,13 +128,20 @@ class OperatingTools:
             )
         except ValidationError:
             return usage_error("The trigger arguments are invalid.")
+        return await self.invoke(
+            TRIGGER_TOOL, self.client.trigger(namespace, graph, request, key)
+        )
+
+    async def invoke(
+        self, tool: str, request: Awaitable[ListedRunEvents | TriggeredRun]
+    ) -> types.CallToolResult:
         try:
-            triggered = await self.client.trigger(namespace, graph, request, key)
+            result = await request
         except ApiError as error:
-            self.finished("api_error", error.code)
+            self.finished(tool, "api_error", error.code)
             return tool_result(error.body, is_error=True)
         except ClientError as error:
-            self.finished("client_error", error.code)
+            self.finished(tool, "client_error", error.code)
             return tool_result(cast("JsonObject", error.envelope()), is_error=True)
-        self.finished("ok", "none")
-        return tool_result(triggered.document)
+        self.finished(tool, "ok", "none")
+        return tool_result(result.document)

@@ -373,19 +373,25 @@ async def another_run(database: Database, case: ClaimCase) -> ClaimCase:
 
 async def state(database: Database) -> dict[str, list[dict[str, object]]]:
     async with database.read_transaction() as reader:
-        result: dict[str, list[dict[str, object]]] = {}
-        for table in (
-            worker,
-            run,
-            node_instance,
-            attempt,
-            attempt_claim_read_admission,
-            attempt_dispatcher,
-            attempt_first_claim_basis,
-            event,
-        ):
-            with await reader.execute(
-                select(table).order_by(*table.primary_key.columns)
-            ) as rows:
-                result[table.name] = [dict(row) for row in rows.mappings()]
-        return result
+        return await read_claim_state(reader)
+
+
+async def read_claim_state(
+    reader: AsyncConnection,
+) -> dict[str, list[dict[str, object]]]:
+    result: dict[str, list[dict[str, object]]] = {}
+    for table in (
+        worker,
+        run,
+        node_instance,
+        attempt,
+        attempt_claim_read_admission,
+        attempt_dispatcher,
+        attempt_first_claim_basis,
+        event,
+    ):
+        with await reader.execute(
+            select(table).order_by(*table.primary_key.columns)
+        ) as rows:
+            result[table.name] = [dict(row) for row in rows.mappings()]
+    return result

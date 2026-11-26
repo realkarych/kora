@@ -25,7 +25,7 @@ from tests.api.deployment_cases import (
     NAMESPACE,
     preparer,
     skeleton_ir,
-    unresolved_approval,
+    unresolved_predicate,
     with_agent_secret,
 )
 from tests.api.support import (
@@ -266,7 +266,7 @@ async def test_deploy_route_reports_operations_that_could_not_complete(
 
     async with client_for(app) as client:
         incomplete = await client.post(
-            PATH, json=body(unresolved_approval()), headers=headers
+            PATH, json=body(unresolved_predicate()), headers=headers
         )
         async with preparer.hold():
             busy = await client.post(PATH, content=b"{not json", headers=headers)

@@ -140,7 +140,12 @@ async def recover_expired_lease(context: ExpiryContext, attempt_id: str) -> bool
         return True
 
 
-async def close_undispatched_attempt(context: ExpiryContext, attempt_id: str) -> bool:
+async def close_undispatched_attempt(
+    context: ExpiryContext,
+    attempt_id: str,
+    *,
+    deadline_refused_at: datetime | None = None,
+) -> bool:
     async with expiry_transition(context, "undispatched_closure"):
         if not await admit_attempt_read(context, attempt_id):
             return False
@@ -149,7 +154,7 @@ async def close_undispatched_attempt(context: ExpiryContext, attempt_id: str) ->
             .where(attempt_dispatcher.c.attempt_id == attempt.c.id)
             .exists()
         )
-        with await context.connection.execute(
+        owner = (
             select(attempt.c.node_instance_id, attempt.c.runtime, attempt.c.number)
             .join(node_instance, attempt.c.node_instance_id == node_instance.c.id)
             .where(
@@ -157,7 +162,8 @@ async def close_undispatched_attempt(context: ExpiryContext, attempt_id: str) ->
                 node_instance.c.run_id == context.run_id,
                 attempt.c.status == "created",
                 node_instance.c.top_level.is_(True),
-                attempt.c.desired_state == "cancel",
+                attempt.c.desired_state
+                == ("cancel" if deadline_refused_at is None else "run"),
                 attempt.c.execution_state == "not_started",
                 attempt.c.execution_domain_id.is_(None),
                 attempt.c.worker_id.is_(None),
@@ -168,17 +174,33 @@ async def close_undispatched_attempt(context: ExpiryContext, attempt_id: str) ->
                 attempt.c.handle.is_(None),
                 ~grants,
             )
-        ) as result:
+        )
+        if deadline_refused_at is not None:
+            owner = owner.where(
+                node_instance.c.current_attempt_id == attempt.c.id,
+                node_instance.c.status == "queued",
+                attempt.c.current_dispatcher_open.is_(None),
+                attempt.c.finished_at.is_(None),
+                attempt.c.outcome.is_(None),
+                attempt.c.recovery_required.is_(False),
+                attempt.c.recovery_version == 0,
+            )
+        with await context.connection.execute(owner) as result:
             row = result.one_or_none()
         if row is None:
             return False
         context.require_capacity(str(row.runtime))
-        now = normalise_timestamp(context.clock())
+        now = (
+            normalise_timestamp(context.clock())
+            if deadline_refused_at is None
+            else deadline_refused_at
+        )
         await context.connection.execute(
             update(attempt)
             .where(attempt.c.id == attempt_id)
             .values(
                 status="cancelled",
+                desired_state="cancel",
                 recovery_required=False,
                 finished_at=now,
                 updated_at=now,

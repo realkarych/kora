@@ -9,13 +9,18 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
 )
+from pydantic import ValidationError
 
 from kora.plugins.harness.claude.configuration import (
     CLI_VERSION,
     ClaudeEnvironmentConfiguration,
 )
 from kora.plugins.harness.claude.events import ClaudeEvents
-from kora.plugins.harness.claude.options import ClaudeSessionOptions, agent_options
+from kora.plugins.harness.claude.options import (
+    ClaudeSessionOptions,
+    agent_options,
+    configuration_refused,
+)
 from kora.plugins.harness.claude.policy import PolicyBridge
 from kora.plugins.harness.claude.sdk import feed
 from kora.plugins.harness.claude.trust import surface_cause
@@ -149,7 +154,12 @@ class ClaudeSession:
         launches: LaunchContext,
         environment: ClaudeEnvironmentConfiguration,
     ) -> RunnerOutcome:
-        options = ClaudeSessionOptions.model_validate(spec.options)
+        if spec.files:
+            raise configuration_refused()
+        try:
+            options = ClaudeSessionOptions.model_validate(spec.options)
+        except ValidationError:
+            raise configuration_refused() from None
         if (cause := self.startup_stop()) is not None:
             return RunnerOutcome(cause, "none", None, None)
         try:

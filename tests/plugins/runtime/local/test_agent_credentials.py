@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for, kora_capture
+from kora.ir.json import JsonObject
 from kora.plugins.runtime.local.agent import AgentSources, HarnessCredentials
 from kora.plugins.runtime.local.installation import InstallationConfiguration
 from kora.plugins.runtime.local.launch import ExpectedBinary
@@ -18,13 +20,23 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import AgentExecution, LaunchInputs
 from kora.protocols.secret_value import SecretRevealRefused, SecretValue
 from kora.protocols.time import SystemClock
+from kora.runner.session_result import RESULT_DIRECTORY
+from kora.runner.sink import ADAPTER_KINDS
+from tests.plugins.harness.fake.fake_support import result, tool_call, turn
 from tests.plugins.runtime.local.test_agent_session import (
     agent_session,
     detached_workload,
 )
 from tests.plugins.runtime.local.test_command_observation import SUBMITTER, unless_busy
 from tests.plugins.runtime.local.test_production_sources import CLAUDE, file_sections
-from tests.runner.agent_support import PAUSE, FakeResolver, script
+from tests.runner.agent_support import (
+    PAUSE,
+    FakeResolver,
+    GatedScript,
+    ObservedFakeHarness,
+    journal_threads_exited,
+    script,
+)
 from tests.support.local_peers import CONDITION_SECONDS, until
 from tests.support.local_runtime import protocol_error
 
@@ -353,3 +365,98 @@ async def test_conflicting_digest_refuses_before_credential_resolution(
     assert all(
         event.get("event") != "secrets.file.resolved" for event in kora_capture.finish()
     )
+
+
+@pytest.mark.parametrize("identifier", [False, True], ids=["content", "identifier"])
+@pytest.mark.asyncio
+async def test_handle_and_events_are_secret_and_capability_free(
+    tmp_path: Path, kora_capture: Capture, identifier: bool
+) -> None:
+    key_file(tmp_path)
+    token = "1785" * 8
+    content = f"before {KEY} {token} after"
+    call = tool_call("Bash", "call-1")
+    call["outcome"] = {"is_error": False, "content": content}
+    documents: list[JsonObject] = [
+        turn("m1", content),
+        call,
+        {
+            "kind": "event",
+            "event": "error",
+            "data": {"code": "harness_failed", "text": content, "truncated": False},
+        },
+    ]
+    if identifier:
+        documents.append(turn(f"id-{token}", "refused"))
+    else:
+        documents.append(
+            {"kind": "output", "source": "structured_output", "value": content}
+        )
+    documents.append(result())
+    source = GatedScript(script(documents))
+    resolver = FakeResolver(
+        source, context_for(kora_capture), adapter_type=ObservedFakeHarness
+    )
+    sources = replace(configured_sources(tmp_path, kora_capture), resolver=resolver)
+    work = detached_workload({})
+    async with agent_session(tmp_path, kora_capture, sources, SystemClock()) as (
+        session,
+        attempt,
+    ):
+        token_path = attempt / "attempt.token"
+        token_path.write_text(token, encoding="ascii")
+        token_path.chmod(0o600)
+        session.accept(SUBMITTER, None, work)
+
+        await unless_busy(
+            lambda: asyncio.to_thread(
+                session.supervise, SUBMITTER, False, work, lambda: None
+            )
+        )
+        await asyncio.wait_for(source.entered.wait(), CONDITION_SECONDS)
+        try:
+            registry = kora_capture.diagnostics.registry
+            masked_key = registry.mask(KEY)
+            masked_token = registry.mask(token)
+            source.release.set()
+            await until(lambda: session.status()[0] == "exited")
+            reference = session.session_observation(SUBMITTER)
+            payload = (
+                attempt / "control" / RESULT_DIRECTORY / reference.name
+            ).read_bytes()
+            journal = (attempt / "journal.jsonl").read_bytes()
+            adapter = resolver.adapters[0]
+            assert isinstance(adapter, ObservedFakeHarness)
+            sink = adapter.runner_sink
+            assert sink is not None
+            liveness = sink.liveness()
+            await session.stop()
+        finally:
+            source.release.set()
+
+        assert masked_key == masked_token == "[redacted]"
+        assert json.loads(payload) == {
+            "kind": "session_failed",
+            "code": "event_refused" if identifier else "secret_leak",
+        }
+        assert reference.size == len(payload)
+        assert reference.digest == "sha256:" + hashlib.sha256(payload).hexdigest()
+        for value in (KEY, token):
+            assert value.encode() not in journal
+            assert value.encode() not in payload
+            assert value not in str(reference)
+        records: list[JsonObject] = [json.loads(line) for line in journal.splitlines()]
+        host_started = next(
+            index
+            for index, record in enumerate(records)
+            if record["kind"] == "runner.session_spec"
+        )
+        assert all(
+            record["kind"] in ADAPTER_KINDS or str(record["kind"]).startswith("runner.")
+            for record in records[host_started:]
+        )
+        assert all("kill" not in str(record["kind"]) for record in records)
+        assert b"kill_handle" not in journal
+        assert b"[redacted] [redacted]" in journal
+        assert not liveness.calls_open
+        assert journal_threads_exited()

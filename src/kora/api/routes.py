@@ -16,6 +16,7 @@ class RouteName(StrEnum):
     SCHEMA = "/api/v1/openapi.json"
     GRAPH_VERSIONS = "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
     GRAPH_RUNS = "/api/v1/namespaces/{ns}/graphs/{graph}/runs"
+    RUN_EVENTS = "/api/v1/namespaces/{ns}/runs/{run}/events"
     WORKERS = "/api/v1/workers"
     WORKER_CLAIMS = "/api/v1/workers/{worker_id:path}/claims"
     WORKER_HISTORY = "/api/v1/attempts/{att}/grants"
@@ -28,6 +29,7 @@ ROUTE_METHODS: dict[RouteName, frozenset[str]] = {
     RouteName.SCHEMA: frozenset({"GET"}),
     RouteName.GRAPH_VERSIONS: frozenset({"POST"}),
     RouteName.GRAPH_RUNS: frozenset({"POST"}),
+    RouteName.RUN_EVENTS: frozenset({"GET"}),
     RouteName.WORKERS: frozenset({"POST"}),
     RouteName.WORKER_CLAIMS: frozenset({"POST"}),
     RouteName.WORKER_HISTORY: frozenset({"GET"}),
@@ -40,6 +42,7 @@ PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
         RouteName.SCHEMA,
         RouteName.GRAPH_VERSIONS,
         RouteName.GRAPH_RUNS,
+        RouteName.RUN_EVENTS,
         RouteName.WORKERS,
         RouteName.WORKER_CLAIMS,
         RouteName.WORKER_HISTORY,

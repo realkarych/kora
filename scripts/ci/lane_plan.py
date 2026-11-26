@@ -11,13 +11,14 @@ from xml.parsers.expat import ParserCreate
 
 TARGET_MILLISECONDS = 210_000
 CHILDREN = 3
-MAXIMUM_LANES = 20
+MAXIMUM_LANES = 22
 UNRECORDED_PERCENTILE = 90
 SPECIAL_LANES = frozenset({"storage", "local-runtime"})
 TABLE = Path(__file__).with_name("lane_durations.json")
 MAXIMUM_INPUT = 67108864
 ARTIFACT = re.compile(
-    r"scaffold-tests-(ubuntu-24\.04|macos-15)-([0-9]+\.[0-9]+\.[0-9]+)-(.+)"
+    r"scaffold-tests-(?:attempt-(?P<attempt>[1-9][0-9]*)-)?"
+    r"(?P<environment>(?:ubuntu-24\.04|macos-15)-[0-9]+\.[0-9]+\.[0-9]+)-(?P<lane>.+)"
 )
 REVISION = re.compile(r"[0-9a-f]{40}")
 IDENTIFIER = re.compile(r"[1-9][0-9]*")
@@ -238,17 +239,6 @@ def require_success(directory: Path) -> None:
         raise PlanFailure(COMPLETE_RUN_ONLY)
 
 
-def general_lane_directories(root: Path) -> dict[str, list[Path]]:
-    environments: dict[str, list[Path]] = {}
-    for directory in sorted(root.iterdir()):
-        match = ARTIFACT.fullmatch(directory.name)
-        if match is None or directory.is_symlink() or not directory.is_dir():
-            raise PlanFailure("the timing input has an unexpected entry")
-        if match[3] not in SPECIAL_LANES:
-            environments.setdefault(f"{match[1]}-{match[2]}", []).append(directory)
-    return environments
-
-
 def environment_durations(
     directories: list[Path], collection: Collection
 ) -> dict[str, Record]:
@@ -274,13 +264,25 @@ def environment_durations(
 def recorded_table(
     root: Path, collection: Collection, expected_environments: frozenset[str]
 ) -> Table:
-    environments = general_lane_directories(root)
-    sources = {
-        receipt_source(directory / "receipt.json")
-        for directory in sorted(root.iterdir())
-    }
+    environments: dict[str, list[Path]] = {}
+    lanes: set[tuple[str, str]] = set()
+    sources: set[tuple[str, str, str]] = set()
     for directory in sorted(root.iterdir()):
+        match = ARTIFACT.fullmatch(directory.name)
+        if match is None or directory.is_symlink() or not directory.is_dir():
+            raise PlanFailure("the timing input has an unexpected entry")
+        environment, lane = match["environment"], match["lane"]
+        if (environment, lane) in lanes:
+            raise PlanFailure("the timing input repeats a lane")
+        lanes.add((environment, lane))
+        source = receipt_source(directory / "receipt.json")
+        named_attempt = match["attempt"]
+        if named_attempt is not None and named_attempt != source[1]:
+            raise PlanFailure(COMPLETE_RUN_ONLY)
+        sources.add(source)
         require_success(directory)
+        if lane not in SPECIAL_LANES:
+            environments.setdefault(environment, []).append(directory)
     if len(sources) != 1 or not environments:
         raise PlanFailure(COMPLETE_RUN_ONLY)
     if not expected_environments <= environments.keys():
