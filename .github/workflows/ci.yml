@@ -1046,6 +1046,7 @@ jobs:
           SCOPE_RESULT: ${{ needs.change-scope.result }}
           SCOPE_VERIFIED: ${{ needs.change-scope.outputs.verified }}
           FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
+          BROWSER_PNPM_RESULT: ${{ steps.browser_pnpm.outcome }}
           BROWSER_RESULT: ${{ steps.verification.outcome }}
           CANCELLED: ${{ job.status == 'cancelled' }}
         run: bash scripts/ci/require_outcomes.sh browser
