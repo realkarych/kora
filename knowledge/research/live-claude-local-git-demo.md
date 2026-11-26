@@ -8,12 +8,13 @@ The offline procedure exercises the verifier embedded in the graph with real Git
 
 Use a trusted Linux or macOS environment dedicated to this demo. The `local` runtime is cooperative. Give it a private installation and repository with no ambient service credentials, custom Git hooks or includes. The live installation needs a trusted Git binding for the logical repository, selecting `local_credential_free` with the saved binding identity, revision and scoped local principal. Configure only the dedicated model credential through the ordinary private harness configuration. The graph carries no credentials. [ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md) · [Local publication contract](../specs/protocols.md#credential-free-local-publication)
 
-Use Bash from the repository root with Kora installed at the checked revision. The default Python path below comes from the locked development environment. To use the installed runtime's Python, set `KORA_DEMO_PYTHON` to its absolute executable path. Set `KORA_DEMO_GIT` if the installation's trusted Git executable has a different absolute path. Run this block again in a fresh Bash session for the live witness to start with a clean bare repository. [Development setup](../../docs/development.md#tool-setup)
+Use Bash from the repository root with Kora installed at the checked revision. The default Python path below comes from the locked development environment. To use the installed runtime's Python, set `KORA_DEMO_PYTHON` to its absolute executable path. Set `KORA_DEMO_GIT` if the installation's trusted Git executable has a different absolute path. Run this block again in a fresh Bash session for the live witness to start with a clean bare repository. The trusted Git binding requires a physical repository path without symlink aliases. [Development setup](../../docs/development.md#tool-setup)
 
 ```bash
 set -euo pipefail
 umask 077
 demo_dir=$(mktemp -d "${TMPDIR:-/tmp}/kora-live-demo.XXXXXX")
+demo_dir=$(cd -P -- "$demo_dir" && pwd -P)
 demo_home="$demo_dir/home"
 mkdir "$demo_home"
 bare="$demo_dir/demo.git"
