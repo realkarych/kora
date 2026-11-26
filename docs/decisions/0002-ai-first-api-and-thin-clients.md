@@ -26,7 +26,7 @@ Two questions had to be settled: how the agent-facing surface is produced (a fir
 
 ## First-slice amendment of 2026-10-23
 
-A separate authoring `kora_validate` tool validates compiled IR through `POST /validate`. The complete future inventory is sixteen tools; this explicitly supersedes the fifteen-tool cap. The first slice exposes the ten stdio tools and complete included-operation mappings in [first-slice.md](../../knowledge/specs/first-slice.md#included-operation-and-parity-contract). Compile/test pair-presence and skill-reference parity activate with their implementations; Python compilation and scenario execution remain prohibited on the server at all times.
+A separate authoring `kora_validate` tool validates compiled IR through `POST /validate`. The complete future inventory is sixteen tools; this explicitly supersedes the fifteen-tool cap. The first slice exposes the ten API-backed stdio tools with the complete included-operation mappings in [first-slice.md](../../knowledge/specs/first-slice.md#included-operation-and-parity-contract). Compile/test pair-presence and skill-reference parity activate with their implementations; Python compilation and scenario execution remain prohibited on the server at all times.
 
 Exactly `GET /healthz`, `GET /readyz` and `GET /metrics` are excluded from CLI/MCP operation parity as infrastructure probes, alongside the existing worker and auth exclusions. This is not an authentication exemption: the route-authorization contract governs each probe. Doctor, provider listing/conformance, database maintenance and standalone remain local operations, not remotely callable API work.
 

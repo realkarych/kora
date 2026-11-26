@@ -147,7 +147,7 @@ The sequential chain uses direct CLI approval bindings, as in [the accepted depe
 
 ## Included operation and parity contract
 
-Retain every included API operation with one reachable CLI form and MCP selector. Ten slice tools: authoring `kora_reference` (deployed graphs/versions only), `kora_validate`, `kora_deploy`; operating `kora_trigger`, `kora_runs`, `kora_inspect`, `kora_approvals`, `kora_respond`, `kora_cancel`, `kora_admin` (reconcile only).
+Retain every included API operation with one reachable CLI form and MCP selector. Ten API-backed slice tools: authoring `kora_reference` (deployed graphs/versions only), `kora_validate`, `kora_deploy`; operating `kora_trigger`, `kora_runs`, `kora_inspect`, `kora_approvals`, `kora_respond`, `kora_cancel`, `kora_admin` (reconcile only).
 
 - Validate compiled IR; deploy graph versions; list/get graphs and versions.
 - Trigger; list/get runs, with the existing bounded wait on the single-run read; events.

@@ -8,7 +8,7 @@ The committed schema is generated from the real `GraphDocument` model by `kora.i
 
 ## 1. Design rules
 
-- The scheduler consumes materialised node configuration (FR-3.2) and the expressions in [section 7](#7-expressions-and-templates). Authored Python runs at compilation.
+- The scheduler consumes materialised node configuration (FR-3.2) and the expressions in [section 7](#7-expressions-and-templates). The general compiler runs authored Python in the author's process. The [early compiler](dsl.md#early-sequential-json-mode-issue-1918) parses source without running it.
 - Edges use stable string IDs and named references (FR-1.5). Node IDs match `^[a-z][a-z0-9_]{0,63}(?![\s\S])` and are unique within the root node map or one stored body's node map. Independent maps can reuse an ID.
 - `graph` holds topology and node definitions, `runtime` holds graph-level policy and configuration, and `secrets` holds references only (FR-1.3). Compiler provenance belongs to `meta`.
 - Compilation emits deterministic output with schema-ordered keys, source-ordered lists and no generated timestamps (NFR-6.2).
