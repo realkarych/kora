@@ -15,6 +15,7 @@ from kora.db.connection import Database, Lifecycle, parse_database_url
 from kora.db.migrations import upgrade_database
 from tests.api.serving_lifecycle_child import PRIVATE_LIFESPAN_REASON, serving_event
 from tests.api.support import api_capture
+from tests.client.support import write_tls_material
 
 __all__ = ["api_capture"]
 
@@ -159,6 +160,51 @@ async def test_serving_refused_lifespan_never_binds_or_leaks_reason(
     assert b'"reason":"startup_failed"' in diagnostics
     assert b"api.serving_bound" not in diagnostics
     assert PRIVATE_LIFESPAN_REASON.encode() not in diagnostics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["recover", "stop"])
+async def test_tls_accept_pressure_retries_or_settles_on_stop(
+    tmp_path: Path, mode: str
+) -> None:
+    material = write_tls_material(tmp_path)
+    settings = parse_database_url(f"sqlite+aiosqlite:///{tmp_path / 'metadata.sqlite'}")
+    await upgrade_database(settings)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind((LOOPBACK, 0))
+        port = listener.getsockname()[1]
+    environment = dict(os.environ)
+    environment.update(
+        KORA_DATABASE_URL=str(settings.url),
+        KORA_LOG_LEVEL="INFO",
+        KORA_API_HTTPS_ORIGIN=f"https://{LOOPBACK}:{port}",
+        KORA_API_TLS_CERT_FILE=str(material.certificate),
+        KORA_API_TLS_KEY_FILE=str(material.key),
+    )
+
+    child = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "tests.api.serving_lifecycle_child",
+        "tls_accept_pressure",
+        str(port),
+        str(material.authority),
+        mode,
+        env=environment,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        async with asyncio.timeout(SERVER_WAIT):
+            output, diagnostics = await child.communicate()
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
+
+    assert child.returncode == 0, diagnostics.decode()
+    assert output == b"tls_accept_pressure_settled\n"
+    assert b"api.serving_refused" not in diagnostics
 
 
 @pytest.mark.asyncio

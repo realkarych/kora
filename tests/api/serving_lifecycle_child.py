@@ -2,15 +2,19 @@ import asyncio
 import errno
 import json
 import os
+import resource
 import signal
 import socket
+import ssl
 import sys
 import threading
 from asyncio.trsock import TransportSocket
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from selectors import BaseSelector
 from typing import Protocol, cast
 
 import aiosqlite
@@ -26,7 +30,7 @@ from kora.api.graph_deployment_worker import THREAD_NAME, DeploymentPreparer
 from kora.api.graph_services import deployment_selection
 from kora.api.installed_scheduler import installed_root_admission
 from kora.api.installed_worker import installed_worker_profile
-from kora.api.serving import read_tls_context, serve_sqlite
+from kora.api.serving import LOOPBACK, ApiServer, read_tls_context, serve_sqlite
 from kora.api.worker_claims_route import WorkerClaimsRoute
 from kora.api.worker_registration_route import WorkerRegistrationRoute
 from kora.cel_eval.evaluate import PatternCompilation
@@ -34,6 +38,7 @@ from kora.cel_eval.thread import PROCESS, Evaluator
 from kora.db.connection import (
     Database,
     DatabaseClosedError,
+    DatabaseSettings,
     Lifecycle,
     read_database_settings,
 )
@@ -412,6 +417,123 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+def exhaust_descriptors(release: ExitStack) -> None:
+    original = resource.getrlimit(resource.RLIMIT_NOFILE)
+    release.callback(resource.setrlimit, resource.RLIMIT_NOFILE, original)
+    soft, hard = original
+    limit = 64 if soft == resource.RLIM_INFINITY else min(soft, 64)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))
+    for _ in range(limit + 1):
+        try:
+            descriptor = os.open(os.devnull, os.O_RDONLY)
+        except OSError as error:
+            if error.errno != errno.EMFILE:
+                raise
+            return
+        release.callback(os.close, descriptor)
+    raise AssertionError("the TLS fixture did not exhaust its descriptor limit")
+
+
+async def selector_turn() -> None:
+    loop = asyncio.get_running_loop()
+    barrier: asyncio.Future[None] = loop.create_future()
+    loop.call_soon(barrier.set_result, None)
+    await asyncio.shield(barrier)
+
+
+async def tls_retry_armed(
+    listener: object, serving: asyncio.Task[None]
+) -> asyncio.TimerHandle:
+    while not serving.done():
+        timer: object = vars(listener).get("_accept_retry")
+        if isinstance(timer, asyncio.TimerHandle):
+            return timer
+        await selector_turn()
+    raise AssertionError("the TLS listener stopped before scheduling accept retry")
+
+
+async def tls_pressure_health(port: int, authority: ssl.SSLContext) -> None:
+    reader, writer = await asyncio.open_connection(
+        LOOPBACK, port, ssl=authority, server_hostname=LOOPBACK
+    )
+    try:
+        writer.write(
+            b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        await writer.drain()
+        response = await reader.read()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+    assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+    assert response.endswith(b'{"status":"ok"}')
+
+
+async def exercise_tls_accept_pressure(
+    settings: DatabaseSettings,
+    diagnostics: ProcessDiagnostics,
+    port: int,
+    authority_file: Path,
+    stop_while_paused: bool,
+) -> int:
+    context = read_tls_context(os.environ, port, ordinary_sqlite=True)
+    assert context is not None
+    authority = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    authority.load_verify_locations(authority_file)
+    database = Database(settings)
+    application = create_application(
+        StaticTokenAuthenticator({}, database),
+        diagnostics,
+        SystemClock(),
+        new_instance_id,
+    )
+    server = ApiServer(
+        application, port, diagnostics.logger(COMPONENT), tls_context=context
+    )
+    loop = asyncio.get_running_loop()
+    selector: object = vars(loop)["_selector"]
+    assert isinstance(selector, BaseSelector)
+    serving = asyncio.create_task(server.serve())
+    try:
+        async with asyncio.timeout(10):
+            while not server.started:
+                assert not serving.done()
+                await selector_turn()
+            listener: object = vars(server)["_tls_listener"]
+            raw: object = vars(listener)["_listener"]
+            assert isinstance(raw, socket.socket)
+            fd = raw.fileno()
+            assert fd in selector.get_map()
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+                client.setblocking(False)
+                with ExitStack() as release:
+                    exhaust_descriptors(release)
+                    await loop.sock_connect(client, (LOOPBACK, port))
+                    retry = await tls_retry_armed(listener, serving)
+                    assert not retry.cancelled()
+                    assert fd not in selector.get_map()
+                    if stop_while_paused:
+                        server.should_exit = True
+                        assert not await server.seal_connections()
+                        assert retry.cancelled()
+                        assert raw.fileno() == -1
+                    else:
+                        release.close()
+                        client.close()
+                        await tls_pressure_health(port, authority)
+                        assert vars(listener)["_accept_retry"] is None
+            os.write(1, b"tls_accept_pressure_settled\n")
+    finally:
+        server.should_exit = True
+        try:
+            await serving
+            await server.drain()
+        finally:
+            await database.close()
+    assert not server.listener_failed
+    return 0
+
+
 def launch() -> int:
     settings = read_database_settings(os.environ)
     diagnostics = configure_process(
@@ -425,6 +547,16 @@ def launch() -> int:
     forced_owners: list[Database] = []
     try:
         match sys.argv[1:]:
+            case ["tls_accept_pressure", requested_port, authority, mode]:
+                return asyncio.run(
+                    exercise_tls_accept_pressure(
+                        settings,
+                        diagnostics,
+                        int(requested_port),
+                        Path(authority),
+                        mode == "stop",
+                    )
+                )
             case ["refuse_lifespan"]:
                 make_application = refused_lifespan
             case ["hold_native", release]:

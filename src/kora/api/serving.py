@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import logging
 import os
 import signal
@@ -35,6 +36,10 @@ LOOPBACK: str = "127.0.0.1"
 TLS_ORIGIN_VARIABLE: str = "KORA_API_HTTPS_ORIGIN"
 TLS_CERT_VARIABLE: str = "KORA_API_TLS_CERT_FILE"
 TLS_KEY_VARIABLE: str = "KORA_API_TLS_KEY_FILE"
+ACCEPT_PRESSURE: frozenset[int] = frozenset(
+    {errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM}
+)
+ACCEPT_RETRY_SECONDS: float = 1.0
 SERVER_LOGGERS: tuple[str, ...] = (
     "uvicorn",
     "uvicorn.error",
@@ -212,6 +217,7 @@ class _ServingHttpConnection(H11Protocol):
 class _TlsListener:
     failed: bool
     _listener: socket.socket | None
+    _accept_retry: asyncio.TimerHandle | None
     _handshakes: dict[asyncio.Task[None], tuple[socket.socket, _ServingHttpConnection]]
 
     def __init__(
@@ -225,6 +231,7 @@ class _TlsListener:
         self._make_protocol = make_protocol
         self._stop = stop
         self._listener = None
+        self._accept_retry = None
         self._handshakes = {}
         self.failed = False
 
@@ -238,7 +245,17 @@ class _TlsListener:
         self._loop.add_reader(listener.fileno(), self._accept, listener)
         return listener.getsockname()
 
+    def _retry_accept(self, listener: socket.socket) -> None:
+        self._accept_retry = None
+        try:
+            self._loop.add_reader(listener.fileno(), self._accept, listener)
+        except OSError:
+            self._fail()
+
     def _close_listener(self) -> None:
+        if self._accept_retry is not None:
+            self._accept_retry.cancel()
+            self._accept_retry = None
         if self._listener is not None:
             self._loop.remove_reader(self._listener.fileno())
             self._listener.close()
@@ -254,8 +271,14 @@ class _TlsListener:
             connection, _ = listener.accept()
         except (BlockingIOError, InterruptedError, ConnectionAbortedError):
             return
-        except OSError:
-            self._fail()
+        except OSError as error:
+            if error.errno in ACCEPT_PRESSURE:
+                self._loop.remove_reader(listener.fileno())
+                self._accept_retry = self._loop.call_later(
+                    ACCEPT_RETRY_SECONDS, self._retry_accept, listener
+                )
+            else:
+                self._fail()
             return
         with ExitStack() as cleanup:
             cleanup.callback(connection.close)
