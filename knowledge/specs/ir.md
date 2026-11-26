@@ -1061,7 +1061,7 @@ A child cannot exceed its parent's bytes or value count or the global element an
 The estimate examines the entire type and bound of each referenced variable and treats a reached malformed bound as the builder error `BoundError`.
 The default variable bound uses 4,096 canonical bytes and 256 values alongside the independent container and string limits, which aggregate limits may dominate.
 
-For a list literal, concatenation or conditional, join operand element bounds, using inheritance when an operand lacks an element bound or declares fields.
+The element bound of a list literal, a concatenation or a conditional joins its operands' element bounds, using the inherited bound for an operand that declares none or that declares fields, whatever the static type.
 A map or record range iterates over keys.
 A `dyn` range iterates over the join of its key and element bounds, with inheritance for an operand with declared fields.
 A type join keeps a type only for the same object or primitive kind and otherwise gives `dyn`.
@@ -1134,12 +1134,12 @@ An `Evaluator` belongs to its creating event loop.
 Stopping one instance or closing a handle rejects only its own queued jobs, waits for its in-flight and undelivered work and leaves other handles and the worker usable.
 The default one-second close deadline returns `close_timed_out`.
 Queued cancellations prevent execution, and in-flight cancellations discard the result.
-Closed loops release their retained jobs, and stopped open loops remain charged until delivery or close.
+A running job stays charged until the native call settles after cancellation, event-loop closure or `close_timed_out`.
+Closed loops release work that is no longer running, and stopped open loops remain charged until delivery or close.
 An unmapped worker fault permanently closes admission, settles waiting callers and releases the cache.
 
-At process shutdown reject queued jobs and let in-flight work finish.
-Embedded standalone shutdown (`kora test`, `run_scenario`, `kora_test`) waits under the same rule without exiting the host.
-The process releases the daemon thread on exit.
+Embedded standalone shutdown (`kora test`, `run_scenario`, `kora_test`) follows handle closure without exiting the host.
+The daemon belongs to the process until it exits.
 The native binding holds the GIL during compile and evaluation and cannot be interrupted.
 A supervisor kill is the hard limit.
 Static admission, logical budgets and compact timing observations do not establish GIL dwell, API response or transaction duration limits.
@@ -1159,9 +1159,9 @@ An admitted expression can stall or crash the shared process.
 
 Job counts include in-flight work and completed results waiting for delivery.
 Charge detached values, renderings, bounded metadata and result retention to the shared owner.
-Result growth beyond that charge returns operational `busy`.
+Result growth that would exceed the shared outstanding charge limit returns operational `busy`.
 Pending lifecycle reports count toward new-handle admission, with up to one timeout and one completed-close report per handle.
-The internal admission limits are configurable in `Settings`.
+These internal limits precede the first product consumer and are configurable through `Settings`.
 The [lifetime method](../research/cel-evaluator-lifetime-2026-10-21.md#method-amendment-dated-2026-10-28-process-wide-rss-spans-and-hop-latency-become-diagnostics) governs native validation-compile qualification at its recorded trigger.
 
 Validation and evaluation charge the checked expression's effective bound snapshot.
@@ -1202,7 +1202,8 @@ Each transaction evaluates at least one expression.
 At exhaustion, commit decisions, keep `needs_scheduling` for the rest and rotate across runs and namespaces.
 Match an inbound event in batches under each run's lock.
 The allowance affects order, and existing expiry rules decide waits whose work is deferred past expiry.
-The API admits `approve_when` under the per-expression budget independently of the allowance, without a response deadline.
+The API admits `approve_when` under the per-expression logical budget independently of the allowance.
+That budget establishes no response deadline.
 
 ### 7.7 Evaluation errors
 
@@ -1228,7 +1229,7 @@ kora also returns `bound_exceeded`, `number_out_of_range`, `invalid_value`, `wro
 The required result is exactly `bool`, or `string` for reasons, without coercing Python truthiness.
 
 An `internal_fault` is logged at ERROR.
-It covers execution `ValueError`, failure to compile a checked rendering, native panic during compile or execution, checked-tree re-parse failure and cache collisions.
+Its fault is `value_error` for native `ValueError` at compilation or execution, `runtime_error` for compile `RuntimeError`, `panic` for native panic at either stage, and `unmapped` for checked-tree re-parse failure or cache collision.
 An undeclared identifier or native pattern rejection could also raise execution `RuntimeError`, which still maps to `invalid_argument`.
 The checker, required projections and server-side pattern validation exclude those inputs before evaluation.
 
@@ -1532,7 +1533,7 @@ Seal the authoritative rendered content once in the nonsecret execution request 
 The Worker prepares a proposal and the API independently derives and compares the complete result before upload readiness or the first inline seal.
 A first seal of a ready upload uses its checked identity.
 The attempt owns the saved content and availability, and seal replay and recovery reuse the recorded bytes.
-The [execution request contract](execution-request.md#3-trusted-derivation-and-finite-admission) owns renderer admission and actual stop controls. [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md)
+The [execution request contract](execution-request.md#3-trusted-derivation-and-finite-admission) owns renderer admission and actual stop controls, with activation under #1453. [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md)
 
 A graph with a webhook trigger may use run parameters in prompts.
 Using them in a `cmd` element or `workspace.rev` is `IR016` for that graph.
