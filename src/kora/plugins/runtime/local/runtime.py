@@ -9,16 +9,18 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Coroutine,
+    Generator,
     Mapping,
     Sequence,
 )
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from threading import Event
-from typing import Final, TypeVar
+from typing import Final, Literal, TypeVar
 from weakref import WeakValueDictionary
 
 from kora.executor.digests import object_digest
@@ -26,8 +28,10 @@ from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.ir.json import JsonObject
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import (
+    ENVELOPE_BYTES,
     MESSAGE_PROGRESS_NS,
     SECTION_FRAME_BYTES,
+    DispatcherQuiescenceRequest,
     LogName,
     LogRequest,
     LogSource,
@@ -35,6 +39,7 @@ from kora.plugins.runtime.local.channel import (
     checked_log,
     checked_output_name,
     delivery_error,
+    read_delivery,
     transfer_cutoff,
     workload_digest,
     write_transfer_bytes,
@@ -59,6 +64,7 @@ from kora.plugins.runtime.local.configuration import (
 from kora.plugins.runtime.local.configuration import StateRoot as StateRoot
 from kora.plugins.runtime.local.control import (
     ListenerRefused,
+    attached_request,
     deliver_workload,
     observe_command,
     observe_finalization,
@@ -78,8 +84,10 @@ from kora.plugins.runtime.local.services import (
     unmanaged_services,
 )
 from kora.plugins.runtime.local.spawn import (
+    CompletionPipe,
     Launchers,
     Readiness,
+    completion_frame,
     default_socket_directory,
     launch_deadline,
     open_socket_directory,
@@ -97,8 +105,18 @@ from kora.plugins.runtime.local.spool import (
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline, duration_ns
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.evidence import NormalCompletionQuiescence, TerminationReceipt
-from kora.protocols.identity import Handle, ProcessIdentity
+from kora.protocols.evidence import (
+    DispatcherQuiescence,
+    NormalCompletionQuiescence,
+    TerminationReceipt,
+)
+from kora.protocols.history import (
+    GrantHistoryPage,
+    GrantHistoryPosition,
+    GrantHistoryProgress,
+    GrantHistorySnapshot,
+)
+from kora.protocols.identity import GrantBinding, Handle, ProcessIdentity
 from kora.protocols.runtime import (
     CommandObservation,
     RuntimeCapabilities,
@@ -132,10 +150,12 @@ from kora.runner.identity import (
     ProcessScanFailure,
 )
 from kora.runner.native_io import NativeIOSubmissionUncertain, observed
-from kora.runner.peers import PeerSource, kernel_source
+from kora.runner.peers import PeerRefused, PeerSource, kernel_source, same_process
 from kora.runner.processes import ExitAnchor, SignalResult, wait_member_change
 from kora.runner.registry import (
+    ADMITTED_JOBS,
     COMPONENT,
+    FIRST_GRANT_ARGUMENT,
     RUNTIME_NAME,
     Applied,
     AttemptKey,
@@ -143,8 +163,14 @@ from kora.runner.registry import (
     DomainRecord,
     Entry,
     Fence,
+    FirstClosureRecord,
+    FirstGrantHead,
+    FirstGrantLinks,
+    FirstGrantRecord,
+    LifecycleHead,
     LockOutcome,
     Registry,
+    RetainedReference,
     Retired,
     Retiring,
     Running,
@@ -152,11 +178,15 @@ from kora.runner.registry import (
     Submitter,
     Transition,
     TransitionExecutor,
+    Unsubmitted,
     bind_workspace,
     lineage_of,
     lookup_cell,
+    model_bytes,
     open_domain,
+    original_submitter,
     refusal,
+    released,
     released_cell,
     retire_cell,
     runner_argv,
@@ -228,6 +258,19 @@ RELEASED: Final[EventSpec] = CATALOG.register(
         },
     )
 )
+FIRST_GRANT_OUTCOME: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.first_grant",
+        COMPONENT,
+        Level.INFO,
+        "the local original grant operation returned",
+        {
+            "operation": FieldKind.STRING,
+            "outcome": FieldKind.STRING,
+            "waited_ms": FieldKind.FLOAT,
+        },
+    )
+)
 RELEASE_REFUSALS: Final[dict[type, str]] = {
     Retiring: "attempt_retired",
     Retired: "attempt_retired",
@@ -244,6 +287,25 @@ LISTENER_REFUSED: Final[EventSpec] = CATALOG.register(
         {"reason": FieldKind.STRING},
     )
 )
+
+
+@contextmanager
+def report_first_grant(
+    ctx: ProtocolContext, operation: Literal["intake", "closure"]
+) -> Generator[None]:
+    started = ctx.clock.monotonic_ns()
+    outcome = "refused"
+    try:
+        yield
+        outcome = "confirmed"
+    finally:
+        ctx.logger.emit_at(
+            Level.INFO if outcome == "confirmed" else Level.WARNING,
+            FIRST_GRANT_OUTCOME,
+            operation=operation,
+            outcome=outcome,
+            waited_ms=(ctx.clock.monotonic_ns() - started) / 1_000_000,
+        )
 
 
 def rejection(code: str) -> KoraProtocolError:
@@ -467,9 +529,11 @@ class RunnerLaunch:
     socket_directory: Path
     identity: ProcessIdentity
     clock: Clock
+    first_grant: bool = False
 
     def prefix(self, root: Path) -> tuple[str, ...]:
-        return (*self.command, str(root))
+        profile = (FIRST_GRANT_ARGUMENT,) if self.first_grant else ()
+        return (*self.command, *profile, str(root))
 
 
 def output_deadline_reached(
@@ -501,6 +565,23 @@ class SessionFinalizationRead:
     receipt: _FinalizationReceipt
 
 
+@dataclass
+class OriginalFirstGrant:
+    reference: RetainedReference
+    deadline: ExecutionDeadline | None
+    confirmed: bool = False
+    completed: tuple[NormalCompletionQuiescence, RetainedReference, bytes] | None = None
+    released: bool = False
+
+    def confirms(self, entry: Completed, closure: RetainedReference | None) -> bool:
+        return self.completed == (entry.quiescence, closure, model_bytes(entry.runner))
+
+
+FirstGrantState = tuple[
+    FirstGrantHead, FirstGrantRecord, OriginalFirstGrant, FirstClosureRecord | None
+]
+
+
 class LocalRuntime:
     name: str = RUNTIME_NAME
     config_schema: JsonObject = CONFIG_SCHEMA
@@ -522,6 +603,8 @@ class LocalRuntime:
         spool: SpoolOwner,
     ) -> None:
         self._configuration: LocalRuntimeConfiguration = configuration
+        self._first_grants: dict[AttemptKey, OriginalFirstGrant] = {}
+        self._first_pipe: CompletionPipe | None = None
         self.execution_domain_id = registry.execution_domain_id
         self.service_report = None
         self.registry = registry
@@ -534,7 +617,7 @@ class LocalRuntime:
         self._peers = peers
         self._observations: set[asyncio.Task[RuntimeStatus]] = set()
         self._finalization_reads: set[asyncio.Task[SessionFinalizationRead]] = set()
-        self._deliveries: set[asyncio.Task[None]] = set()
+        self._deliveries: set[asyncio.Task[object]] = set()
         self._spool = spool
         self._spool_admission = asyncio.Lock()
         self._spool_allocations = 0
@@ -572,7 +655,14 @@ class LocalRuntime:
         peers: PeerSource | None = None,
         service_launcher: StepLauncher | None = None,
         release_entries: int = RELEASE_ENTRIES,
+        first_grant: bool = False,
     ) -> "LocalRuntime":
+        if first_grant and any(
+            source is not None for source in (runner, peers, identities, scanner)
+        ):
+            raise ValueError(
+                "first-grant closure requires the production runner and native peers"
+            )
         if release_entries <= RELEASE_DEPTH:
             raise ValueError("the release bound must exceed its depth bound")
         executor = TransitionExecutor()
@@ -660,6 +750,7 @@ class LocalRuntime:
                 socket_directory=sockets,
                 identity=identity,
                 clock=ctx.clock,
+                first_grant=first_grant,
             )
             result = await executor.run(locate, after_uncertain_submission=close_root)
             if result is None:
@@ -699,7 +790,12 @@ class LocalRuntime:
                 outcome=owner.outcome.value,
                 waited_ms=max(0, ctx.clock.monotonic_ns() - started) / 1_000_000,
             )
-            registry = Registry(directory, domain.execution_domain_id, new_identifier)
+            registry = Registry(
+                directory,
+                domain.execution_domain_id,
+                new_identifier,
+                first_grant=first_grant,
+            )
             runtime = cls(
                 configuration,
                 path,
@@ -753,9 +849,14 @@ class LocalRuntime:
         decide: Callable[[Entry | None], Transition],
         ctx: ProtocolContext,
         operation: str,
+        check: Callable[[LifecycleHead | None], object] | None = None,
+        on_cancel: Callable[[Applied], None] | None = None,
     ) -> Applied:
         applied = await self.executor.locked(
-            lambda: self.registry.try_transition(key, decide), ctx, operation
+            lambda: self.registry.try_transition(key, decide, check),
+            ctx,
+            operation,
+            on_cancel,
         )
         if applied.transition.refusal is not None:
             raise refusal(applied.transition.refusal)
@@ -763,6 +864,225 @@ class LocalRuntime:
 
     async def entry(self, key: AttemptKey) -> Entry | None:
         return await self.executor.run(lambda: self.registry.entry(key))
+
+    def verify_original(self, grant: GrantBinding) -> None:
+        original = self._launch.identity
+        if (
+            not self._launch.first_grant
+            or grant.process is None
+            or original.pid != os.getpid()
+            or not original.leads_group
+            or model_bytes(grant.process) != model_bytes(original)
+        ):
+            raise refusal("lineage_unavailable")
+        try:
+            same_process(self._identities, original)
+        except PeerRefused:
+            raise refusal("lineage_unavailable") from None
+
+    def checked_first(
+        self, key: AttemptKey, ctx: ProtocolContext, head: LifecycleHead | None
+    ) -> FirstGrantState:
+        owner = self._first_grants.get(key)
+        if (
+            not isinstance(head, FirstGrantHead)
+            or owner is None
+            or not owner.confirmed
+            or head.first_grant.grant != owner.reference
+            or owner.deadline != ctx.deadline
+            or (isinstance(head.entry, Completed) and head.first_grant.closure is None)
+        ):
+            raise refusal("lineage_unavailable")
+        record = self.registry.linked_grant(key, head)
+        closure = self.registry.linked_closure(key, head, record.grant)
+        if record.snapshot.namespace_id != ctx.namespace_id or (
+            isinstance(head.entry, Unsubmitted | Starting | Running | Completed)
+            and head.entry.deadline != owner.deadline
+        ):
+            raise refusal("lineage_unavailable")
+        self.verify_original(record.grant)
+        if isinstance(head.entry, Starting | Running) and not original_submitter(
+            record.grant, head.entry.submitter
+        ):
+            raise refusal("lineage_unavailable")
+        return head, record, owner, closure
+
+    def first_effect(
+        self,
+        key: AttemptKey,
+        ctx: ProtocolContext,
+        head: LifecycleHead | None,
+        dispatcher: str | None = None,
+        *,
+        preparing: bool = True,
+    ) -> None:
+        first, record, _, closure = self.checked_first(key, ctx, head)
+        entry = first.entry
+        if closure is not None and (
+            isinstance(entry, Running)
+            or (preparing and isinstance(entry, Completed) and not released(entry))
+        ):
+            if entry.gate_closed or expired(entry.deadline, ctx.clock.now()):
+                raise refusal("deadline_expired")
+            raise refusal("workload_conflict")
+        if dispatcher not in (None, record.grant.dispatcher_id):
+            raise refusal("workload_conflict")
+
+    async def locked_head(
+        self,
+        key: AttemptKey,
+        ctx: ProtocolContext,
+        check: Callable[[LifecycleHead | None], T],
+    ) -> T:
+        return await self.executor.locked(
+            lambda: self.registry.under_lock(
+                key, lambda: check(self.registry.read(key))
+            ),
+            ctx,
+            "first_grant_state",
+        )
+
+    async def completion_state(
+        self, key: AttemptKey, ctx: ProtocolContext
+    ) -> tuple[Entry | None, OriginalFirstGrant | None, RetainedReference | None]:
+        if not self._launch.first_grant:
+            return await self.entry(key), None, None
+        head, _, owner, _ = await self.locked_head(
+            key, ctx, partial(self.checked_first, key, ctx)
+        )
+        return head.entry, owner, head.first_grant.closure
+
+    async def check_first_effect(self, key: AttemptKey, ctx: ProtocolContext) -> None:
+        if self._launch.first_grant:
+            check = partial(self.first_effect, key, ctx, preparing=False)
+            await self.locked_head(key, ctx, check)
+
+    def singleton(
+        self,
+        key: AttemptKey,
+        grant: GrantBinding,
+        snapshot: GrantHistorySnapshot,
+        ctx: ProtocolContext,
+    ) -> None:
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        self.verify_original(grant)
+        if snapshot.namespace_id != ctx.namespace_id or not key.matches_history(
+            snapshot, grant
+        ):
+            raise refusal("workload_conflict")
+
+    async def grant_history_status(
+        self,
+        attempt_id: str,
+        current_grant: GrantBinding,
+        snapshot: GrantHistorySnapshot,
+        ctx: ProtocolContext,
+    ) -> GrantHistoryProgress:
+        key = self.key(attempt_id, ctx)
+
+        def read() -> GrantHistoryProgress | LockOutcome:
+            self.singleton(key, current_grant, snapshot, ctx)
+            if self.registry.read(key) is None:
+                if key in self._first_grants:
+                    raise refusal("lineage_unavailable")
+                empty = GrantHistoryPosition(
+                    after_epoch=None, received_count=0, prefix_digest=snapshot.seed()
+                )
+                return GrantHistoryProgress(
+                    snapshot=snapshot, accepted=empty, complete=False
+                )
+            return self.registry.under_lock(key, settled)
+
+        def settled() -> GrantHistoryProgress:
+            head, record, _, _ = self.checked_first(key, ctx, self.registry.read(key))
+            if isinstance(head.entry, Retiring | Retired) or released(head.entry):
+                raise refusal("attempt_retired")
+            if record.snapshot != snapshot or model_bytes(record.grant) != model_bytes(
+                current_grant
+            ):
+                raise refusal("workload_conflict")
+            return GrantHistoryProgress(
+                snapshot=snapshot, accepted=snapshot.tip(), complete=True
+            )
+
+        return await self.executor.locked(read, ctx, "grant_history_status")
+
+    async def accept_grant_history(
+        self,
+        attempt_id: str,
+        current_grant: GrantBinding,
+        page: GrantHistoryPage,
+        ctx: ProtocolContext,
+    ) -> GrantHistoryProgress:
+        key = self.key(attempt_id, ctx)
+        snapshot = page.snapshot
+
+        def admitted() -> bytes:
+            self.singleton(key, current_grant, snapshot, ctx)
+            if (
+                not page.complete
+                or page.start.received_count != 0
+                or len(page.grants) != 1
+                or model_bytes(page.grants[0]) != model_bytes(current_grant)
+            ):
+                raise refusal("workload_conflict")
+            grant = FirstGrantRecord(
+                format="local-first-grant/1", snapshot=snapshot, grant=current_grant
+            )
+            return model_bytes(grant)
+
+        record = await self.executor.run(admitted)
+        reference = RetainedReference.describe(record)
+
+        def read_intake() -> tuple[LifecycleHead | None, OriginalFirstGrant | None]:
+            head, owner = self.registry.read(key), self._first_grants.get(key)
+            if (head is not None and owner is None) or (
+                head is None and owner is not None and owner.confirmed
+            ):
+                raise refusal("lineage_unavailable")
+            return head, owner
+
+        def apply() -> GrantHistoryProgress:
+            self.singleton(key, current_grant, snapshot, ctx)
+            head, owner = read_intake()
+            if owner is None:
+                owner = OriginalFirstGrant(reference, ctx.deadline)
+                self._first_grants[key] = owner
+            if owner.reference != reference or owner.deadline != ctx.deadline:
+                raise refusal("workload_conflict")
+            if owner.confirmed:
+                first, _, _, _ = self.checked_first(key, ctx, head)
+                if isinstance(first.entry, Retiring | Retired) or released(first.entry):
+                    raise refusal("attempt_retired")
+            else:
+                next_head = FirstGrantHead(
+                    format="local/2",
+                    execution_domain_id=key.execution_domain_id,
+                    attempt_id=key.attempt_id,
+                    entry=Unsubmitted(
+                        state="unsubmitted", deadline=ctx.deadline, gate_closed=False
+                    ),
+                    first_grant=FirstGrantLinks(grant=reference, closure=None),
+                )
+                if head is None:
+                    self.registry.put_evidence(key, next_head, "first-grant", record)
+                elif model_bytes(head) != model_bytes(next_head):
+                    raise refusal("lineage_unavailable")
+                else:
+                    self.registry.linked_grant(key, next_head)
+                    self.registry.synchronize_evidence(key, "first-grant")
+                owner.confirmed = True
+            return GrantHistoryProgress(
+                snapshot=snapshot, accepted=snapshot.tip(), complete=True
+            )
+
+        def locked() -> GrantHistoryProgress | LockOutcome:
+            head, _ = read_intake()
+            return self.registry.under_lock(key, apply, create=head is None)
+
+        with report_first_grant(ctx, "intake"):
+            return await self.executor.locked(locked, ctx, "accept_grant_history")
 
     async def workspace_target(
         self, attempt_id: str, ctx: ProtocolContext
@@ -776,6 +1096,7 @@ class LocalRuntime:
             ),
             ctx,
             "workspace_target",
+            partial(self.first_effect, key, ctx) if self._launch.first_grant else None,
         )
         target = str(self._root_path / "workspaces" / key.name)
         return WorkspaceTarget(root=target, host_path=target)
@@ -827,6 +1148,7 @@ class LocalRuntime:
         key = self.key_of(handle, ctx)
         if self._closing is not None:
             raise refusal("runtime_closed")
+        await self.check_first_effect(key, ctx)
         entry = await self.entry(key)
         if isinstance(entry, Completed):
             raise refusal(completed_code(entry))
@@ -1058,21 +1380,46 @@ class LocalRuntime:
             raise delivery_error("session_unobserved")
         return SessionFinalizationRead(observation, facts, receipt)
 
+    def admit_delivery(self) -> None:
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        if len(self._deliveries) >= ADMITTED_JOBS:
+            raise refusal("registry_busy")
+
+    def own_delivery(self, operation: Coroutine[object, object, T]) -> asyncio.Task[T]:
+        task = asyncio.create_task(operation)
+        self._deliveries.add(task)
+        task.add_done_callback(self._deliveries.discard)
+        return task
+
+    def first_runner(self, key: AttemptKey) -> tuple[CompletionPipe, ProcessIdentity]:
+        pipe = self._first_pipe
+        if pipe is None or pipe.key != key or pipe.runner is None:
+            raise refusal("lineage_unavailable")
+        return pipe, pipe.runner
+
     async def quiescence(
         self, handle: Handle, ctx: ProtocolContext
     ) -> NormalCompletionQuiescence:
         key = self.key_of(handle, ctx)
         if self._closing is not None:
             raise refusal("runtime_closed")
-        entry = await self.entry(key)
+        entry, owner, closure = await self.completion_state(key, ctx)
         if isinstance(entry, Completed):
-            return entry.quiescence
+            if owner is None or owner.confirms(entry, closure):
+                return entry.quiescence
+            return await self.recover_completion(key, ctx)
         if isinstance(entry, Retiring | Retired):
             raise refusal("attempt_retired")
         if not isinstance(entry, Running):
             raise refusal("runner_starting")
+        runner = model_bytes(entry.runner) if owner is not None else b""
+        if owner is not None and runner != model_bytes(self.first_runner(key)[1]):
+            raise refusal("lineage_unavailable")
+        if owner is not None:
+            self.admit_delivery()
         try:
-            return await quiesce_command(
+            command = quiesce_command(
                 entry.socket_path,
                 entry.runner,
                 entry.submitter.dispatcher_id,
@@ -1081,15 +1428,117 @@ class LocalRuntime:
                 ctx.clock,
                 self._new_identifier(),
             )
-        except (ListenerRefused, ChannelError, OSError):
+            record = (
+                await command if owner is None else await self.own_delivery(command)
+            )
+            if owner is not None:
+                if closure is None:
+                    _, _, closure = await self.completion_state(key, ctx)
+                if closure is None:
+                    raise refusal("lineage_unavailable")
+                owner.completed = record, closure, runner
+            return record
+        except ChannelError as error:
+            if owner is not None and error.reason is ChannelFailure.MALFORMED:
+                raise
+        except (ListenerRefused, OSError):
             pass
         except KoraProtocolError as error:
-            if error.code != "message_refused":
+            if owner is not None or error.code != "message_refused":
                 raise
-        current = await self.entry(key)
-        if isinstance(current, Completed):
-            return current.quiescence
+        if owner is None:
+            current = await self.entry(key)
+            if isinstance(current, Completed):
+                return current.quiescence
         raise refusal("runner_unreachable")
+
+    async def recover_completion(
+        self, key: AttemptKey, ctx: ProtocolContext
+    ) -> NormalCompletionQuiescence:
+        pipe, runner = self.first_runner(key)
+        if not await self.executor.run(
+            lambda: recorded_exited(self._identities, runner)
+        ):
+            raise refusal("runner_unreachable")
+        frame = pipe.collect()
+
+        def confirm(current: LifecycleHead | None) -> NormalCompletionQuiescence:
+            head, _, owner, _ = self.checked_first(key, ctx, current)
+            closure, entry = head.first_grant.closure, head.entry
+            if (
+                not isinstance(entry, Completed)
+                or entry.released_at is not None
+                or closure is None
+                or model_bytes(entry.runner) != model_bytes(runner)
+                or frame != completion_frame(pipe.nonce, head)
+            ):
+                raise refusal("lineage_unavailable")
+            owner.completed = entry.quiescence, closure, model_bytes(runner)
+            return entry.quiescence
+
+        return await self.locked_head(key, ctx, confirm)
+
+    async def record_dispatcher_quiescence(
+        self,
+        attempt_id: str,
+        acknowledgement: DispatcherQuiescence,
+        grant: GrantBinding,
+        ctx: ProtocolContext,
+    ) -> None:
+        key = self.key(attempt_id, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+
+        def checked(head: LifecycleHead | None) -> Running | None:
+            head, retained, owner, saved = self.checked_first(key, ctx, head)
+            if model_bytes(retained.grant) != model_bytes(grant):
+                raise refusal("workload_conflict")
+            if isinstance(head.entry, Running):
+                return head.entry
+            if isinstance(head.entry, Retiring | Retired):
+                raise refusal("attempt_retired")
+            if (
+                not isinstance(head.entry, Completed)
+                or not owner.confirms(head.entry, head.first_grant.closure)
+                or (head.entry.released_at is not None and not owner.released)
+                or not recorded_exited(self._identities, head.entry.runner)
+            ):
+                raise refusal("lineage_unavailable")
+            if saved is None or model_bytes(saved.closure.quiescence) != model_bytes(
+                acknowledgement
+            ):
+                raise refusal("workload_conflict")
+            return None
+
+        async def record() -> None:
+            running = await self.locked_head(key, ctx, checked)
+            if running is None:
+                return
+            request = DispatcherQuiescenceRequest(
+                op="record_dispatcher_quiescence",
+                request_id=self._new_identifier(),
+                grant=grant,
+                acknowledgement=acknowledgement,
+            )
+            try:
+                payload = await attached_request(
+                    running.socket_path,
+                    running.runner,
+                    running.submitter.dispatcher_id,
+                    self._peers,
+                    self.executor,
+                    ctx.clock,
+                    request.request_id,
+                    model_bytes(request),
+                    ENVELOPE_BYTES,
+                )
+            except (ListenerRefused, ChannelError, OSError):
+                raise refusal("runner_unreachable") from None
+            read_delivery(payload, request.request_id, "dispatcher_quiescence_recorded")
+
+        with report_first_grant(ctx, "closure"):
+            self.admit_delivery()
+            await self.own_delivery(record())
 
     async def _from_completed(
         self,
@@ -1148,6 +1597,7 @@ class LocalRuntime:
     ) -> None:
         clock = ctx.clock
         deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        await self.check_first_effect(key, ctx)
         entry = await self.entry(key)
         if isinstance(entry, Completed):
             raise refusal(completed_code(entry))
@@ -1396,6 +1846,8 @@ class LocalRuntime:
         key = self.key_of(handle, ctx)
         if self._closing is not None:
             raise refusal("runtime_closed")
+        if gated:
+            await self.check_first_effect(key, ctx)
         if len(self._output_pulls) >= OUTPUT_PULLS:
             raise delivery_error("workload_busy")
         deadline = ctx.clock.monotonic_ns() + MESSAGE_PROGRESS_NS
@@ -1612,6 +2064,9 @@ class LocalRuntime:
         process = workload.dispatcher_process
         if process is None or process != self._launch.identity:
             raise rejection("dispatcher_process_mismatch")
+        same_group = process.leads_group == self._launch.identity.leads_group
+        if self._launch.first_grant and not same_group:
+            raise rejection("dispatcher_process_mismatch")
         digest = object_digest(workload.execution_request)
         if (
             digest != workload.execution_request_digest
@@ -1626,12 +2081,15 @@ class LocalRuntime:
         if self._closing is not None:
             raise refusal("runtime_closed")
         key = self.key(workload.attempt_id, ctx)
+        if self._launch.first_grant and workload.kind != "command":
+            raise refusal("workload_conflict")
         digest = await self.executor.run(lambda: self.checked_digest(workload, ctx))
         logical_digest = await self.executor.run(lambda: workload_digest(workload))
         launch = self._launch
-        await self.executor.run(
-            lambda: verified_socket_directory(launch.socket_directory)
-        )
+        if not launch.first_grant:
+            await self.executor.run(
+                lambda: verified_socket_directory(launch.socket_directory)
+            )
         nonce = self._new_identifier()
         starting = Starting(
             state="starting",
@@ -1648,7 +2106,19 @@ class LocalRuntime:
             runner_prefix=launch.prefix(self._root_path),
             fence=None,
         )
-        applied = await self.transition(
+        pipe = self._first_pipe
+        if pipe is not None and (
+            pipe.key != key or (pipe.reader is None and pipe.runner is None)
+        ):
+            raise refusal("runner_starting")
+
+        def admitted_start() -> Starting:
+            if launch.first_grant:
+                verified_socket_directory(launch.socket_directory)
+            return starting
+
+        submission = partial(
+            self.transition,
             key,
             lambda entry: submit_cell(
                 entry,
@@ -1656,14 +2126,41 @@ class LocalRuntime:
                 logical_digest,
                 workload.deadline,
                 expired(workload.deadline, ctx.clock.now()),
-                lambda: starting,
+                admitted_start,
             ),
             ctx,
             "submit",
+            partial(self.first_effect, key, ctx, dispatcher=workload.dispatcher_id)
+            if self._launch.first_grant
+            else None,
         )
-        if applied.transition.entry is starting:
-            await self.spawn(runner_argv(starting.runner_prefix, key, nonce), ctx)
+
+        async def submit_runner(fresh: CompletionPipe | None = None) -> None:
+            try:
+                if (await submission()).transition.entry is starting:
+                    if launch.first_grant and fresh is None:
+                        raise refusal("lineage_unavailable")
+                    await self.spawn(
+                        runner_argv(starting.runner_prefix, key, nonce), ctx
+                    )
+            finally:
+                if fresh is not None and fresh.reader is None:
+                    self.close_first_pipe()
+
+        if launch.first_grant and pipe is None:
+            self.admit_delivery()
+            pipe = self._first_pipe = CompletionPipe(key, nonce)
+            task = self.own_delivery(submit_runner(pipe))
+            if await observed(task):
+                raise asyncio.CancelledError
+            task.result()
+        else:
+            await submit_runner()
         entry = await self.entry(key)
+        if isinstance(entry, Running) and launch.first_grant:
+            if pipe is None or pipe.reader is None:
+                raise refusal("lineage_unavailable")
+            pipe.runner = entry.runner if pipe.runner is None else pipe.runner
         if isinstance(entry, Running):
             task = asyncio.create_task(self.deliver(key, entry, workload, ctx))
             self._deliveries.add(task)
@@ -1701,6 +2198,7 @@ class LocalRuntime:
         submitter = Submitter(
             dispatcher_id=workload.dispatcher_id, process=self._launch.identity
         )
+        await self.check_first_effect(key, ctx)
         for attempt in range(2):
             await self.transition(
                 key,
@@ -1714,6 +2212,8 @@ class LocalRuntime:
             )
             if entry.submitter == submitter:
                 break
+            if self._launch.first_grant:
+                raise refusal("lineage_unavailable")
             if not await self.executor.run(
                 partial(self.submitter_gone, entry.submitter)
             ):
@@ -1759,6 +2259,11 @@ class LocalRuntime:
                 raise
             raise refusal("runner_unreachable") from None
 
+    def close_first_pipe(self) -> None:
+        pipe, self._first_pipe = self._first_pipe, None
+        if pipe is not None:
+            pipe.close()
+
     async def spawn(self, argv: tuple[str, ...], ctx: ProtocolContext) -> None:
         started = ctx.clock.monotonic_ns()
         cutoff = launch_deadline(ctx.clock, ctx.deadline)
@@ -1770,6 +2275,7 @@ class LocalRuntime:
                 ctx.clock,
                 self.launchers,
                 deadline_ns=cutoff,
+                completion=self._first_pipe,
             )
             outcome = readiness.value
         except OSError:
@@ -1793,14 +2299,18 @@ class LocalRuntime:
             raise refusal("runtime_closed")
         started = ctx.clock.monotonic_ns()
         try:
-            entry = await self.entry(key)
+            entry, owner, closure = await self.completion_state(key, ctx)
             if not isinstance(entry, Completed):
                 raise refusal(
                     "attempt_not_submitted"
                     if entry is None
                     else RELEASE_REFUSALS.get(type(entry), "attempt_not_submitted")
                 )
+            if owner is not None and not owner.confirms(entry, closure):
+                raise refusal("lineage_unavailable")
             if entry.released_at is not None:
+                if owner is not None and not owner.released:
+                    raise refusal("lineage_unavailable")
                 self._finalizations.pop(key, None)
                 self._report_release(ctx, started, "already_released")
                 return
@@ -1809,6 +2319,8 @@ class LocalRuntime:
                 lambda: recorded_exited(self._identities, runner)
             ):
                 raise refusal("runner_unreachable")
+            if self._first_pipe is not None and self._first_pipe.key == key:
+                self.close_first_pipe()
             progress = await self.releases.run(lambda: self._release_files(key))
         except KoraProtocolError:
             self._report_release(ctx, started, "refused")
@@ -1830,10 +2342,23 @@ class LocalRuntime:
                 {"foreign": progress.foreign},
             )
         now = ctx.clock.now()
+
+        def confirmed(applied: Applied) -> None:
+            if owner is not None and applied.transition.entry is not None:
+                owner.released = True
+
         try:
-            await self.transition(
-                key, lambda current: released_cell(current, runner, now), ctx, "release"
+            applied = await self.transition(
+                key,
+                lambda current: released_cell(current, runner, now),
+                ctx,
+                "release",
+                partial(self.checked_first, key, ctx) if owner is not None else None,
+                confirmed,
             )
+            confirmed(applied)
+            if owner is not None and not owner.released:
+                raise refusal("lineage_unavailable")
         except KoraProtocolError:
             self._report_release(ctx, started, "refused", progress)
             raise
@@ -2087,6 +2612,7 @@ class LocalRuntime:
                 await asyncio.gather(*finalizations, return_exceptions=True)
             await self.launchers.drain(self._launch.clock)
         finally:
+            self.close_first_pipe()
             try:
                 await self.executor.close()
             finally:
@@ -2098,6 +2624,7 @@ class LocalRuntime:
                         await self.releases.close()
                 finally:
                     if self.executor.joined:
+                        self._first_grants.clear()
                         try:
                             await close_spool(self._spool)
                             self._output_pulls.clear()

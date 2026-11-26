@@ -159,7 +159,7 @@ async def attached_request(
     executor: TransitionExecutor,
     clock: Clock,
     request_id: str,
-    op: str,
+    op: str | bytes,
     reservation: int,
 ) -> bytes:
     deadline = clock.monotonic_ns() + FRAME_PROGRESS_NS
@@ -177,9 +177,8 @@ async def attached_request(
         _, payload = await channel.read_typed_frame(deadline, reservations)
         read_delivery(payload, request_id, "attached")
         answered = clock.monotonic_ns() + START_PROGRESS_NS
-        await channel.write_typed_frame(
-            FrameType.JSON, control_request(op, request_id), answered
-        )
+        prepared = control_request(op, request_id) if isinstance(op, str) else op
+        await channel.write_typed_frame(FrameType.JSON, prepared, answered)
         _, payload = await channel.read_typed_frame(
             answered, {FrameType.JSON.value: reservation}
         )
