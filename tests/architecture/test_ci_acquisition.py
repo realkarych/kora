@@ -9,12 +9,13 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import pytest
+from ruamel.yaml import YAML
 
 from scripts.ci.acquire import (
     ARTIFACTS,
@@ -46,6 +47,7 @@ from scripts.ci.browser_system_packages import (
     BrowserPackagesRefused,
     package_attempt,
 )
+from scripts.ci.pi_sdk_manifest import write_manifest
 from tests.support.https_fixture import (
     Authority,
     Body,
@@ -77,13 +79,17 @@ BROWSER_OWNERSHIP_WITNESS = (
     "python3 -m tests.architecture.browser_system_packages_witness"
 )
 PNPM_SETUP = "scripts/ci/setup_scaffold_pnpm.sh"
+PI_SDK_SETUP = "scripts/ci/setup_pi_sdk_witness.sh"
+PI_SDK_BRIDGE = ROOT / "src/kora/plugins/harness/pi/bridge"
 FETCHING_SCRIPTS = {
     PNPM_SETUP: ("pnpm-",),
+    PI_SDK_SETUP: ("node-", "pnpm-"),
     "scripts/ci/setup_scaffold_node.sh": ("node-",),
     "scripts/ci/setup_uv_cache.sh": ("uv-", "cpython-"),
     "scripts/ci/check_links.sh": ("lychee-",),
 }
 COMMAND_SCRIPTS = {
+    PI_SDK_SETUP: PI_SDK_SETUP,
     "scripts/ci/apt_install.sh": "scripts/ci/apt_install.sh",
     "prepare-local-runtime-fixtures.sh prepare": "scripts/ci/apt_install.sh",
 }
@@ -457,6 +463,90 @@ def test_linux_scaffold_pnpm_acquisition_matches_the_project_pin() -> None:
         "release-assets.githubusercontent.com",
         30.0,
     )
+
+
+class PnpmLockLoader(Protocol):
+    def load_all(self, stream: Path) -> Iterator[object]: ...
+
+
+def test_pi_sdk_lock_admits_only_hash_pinned_registry_packages() -> None:
+    lock = list(
+        cast(PnpmLockLoader, YAML(typ="safe")).load_all(
+            PI_SDK_BRIDGE / "pnpm-lock.yaml"
+        )
+    )
+    package = table(json.loads((PI_SDK_BRIDGE / "package.json").read_text()))
+
+    resolutions = [
+        table(table(entry)["resolution"])
+        for document in lock
+        for entry in table(table(document)["packages"]).values()
+    ]
+
+    assert resolutions
+    assert all(set(resolution) == {"integrity"} for resolution in resolutions)
+    assert all(
+        re.fullmatch(r"sha512-[a-zA-Z0-9+/]{86}==", str(resolution["integrity"]))
+        for resolution in resolutions
+    )
+    assert package["private"] is True
+    assert package["packageManager"] == "pnpm@12.14.0"
+    assert package["engines"] == {"node": "24.22.0", "pnpm": "12.14.0"}
+    assert package["dependencies"] == {
+        "@earendil-works/pi-ai": "1.6.1",
+        "@earendil-works/pi-coding-agent": "1.6.1",
+    }
+    assert table(package["devDependencies"])["typescript"] == "6.0.3"
+    assert "scripts" not in package
+
+
+def test_pi_sdk_bridge_compiles_without_emitting_failed_source() -> None:
+    bridge = table(json.loads((PI_SDK_BRIDGE / "tsconfig.json").read_text()))
+
+    compiler = table(bridge["compilerOptions"])
+
+    assert compiler["strict"] is True
+    assert compiler["noEmitOnError"] is True
+    assert compiler["outDir"] == "dist"
+    assert bridge["files"] == ["bridge.ts"]
+
+
+def test_pi_sdk_manifest_records_exact_installed_file_bytes(tmp_path: Path) -> None:
+    folder = tmp_path / "installed/bridge"
+    folder.mkdir(parents=True)
+    (folder / "entry.js").write_bytes(CONTENT)
+
+    write_manifest(tmp_path)
+
+    assert json.loads((tmp_path / "manifest.json").read_bytes()) == [
+        {"path": "bridge", "kind": "directory"},
+        {
+            "path": "bridge/entry.js",
+            "kind": "file",
+            "size": len(CONTENT),
+            "sha256": hashlib.sha256(CONTENT).hexdigest(),
+        },
+    ]
+
+
+@pytest.mark.parametrize("hardlink", [False, True])
+def test_pi_sdk_manifest_refuses_aliased_dependency_bytes(
+    tmp_path: Path, hardlink: bool
+) -> None:
+    staged = tmp_path / "installed"
+    staged.mkdir()
+    external = tmp_path / "dependency.js"
+    external.write_bytes(CONTENT)
+    alias = staged / "dependency.js"
+    if hardlink:
+        alias.hardlink_to(external)
+    else:
+        alias.symlink_to(external)
+
+    with pytest.raises(ValueError, match="Pi SDK installation"):
+        write_manifest(tmp_path)
+
+    assert not (tmp_path / "manifest.json").exists()
 
 
 def run_scaffold_pnpm(

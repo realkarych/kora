@@ -80,6 +80,7 @@ REPETITION_JOB_COMMANDS = (
     "bash scripts/ci/setup_uv_cache.sh 3.11.17",
     "bash scripts/ci/scaffold_lane.sh dependencies",
     "pnpm --dir web install --frozen-lockfile",
+    "bash scripts/ci/setup_pi_sdk_witness.sh changed-test",
     REPETITION_COMMAND,
 )
 Mutation = Callable[[Workflows], None]

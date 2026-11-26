@@ -30,7 +30,7 @@ run_service() (
   shift
   trap 'cleanup "$ownership" "$unit"' EXIT
   environment=()
-  for name in KORA_MEASUREMENT_OUTPUT KORA_MEASUREMENT_REVISION KORA_TEST_DATABASES UV_PYTHON; do
+  for name in KORA_MEASUREMENT_OUTPUT KORA_MEASUREMENT_REVISION KORA_PI_SDK_STAGE KORA_TEST_DATABASES UV_PYTHON; do
     if test -n "${!name:-}"; then
       environment+=("--setenv=$name=${!name}")
     fi

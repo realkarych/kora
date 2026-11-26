@@ -184,6 +184,14 @@ FLIPPED = {
     "push": "pull_request",
 }
 UNGATED_STEPS = {
+    "ci.yml:scaffold-tests:pi_sdk_stage": (
+        "prepares a Pi SDK installation required by the local runtime test; "
+        "its failure fails the lane job itself"
+    ),
+    "ci.yml:scaffold-tests-macos:pi_sdk_stage": (
+        "prepares a Pi SDK installation required by the local runtime test; "
+        "its failure fails the lane job itself"
+    ),
     "ci.yml:scaffold-tests:unit_collisions": (
         "runs only on Linux local-runtime lanes, which the lane gate does not tell "
         "apart from macOS lanes; its failure fails the lane job itself"
@@ -1697,6 +1705,41 @@ def lane_job_static_violations(location: str, job: dict[str, object]) -> list[st
             if steps.get(identity, {}).get("if") != condition
         ),
     ]
+
+
+def test_pi_sdk_stage_precedes_tests_in_both_local_runtime_lanes() -> None:
+    workflows = repository_workflows()
+    jobs = dict(jobs_of(workflows))
+
+    staged_steps = [
+        (
+            location,
+            index,
+            step,
+            next(
+                index
+                for index, evidence in enumerate(step_list(job))
+                if evidence.get("id") == "tests"
+            ),
+        )
+        for location, job in jobs.items()
+        for index, step in enumerate(step_list(job))
+        if step.get("id") == "pi_sdk_stage"
+    ]
+
+    assert {location for location, _, _, _ in staged_steps} == {
+        "ci.yml:scaffold-tests",
+        "ci.yml:scaffold-tests-macos",
+    }
+    assert len(staged_steps) == 2
+    for _, index, step, test_index in staged_steps:
+        assert index < test_index
+        assert step == {
+            "name": "Stage the locked Pi SDK witness",
+            "id": "pi_sdk_stage",
+            "if": "${{ matrix.lane == 'local-runtime' }}",
+            "run": "bash scripts/ci/setup_pi_sdk_witness.sh",
+        }
 
 
 def unrequired_static_check_jobs(

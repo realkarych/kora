@@ -20,6 +20,7 @@ SCAN_ARGUMENTS = (
     "--lockfile=uv.lock",
     "--lockfile=web/pnpm-lock.yaml",
     "--lockfile=.github/osv/common-expression-language/Cargo.lock",
+    "--lockfile=src/kora/plugins/harness/pi/bridge/pnpm-lock.yaml",
 )
 SCANNER_WORKFLOWS = "google/osv-scanner-action/.github/workflows"
 SCANNING_JOBS = {
@@ -129,7 +130,9 @@ def stop_failing_on_findings(document: dict[str, object]) -> None:
 
 def drop_the_crate_lock(document: dict[str, object]) -> None:
     inputs = scan_inputs(document, "full-scan")
-    inputs["scan-args"] = "\n".join(SCAN_ARGUMENTS[:2])
+    inputs["scan-args"] = "\n".join(
+        argument for argument in SCAN_ARGUMENTS if not argument.endswith("Cargo.lock")
+    )
 
 
 @pytest.mark.parametrize(
@@ -147,7 +150,7 @@ def test_osv_scan_check_refuses_a_mutated_workflow(
     assert scans != EXPECTED_SCANS
 
 
-def test_osv_scans_pass_only_the_three_lockfiles_and_fail_on_findings() -> None:
+def test_osv_scans_pass_only_the_four_lockfiles_and_fail_on_findings() -> None:
     document = workflow_document("osv-scanner.yml")
 
     scans = scan_configurations(document)

@@ -175,6 +175,10 @@ jobs:
         run: |
           sudo bash scripts/ci/check-local-runtime-unit-collisions.sh root
           bash scripts/ci/check-local-runtime-unit-collisions.sh user
+      - name: Stage the locked Pi SDK witness
+        id: pi_sdk_stage
+        if: ${{ matrix.lane == 'local-runtime' }}
+        run: bash scripts/ci/setup_pi_sdk_witness.sh
       - name: Prepare local runtime host fixtures
         id: preparation
         if: ${{ matrix.lane == 'local-runtime' }}
@@ -215,7 +219,7 @@ jobs:
         run: |
           uv sync --locked --no-build --group build --extra postgres --extra cel
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
-            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml src/kora/plugins/harness/pi/bridge
 
       - name: Record lane workflow cancellation
         id: workflow_cancellation
@@ -320,6 +324,10 @@ jobs:
         run: |
           sudo xcode-select --switch /Applications/Xcode_26.3.app
           /usr/bin/git --version
+      - name: Stage the locked Pi SDK witness
+        id: pi_sdk_stage
+        if: ${{ matrix.lane == 'local-runtime' }}
+        run: bash scripts/ci/setup_pi_sdk_witness.sh
       - name: Prepare local runtime host fixtures
         id: preparation
         if: ${{ matrix.lane == 'local-runtime' }}
@@ -359,7 +367,7 @@ jobs:
         run: |
           uv sync --locked --no-build --group build --extra postgres --extra cel
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
-            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml src/kora/plugins/harness/pi/bridge
 
       - name: Record lane workflow cancellation
         id: workflow_cancellation
@@ -569,6 +577,9 @@ jobs:
       - name: Install locked frontend dependencies
         if: ${{ github.event_name == 'pull_request' }}
         run: pnpm --dir web install --frozen-lockfile
+      - name: Stage the locked Pi SDK for changed tests
+        if: ${{ github.event_name == 'pull_request' }}
+        run: bash scripts/ci/setup_pi_sdk_witness.sh changed-test
       - name: Repeat changed test modules
         id: repetition
         if: ${{ github.event_name == 'pull_request' }}
