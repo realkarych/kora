@@ -1,10 +1,13 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
+from kora.ir.diagnostics import Diagnostic
 from kora.ir.json import JsonObject
+from kora.models.errors import ValidationDetails
 
 
 class Outcome(StrEnum):
@@ -118,6 +121,59 @@ class ClientError(Exception):
                 "request_id": None,
             }
         }
+
+
+LocalValidationReason = Literal[
+    "diagnostics_limit",
+    "diagnostic_count_limit",
+    "provider_failure",
+    "dependency_unavailable",
+]
+LOCAL_VALIDATION_CODE = "CLT005"
+LOCAL_VALIDATION_HINT = "Repair validation or its dependency before compiling again."
+INTERNAL_FAILURE_MESSAGE = "Internal operation failure."
+CompileArgument = Literal["arguments", "path", "format"]
+COMPILE_ARGUMENT_CODE = "DSL016"
+COMPILE_ARGUMENT_MESSAGES: dict[CompileArgument, str] = {
+    "arguments": "Pass a source path and select JSON output.",
+    "path": "The source path must be a nonempty string.",
+    "format": "The output format must be json.",
+}
+
+
+def local_validation_error(reason: LocalValidationReason) -> JsonObject:
+    return {
+        "error": {
+            "origin": "client",
+            "code": LOCAL_VALIDATION_CODE,
+            "message": "Local validation could not complete.",
+            "location": None,
+            "retryable": False,
+            "details": {
+                "reason": reason,
+                "outcome": Outcome.NOT_SENT.value,
+                "recovery_hint": LOCAL_VALIDATION_HINT,
+            },
+            "request_id": None,
+        }
+    }
+
+
+def validation_findings(collection: DiagnosticCollection) -> JsonObject:
+    return cast(
+        "JsonObject",
+        ValidationDetails.from_collection(collection).model_dump(mode="json"),
+    )
+
+
+def compile_argument_findings(reason: CompileArgument) -> JsonObject:
+    collector = DiagnosticCollector()
+    collector.add(
+        Diagnostic(
+            code=COMPILE_ARGUMENT_CODE, message=COMPILE_ARGUMENT_MESSAGES[reason]
+        )
+    )
+    return validation_findings(collector.finish())
 
 
 class ApiErrorFields(BaseModel):

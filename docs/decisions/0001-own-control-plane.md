@@ -41,7 +41,7 @@ Usage records, completeness and approval `run_cost` remain required despite budg
 
 Finite retention and abandoned-upload cleanup, `kora doctor`, provider listing/conformance commands and an isolated built-and-installed external provider fixture are required before readiness. Implementation owners are [#216](https://github.com/realkarych/kora/issues/216), [#214](https://github.com/realkarych/kora/issues/214) and [#215](https://github.com/realkarych/kora/issues/215). Immutable history and unresolved recovery remain retained. Graph-version retirement, attempt diff, S3, external exporters, product console journeys, DSL/scenarios/dry-run, product harness skills, remote code-host/credential issuance and the other matrix rows activate with their named implementations; existing executable gates remain active.
 
-Local bare Git publication is explicitly credential-free only under a saved trusted binding, and retains late authorization, a stable `local_service` principal, digest/destination matching, closure and durable provenance (ADR-0023). It creates no change request. The included API operations have complete CLI/MCP coverage: ten stdio tools, including a distinct compiled-IR `kora_validate`. The complete future inventory becomes sixteen under ADR-0002. Probe exclusions apply to exactly `GET /healthz`, `GET /readyz` and `GET /metrics`, with no authentication exemption.
+Local bare Git publication is explicitly credential-free only under a saved trusted binding, and retains late authorization, a stable `local_service` principal, digest/destination matching, closure and durable provenance (ADR-0023). It creates no change request. The included API operations have complete CLI/MCP coverage through ten API-backed stdio tools, including a distinct compiled-IR `kora_validate`. The complete future inventory becomes sixteen under ADR-0002. Probe exclusions apply to exactly `GET /healthz`, `GET /readyz` and `GET /metrics`, with no authentication exemption.
 
 Every affected test keeps its required legs; only legs needing an excluded feature wait for that feature's implementation. [The named test matrix](../../knowledge/specs/first-slice.md#required-and-pending-test-cases) and implementation plan record these splits. Both real harness policy/launcher gates, local publication/recovery checks and resource-lifetime methods remain first-slice obligations. This amendment defines scope, not implemented runtime behavior.
 
@@ -77,6 +77,12 @@ The same decision narrows the depth of the first slice:
 - `kora doctor` is minimal: it checks the kora version, that the CEL binding loads, the configured harness binaries and their versions, that the metadata database is reachable and that the state root is writable.
 
 [The first-slice contract](../../knowledge/specs/first-slice.md#walking-skeleton-and-narrowed-depth) records these changes and the gates they leave unchanged.
+
+### Early authoring amendment of 2026-11-26
+
+The project owner [approved an early authoring path for the walking-skeleton demonstration](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699). Authors can compile one sequential graph locally and deploy the resulting IR JSON before first-slice acceptance. This authoring path is an independent delivery. The skeleton run and the first-slice qualification keep their existing gates.
+
+The first-slice inventory now includes eleven stdio tools. The ten API-backed tools are joined by the author-side `kora_compile` operation of [ADR-0002](0002-ai-first-api-and-thin-clients.md#early-authoring-amendment-of-2026-11-26). The general compiler, scenarios and dry-run activate separately. The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
 
 ## Milestone-order amendment of 2026-11-11
 

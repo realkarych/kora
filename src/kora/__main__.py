@@ -1180,6 +1180,19 @@ def compose_application(
     ) -> None:
         raise typer.Exit(serve_api(environment, diagnostics, port))
 
+    @app.command(name="compile", help="Compile a local Python graph to JSON IR.")
+    def compile_source(
+        path: Annotated[
+            str | None, typer.Argument(help="Local Python graph source.")
+        ] = None,
+        output_format: str | None = typer.Option(
+            None, "--format", help="Required output format: json."
+        ),
+    ) -> None:
+        from kora.cli.compile import compile_command
+
+        compile_command(diagnostics, path, output_format)
+
     @app.command(name="deploy", help="Deploy a compiled graph without command files.")
     def deploy(
         path: Path,
@@ -1276,7 +1289,9 @@ def compose_application(
     return app
 
 
-def run_application(app: typer.Typer, argv: Sequence[str]) -> int:
+def run_application(
+    app: typer.Typer, argv: Sequence[str], diagnostics: ProcessDiagnostics
+) -> int:
     command = typer.main.get_command(app)
     try:
         with command.make_context(PROGRAM, list(argv)) as context:
@@ -1289,6 +1304,11 @@ def run_application(app: typer.Typer, argv: Sequence[str]) -> int:
     except typer.Abort:
         return EXIT_FAILURE
     except typer.TyperException as error:
+        if tuple(argv[:1]) == ("compile",) or tuple(argv[:2]) == ("--", "compile"):
+            from kora.cli.compile import report_compile_argument
+
+            report_compile_argument(diagnostics, "arguments")
+            return EXIT_USAGE
         get_usage = getattr(getattr(error, "ctx", None), "get_usage", None)
         usage = str(get_usage()) if callable(get_usage) else ""
         write_usage(usage, error.format_message())
@@ -1387,6 +1407,7 @@ def main(
                     application
                     or compose_application(environment, diagnostics, doctor_settings),
                     arguments,
+                    diagnostics,
                 )
             except KeyboardInterrupt:
                 exit_code = EXIT_INTERRUPT
