@@ -62,11 +62,9 @@ def _safe(metadata: os.stat_result, *, directory: bool) -> None:
         or metadata.st_mode
         & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID)
         or (
-            not stat.S_ISDIR(metadata.st_mode)
-            if directory
-            else not stat.S_ISREG(metadata.st_mode)
+            not directory
+            and (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1)
         )
-        or (not directory and metadata.st_nlink != 1)
     ):
         raise InstallationRefused()
 
@@ -203,29 +201,24 @@ class PiInstallation:
         return self.root / "installed/bridge/dist/bridge.js"
 
     def recheck(self, cutoff_ns: int, clock: Clock) -> None:
-        if (
-            _inspect(self.root, self.entries, self.stamps, cutoff_ns, clock)[0]
-            != self.stamp
-        ):
-            raise InstallationRefused()
+        verify_pi_installation(self.root, cutoff_ns, clock, previous=self)
 
 
-def _inspect(
-    root: Path,
-    entries: dict[str, _Directory | _File] | None,
-    expected_stamps: dict[str, Stamp] | None,
-    cutoff_ns: int,
-    clock: Clock,
-) -> tuple[Stamp, dict[str, _Directory | _File], dict[str, Stamp]]:
+def verify_pi_installation(
+    root: Path, cutoff_ns: int, clock: Clock, *, previous: PiInstallation | None = None
+) -> PiInstallation:
     anchor: DirectoryAnchor | None = None
     try:
         _before(cutoff_ns, clock)
         anchor = DirectoryAnchor.open_path(root)
         stamp = _stamp(os.fstat(anchor.descriptor))
+        if previous is not None and stamp != previous.stamp:
+            raise InstallationRefused()
         for parent in (root / "installed", root, *root.parents):
             if os.path.lexists(parent / "node_modules"):
                 raise InstallationRefused()
-        captured = _entries(anchor.descriptor) if entries is None else entries
+        captured = _entries(anchor.descriptor) if previous is None else previous.entries
+        expected_stamps = None if previous is None else previous.stamps
         remaining = captured.copy()
         stamps: dict[str, Stamp] = {}
         descriptor = os.open("installed", DIRECTORY, dir_fd=anchor.descriptor)
@@ -248,21 +241,15 @@ def _inspect(
             os.close(descriptor)
         if (
             _stamp(root.stat(follow_symlinks=False)) != stamp
-            or "bridge/dist/bridge.js" not in stamps
             or not isinstance(captured.get("node"), _File)
             or not isinstance(captured.get("bridge/dist/bridge.js"), _File)
             or not stamps["node"][2] & stat.S_IXUSR
         ):
             raise InstallationRefused()
         _before(cutoff_ns, clock)
-        return stamp, captured, stamps
+        return PiInstallation(root, stamp, captured, stamps)
     except (OSError, FilesystemError, ValueError):
         raise InstallationRefused() from None
     finally:
         if anchor is not None:
             anchor.close()
-
-
-def verify_pi_installation(root: Path, cutoff_ns: int, clock: Clock) -> PiInstallation:
-    stamp, entries, stamps = _inspect(root, None, None, cutoff_ns, clock)
-    return PiInstallation(root, stamp, entries, stamps)

@@ -4,7 +4,7 @@ import shutil
 import signal
 import socket
 import sys
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -13,10 +13,11 @@ from typing import Final, cast
 
 import pytest
 
-from kora.conformance.capture import Capture
-from kora.conformance.common import kora_capture
+from kora.conformance.capture import Capture, captured
+from kora.conformance.common import CONFORMANCE_COMPONENT, INSTANCE_ID, utc_now
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import decode_strict_json
+from kora.observability import Level, LoggingSettings
 from kora.plugins.harness.pi.bridge_protocol import (
     MAX_FRAME_BYTES,
     BridgeChannel,
@@ -42,8 +43,7 @@ from kora.runner.process_stdio import StdioStreams
 from kora.runner.processes import GatedProcess, ProcessCondition, start_gated
 from tests.plugins.harness.claude.scripted_model import end_stream
 from tests.plugins.harness.codex.selected_gated_stdio import native_environment
-
-__all__ = ["kora_capture"]
+from tests.plugins.runtime.local.frames_support import StepClock
 
 SECOND: Final[int] = 1_000_000_000
 MODEL: Final[str] = "claude-sonnet-4-5-20250929"
@@ -69,12 +69,14 @@ class ModelPeer:
         overflow: bool = False,
         response_gate: asyncio.Event | None = None,
         reported_model: str = MODEL,
+        reported_stop: str = "end_turn",
     ) -> None:
         self.hold: bool = hold
         self.redirect: str | None = redirect
         self.overflow: bool = overflow
         self.response_gate: asyncio.Event | None = response_gate
         self.reported_model: str = reported_model
+        self.reported_stop: str = reported_stop
         self.received: asyncio.Event = asyncio.Event()
         self.requests: list[Request] = []
         self.tasks: set[asyncio.Task[None]] = set()
@@ -134,7 +136,9 @@ class ModelPeer:
                     body = (
                         b"data: " + b"x" * (256 * 1024)
                         if self.overflow
-                        else end_stream(self.reported_model)
+                        else end_stream(self.reported_model).replace(
+                            b'"end_turn"', f'"{self.reported_stop}"'.encode()
+                        )
                     )
                     headers_out = (
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -161,6 +165,7 @@ async def model_peer(
     overflow: bool = False,
     response_gate: asyncio.Event | None = None,
     reported_model: str = MODEL,
+    reported_stop: str = "end_turn",
 ) -> AsyncGenerator[ModelPeer]:
     peer = ModelPeer(
         hold=hold,
@@ -168,6 +173,7 @@ async def model_peer(
         overflow=overflow,
         response_gate=response_gate,
         reported_model=reported_model,
+        reported_stop=reported_stop,
     )
     server = await asyncio.start_server(peer.accept, "127.0.0.1", 0, limit=16_384)
     assert server.sockets
@@ -187,17 +193,24 @@ def stage_path() -> Path:
 
 
 @pytest.fixture
+def kora_capture() -> Generator[Capture]:
+    with captured(
+        CONFORMANCE_COMPONENT, LoggingSettings(level=Level.DEBUG), INSTANCE_ID, utc_now
+    ) as capture:
+        yield capture
+
+
+@pytest.fixture
 def installation(stage_path: Path) -> PiInstallation:
     clock = SystemClock()
     return verify_pi_installation(stage_path, clock.monotonic_ns() + 15 * SECOND, clock)
 
 
 def seed_discovery(root: Path) -> None:
-    settings = root / ".pi"
-    settings.mkdir(mode=0o700)
-    (settings / "settings.json").write_text('{"defaultModel":"' + AMBIENT + '"}')
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (root / "settings.json").write_text('{"defaultModel":"' + AMBIENT + '"}')
     (root / "AGENTS.md").write_text(AMBIENT)
-    extensions = settings / "extensions"
+    extensions = root / "extensions"
     extensions.mkdir()
     (extensions / "canary.ts").write_text(
         "import { writeFileSync } from 'node:fs';\n"
@@ -205,7 +218,7 @@ def seed_discovery(root: Path) -> None:
         "  writeFileSync('pi-extension-loaded', '1');\n"
         "}\n"
     )
-    (settings / "commands").mkdir()
+    (root / "commands").mkdir()
 
 
 class PiGate:
@@ -216,6 +229,8 @@ class PiGate:
         self.checkout: BoundCheckout = checkout
         self.clock: SystemClock = SystemClock()
         self.cutoff_ns: int = self.clock.monotonic_ns() + 10 * SECOND
+        self.nonce: str = new_operation_id()
+        self.stopped: bool = False
         self.checkout.verify(self.checkout.path, self.cutoff_ns, self.clock)
         installation.recheck(self.cutoff_ns, self.clock)
         context = (checkout.path, home)
@@ -246,46 +261,68 @@ class PiGate:
         )
         self.owner: GatedProcess = start_gated(
             self.recipe,
-            new_operation_id(),
+            self.nonce,
             checkout.anchor.descriptor,
             self.cutoff_ns,
             self.clock,
             stdio_limit=MAX_FRAME_BYTES - 1,
         )
-        self.channel: BridgeChannel
+        self.channel: BridgeChannel | None = None
         self.streams: StdioStreams
         self.pid: int
 
-    async def start(self, origin: str, model: str = MODEL) -> None:
+    async def start(
+        self,
+        origin: str,
+        model: str = MODEL,
+        barrier: tuple[asyncio.Event, asyncio.Event] | None = None,
+    ) -> None:
         registration = await self.owner.prepare()
         self.pid = registration.process.pid
+        if barrier is not None:
+            appeared, approval = barrier
+            appeared.set()
+            await approval.wait()
         self.checkout.verify(self.checkout.path, self.cutoff_ns, self.clock)
         await self.owner.acknowledge()
         self.streams = self.owner.borrow_stdio()
-        self.channel = BridgeChannel(self.streams, NONCE, self.cutoff_ns, self.clock)
+        self.channel = BridgeChannel(
+            self.streams, self.nonce, self.cutoff_ns, self.clock
+        )
         await self.channel.initialize(origin, model)
 
     def require_live(self) -> None:
+        if self.stopped:
+            raise BridgeRefused("stopped")
         self.checkout.verify(self.checkout.path, self.cutoff_ns, self.clock)
         if self.owner.observe(self.cutoff_ns).condition is not ProcessCondition.LIVE:
             raise BridgeRefused("stopped")
         self.owner.require_acquired()
 
-    async def key(self, capture: Capture) -> None:
+    async def key(self, capture: Capture, key: str = FIXTURE_KEY) -> None:
         await asyncio.to_thread(self.installation.recheck, self.cutoff_ns, self.clock)
         self.require_live()
-        await self.channel.credential(capture.scope.admit(FIXTURE_KEY))
+        assert self.channel is not None
+        await self.channel.credential(capture.scope.admit(key))
 
     async def prompt(self, text: str) -> str:
         self.require_live()
+        assert self.channel is not None
         return await self.channel.prompt(text)
+
+    def stop(self) -> None:
+        self.stopped = True
+        if self.channel is not None:
+            self.channel.revoke()
+        self.owner.close_gate()
 
     async def release(self, *, natural: bool) -> int:
         cutoff_ns = self.clock.monotonic_ns() + 6 * SECOND
-        self.owner.close_gate()
         if natural:
+            self.owner.close_gate()
             await self.owner.settle(cutoff_ns)
         else:
+            self.stop()
             self.owner.signal(signal.SIGTERM, cutoff_ns)
             term_ns = min(cutoff_ns, self.clock.monotonic_ns() + 2 * SECOND)
             try:
@@ -300,7 +337,7 @@ class PiGate:
 
     def assert_reaped(self) -> None:
         assert self.owner.closed
-        assert self.streams[1].is_closing()
+        assert self.channel is None or self.streams[1].is_closing()
         with pytest.raises(ChildProcessError):
             os.waitpid(self.pid, os.WNOHANG)
 
@@ -311,13 +348,12 @@ async def witness(
 ) -> AsyncGenerator[PiGate]:
     root = directory.resolve()
     checkout_path = root / "checkout"
-    checkout_path.mkdir(mode=0o700)
     seed_discovery(checkout_path)
+    seed_discovery(checkout_path / ".pi")
     home = root / "role"
     home.mkdir(mode=0o700)
-    seed_discovery(home)
     ambient_agent = home / ".pi" / "agent"
-    ambient_agent.mkdir()
+    seed_discovery(ambient_agent)
     (ambient_agent / "auth.json").write_text(
         '{"anthropic":{"type":"api_key","key":"' + AMBIENT + '"}}'
     )
@@ -360,7 +396,9 @@ async def test_pi_sdk_uses_closed_session_and_reaps(
         assert request.document["model"] == MODEL
         assert request.document["stream"] is True
         assert request.document.get("tools", []) == []
-        assert PROMPT in repr(request.document)
+        assert request.document["messages"] == [
+            {"role": "user", "content": [{"type": "text", "text": PROMPT}]}
+        ]
         assert AMBIENT not in repr(request.document)
         assert FIXTURE_KEY not in repr(request.document)
         assert FIXTURE_KEY not in repr(gate.recipe)
@@ -496,7 +534,7 @@ async def test_pi_sdk_refuses_bad_control_before_key(
             )
         result = await gate.release(natural=True)
 
-        assert failure == {"kind": "failure", "nonce": NONCE, "code": "protocol"}
+        assert failure == {"kind": "failure", "nonce": gate.nonce, "code": "protocol"}
         assert result == 1
         gate.assert_reaped()
         assert peer.requests == []
@@ -533,9 +571,11 @@ async def test_pi_sdk_stop_fences_admission(
             else partial(gate.key, kora_capture)
         )
 
-        await gate.release(natural=False)
+        gate.stop()
+        assert not gate.owner.closed
         with pytest.raises(BridgeRefused, match="pi_bridge_refused") as failure:
             await action()
+        await gate.release(natural=False)
 
     assert failure.value.code == "stopped"
     gate.assert_reaped()
@@ -557,7 +597,7 @@ async def test_pi_sdk_lost_terminal_keeps_original_process_owner(
         async with asyncio.timeout(5):
             await peer.received.wait()
 
-        gate.owner.close_gate()
+        gate.stop()
         send_response.set()
         with pytest.raises(BridgeRefused) as failure:
             await prompt
@@ -568,42 +608,112 @@ async def test_pi_sdk_lost_terminal_keeps_original_process_owner(
     assert len(peer.requests) == 1
 
 
-@pytest.mark.asyncio
-async def test_pi_bridge_closes_with_pending_control_write() -> None:
+@asynccontextmanager
+async def prepared_channel(
+    capture: Capture, clock: StepClock
+) -> AsyncGenerator[tuple[BridgeChannel, asyncio.StreamReader, StdioStreams]]:
     socket_end, held = socket.socketpair()
     with socket_end, held:
         socket_end.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
         streams = await asyncio.open_connection(sock=socket_end)
-        clock = SystemClock()
+        peer = await asyncio.open_connection(sock=held)
         channel = BridgeChannel(
             streams, NONCE, clock.monotonic_ns() + 5 * SECOND, clock
         )
-        _, writer = streams
-        started = asyncio.Event()
-
-        async def send() -> str:
-            started.set()
-            return await channel.prompt("x" * 32_768)
-
-        pending = asyncio.create_task(send())
-        await started.wait()
+        reader, writer = streams
+        peer_reader, peer_writer = peer
         try:
-            assert writer.transport.get_write_buffer_size() > 0
-            writer.transport.abort()
-            with pytest.raises(BridgeRefused):
-                await pending
+            async with asyncio.timeout(5):
+                init = asyncio.create_task(
+                    channel.initialize("http://127.0.0.1:1", MODEL)
+                )
+                assert b'"kind":"init"' in await peer_reader.readline()
+                peer_writer.write(f'{{"kind":"ready","nonce":"{NONCE}"}}\n'.encode())
+                await peer_writer.drain()
+                await init
+                key = asyncio.create_task(
+                    channel.credential(capture.scope.admit(FIXTURE_KEY))
+                )
+                assert b'"kind":"credential"' in await peer_reader.readline()
+                peer_writer.write(
+                    f'{{"kind":"credential_ready","nonce":"{NONCE}"}}\n'.encode()
+                )
+                await peer_writer.drain()
+                await key
+            yield channel, reader, peer
         finally:
-            writer.close()
-            await writer.wait_closed()
-            await asyncio.gather(pending, return_exceptions=True)
+            channel.revoke()
+            peer_writer.close()
+            await asyncio.gather(writer.wait_closed(), peer_writer.wait_closed())
 
 
 @pytest.mark.asyncio
-async def test_pi_sdk_refuses_reported_model_mismatch(
-    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+@pytest.mark.parametrize("expire", [False, True], ids=["stop", "cutoff"])
+async def test_pi_bridge_closes_with_pending_control_write(
+    kora_capture: Capture, expire: bool
+) -> None:
+    clock = StepClock()
+    async with prepared_channel(kora_capture, clock) as (channel, _, peer):
+        peer_reader, peer_writer = peer
+        transport = peer_writer.transport
+        assert isinstance(transport, asyncio.Transport)
+        transport.pause_reading()
+        pending = asyncio.create_task(channel.prompt("x" * 32_768))
+        async with asyncio.timeout(5):
+            await clock.waiting.wait()
+
+        if expire:
+            clock.advance(5 * SECOND)
+        else:
+            channel.revoke()
+        with pytest.raises(BridgeRefused) as failure:
+            await pending
+        transport.resume_reading()
+        async with asyncio.timeout(5):
+            partial_frame = await peer_reader.read()
+
+    assert failure.value.code == ("deadline" if expire else "closed")
+    assert partial_frame.startswith(b'{"kind":"prompt"')
+    assert b"\n" not in partial_frame
+
+
+@pytest.mark.asyncio
+async def test_pi_bridge_stop_invalidates_buffered_terminal(
+    kora_capture: Capture,
+) -> None:
+    async with prepared_channel(kora_capture, StepClock()) as (channel, reader, peer):
+        pending = asyncio.create_task(channel.prompt(PROMPT))
+        async with asyncio.timeout(5):
+            assert b'"kind":"prompt"' in await peer[0].readline()
+        with pytest.raises(BridgeRefused) as duplicate:
+            await channel.prompt(PROMPT)
+
+        reader.feed_data(
+            f'{{"kind":"terminal","nonce":"{NONCE}","text":"done"}}\n'.encode()
+        )
+        channel.revoke()
+        with pytest.raises(BridgeRefused) as stopped:
+            await pending
+
+    assert duplicate.value.code == "protocol"
+    assert stopped.value.code == "closed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reported_model", "reported_stop"),
+    [("different-physical-model", "end_turn"), ("", "end_turn"), (MODEL, "pause_turn")],
+    ids=["changed-model", "empty-model", "incomplete-turn"],
+)
+async def test_pi_sdk_refuses_unadmitted_terminal(
+    installation: PiInstallation,
+    tmp_path: Path,
+    kora_capture: Capture,
+    reported_model: str,
+    reported_stop: str,
 ) -> None:
     async with (
-        model_peer(reported_model="different-physical-model") as peer,
+        model_peer(reported_model=reported_model, reported_stop=reported_stop) as peer,
         witness(installation, tmp_path) as gate,
     ):
         await gate.start(peer.origin)
@@ -626,7 +736,7 @@ async def test_pi_sdk_stops_during_partial_credential_frame(
     async with model_peer() as peer, witness(installation, tmp_path) as gate:
         await gate.start(peer.origin)
         reader, writer = gate.streams
-        prefix = f'{{"kind":"credential","nonce":"{NONCE}","key":"synthetic'
+        prefix = f'{{"kind":"credential","nonce":"{gate.nonce}","key":"synthetic'
 
         writer.write(prefix.encode())
         await writer.drain()
@@ -635,3 +745,70 @@ async def test_pi_sdk_stops_during_partial_credential_frame(
         assert await reader.read() == b""
         assert peer.requests == []
         gate.assert_reaped()
+
+
+@pytest.mark.asyncio
+async def test_pi_sdk_cancellation_during_startup_reaps(
+    installation: PiInstallation, tmp_path: Path
+) -> None:
+    started, activate = asyncio.Event(), asyncio.Event()
+    async with model_peer() as peer, witness(installation, tmp_path) as gate:
+        pending = asyncio.create_task(
+            gate.start(peer.origin, barrier=(started, activate))
+        )
+        async with asyncio.timeout(5):
+            await started.wait()
+
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await gate.release(natural=False)
+
+    assert peer.requests == []
+    gate.assert_reaped()
+
+
+@pytest.mark.asyncio
+async def test_pi_sdk_refuses_oauth_shape(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with model_peer() as peer, witness(installation, tmp_path) as gate:
+        await gate.start(peer.origin)
+        key = "fixture-sk-ant-oat-shape"
+
+        with pytest.raises(BridgeRefused) as failure:
+            await gate.key(kora_capture, key)
+        await gate.release(natural=True)
+
+    assert failure.value.code == "credential"
+    assert peer.requests == []
+    assert key not in repr(kora_capture.finish())
+    gate.assert_reaped()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fallback", [False, True], ids=["changed-bytes", "ancestor-module"]
+)
+async def test_pi_sdk_rechecks_staged_authority_before_key(
+    stage_path: Path, tmp_path: Path, kora_capture: Capture, fallback: bool
+) -> None:
+    root = tmp_path.resolve()
+    stage = root / "stage"
+    shutil.copytree(stage_path, stage)
+    clock = SystemClock()
+    saved = verify_pi_installation(stage, clock.monotonic_ns() + 15 * SECOND, clock)
+    async with model_peer() as peer, witness(saved, root / "attempt") as gate:
+        await gate.start(peer.origin)
+        if fallback:
+            (root / "node_modules").mkdir()
+        else:
+            saved.bridge.write_text("changed")
+
+        with pytest.raises(InstallationRefused):
+            await gate.key(kora_capture)
+        await gate.release(natural=False)
+
+    assert kora_capture.scope.registered_count() == 0
+    assert peer.requests == []
+    gate.assert_reaped()

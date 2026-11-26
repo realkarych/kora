@@ -1,11 +1,13 @@
 import asyncio
 import json
+import os
 import re
-from typing import Final, Literal
+from typing import Final, Literal, Protocol, cast
 
 from kora.ir.vcs_ref_json import decode_strict_json
 from kora.protocols.secret_value import SecretValue
 from kora.protocols.time import Clock
+from kora.runner.channels import ChannelError, DescriptorReadiness, wait_future
 from kora.runner.process_stdio import StdioStreams
 
 MAX_FRAME_BYTES: Final[int] = 65_536
@@ -14,6 +16,12 @@ _NONCE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{32}")
 _FAILURES: Final[frozenset[str]] = frozenset(
     {"protocol", "startup", "credential", "prompt", "stopped"}
 )
+Command = Literal["init", "credential", "prompt"]
+Reply = Literal["ready", "credential_ready", "terminal"]
+
+
+class _Endpoint(Protocol):
+    def fileno(self) -> int: ...
 
 
 class BridgeRefused(ValueError):
@@ -29,33 +37,84 @@ class BridgeChannel:
         if _NONCE.fullmatch(nonce) is None:
             raise BridgeRefused("protocol")
         self._reader, self._writer = streams
-        self._writer.transport.set_write_buffer_limits(high=MAX_FRAME_BYTES, low=0)
+        self._endpoint = cast(_Endpoint, self._writer.get_extra_info("socket"))
         self._nonce = nonce
         self._cutoff_ns = cutoff_ns
         self._clock = clock
+        self._phase: Command | None = "init"
+        self._revoked: bool = False
+        self._waiting: tuple[int, DescriptorReadiness] | None = None
 
     async def initialize(self, origin: str, model: str) -> None:
-        await self._send("init", origin=origin, model=model)
-        await self._receive("ready")
+        await self._exchange("init", "ready", "credential", origin=origin, model=model)
 
     async def credential(self, key: SecretValue) -> None:
-        self._remaining()
-        await self._send("credential", key=key.reveal())
-        await self._receive("credential_ready")
+        await self._exchange("credential", "credential_ready", "prompt", secret=key)
 
     async def prompt(self, text: str) -> str:
         if len(text) > MAX_PROMPT_BYTES or len(text.encode()) > MAX_PROMPT_BYTES:
             raise BridgeRefused("protocol")
-        await self._send("prompt", text=text)
-        return await self._receive("terminal")
+        return await self._exchange("prompt", "terminal", None, text=text)
+
+    def revoke(self) -> None:
+        self._revoked = True
+        self._release_waiter()
+        self._writer.transport.abort()
+
+    async def _exchange(
+        self,
+        kind: Command,
+        reply: Reply,
+        following: Command | None,
+        *,
+        secret: SecretValue | None = None,
+        **fields: str,
+    ) -> str:
+        self._remaining()
+        if self._phase != kind:
+            raise BridgeRefused("protocol")
+        self._phase = None
+        complete = False
+        try:
+            if secret is not None:
+                fields["key"] = secret.reveal()
+            await self._send(kind, **fields)
+            response = await self._receive(reply)
+            self._phase = following
+            complete = True
+            return response
+        finally:
+            if not complete:
+                self.revoke()
 
     def _remaining(self) -> float:
+        if self._revoked:
+            raise BridgeRefused("closed")
         remaining = self._cutoff_ns - self._clock.monotonic_ns()
         if remaining <= 0:
             raise BridgeRefused("deadline")
-        if self._writer.is_closing():
-            raise BridgeRefused("closed")
         return remaining / 1_000_000_000
+
+    def _release_waiter(self) -> None:
+        waiting, self._waiting = self._waiting, None
+        if waiting is not None:
+            descriptor, ready = waiting
+            try:
+                ready.close()
+            finally:
+                os.close(descriptor)
+
+    async def _wait_writable(self, descriptor: int) -> None:
+        duplicate = os.dup(descriptor)
+        try:
+            self._waiting = (duplicate, DescriptorReadiness(duplicate, writing=True))
+        except (OSError, RuntimeError):
+            os.close(duplicate)
+            raise BridgeRefused("closed") from None
+        try:
+            await wait_future(self._waiting[1].ready, self._cutoff_ns, self._clock)
+        finally:
+            self._release_waiter()
 
     async def _send(self, kind: str, **fields: str) -> None:
         record = (
@@ -66,24 +125,28 @@ class BridgeChannel:
             ).encode()
             + b"\n"
         )
-        if (
-            len(record) > MAX_FRAME_BYTES
-            or self._writer.transport.get_write_buffer_size()
-        ):
+        if len(record) > MAX_FRAME_BYTES:
             raise BridgeRefused("protocol")
         try:
-            async with asyncio.timeout(self._remaining()):
-                self._writer.write(record)
-                await self._writer.drain()
+            remaining = memoryview(record)
+            while remaining:
                 self._remaining()
-        except TimeoutError:
+                descriptor = self._endpoint.fileno()
+                try:
+                    written = os.write(descriptor, remaining)
+                except BlockingIOError:
+                    await self._wait_writable(descriptor)
+                    continue
+                if written <= 0:
+                    raise BridgeRefused("closed")
+                remaining = remaining[written:]
+            self._remaining()
+        except ChannelError:
             raise BridgeRefused("deadline") from None
         except OSError:
             raise BridgeRefused("closed") from None
 
-    async def _receive(
-        self, expected: Literal["ready", "credential_ready", "terminal"]
-    ) -> str:
+    async def _receive(self, expected: Reply) -> str:
         try:
             async with asyncio.timeout(self._remaining()):
                 record = await self._reader.readuntil(b"\n")
@@ -93,8 +156,7 @@ class BridgeChannel:
             raise BridgeRefused("closed") from None
         except asyncio.LimitOverrunError:
             raise BridgeRefused("protocol") from None
-        if self._clock.monotonic_ns() >= self._cutoff_ns:
-            raise BridgeRefused("deadline")
+        self._remaining()
         if b"\r" in record:
             raise BridgeRefused("protocol")
         frame = decode_strict_json(record, MAX_FRAME_BYTES, 1)

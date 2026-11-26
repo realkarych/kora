@@ -99,7 +99,7 @@ class Bridge {
   private readonly buffer = Buffer.alloc(frameLimit - 1);
   private readonly stop = new AbortController();
   private end = 0;
-  private writing = false;
+  private pendingWrite: Promise<void> | undefined;
   private nonce: string | undefined;
   private session: AgentSession | undefined;
   private models: ModelRuntime | undefined;
@@ -158,13 +158,13 @@ class Bridge {
       this.fail("stopped");
       return;
     }
-    if (this.phase === "credential" && !this.writing && kind === "credential" && fields.size === 3) {
+    if (this.phase === "credential" && kind === "credential" && fields.size === 3) {
       const key = fields.get("key");
       this.phase = "installing";
       void this.installCredential(key).catch(() => this.fail("credential"));
       return;
     }
-    if (this.phase === "prompt" && !this.writing && kind === "prompt" && fields.size === 3) {
+    if (this.phase === "prompt" && kind === "prompt" && fields.size === 3) {
       const text = fields.get("text");
       this.phase = "running";
       void this.prompt(text).catch(() => this.fail("prompt"));
@@ -227,6 +227,8 @@ class Bridge {
   }
 
   private async installCredential(key: string | undefined): Promise<void> {
+    await this.pendingWrite;
+    this.stop.signal.throwIfAborted();
     if (!this.models || !key || !/^[!-~]{1,4096}$/.test(key) || key.includes("sk-ant-oat")) throw new Error();
     await this.models.setRuntimeApiKey(provider, key, { signal: this.stop.signal });
     this.stop.signal.throwIfAborted();
@@ -236,6 +238,8 @@ class Bridge {
   }
 
   private async prompt(text: string | undefined): Promise<void> {
+    await this.pendingWrite;
+    this.stop.signal.throwIfAborted();
     const session = this.session;
     if (!session || text === undefined || !text.length || Buffer.byteLength(text) > promptLimit
       || !this.key || text.includes(this.key)) throw new Error();
@@ -243,8 +247,10 @@ class Bridge {
     await session.prompt(text, { expandPromptTemplates: false });
     if (this.phase !== "running") return;
     const message = session.messages.at(-1);
-    if (message?.role !== "assistant" || message.stopReason !== "stop" || message.provider !== provider
-      || message.model !== this.model || (message.responseModel && message.responseModel !== this.model)) throw new Error();
+    if (message?.role !== "assistant" || message.stopReason !== "stop"
+      || message.rawStopReason !== "end_turn" || message.provider !== provider
+      || message.model !== this.model
+      || (Object.hasOwn(message, "responseModel") && message.responseModel !== this.model)) throw new Error();
     const answer = message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
     if (!answer.length || answer.includes(this.key)) throw new Error();
     session.dispose();
@@ -263,18 +269,20 @@ class Bridge {
     } catch {
       exit(1);
     }
-    if (this.writing || !this.nonce) exit(1);
+    if (this.pendingWrite || !this.nonce) exit(1);
     this.send({ kind: "failure", code }, 1);
   }
 
   private send(value: Record<string, string>, exitCode?: number): void {
     const frame = JSON.stringify({ ...value, nonce: this.nonce }) + "\n";
-    if (this.writing || Buffer.byteLength(frame) > frameLimit) exit(1);
-    this.writing = true;
-    stdout.write(frame, "utf8", (error) => {
-      this.writing = false;
-      if (error) exit(1);
-      if (exitCode !== undefined) exit(exitCode);
+    if (this.pendingWrite || Buffer.byteLength(frame) > frameLimit) exit(1);
+    this.pendingWrite = new Promise((written) => {
+      stdout.write(frame, "utf8", (error) => {
+        this.pendingWrite = undefined;
+        if (error) exit(1);
+        if (exitCode !== undefined) exit(exitCode);
+        written();
+      });
     });
   }
 }

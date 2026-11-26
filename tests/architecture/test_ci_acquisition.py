@@ -511,6 +511,16 @@ def test_pi_sdk_bridge_compiles_without_emitting_failed_source() -> None:
     assert bridge["files"] == ["bridge.ts"]
 
 
+def test_pi_sdk_installs_ignore_parent_pnpm_workspaces() -> None:
+    setup = (ROOT / PI_SDK_SETUP).read_text()
+
+    install = re.search(r"(?ms)^install=\((.*?)\)\n", setup)
+
+    assert install is not None
+    assert "--ignore-workspace" in install.group(1).split()
+    assert setup.count('"${install[@]}"') == 2
+
+
 def test_pi_sdk_manifest_records_exact_installed_file_bytes(tmp_path: Path) -> None:
     folder = tmp_path / "installed/bridge"
     folder.mkdir(parents=True)
