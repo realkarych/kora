@@ -20,8 +20,8 @@ from kora.protocols.deadlines import (
     thresholds,
 )
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
-from kora.protocols.evidence import NormalCompletionQuiescence
-from kora.protocols.identity import Count, Identifier, Sha256
+from kora.protocols.evidence import DispatcherQuiescence, NormalCompletionQuiescence
+from kora.protocols.identity import Count, GrantBinding, Identifier, Sha256
 from kora.protocols.lifetime import EnvironmentVariable, Executable
 from kora.protocols.runtime import (
     MAX_TRANSFER_BYTES,
@@ -98,6 +98,12 @@ ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
     ),
     "command_not_started": EnvelopeEntry("the command process did not start", False),
     "journal_unavailable": EnvelopeEntry("the command journal is not durable", True),
+    "registry_unavailable": EnvelopeEntry(
+        "the attempt registry could not be written", True
+    ),
+    "lineage_unavailable": EnvelopeEntry(
+        "the execution-domain registry lineage is unavailable", True
+    ),
     "integrity_error": EnvelopeEntry(
         "the transferred bytes do not match the digest", False
     ),
@@ -218,6 +224,19 @@ class ControlRequest(BoundaryModel):
     request_id: Identifier
 
 
+class DispatcherQuiescenceRequest(BoundaryModel):
+    op: Literal["record_dispatcher_quiescence"]
+    request_id: Identifier
+    grant: GrantBinding
+    acknowledgement: DispatcherQuiescence
+
+
+def read_dispatcher_quiescence(payload: bytes) -> DispatcherQuiescenceRequest | None:
+    if isinstance(decode_strict_json(payload, PRE_ATTACH_BYTES, 3), JsonRefusal):
+        return None
+    return json_model(DispatcherQuiescenceRequest, payload)
+
+
 class AttachRequest(BoundaryModel):
     op: Literal["attach"]
     request_id: Identifier
@@ -276,7 +295,9 @@ class EmptyValue(BoundaryModel):
     pass
 
 
-DeliveryResult = Literal["attached", "accepted", "started", "transferred"]
+DeliveryResult = Literal[
+    "attached", "accepted", "started", "transferred", "dispatcher_quiescence_recorded"
+]
 
 
 class DeliveryEnvelope(BoundaryModel):
