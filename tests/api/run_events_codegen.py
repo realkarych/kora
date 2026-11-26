@@ -39,6 +39,10 @@ def project_run_events_schema(installed_schema: bytes) -> bytes:
     path_item = schema_object(paths[operation_path])
     operation = schema_object(path_item["get"])
     assert operation["operationId"] == "list_run_events"
+    responses = schema_object(operation["responses"])
+    validation_response = schema_object(responses["422"])
+    if validation_response.get("description") == "Unprocessable Content":
+        validation_response["description"] = "Unprocessable Entity"
     path_metadata = {"parameters", "servers", "summary", "description"}
     selected_path = {key: path_item[key] for key in path_metadata & path_item.keys()}
     selected_path["get"] = operation
