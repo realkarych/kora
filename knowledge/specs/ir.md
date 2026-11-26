@@ -8,7 +8,7 @@ The committed schema is generated from the real `GraphDocument` model by `kora.i
 
 ## 1. Design rules
 
-- The scheduler consumes materialised node configuration (FR-3.2) and the expressions in [section 7](#7-expressions-and-templates). Authored Python runs at compilation.
+- The scheduler consumes materialised node configuration (FR-3.2) and the expressions in [section 7](#7-expressions-and-templates). The general compiler runs authored Python in the author's process. The [early compiler](dsl.md#early-sequential-json-mode-issue-1918) parses source without running it.
 - Edges use stable string IDs and named references (FR-1.5). Node IDs match `^[a-z][a-z0-9_]{0,63}(?![\s\S])` and are unique within the root node map or one stored body's node map. Independent maps can reuse an ID.
 - `graph` holds topology and node definitions, `runtime` holds graph-level policy and configuration, and `secrets` holds references only (FR-1.3). Compiler provenance belongs to `meta`.
 - Compilation emits deterministic output with schema-ordered keys, source-ordered lists and no generated timestamps (NFR-6.2).
@@ -652,7 +652,7 @@ The binding compiles only the checked canonical rendering, and the IR retains th
 #### Local and server validation
 
 The author-side `kora compile` uses the kora parser and checker without importing the binding.
-Stdio `kora_compile` compiles locally and forwards only compiled IR to `/validate`. [DSL compilation](dsl.md#2-compile-step-kora-compile) · [MCP operations](api-and-agent-surface.md#4-mcp-servers-fr-01-dd-28)
+The general stdio `kora_compile` compiles locally and forwards only compiled IR to `/validate`. The [early JSON mode](dsl.md#early-sequential-json-mode-issue-1918) shares the authored IR checks without making an API request. Installation and executable binding checks run at deploy. [DSL compilation](dsl.md#2-compile-step-kora-compile) · [MCP operations](api-and-agent-surface.md#4-mcp-servers-fr-01-dd-28)
 
 For complete server validation, including `/validate`, `/plan` and full deployment validation, compile every distinct canonical rendering and each distinct decoded `matches()` pattern once.
 A proven rejection under the complete public validation rules is reported as `IR011` without the native message.
