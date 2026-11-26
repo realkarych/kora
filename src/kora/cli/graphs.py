@@ -10,11 +10,12 @@ from pydantic import ValidationError
 
 from kora.cli.app import CLI_COMPONENT
 from kora.cli.parameters import trigger_parameters
-from kora.client import ApiError, ClientError, KoraClient
+from kora.client import ApiError, ClientError
 from kora.client.documents import GraphDocumentError, read_graph_deployment
 from kora.client.settings import (
     CLI_CREDENTIAL_VARIABLE,
     ClientConfigurationError,
+    ClientSettings,
     read_client_settings,
     read_namespace,
 )
@@ -62,10 +63,10 @@ def _stderr(text: str) -> None:
 
 
 async def _deploy(
-    url: str, token: str, path: Path, diagnostics: ProcessDiagnostics
+    settings: ClientSettings, path: Path, diagnostics: ProcessDiagnostics
 ) -> DeployedGraphVersion:
     deployment = read_graph_deployment(path)
-    async with KoraClient(url, token, diagnostics=diagnostics) as client:
+    async with settings.client(diagnostics) as client:
         return await client.deploy(deployment.namespace, deployment.request)
 
 
@@ -118,7 +119,7 @@ def deploy_command(
 ) -> None:
     async def call() -> DeployedGraphVersion:
         settings = read_client_settings(environment, CLI_CREDENTIAL_VARIABLE)
-        return await _deploy(settings.url, settings.token, path, diagnostics)
+        return await _deploy(settings, path, diagnostics)
 
     report(
         diagnostics,
@@ -170,9 +171,7 @@ def trigger_command(
     async def call() -> TriggeredRun:
         settings = read_client_settings(environment, CLI_CREDENTIAL_VARIABLE)
         namespace = read_namespace(environment, options.namespace)
-        async with KoraClient(
-            settings.url, settings.token, diagnostics=diagnostics
-        ) as client:
+        async with settings.client(diagnostics) as client:
             return await client.trigger(namespace, options.graph, request, key)
 
     report(

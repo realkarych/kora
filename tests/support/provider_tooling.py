@@ -126,6 +126,7 @@ def prepare_wheelhouse(
     conformance: bool = False,
     postgres: bool = False,
     serve: bool = False,
+    mcp: bool = False,
     github_app: bool = False,
 ) -> None:
     configuration = ProjectManifest.model_validate(
@@ -142,6 +143,8 @@ def prepare_wheelhouse(
         requirements += configuration.project.optional_dependencies["postgres"]
     if serve:
         requirements += configuration.project.optional_dependencies["serve"]
+    if mcp:
+        requirements += configuration.project.optional_dependencies["mcp"]
     if github_app:
         requirements += configuration.project.optional_dependencies["github-app"]
     pending = [Requirement(value) for value in requirements]

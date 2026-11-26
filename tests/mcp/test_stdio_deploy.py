@@ -30,6 +30,17 @@ class StdioSession:
     lines: list[JsonObject] = field(default_factory=list[JsonObject])
     sequence: int = 0
 
+    async def initialize(self) -> None:
+        await self.request(
+            "initialize",
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "kora-test", "version": "1"},
+            },
+        )
+        await self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
     async def send(self, message: JsonObject) -> None:
         stdin = self.process.stdin
         assert stdin is not None
@@ -84,15 +95,7 @@ async def start(environment: dict[str, str], server: str = "authoring") -> Stdio
         stderr=asyncio.subprocess.PIPE,
     )
     session = StdioSession(process)
-    await session.request(
-        "initialize",
-        {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": {"name": "kora-test", "version": "1"},
-        },
-    )
-    await session.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    await session.initialize()
     return session
 
 
