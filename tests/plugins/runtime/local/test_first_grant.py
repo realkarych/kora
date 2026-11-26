@@ -724,12 +724,13 @@ async def exercise(
     attempt = attempt_directory(root, runtime, ATTEMPT)
     hold_command = not discard and not discard_completion
     gate_path = root / "command-gate"
+    waiting_marker = b"waiting for gate\n"
     command = "pass"
     if hold_command:
         command = "\n".join(
             (
                 "import fcntl, os",
-                "os.write(1, b'waiting for gate')",
+                f"os.write(1, {waiting_marker!r})",
                 f"with open({str(gate_path)!r}, 'rb') as gate:",
                 "    fcntl.flock(gate, fcntl.LOCK_SH)",
             )
@@ -844,7 +845,7 @@ async def exercise(
             fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
             await runtime.start(handle, ctx)
             await until(
-                lambda: output.exists() and output.read_bytes() == b"waiting for gate"
+                lambda: output.exists() and output.read_bytes() == waiting_marker
             )
             held = stamps(head_path, grant_path)
 
