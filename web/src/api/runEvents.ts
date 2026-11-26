@@ -11,6 +11,10 @@ const credentialPattern = /^Bearer +([A-Za-z0-9._~+/-]+=*)$/iu
 const requestIdPattern = /^(?:req_[a-zA-Z0-9_-]{1,252}|[0-9a-f]{32})$/u
 const serverCodePattern = /^(?:API|IR|DSL|RT|POL)[0-9]{3}$/u
 const unpairedSurrogate = /[\uD800-\uDFFF]/u
+const pageKeys = ['items', 'observed_at', 'next_cursor'] satisfies (keyof ListRunEventsResponse)[]
+const rowKeys = ['id', 'kind', 'at', 'actor', 'run_id', 'node_instance_id', 'attempt_id'] satisfies (keyof RunEvent)[]
+const systemActorKeys = ['kind', 'component']
+const tokenActorKeys = ['kind', 'owner', 'token_id']
 
 type RunEventsRequest = {
   origin: string
@@ -36,7 +40,14 @@ type FailureReason = Exclude<RunEventsFailure['reason'], 'cancelled'>
 
 type RunEventsResult =
   | { kind: 'page'; page: ListRunEventsResponse; requestId: string | null }
-  | { kind: 'api-error'; status: number; error: ErrorEnvelope; requestId: string | null; errorRequestId: string | null }
+  | {
+    kind: 'api-error'
+    status: number
+    error: ErrorEnvelope
+    responseText: string
+    requestId: string | null
+    errorRequestId: string | null
+  }
   | { kind: 'client-error'; code: FailureCode; reason: FailureReason; requestId: string | null }
   | { kind: 'cancelled'; requestId: string | null }
 
@@ -62,6 +73,10 @@ const knownErrors: Partial<Record<string, ErrorPolicy>> = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 }
 
 function exactMatch(pattern: RegExp, value: string): boolean {
@@ -104,12 +119,13 @@ function identifier(value: unknown): value is string {
 function eventActor(value: unknown): value is RunEvent['actor'] {
   if (!isRecord(value)) return false
   const { kind, component, owner, token_id } = value
-  return (kind === 'system' && component === 'scheduler')
-    || ((kind === 'user' || kind === 'service') && identifier(owner) && identifier(token_id))
+  return (kind === 'system' && component === 'scheduler' && hasExactKeys(value, systemActorKeys))
+    || ((kind === 'user' || kind === 'service') && identifier(owner) && identifier(token_id)
+      && hasExactKeys(value, tokenActorKeys))
 }
 
 function eventRow(value: unknown, run: string): value is RunEvent {
-  if (!isRecord(value)) return false
+  if (!isRecord(value) || !hasExactKeys(value, rowKeys)) return false
   const { id, kind, at, actor, run_id, node_instance_id, attempt_id } = value
   return prefixedId(id, 'event_') && run_id === run && boundedText(kind, 255) && !kind.includes('\0')
     && instant(at) && eventActor(actor)
@@ -122,7 +138,7 @@ function cursor(value: unknown): value is string {
 }
 
 function eventPage(value: unknown, run: string, limit: number): value is ListRunEventsResponse {
-  if (!isRecord(value)) return false
+  if (!isRecord(value) || !hasExactKeys(value, pageKeys)) return false
   const { items, observed_at, next_cursor } = value
   if (!Array.isArray(items) || items.length > limit || !instant(observed_at)
     || (next_cursor !== null && !cursor(next_cursor))) return false
@@ -195,7 +211,10 @@ function runBudget(caller: AbortSignal | undefined) {
 
 export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsResult> {
   const budget = runBudget(input.signal)
-  let requestId: string | null = null
+  const exchange: { requestId: string | null; errorText: string | null } = {
+    requestId: null,
+    errorText: null,
+  }
   try {
     budget.check()
     const { url, token } = destination(input)
@@ -208,8 +227,10 @@ export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsR
       budget.check()
       const requestFetch = input.fetch
       const response = await requestFetch(request).catch(() => { throw new RunEventsFailure('connection') })
-      requestId = safeCorrelation(response.headers.get('x-request-id'), token)
-      return detachRunEventsBody(response, budget.check)
+      exchange.requestId = safeCorrelation(response.headers.get('x-request-id'), token)
+      const detached = await detachRunEventsBody(response, budget.check)
+      exchange.errorText = detached.errorText
+      return detached.response
     }
     const result = await listRunEvents({
       baseUrl: input.origin,
@@ -227,14 +248,15 @@ export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsR
     })
     budget.check()
     const status = result.response?.status
+    const { requestId, errorText } = exchange
     if (status === undefined) return localFailure(result.error, requestId)
     if (status !== 200) {
-      if (!errorEnvelope(result.error, status) || !validJsonScalars(result.error)) {
+      if (errorText === null || !errorEnvelope(result.error, status) || !validJsonScalars(result.error)) {
         throw new RunEventsFailure('status_envelope')
       }
       const errorRequestId = safeCorrelation(result.error.error.request_id, token)
       budget.check()
-      return { kind: 'api-error', status, error: result.error, requestId, errorRequestId }
+      return { kind: 'api-error', status, error: result.error, responseText: errorText, requestId, errorRequestId }
     }
     if (result.error !== undefined) throw new RunEventsFailure('json')
     if (!eventPage(result.data, input.run, input.limit ?? 100) || !validJsonScalars(result.data)) {
@@ -246,9 +268,9 @@ export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsR
     try {
       budget.check()
     } catch (expired) {
-      return localFailure(expired, requestId)
+      return localFailure(expired, exchange.requestId)
     }
-    return localFailure(error, requestId)
+    return localFailure(error, exchange.requestId)
   } finally {
     budget.release()
   }

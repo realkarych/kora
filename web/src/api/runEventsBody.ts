@@ -71,16 +71,19 @@ function boundedJsonStructure(text: string): boolean {
   return containers.length === 0
 }
 
-function validJsonStructure(body: Uint8Array<ArrayBuffer>): boolean {
+function admittedJsonText(body: Uint8Array<ArrayBuffer>): string | null {
   try {
-    return boundedJsonStructure(utf8.decode(body))
+    const text = utf8.decode(body)
+    return boundedJsonStructure(text) ? text : null
   } catch (error) {
-    if (error instanceof SyntaxError || error instanceof TypeError) return false
+    if (error instanceof SyntaxError || error instanceof TypeError) return null
     throw error
   }
 }
 
-export async function detachRunEventsBody(response: Response, check: () => void): Promise<Response> {
+type DetachedBody = { response: Response; errorText: string | null }
+
+export async function detachRunEventsBody(response: Response, check: () => void): Promise<DetachedBody> {
   const reader = response.body?.getReader()
   if (reader === undefined) throw new RunEventsFailure('status_envelope')
 
@@ -110,12 +113,16 @@ export async function detachRunEventsBody(response: Response, check: () => void)
     if (used === 0) throw new RunEventsFailure('status_envelope')
 
     const body = bytes.subarray(0, used)
-    if (!validJsonStructure(body)) {
+    const text = admittedJsonText(body)
+    if (text === null) {
       throw new RunEventsFailure(status === 200 ? 'json' : 'status_envelope')
     }
     check()
 
-    return new Response(body, { status, headers: { 'Content-Type': 'application/json' } })
+    return {
+      response: new Response(body, { status, headers: { 'Content-Type': 'application/json' } }),
+      errorText: status === 200 ? null : text,
+    }
   } finally {
     try {
       if (!complete) await reader.cancel().catch(() => undefined)

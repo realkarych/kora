@@ -118,6 +118,41 @@ function wireOptions(origin: string): Identity & { fetch: typeof globalThis.fetc
   return { ...wireSelectors, origin, fetch: globalThis.fetch }
 }
 
+function captureNativeBody() {
+  const bodies: ReadableStream<Uint8Array>[] = []
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const response = await globalThis.fetch(input, init)
+    assert(response.body !== null)
+    bodies.push(response.body)
+    return response
+  }
+  return { bodies, fetch }
+}
+
+function timeoutCount(): number {
+  return process.getActiveResourcesInfo().filter((type) => type === 'Timeout').length
+}
+
+async function releaseCallTimer(): Promise<void> {
+  const caller = new AbortController()
+  let dispatched = false
+  const fetch: typeof globalThis.fetch = (input, init) => {
+    dispatched = true
+    return globalThis.fetch(input, init)
+  }
+  const before = timeoutCount()
+
+  const pending = readRunEvents({ ...wireOptions('http://127.0.0.1:1'), fetch, signal: caller.signal })
+  const during = timeoutCount()
+  caller.abort()
+  const outcome = await pending
+
+  assert.equal(during, before + 1)
+  assert.equal(outcome.kind, 'cancelled')
+  assert.equal(dispatched, false)
+  assert.equal(timeoutCount(), before)
+}
+
 async function destinations(): Promise<void> {
   const seen: (string | undefined)[] = []
   await withListener((request, response) => {
@@ -134,8 +169,13 @@ async function destinations(): Promise<void> {
   })
 }
 
+function errorWithDetails(detailsText: string): string {
+  return JSON.stringify(errorBody).replace('"details":{}', '"details":' + detailsText)
+}
+
 async function validPageAndErrors(): Promise<void> {
   const requests: boolean[] = []
+  const largeErrorText = errorWithDetails('{ "count": 9007199254740993 }')
   await withListener((request, response) => {
     requests.push(request.method === 'GET' && request.headers.authorization === wireAuthorization)
     switch (request.url) {
@@ -152,18 +192,24 @@ async function validPageAndErrors(): Promise<void> {
         response.writeHead(401, { 'Content-Type': 'application/json', 'X-Request-ID': 'invalid header identity' })
         response.end(JSON.stringify(standardError))
         break
-      default:
+      case route + '?limit=5':
         send(response, JSON.stringify(unsafeIdentityError), 409)
+        break
+      default:
+        send(response, largeErrorText, 409)
     }
   }, async (origin) => {
     const options = wireOptions(origin)
-    const exact = await readRunEvents({ ...options, limit: 1 })
+    const observed = captureNativeBody()
+    const exact = await readRunEvents({ ...options, limit: 1, fetch: observed.fetch })
+    assert.equal(observed.bodies[0]?.locked, false)
     const additive = await readRunEvents({ ...options, limit: 2 })
     const mismatched = await readRunEvents({ ...options, limit: 3 })
     const invalidHeader = await readRunEvents({ ...options, limit: 4 })
     const invalidBodyIdentity = await readRunEvents({ ...options, limit: 5 })
+    const large = await readRunEvents({ ...options, limit: 6 })
 
-    assert.deepEqual(requests, [true, true, true, true, true])
+    assert.deepEqual(requests, [true, true, true, true, true, true])
     assert(exact.kind === 'page')
     assert.equal(exact.requestId, requestId)
     assert(additive.kind === 'api-error')
@@ -171,6 +217,7 @@ async function validPageAndErrors(): Promise<void> {
     assert.equal(additive.errorRequestId, errorId)
     assert.deepEqual(additive.error, errorBody)
     assert(mismatched.kind === 'client-error' && mismatched.code === 'CLT003')
+    assert(!('responseText' in mismatched))
     assert(invalidHeader.kind === 'api-error')
     assert.equal(invalidHeader.requestId, null)
     assert.equal(invalidHeader.errorRequestId, errorId)
@@ -179,14 +226,57 @@ async function validPageAndErrors(): Promise<void> {
     assert.equal(invalidBodyIdentity.requestId, requestId)
     assert.equal(invalidBodyIdentity.errorRequestId, null)
     assert.deepEqual(invalidBodyIdentity.error, unsafeIdentityError)
+    assert(large.kind === 'api-error')
+    assert.equal(large.error.error.code, 'API901')
+    assert.equal(large.responseText, largeErrorText)
+  })
+}
+
+async function exactPageShape(): Promise<void> {
+  const system = {
+    id: 'event_01JCE8H63M86YBS2P0NN4R3JDH',
+    kind: 'run.succeeded',
+    at: observedAt,
+    actor: { kind: 'system', component: 'scheduler' },
+    run_id: wireSelectors.run,
+    node_instance_id: null,
+    attempt_id: null,
+  }
+  const token = {
+    ...system,
+    id: 'event_01JCE8H63M86YBS2P0NN4R3JDK',
+    actor: { kind: 'user', owner: 'person', token_id: 'token' },
+  }
+  const valid = { items: [token, system], observed_at: observedAt, next_cursor: null }
+  const extra = { unexpected: wireContent }
+  const pages = [
+    { ...valid, ...extra },
+    { ...valid, items: [token, { ...system, ...extra }] },
+    { ...valid, items: [token, { ...system, actor: { ...system.actor, ...extra } }] },
+    { ...valid, items: [{ ...token, actor: { ...token.actor, ...extra } }, system] },
+  ]
+  await withListener((request, response) => {
+    request.resume()
+    const selector = new URL(request.url ?? '/', 'http://127.0.0.1').searchParams.get('limit')
+    send(response, JSON.stringify(pages[Number(selector) - 2] ?? valid))
+  }, async (origin) => {
+    const options = wireOptions(origin)
+    const accepted = await readRunEvents({ ...options, limit: 100 })
+
+    assert(accepted.kind === 'page')
+    assert.deepEqual(accepted.page, valid)
+    for (const index of pages.keys()) {
+      const rejected = await readRunEvents({ ...options, limit: index + 2 })
+      assert(rejected.kind === 'client-error' && rejected.reason === 'schema')
+      assert(!('responseText' in rejected))
+    }
   })
 }
 
 async function invalidFrames(): Promise<void> {
   const duplicate = page.replace('}', ',"n\\u0065xt_cursor":null}')
-  const deep = page.replace('}', ',"extra":' + '['.repeat(65) + '0' + ']'.repeat(65) + '}')
   const malformed = Buffer.concat([Buffer.from(page.slice(0, -1) + ',"extra":"'), Buffer.from([0xc3, 0x28]), Buffer.from('"}')])
-  const frames = [Buffer.from(duplicate), Buffer.from(deep), malformed]
+  const frames = [Buffer.from(duplicate), malformed]
   for (const frame of frames) {
     await withListener((request, response) => {
       request.resume()
@@ -195,6 +285,25 @@ async function invalidFrames(): Promise<void> {
       const result = await readRunEvents(wireOptions(origin))
 
       assert(result.kind === 'client-error' && result.code === 'CLT003')
+    })
+  }
+
+  for (const depth of [64, 65]) {
+    const nested = '['.repeat(depth - 3) + '0' + ']'.repeat(depth - 3)
+    const body = errorWithDetails('{"nested":' + nested + '}')
+    await withListener((request, response) => {
+      request.resume()
+      send(response, body, 409)
+    }, async (origin) => {
+      const result = await readRunEvents(wireOptions(origin))
+
+      if (depth === 64) {
+        assert(result.kind === 'api-error')
+        assert.equal(result.responseText, body)
+      } else {
+        assert(result.kind === 'client-error' && result.code === 'CLT003')
+        assert(!('responseText' in result))
+      }
     })
   }
 }
@@ -221,10 +330,12 @@ async function oversized(status: number, zip: boolean): Promise<void> {
     })
     response.write(body)
   }, async (origin) => {
-    const result = await readRunEvents(wireOptions(origin))
+    const observed = captureNativeBody()
+    const result = await readRunEvents({ ...wireOptions(origin), fetch: observed.fetch })
     const ended = await Promise.race([promise, abortAfter(3_000)])
 
     assert(result.kind === 'client-error' && result.reason === 'response_limit')
+    assert.equal(observed.bodies[0]?.locked, false)
     assert.equal(ended, false)
   })
 }
@@ -257,6 +368,7 @@ async function withIncompleteResponse(
 async function cancelPendingRead(): Promise<void> {
   const started = deferred<undefined>()
   const caller = new AbortController()
+  const adaptedBodies: ReadableStream<Uint8Array>[] = []
   let nativeReader: ReadableStreamDefaultReader<Uint8Array> | undefined
   let readPending = false
 
@@ -284,6 +396,7 @@ async function cancelPendingRead(): Promise<void> {
             return reader.cancel()
           },
         }, { highWaterMark: 0 })
+        adaptedBodies.push(body)
         return new Response(body, { status: response.status, headers: response.headers })
       }
       const result = readRunEvents({ ...wireOptions(origin), fetch, signal: caller.signal })
@@ -294,6 +407,7 @@ async function cancelPendingRead(): Promise<void> {
 
       assert.equal(outcome.kind, 'cancelled')
       assert.equal(readPending, false)
+      assert.equal(adaptedBodies[0]?.locked, false)
     })
   } finally {
     caller.abort()
@@ -319,10 +433,14 @@ async function rejectLateResponse(): Promise<void> {
 }
 
 async function wire(): Promise<void> {
+  failureStage = 'call-timer'
+  await releaseCallTimer()
   failureStage = 'destination'
   await destinations()
   failureStage = 'valid-page-and-errors'
   await validPageAndErrors()
+  failureStage = 'exact-page-shape'
+  await exactPageShape()
   failureStage = 'invalid-frames'
   await invalidFrames()
   failureStage = 'compressed-response-limit'
