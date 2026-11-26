@@ -1137,7 +1137,7 @@ An `Evaluator` belongs to its creating event loop.
 Stopping one instance or closing a handle rejects only its own queued jobs, waits for its in-flight and undelivered work and leaves other handles and the worker usable.
 The default one-second close deadline returns `close_timed_out`.
 Queued cancellations prevent execution, and in-flight cancellations discard the result.
-A running job stays charged until the native call settles after cancellation, event-loop closure or `close_timed_out`.
+After cancellation, event-loop closure or `close_timed_out`, a running job stays charged until all its native work settles.
 Closed loops release work that is no longer running, and stopped open loops remain charged until delivery or close.
 An unmapped worker fault permanently closes admission, settles waiting callers and releases the cache.
 
@@ -1157,7 +1157,7 @@ An admitted expression can stall or crash the shared process.
 | Evaluations per batch | 16 |
 | Outstanding charge | 8 MiB |
 | Handles | 128 |
-| Pending lifecycle reports | At most twice the configured handle capacity, 256 by default |
+| Pending lifecycle reports | Required bound of twice the configured handle capacity, 256 by default |
 | YAML path, event ID and checked rendering | 1,024, 128 and 65,536 characters respectively |
 
 Job counts include in-flight work and completed results waiting for delivery.
@@ -1537,7 +1537,8 @@ Seal the authoritative rendered content once in the nonsecret execution request 
 The Worker prepares a proposal and the API independently derives and compares the complete result before upload readiness or the first inline seal.
 A first seal of a ready upload uses its checked identity.
 The attempt owns the saved content and availability, and seal replay and recovery reuse the recorded bytes.
-The [execution request contract](execution-request.md#3-trusted-derivation-and-finite-admission) owns renderer admission and actual stop controls, with activation under #1453. [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md)
+The [execution request contract](execution-request.md#3-trusted-derivation-and-finite-admission) owns renderer admission and actual stop controls.
+Seal activation belongs to #1453, and upload-to-ready rendering belongs to #1640. [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md)
 
 A graph with a webhook trigger may use run parameters in prompts.
 Using them in a `cmd` element or `workspace.rev` is `IR016` for that graph.
