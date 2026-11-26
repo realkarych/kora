@@ -977,178 +977,366 @@ Without typed conversion, whole JSON numbers raised `TypeError` in the probe. [B
 
 ### 7.6 Data bounds, cost and evaluation
 
-**Data bounds.** They apply after projection to each stored projection, and to the aggregate of all referenced variables before and after typed conversion. Count every referenced root and every scalar/container occurrence; map keys contribute canonical bytes, not value count:
+#### Data admission
 
-| bound | limit |
+Apply the bounds to each stored projection and to the aggregate of referenced variables before and after typed conversion.
+Count all referenced roots and each scalar or container occurrence.
+Map keys count toward canonical bytes, with no extra value count.
+
+| Bound | Limit |
 |---|---|
-| total size of the bound values, and of each stored projection | 4 KiB (4,096 bytes) of canonical JSON |
-| total scalar/container values, and values in each stored projection | 256 |
-| list length | 1,000 elements |
-| string length | 16 KiB of UTF-8 |
-| nesting depth | 32 |
-| map size | 1,000 keys |
+| Aggregate size and each stored projection | 4 KiB (4,096 bytes) of canonical JSON |
+| Aggregate scalar and container values, and values in each projection | 256 |
+| List length | 1,000 elements |
+| Map size | 1,000 keys |
+| String length | 16 KiB of UTF-8 |
+| Nesting depth | 32 |
 
-Where each bound is checked:
+Check all bounds when cutting a stored projection (section 7.5), including the entire fan-out `over` list and each element.
+Apply the following outcomes when a bound is exceeded.
 
-- **At the cut.** Every stored projection is checked against every bound where it is cut (section 7.5). For a fan-out `over` list, each element is checked as well as the list. Over a bound:
-  - the producer fails with `artifact_invalid`, including a scheduler-produced collection, export, wait payload output or `PreviousAttempt`, whose producing node fails;
-  - a form response is checked when it is received, against the paths of `approve_when` and of every consumer of its output: a direct response is refused with `API003` and a polled one stays `pending`;
-  - run parameters are refused with `API003` at trigger, webhook start and rerun, and the static `params` of cron, sensor and graph triggers are checked at deployment (`IR027`).
-- **At binding.** Both original and converted aggregate bytes and value counts are checked. An original aggregate that exceeds a bound is refused before copying the root that crosses it, even when numeric conversion would shrink it. The checked expression carries the declared bound of every variable its estimate used (section 7.4, schema-tightened bounds), and binding checks each converted value against it after conversion's JSON-kind check, so a value of another kind stays `invalid_value`: a list or map with more entries than a declared element count, or a string longer in UTF-8 than a declared string length, at any depth the bound declares, is refused, so the estimate holds for every bound value whatever produced it. Declared byte and value counts are enforced only through the aggregate data bounds; the schema mapping never tightens them, and an environment builder must keep them at the data bounds for the estimate to hold. Over a bound, the evaluation error kind is `bound_exceeded`. Unreferenced inputs are neither copied nor charged.
-- **`payload` and `observation`**, at projection. Over a bound, the result is an evaluation error with the meaning of section 7.7.
+- Producers fail with `artifact_invalid`, including the nodes producing a scheduler collection, export, wait payload output or `PreviousAttempt`.
+- A form response must fit the paths read by `approve_when` and by every consumer of the output.
+  Refuse a direct response with `API003` and keep a polled request `pending`.
+- Refuse run parameters with `API003` at trigger, webhook start or rerun.
+  Refuse static `params` for cron, sensor and graph triggers with `IR027` at deployment.
+- Check `payload` and `observation` at projection.
+  A bound violation is an evaluation error under section 7.7.
 
-**Cost estimate.** At validation the checker computes each expression's worst-case cost from its tree and the size bounds of its variables; a smaller `maxItems` or `maxLength` in a schema tightens the bounds (section 7.4, schema-tightened bounds). The estimate has two dimensions:
+Before conversion, iteratively check exact JSON types, finite numbers, Unicode scalar values and the data bounds.
+Bind and charge only referenced roots.
+Refuse the original aggregate before copying a root that would cross its bound, even if conversion would shrink it.
+Check aggregate bytes and values again after conversion.
+The caller supplies the saved, validated projection bounds and schema types.
+Integer schema values bind as signed 64-bit integers, including integral JSON floats, and number and schema-less numeric values bind as finite doubles.
+`Record.extra` types undeclared keys.
+Bind missing `outputs` as an empty map and return `projection_unavailable` for any other missing referenced projection.
 
-- **Steps.** The work charged by the table below.
-- **Memory.** A logical estimate over converted data and peak live intermediate sizes, with a provisional fixed allowance and multiplier. It does not measure native representation, allocator overhead or process RSS.
+A checked expression carries the declared bounds used by its estimate.
+First check each value's JSON kind against the declared type so a mismatch is `invalid_value`.
+Then validate declared element counts and UTF-8 string lengths at every depth covered by the bound.
+A violation is `bound_exceeded`.
+Only the aggregate data bounds enforce declared byte and value counts.
+The schema mapper does not tighten those counts, and environment builders keep them at the data bounds to preserve the estimate.
 
-An expression over either dimension of the budget is `IR027`. The charges model the pinned binding's observed complexity, with provisional coefficients:
+#### Estimated work and memory
 
-| charge | proportional to |
+Validation estimates each expression's worst case from its tree and variable bounds.
+A smaller `maxItems` or `maxLength` tightens the applicable bound under section 7.4.
+Steps charge work, and memory estimates converted data and peak live intermediate sizes with a fixed provisional allowance and multiplier.
+An expression over either budget is `IR027`.
+The estimates do not measure native representation, allocator overhead or RSS.
+
+| Charge | Proportional to |
 |---|---|
-| each evaluation | a fixed base, plus the bound size and value count of every top-level variable the expression references; the evaluator binds exactly those (the binding converts all bound data on every call) |
-| a node visit | one unit |
-| `all`, `exists`, `exists_one` | the range's bound length times the body's charge; nested macros multiply |
-| `map`, `filter` | the square of the range's bound length (binding 0.10.0), plus the range length times the body's charge |
-| `+` on an operand that may be a string, bytes, list or `dyn` value; list and map literals | the result size and value count, the sums over the operands, which propagate to every consumer |
-| result size and element count of `map` and `filter` | for `map`, the range length times the body's result size; `filter` over a list keeps the list's bounds, and over a map, a record or `dyn` it yields a list of the iterated keys or elements, with the range's total size and value count and the iterated element bound; the element count of both is the range length |
-| comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`, `in` | the operand sizes and value counts |
-| conversions and string functions | the operand size |
-| `matches()` | kora's size estimate of its literal pattern, for compiling on every call, plus that estimate times the subject length for matching; the compiled pattern also counts toward memory |
-| a compile on a cache miss | the canonical rendering's length |
-| projection work in a scheduler transaction (re-cutting a collection, projecting an event); charged to the allowance only, not to an expression | the bytes read and written |
+| Evaluation | Fixed base plus bound sizes and value counts for the referenced top-level variables, which the binding converts on each call |
+| Node visit | One weighted visit |
+| `all`, `exists`, `exists_one` | Range bound length times body charge, multiplying for nested macros |
+| `map`, `filter` | Square of the range bound length for binding 0.10.0, plus range length times body charge |
+| `+` if either operand may be a string, bytes, list or `dyn`, and list/map literals | Result size and value count summed over operands and carried to consumers |
+| `map` and `filter` results | Range length for the element count. `map` also multiplies body result size by range length. `filter` preserves a list's bounds. Over a map, record or `dyn`, its list of iterated keys or elements uses range total size, value count and the iterated element bound. |
+| `==`, `!=`, `<`, `<=`, `>`, `>=`, `in` | Operand sizes and value counts |
+| Conversions and string functions | Operand size |
+| `matches()` | Literal pattern estimate for compilation on each call, plus that estimate times subject length for matching. The compiled pattern also counts toward memory. |
+| Compile on a cache miss | Canonical rendering length |
+| Scheduler transaction projection, including collection re-cut and event projection | Bytes read and written. Charge only to the transaction allowance. |
 
-**Bounds and arithmetic.**
+Every comprehension also charges its iteration weight times the range bound length.
 
-- **Hereditary bounds.** Each variable carries a bound: its total size in bytes of canonical JSON, its value count, its element count, its string length, and a bound for its elements or for each declared field. An element or field without its own bound inherits its parent's size and value count, and the element count and string length of the data bounds. Every bound on a cycle of declared bounds (a strongly connected component of more than one bound, or a bound that contains itself) loses all its declared children, which are then inherited. Converting from the leaves up, a bound whose converted subtree would be deeper than the nesting bound of 32 also loses its declared children, so no converted bound nests deeper than 32. Both rules depend only on the bounds, never on where an expression reaches them. Selecting a declared field reads that field's bound, and selecting any other field reads the element bound. An index whose key is a string literal naming a declared field reads that field's bound; any other index into a value with declared fields, and the element of a join of values of which either declares fields, inherit from the parent instead, because the element bound need not cover the declared fields. The environment must be a plain `dict` with string names. Each entry the expression references must be exactly a `Variable` whose type is a closed structure of exact instances (not subclasses) of the CEL type classes of this section, with record fields in a plain `dict` of string names and `RecordField` values whose `required` is a bool, no nullable type wrapping another nullable type, and cycles allowed, and each bound is read once, before anything is derived from it: it must be exactly a `ValueBound` (not a subclass), with non-negative integer sizes, fields held in a plain `dict` with string names and value-bound children, and a declared child must be no larger than its parent in bytes and value count and within the data bounds' element count and string length. An estimate that reaches a bound breaking this raises `BoundError`, an error of the environment's builder rather than a diagnostic, because inheriting from such a parent could lower the estimate. The whole bound and type of every variable the expression references are examined; the entries of variables it does not reference are not. The environment is plain data from kora's own builder, not author input, so `BoundError` reports a builder defect. The default bound of a variable uses 4,096 canonical bytes and 256 values, with the independent per-container and per-string ceilings in the data-bound table. The aggregate limits can dominate those ceilings.
-- **Joined element bounds.** The element bound of a list literal, a concatenation or a conditional joins its operands' element bounds, using the inherited bound for an operand that declares none or that declares fields, whatever the static type. A range of type `dyn` iterates over the join of its element bound (the inherited bound when it declares fields) and a key bound, a map or record over its keys. A join keeps a type only when both sides have the same type object or the same primitive kind; otherwise it is `dyn`, so a join never compares type structures. The schema-driven checker therefore builds one type object per schema node, so that equal types from one closure are identical.
-- **Canonical result sizes.** Empty list/map literals and zero-length comprehension results occupy two canonical bytes. A `string()` conversion allows up to six canonical bytes per input byte, covering escaped controls and replacement characters from invalid UTF-8, including a `dyn` operand, plus the scalar allowance. These sizes propagate through collections, concatenation, comprehensions, comparisons and pattern subjects.
-- **Affine results.** A size computed inside a comprehension is affine in the iteration variable's size, so the total over the range is bounded by the range's own total rather than by the element count times the largest element: `l.map(x, x)` is bounded by the size of `l`.
-- **Typed charges.** A charge follows the value's type: `+` on two typed numbers is a node visit, and on anything that may be a string, bytes, list or `dyn` value it is a concatenation. Unless both sides are typed strings, bytes or lists, the result of `+` is charged at least the size of a scalar, so a `dyn` operand never makes an addition look cheaper than its typed form.
-- **Arithmetic.** The estimate is one post-order pass in exact integer arithmetic. Each bound object of the environment is converted once per estimate, iteratively, so the estimate's work is linear in the expression and in the number of bound objects and declared fields of the environment. Memory is checked before steps, so an expression over both reports the memory dimension. Memory adds `memory_base` exactly once, then applies `memory_byte` to converted bound data once and every value an operation allocates; a reference to a variable or to part of a value allocates nothing. The provisional `memory_base` is 0 and `memory_byte` is 1; neither has been fitted to resident-memory measurements.
+Each variable bound carries canonical bytes, value count, element count, string length and any declared element and field bounds.
+An undeclared child inherits the parent's bytes and value count and the global element and string ceilings.
+A cycle, including a self-cycle, discards all declared children of its member bounds, which then use inheritance.
+Convert from leaves up and discard children of a converted bound whose subtree would exceed depth 32.
+These rules depend only on the bounds.
+A declared field selection or literal-string index uses the field bound.
+Other selections use the element bound.
+An index other than a literal declared field, when fields exist, inherits the parent bound.
+A join's element inherits from a parent with declared fields, because its element bound need not cover those fields.
 
-**Provisional budget and regression target.**
+The environment is trusted builder data in a plain `dict` with string names.
+Each referenced entry is an exact `Variable` with a closed graph of exact CEL type instances.
+A record uses a plain `dict` of strings and `RecordField` values with Boolean `required`.
+Type cycles are allowed, and nullable types cannot wrap nullable types.
+Read each bound once before deriving anything from it.
+It is an exact `ValueBound` with non-negative integer sizes and a plain string-keyed `dict` of child bounds.
+A child cannot exceed its parent's bytes or value count or the global element and string ceilings.
+The estimate examines the entire type and bound of each referenced variable and treats a reached malformed bound as the builder error `BoundError`.
+The default variable bound uses 4,096 canonical bytes and 256 values alongside the independent container and string limits, which aggregate limits may dominate.
 
-- The steps budget is **100,000,000,000,000 logical charge units**, ten times the previous provisional budget. All fourteen time weights remain unchanged. The memory budget remains **16 MiB (16,777,216 logical estimated bytes)** with the provisional base and multiplier above. Neither dimension is a calibrated bound on elapsed time or RSS.
-- The observed coarse regression target is **100 ms per evaluation interval** on the reference CI runner. The [compact protocol](../research/cel-cost-calibration-2026-10-22.md#current-compact-regression-protocol) measures ten fixed cases, each in a fresh child, with one cold cache miss and three warm cache hits through `Evaluator.evaluate`. Each of the forty intervals must be at most 100,000,000 ns. The interval includes binding, queueing, cache-miss compilation when needed, native execution and result delivery; expression checking and evaluator startup precede it, and result assertions follow it. This is neither an interruption deadline nor a bound for every admitted expression.
-- The selected initial data bounds are 4,096 canonical bytes and 256 values in both original and converted aggregates. The [qualified smaller-bound result](../research/cel-cost-calibration-2026-10-22.md#qualified-smaller-bound-result) records the conversion evidence. The provisional `kora.execution.v1` exception ends at the first successful durable production graph-version commit containing a [saved estimate](data-model.md#saved-cel-expression-facts), including an estimate of a dormant authored field. An empty inventory or an uncommitted result precedes this boundary. Later data-bound or cost-rule changes require a new execution semantics identity.
-- The golden corpus pins provisional estimate outputs. The compact regression and golden checks replace exhaustive time/memory fitting and crash-margin calibration as the pre-consumer validation gate under [issue #167](https://github.com/realkarych/kora/issues/167). Projections and real consumer integration remain prerequisites for author-expression consumers; schema-driven checking landed under [issue #337](https://github.com/realkarych/kora/issues/337) and [issue #330](https://github.com/realkarych/kora/issues/330), and the correction of minimum-int unary negation under [issue #372](https://github.com/realkarych/kora/issues/372). The independently tested evaluator infrastructure of [issue #166](https://github.com/realkarych/kora/issues/166) does not activate those consumers.
-- The weights and provisional regex tables belong to `kora.execution.v1`, under the pin rule at the start of section 7. Their values have not been established by full numerical calibration.
+The element bound of a list literal joins the bounds of its whole element values.
+Concatenation and conditionals join operand element bounds, using inheritance for an operand that lacks an element bound or declares fields, regardless of its static type.
+A map or record range iterates over keys.
+A `dyn` range iterates over the join of its key and element bounds, with inheritance for an operand with declared fields.
+A type join keeps a type only for the same object or primitive kind and otherwise gives `dyn`.
+It does not compare structures.
+The checker reuses one type object per schema node in a closure.
 
-The logical memory dimension rejects compounding concatenation inside sequential `map` operations. Four of them, each joining sixteen copies of a 2 KiB element of a list with `maxItems: 1`, denote 128 MiB while fitting every static limit and the initial input-data bounds.
+Empty list and map literals and zero-length comprehension results use two canonical bytes.
+`string()` allows six canonical bytes per input byte plus the scalar allowance, including escaped controls and invalid-UTF-8 replacements for `dyn`.
+This bound flows into collections, concatenations, comprehensions, comparisons and pattern subjects.
+A comprehension size is affine in the iteration variable's size, so the range's own total bounds the sum over iterations, as in `l.map(x, x)`.
+Adding two typed numbers costs a node visit.
+Other additions that may concatenate charge the result as such.
+Unless both operands are typed strings, bytes or lists, charge at least a scalar so `dyn` cannot reduce the corresponding typed charge.
 
-**Evaluation.** It runs in the API and scheduler processes, inside the existing short transactions ([scheduler.md](scheduler.md) section 2).
+Estimate once in post-order with exact integer arithmetic.
+Convert each bound object once, iteratively, for work linear in the expression, bound objects and declared fields.
+Check memory before steps to determine the reported dimension.
+Apply `memory_base` once and `memory_byte` to converted data once and to each value allocated by an operation.
+Referencing a variable or part of one allocates nothing.
+Provisional `memory_base` is 0 and `memory_byte` is 1.
+These coefficients have no resident-memory calibration.
 
-- **The evaluation thread.** Each process has one dedicated long-lived evaluation thread with a stack of at least 1 MiB, shared by every in-process standalone instance the process starts. The process owns it: it is a daemon thread released when the process exits, and stopping one instance rejects only that instance's queued jobs. Startup sets the thread stack size, creates the thread and restores the previous setting, so no other thread is affected.
-  - It runs one job at a time.
-  - Evaluations requested from inside a transaction take priority over server-side compile jobs. Compile work is submitted one expression at a time, so an evaluation waits for at most one compile, whose length and pattern size the static limits bound.
-  - At shutdown, queued jobs are rejected and the job in flight finishes, since it holds the GIL and cannot be interrupted. The logical budget and observed 100 ms target do not bound that wait; an external supervisor's kill remains the hard limit. Stopping an embedded standalone (`kora test`, `run_scenario`, `kora_test`) waits for that job the same way and never exits the host process. A cancelled caller discards its result.
-- **The compiled-program cache.** The process worker owns a least-recently-used cache keyed by the canonical rendering digest and expression YAML path. Defaults are 128 entries and 131,072 summed rendering characters. A hit verifies the stored rendering; a miss reparses the canonical rendering before `Binding.compile(checked)`. Validation compiles return a small outcome without entering the cache. A compile on a miss is charged to the allowance.
-- **No interruption.** The binding holds the GIL while it parses or evaluates and cannot be interrupted (probe). Static admission and the compact regression reduce exposure but do not guarantee a bound on GIL hold, API response time or scheduler transaction duration. An admitted expression can still stall or crash the shared process.
+#### Provisional budget and qualification
 
-**Evaluator infrastructure admission.** Each process accepts at most 32 evaluation jobs and 32 validation compiles, including in-flight work and completed results awaiting delivery. A batch contains at most 16 evaluations. The shared outstanding charge is at most 8 MiB; it accounts for detached converted values, renderings, bounded metadata and result retention. Both validation and evaluation include the checked expression's retained bound snapshot: 256 bytes of fixed overhead, 1,024 bytes per distinct bound node, 128 bytes per declared field, 256 bytes per referenced variable and eight bytes per code point in each retained field or variable name. Shared bound nodes are counted once within an expression; separate requests each retain their own charge. The snapshot copies the estimator's effective bounds after cycle and depth normalization, retains no source type or original bound graph, clamps scalar limits to the global data bounds and exposes read-only field maps. Changing builder dictionaries after checking cannot change admission. Snapshot construction is iterative, memoized and counted, without another conversion of the source graph. Result growth that cannot fit the shared charge returns the operational `busy` refusal. This charge is an ownership bound, not a measurement of native memory. At most 128 handles are admitted. Pending lifecycle reports also consume new-handle admission; they are bounded by 256 because each handle can produce one timeout and one completed-close report. YAML paths are bounded to 1,024 characters and event identifiers to 128; checked renderings to 65,536. These internal limits precede the first product consumer and are configurable through `Settings`.
+The steps budget is **100,000,000,000,000 logical charge units**.
+The memory budget remains **16 MiB (16,777,216 logical estimated bytes)**.
+All fourteen time weights and the provisional regex tables belong to `kora.execution.v1` under section 7's pin rule.
+The budgets give neither elapsed-time nor RSS guarantees.
 
-Each native pattern probe occupies one of the same validation slots and retains only its checked rendering across admission. Its charge is the larger of 1,024 bytes for the reply and four times the rendering length. A decoded code point takes at most ten rendering characters and the fixed call takes 14. Evaluation keeps priority over queued probes. The probe uses the existing delivery, cancellation and close rules, and its program never enters the cache.
+The observed coarse regression target is **100 ms per evaluation interval** on the reference CI runner.
+The [compact protocol](../research/cel-cost-calibration-2026-10-22.md#current-compact-regression-protocol) runs ten fixed cases, each in a fresh child, through one cold cache miss and three warm cache hits in `Evaluator.evaluate`.
+Checking and evaluator startup precede each child's measurements, and result assertions follow each interval.
+The interval covers binding, queueing, compilation on a miss, native execution and delivery.
+The original comparison said each interval must be at most 100,000,000 ns.
+Record every observation and its exceedance flag as a diagnostic under the [approved verification classification](../research/approved-verification-audit-2026-10-29.md#numerical-observations).
+Keep forty calls with exact result checks, logical and resource checks, ten-second child deadlines and the 240-second suite watchdog.
+The timing observations establish no interruption limit or latency guarantee.
 
-Before conversion, an iterative walk checks exact JSON types, finite numbers, Unicode scalar values, 32 levels of nesting, 1,000 entries per list or map, 16 KiB UTF-8 strings, 4 KiB of canonical JSON and 256 values. Conversion copies only referenced variables; both original and converted representations must fit the aggregate byte and value bounds. Integer schema fields bind as signed 64-bit integers, accepting integral JSON floats; number and schema-less numeric values bind as finite doubles. Missing `outputs` binds as an empty map; another missing referenced projection is `projection_unavailable`. The caller supplies the saved, validated schema types and projection bounds; the declared value bounds come with the checked expression. `Record.extra` carries the type of undeclared keys (section 7.4), and conversion refuses a value whose JSON kind differs from its declared type with `invalid_value`.
+The provisional exception ends with the first successful durable production graph-version commit containing a [saved estimate](data-model.md#saved-cel-expression-facts), including a dormant authored field.
+An empty inventory or uncommitted result does not cross that boundary.
+Later data-bound or cost-rule changes require a new execution semantics identity.
+The [conversion evidence](../research/cel-cost-calibration-2026-10-22.md#qualified-smaller-bound-result) records the initial bound qualification.
 
-Preparation also constructs the immutable normalized bound snapshots once, preserving distinct per-variable roots and shared descendants. Checked expressions reuse only their referenced snapshot roots and retain no source type, original bound graph or converter. Each expression still calculates its exact charge by a counted traversal of its reachable normalized metadata union; sharing snapshot nodes between expressions does not reduce any request's independent admission charge. Under the [owner-approved #376 amendment](https://github.com/realkarych/kora/issues/376#issuecomment-6475511099), total work is `O(T + B + L + sum(U_i))`: `T` includes environment enumeration and shared type validation, `B` includes source-bound conversion and normalized snapshot construction, `L` is total expression-checking work, and `U_i` counts the distinct reachable normalized nodes, field edges and name code points for expression `i`. Repeated expressions over a large shared bound graph can therefore still require expression-count times reachable-bound-size work. The original universal additive-work criterion is replaced by this explicit weaker bound, not established. Validator-scale admission and `test_cel_validation_work_bounded` remain with work item 3; this library change activates no consumer.
+The golden corpus pins provisional estimates.
+Required compact functional and admission checks and the golden checks supply bounded pre-consumer qualification.
+The 100 ms comparison is diagnostic, including where older coverage descriptions refer to its former gate.
+Author expressions still require the schema-driven checker, projections, minimum-int negation correction and actual consumer integration.
+Evaluator infrastructure alone grants no consumer activation.
 
-Both validation and evaluation also charge the checked expression's retained projection metadata under the same 8 MiB outstanding owner. The separate `projection_bytes` charge leaves `bound_bytes` unchanged: zero for an empty mapping; otherwise 256 fixed bytes, 256 bytes and eight bytes per name code point for each variable, and 128 bytes and eight bytes per canonical path character for each whole/presence path. Only immutable mappings and path tuples/strings are retained; extraction/cutting tries are temporary. Separate submissions each retain their full charge and release it through existing delivery, cancellation and close ownership. This is a conservative logical metadata charge, not an RSS measurement; no limit, refusal meaning or deadline is relaxed.
+Logical memory catches compounded concatenation within sequential macros.
+For example, four `map` calls each joining sixteen copies of a 2 KiB element from a list with `maxItems: 1` denote 128 MiB while fitting static and input-data limits.
 
-An `Evaluator` belongs to its creating event loop. Closing a handle rejects its queued jobs, waits for its in-flight and undelivered work, and leaves other handles and the shared worker usable. Its default one-second close deadline returns `close_timed_out`; it cannot interrupt native work. A cancelled queued job never executes; an in-flight cancellation discards the result. Closed loops release their retained jobs; stopped open loops remain charged until delivery or close. An unmapped worker fault closes admission permanently, settles waiting callers and releases the cache. The worker starts in an empty context, and the process owner loads the binding without the creating request's context.
+#### Worker, cache and closure
 
-**Evaluation allowance.** The installation limits the sum of logical charges evaluated in one scheduler transaction; the default is 100,000,000,000,000 charge units, and it may never be set below one expression's steps budget. This is a work-accounting threshold, not a wall-time bound. Its consumer integration remains pending.
+For runtime consumers, evaluation runs inside the API and Scheduler's existing short transactions. [Scheduler](scheduler.md)
+One process-owned long-lived daemon thread with at least 1 MiB of stack serves all in-process standalone instances.
+During startup, the evaluator holds its own lock while setting the process-wide default stack size, starting the worker and restoring the previous default.
+The worker starts in an empty context and the process owner loads the binding without inheriting request context.
+It runs one job at a time.
+Transaction evaluations take precedence over queued server compiles and probes.
+Submit compile work one expression at a time so an evaluation waits for at most one in-flight compile, whose source and pattern sizes are statically bounded.
 
-- **Scope.** The allowance applies to every scheduler transaction that evaluates CEL: the branch pass, retry handling, wake-ups and prepared-observation apply.
-- **Progress.** Each transaction evaluates at least one expression. When the allowance is used up, the pass commits what it has decided, leaves `needs_scheduling` set for the rest and moves on, rotating across runs and namespaces.
-- **Events.** One inbound event is matched against open waits in batches, per run and under that run's lock.
-- **Order, not results.** The allowance changes when work happens, never how an expression evaluates. Deferred work may cross a wait's expiry, which the existing expiry rules then decide.
-- **Configuration.** It is installation configuration rather than execution semantics.
-- **API evaluations.** An evaluation in the API (`approve_when`) is outside the allowance and is admitted under the per-expression logical budget; that budget establishes no response deadline.
+The worker owns a least-recently-used cache keyed by rendering digest and expression YAML path.
+By default it allows 128 entries and 131,072 summed rendering characters.
+A hit verifies the rendering, and a miss reparses it before `Binding.compile(checked)`.
+Charge compilation on a miss to the allowance.
+Validation compiles return a small outcome without entering the cache, and pattern probes never cache their programs.
+
+An `Evaluator` belongs to its creating event loop.
+Stopping one instance or closing a handle rejects only its own queued jobs, waits for its in-flight and undelivered work and leaves other handles and the worker usable.
+The default one-second close deadline returns `close_timed_out`.
+Queued cancellations prevent execution, and in-flight cancellations discard the result.
+After cancellation, event-loop closure or `close_timed_out`, a running job stays charged until all its native work settles.
+Closed loops release work that is no longer running, and stopped open loops remain charged until delivery or close.
+An unmapped worker fault permanently closes admission, settles waiting callers and releases the cache.
+
+Embedded standalone shutdown (`kora test`, `run_scenario`, `kora_test`) follows handle closure without exiting the host.
+The daemon belongs to the process until it exits.
+The native binding holds the GIL during compile and evaluation and cannot be interrupted.
+A supervisor kill is the hard limit.
+Static admission, logical budgets and compact timing observations do not establish GIL dwell, API response or transaction duration limits.
+An admitted expression can stall or crash the shared process.
+
+#### Outstanding ownership
+
+| Per-process admission | Limit |
+|---|---|
+| Evaluation jobs | 32 |
+| Validation compiles, including native probes | 32 |
+| Evaluations per batch | 16 |
+| Outstanding charge | 8 MiB |
+| Handles | 128 |
+| Pending lifecycle reports | Required bound of twice the configured handle capacity, 256 by default |
+| YAML path, event ID and checked rendering | 1,024, 128 and 65,536 characters respectively |
+
+Job counts include in-flight work and completed results waiting for delivery.
+Charge detached values, renderings, bounded metadata and result retention to the shared owner.
+Result growth that would exceed the shared outstanding charge limit returns operational `busy`.
+Pending lifecycle reports count toward new-handle admission, with up to one timeout and one completed-close report per handle.
+The evaluation and validation job, outstanding charge, batch and handle limits listed above are `Settings` defaults.
+The YAML path, event ID and rendering maxima are fixed.
+The [lifetime method](../research/cel-evaluator-lifetime-2026-10-21.md#method-amendment-dated-2026-10-28-process-wide-rss-spans-and-hop-latency-become-diagnostics) governs native validation-compile qualification at its recorded trigger.
+
+Validation and evaluation charge the checked expression's effective bound snapshot.
+`bound_bytes` counts 256 fixed bytes, 1,024 per distinct bound node, 128 per declared field, 256 per referenced variable and eight per retained name code point.
+The immutable snapshot uses bounds after cycle and depth normalization and clamps scalar limits to the global data bounds.
+Its field maps are read-only and it retains no source type, original bound graph or converter.
+Builder dictionary changes cannot alter admission.
+Construction is iterative, memoized and counted without reconverting the source.
+Preparation constructs normalized snapshots once, preserving distinct per-variable roots and shared descendants.
+Each expression retains its referenced roots and charges its exact reachable metadata union once per expression.
+Each submission pays independently, including when snapshots share nodes.
+
+Under the [approved preparation bound](https://github.com/realkarych/kora/issues/376#issuecomment-6475511099), total work is `O(T + B + L + sum(U_i))`.
+`T` covers enumeration and shared type validation, `B` source-bound conversion and normalization, `L` expression checking and `U_i` the distinct reachable normalized nodes, field edges and name code points for expression `i`.
+Repeated expressions can still cost their count times reachable metadata size.
+Validator-scale admission and its required evidence remain with work item 3.
+
+Both operation families also charge `projection_bytes` separately without altering `bound_bytes`.
+The projection charge is zero if empty.
+Otherwise charge 256 fixed bytes, 256 bytes plus eight per name code point for each variable and 128 bytes plus eight per canonical path character for each whole or presence path.
+Retain only immutable mappings, path tuples and strings.
+Extraction and cutting tries are temporary.
+Every submission releases its own charge through delivery, cancellation or close.
+These are logical ownership charges and establish no native-memory or RSS measure.
+
+A native pattern probe takes one validation slot and retains only its checked rendering at admission.
+Charge the greater of 1,024 reply bytes and four times rendering length.
+Each decoded code point takes at most ten rendering characters and the fixed call takes 14.
+Evaluation keeps priority and delivery, cancellation and close use the shared rules.
+
+#### Scheduler allowance
+
+Consumer integration is pending.
+The installation limits logical CEL work per Scheduler transaction, defaulting to 100,000,000,000,000 charge units and never below one expression's steps budget.
+This is installation configuration and establishes no wall-time limit.
+Apply it to branch, retry, wake-up and prepared-observation evaluation.
+Each transaction evaluates at least one expression.
+At exhaustion, commit decisions, keep `needs_scheduling` for the rest and rotate across runs and namespaces.
+Match an inbound event in batches under each run's lock.
+The allowance affects order, and existing expiry rules decide waits whose work is deferred past expiry.
+The API admits `approve_when` under the per-expression logical budget independently of the allowance.
+That budget establishes no response deadline.
 
 ### 7.7 Evaluation errors
 
-**Error kinds.**
+#### Classification
 
-- From the binding's documented exception classes:
+Catch the binding's errors only around binding calls.
+Conversion runs outside those handlers.
+The process resolves the binding's exact panic class at startup and refuses startup if it cannot do so.
+That class derives from `BaseException`.
+`CancelledError`, `KeyboardInterrupt` and `SystemExit` propagate.
 
-  | binding exception | error kind |
-  |---|---|
-  | `KeyError` | `missing_field` |
-  | `TypeError` | `no_overload`, which includes selection on `null` |
-  | `IndexError` | `index_out_of_range` |
-  | `ZeroDivisionError` | `division_by_zero` |
-  | `OverflowError` | `overflow` |
-  | `RuntimeError` at execution | `invalid_argument`: a function received a value it cannot accept, such as an unparseable string in `int()`, `uint()`, `double()`, `timestamp()` or `duration()`, or a `dyn` value of a kind the function does not take ([issue #373](https://github.com/realkarych/kora/issues/373)) |
+| Binding exception at execution | Error kind |
+|---|---|
+| `KeyError` | `missing_field` |
+| `TypeError` | `no_overload`, including selection on `null` |
+| `IndexError` | `index_out_of_range` |
+| `ZeroDivisionError` | `division_by_zero` |
+| `OverflowError` | `overflow` |
+| `RuntimeError` | `invalid_argument`, for instance an unparseable conversion string or a `dyn` value of an unsupported kind |
 
-- Raised by kora itself:
-  - `bound_exceeded`;
-  - `number_out_of_range`;
-  - `invalid_value` for values outside exact JSON types or Unicode scalar strings, or whose JSON kind does not match the declared CEL type (section 7.4);
-  - `wrong_result_type`: anything that is not exactly `bool`, or `string` for reasons; Python truthiness never applies;
-  - `projection_unavailable`.
-- `internal_fault`, logged at ERROR, covers everything the checker should already have prevented: a `ValueError` at execution, any failure to compile the checked rendering (`runtime_error` among them), the binding's panic at compile or execution, and a rendering that does not re-parse to the checked tree or that collides in the program cache (`unmapped`). The pinned binding raises the same `RuntimeError` for an undeclared identifier and for a `matches()` pattern it cannot compile, both at execution; kora prevents both before evaluation (the checker, `projection_unavailable` for a missing root, and the pattern subset and its size cap, with the server-side pattern compile added when the API validates), so such a kora defect would surface as `invalid_argument` rather than `internal_fault`.
+kora also returns `bound_exceeded`, `number_out_of_range`, `invalid_value`, `wrong_result_type` and `projection_unavailable`.
+`invalid_value` covers non-exact JSON types, non-scalar strings and JSON kinds inconsistent with the declared CEL type.
+The required result is exactly `bool`, or `string` for reasons, without coercing Python truthiness.
 
-**Catching.** Exceptions are caught narrowly, around the binding call only; kora's own conversion code runs outside that handler.
+An `internal_fault` is logged at ERROR.
+Its fault is `value_error` for native `ValueError` at compilation or execution, `runtime_error` for compile `RuntimeError`, `panic` for native panic at either stage, and `unmapped` for checked-tree re-parse failure or cache collision.
+An undeclared identifier or native pattern rejection could also raise execution `RuntimeError`, which still maps to `invalid_argument`.
+The checker, required projections and server-side pattern validation exclude those inputs before evaluation.
 
-- The parser panic class is a `BaseException`. It is resolved exactly when the process starts, and a process that cannot resolve it refuses to start.
-- `CancelledError`, `KeyboardInterrupt` and `SystemExit` are never caught.
+#### Record
 
-**The error record.** A recorded error has these fields:
+The evaluator's internal error record has these fields.
 
-- **`kind`**: one of the kinds above.
-- **`field`**: the YAML path of the expression.
-- **`offset`**: set only when kora itself locates the fault, null for kinds the binding raises.
-- **`event_id`**: for a `match` error, the inbound event's identifier.
-- **`observed_at`**: for an `until` error, the time of the observation.
-- **`at`**: when the error was recorded, from the injected clock.
-- **`fault`**: null except for `internal_fault`, where it is one of the closed classes `value_error`, `runtime_error`, `panic` or `unmapped`; never a native message or an arbitrary exception type.
+| Field | Content |
+|---|---|
+| `kind` | An error kind above |
+| `field` | The expression's YAML path |
+| `offset` | The location only when kora finds it itself, null for native errors |
+| `event_id` | The inbound event ID for a `match` error |
+| `observed_at` | The observation time for an `until` error |
+| `at` | Record time from the injected clock |
+| `fault` | Null except for `internal_fault`, where it is `value_error`, `runtime_error`, `panic` or `unmapped` |
 
-A node that fails because of an evaluation error fails with `config_error`, reason `cel_evaluation_error`, and carries this record in its details.
+A node failed by an evaluation error has class `config_error`, reason `cel_evaluation_error` and an evaluation error in its failure details.
 
-**Meaning per kind**, beyond section 7.1:
+#### Effect on consumers
 
-- **`approve_when`** is evaluated only after the response has passed the staleness, commit and digest, and approver checks (section 4.2). A response refused by those checks is never evaluated. On an error:
-  - the response is kept with the request, and the request becomes `failed` ([data-model.md](data-model.md) section 4);
-  - `approval.responded` records `applied: true` and the error record;
-  - the channel is closed with `notify(resolved)` linking the canonical status, which shows `failed`;
-  - the node fails with `config_error`.
+The effect rules below extend [section 7.1](#71-expression-kinds-and-environments).
 
-  The [automatic expiry exception](cli-approval-opening.md#3-expiry-and-retained-response) under #1737 uses the same safe CEL error record in node-failure facts while preserving an expired request and scheduler audit. The exception preserves human response and legacy error fields.
+- Evaluate `approve_when` only after the response passes staleness, commit, digest and approver checks (section 4.2).
+  On evaluation error, retain the response, set the request to `failed` and record `applied: true` with the error in `approval.responded`.
+  Fail the node with `config_error`.
+  Close the channel with `notify(resolved)` linking the canonical failed status.
+  The failed request gives no approval and a subsequent response is recorded with `applied: false`.
+  The direct API returns HTTP 200 with the request's status.
+  The [automatic expiry path](cli-approval-opening.md#3-expiry-and-retained-response) preserves an expired request and scheduler audit, attaching the same safe CEL error to the node failure.
+  Its request evaluation-error field stays empty, and ordinary human response and legacy error fields retain their behavior.
+- Evaluate `retry.predicate` only with attempts remaining and a retryable class listed in `retry_on`.
+  `infrastructure` and `provider_limited` consume no attempts and never evaluate it.
+  Every `outputs.*` read needs a `has()` guard.
+  Record a predicate error on the node's failure event.
+- Evaluate each event and wait pair at most once, including false results and errors.
+  Apply the existing event eligibility rules.
+  Under the run lock, pass 6 verifies the exact open wait before writing a `match` error.
+  The evaluating transaction records `event_evaluation` together with any consumption.
+  An open wait with an eligible, unevaluated event keeps `needs_scheduling` set.
+- An `until` error counts as a successful dispatch observation, consumes the token and uses the normal next interval without degrading the integration.
+  A start binding consumes no occurrence or cursor and writes no `trigger.*` event.
+  Write the error only from the current claim. [Scheduler](scheduler.md)
+- Store the last `match` or `until` error on the wait or start binding for API and console reads.
+- `projection_unavailable` fails the owning node with `config_error`, including a wait, because a missing or expired projection cannot become available again.
+  For `retry.predicate`, it prevents a retry and retains the original class.
 
-  A `failed` request never counts as approval, and a later response is recorded with `applied: false`. A direct API response returns HTTP 200 with the request's status.
-- **`retry.predicate`** is evaluated only when the class is retryable, listed in `retry_on` and attempts remain. It is never evaluated for `infrastructure` or `provider_limited`, which do not consume attempts. Every `outputs.*` read needs a `has()` guard (section 7.4). An error is recorded on the node's failure event.
-- **`match`.** Each event and wait pair is evaluated at most once, whether the result is false or an error. The evaluating transaction inserts an `event_evaluation` row for the pair ([data-model.md](data-model.md) section 2), together with any consumption. An event is eligible for a wait under the existing matching rules, and an open wait with an eligible event it has not evaluated keeps its run's `needs_scheduling` set. A `match` error is written in that pass-6 transaction, after the exact open wait is verified under the run lock.
-- **`until`.** An error counts as a successful observation for dispatch: the token is consumed, the next poll keeps the normal interval and the integration is not degraded ([scheduler.md](scheduler.md) section 16). A start binding consumes no occurrence or cursor and writes no `trigger.*` event. An `until` error is written only from the current claim.
-- **Recording external errors.** The last `match` or `until` error is stored on the wait or the start binding and is visible in the API and the console.
-- **Unavailable inputs.** `projection_unavailable` fails the owning node with `config_error` for every kind, waits included, because an expired or missing projection never becomes available again. The one exception is `retry.predicate`, where it means no retry and the node keeps its original class, like any predicate error.
+#### Safe content
 
-**Safe content.** Error records stored on a node failure, a wait, a start binding, an approval request or an event, and every error the API returns, carry only the fields above. The evaluator returns frozen error values across the thread boundary; operational refusals are raised on the caller loop with both cause and context cleared, including when called from inside another exception handler. They never carry expression text, bound values, binding messages, chained exceptions or panic payloads. Diagnostics follow the same rule ([observability.md](observability.md) section 5), including at DEBUG. The evaluating component emits them, the scheduler or the API, and deduplicates them on the wait, binding or node, the field and the kind.
+Stored evaluation errors use only the field set defined for the owning record in the data model, including node failures, waits, start bindings, approval requests and events. [Data model](data-model.md)
+Public evaluation errors carry only the fields allowed by the applicable API contract. [Public evaluation errors](api-and-agent-surface.md#external-observation-and-delivery-diagnostics-adr-0021)
+The evaluator returns frozen error values across its thread boundary.
+It raises operational refusals on the caller loop with cause and context cleared, including inside another exception handler.
+Errors and diagnostics exclude expression text, values, native messages, exception chains and panic payloads, including at DEBUG.
+The API or Scheduler component that evaluates emits diagnostics and deduplicates them by wait, binding or node, field and kind. [Observability](observability.md)
 
 ### 7.8 Conformance
 
-The cel-spec conformance suite runs in CI against the binding, through a hand-written reader of the textproto subset its selected files use, with no protobuf dependency.
+CI runs the binding against the vendored cel-spec textproto subset without a protobuf dependency.
+The corpus and licence remain byte-identical to the pinned upstream commit under a SHA-256 manifest validated in CI.
+The [vendoring record](../research/cel-conformance-data-2026-10-20.md) identifies the source, full commit and digests.
 
-- **Vendoring.** The files are vendored under `tests/` at a pinned cel-spec commit, with the upstream licence. Their source URL, full commit SHA and digest are recorded in `knowledge/research/` when the suite is added.
-- **Selection.** Explicit include and exclude lists name the files. Excluded are `dynamic` and `namespace` (message types and containers), `macros2` (two-variable comprehensions), `proto2`, `proto3`, `wrappers` and `enums` (message types), `optionals`, `unknowns`, `type_deduction` and every extension file. Within the included files, explicit entries name each case, or a whole section, that kora rejects, with the feature it needs and the diagnostic reason kora gives: message types and qualified type names, backtick-quoted fields, unescaped control characters in literals, the narrowed standard functions and functions outside the standard library.
-- **Integrity.** The files are byte-identical to the upstream commit, and a test checks them and the licence against a manifest of SHA-256 digests.
-- **Known deviations.** Every case `kora.cel` accepts runs through the binding with its bindings (a `google.protobuf.Duration` binding is decoded from its seconds and nanoseconds to microseconds, the binding's resolution), and its typed result is compared with the expected value. A case where binding 0.10.0 disagrees with cel-spec is listed in `tests/cel/conformance/deviations.py` with its category and the binding's exact outcome, so the test fails when a deviation disappears or changes; a deviation is never skipped. The comparison binds `int` and `uint` alike, because the binding returns both as Python integers, accepts any error where cel-spec expects one, checks an expected timestamp by type only, does not check the sign of a zero double, compares a type value by its name, which is how the binding returns it, looks up an expected map key by Python equality, so the key's kind among `bool`, `int` and `uint` is not checked, and cuts expected and bound durations to microseconds. Measured under [issue #165](https://github.com/realkarych/kora/issues/165), 37 of 1,005 cases deviate:
-  - **string size in bytes**: `size()` of a string counts UTF-8 bytes;
-  - **mixed numeric keys**: `int`, `uint` and `double` values of equal value are not interchangeable as keys: an `int` or `uint` key misses the entry of the other kind, a `double` map key, list index or `in` test raises a type error, and maps with such keys compare unequal;
-  - **error absorption**: `all()` returns the first error instead of a later `false`;
-  - **negated boolean**: `-false` is `true` instead of an error; on `dyn` data that is a silently wrong value, a case for the schema-driven checker;
-  - **wrapping negation**: `-(-9223372036854775808)` wraps instead of overflowing; a typed check rewrites integer negation into subtraction (section 7.2), so checked author expressions overflow as cel-spec requires;
-  - **invalid UTF-8**: `string()` of invalid UTF-8 bytes substitutes the replacement character instead of failing;
-  - **time ranges**: `duration()` of a string beyond cel-spec's range of a signed 64-bit count of nanoseconds (about ±292 years) clamps to that bound instead of failing, so `duration('9300000000s') == duration('9400000000s')` is `true`; sums of durations and differences of timestamps exceed the bound unchecked; a timestamp string whose UTC offset carries it outside the years 1 to 9999 is accepted, while other timestamps beyond that range are refused;
-  - **time formatting**: `string()` of a timestamp or a duration uses another format than cel-spec;
-  - **duration accessors**: `getMilliseconds()` of a duration returns the whole duration in milliseconds rather than its millisecond component;
-  - **missing overloads**: `int(timestamp)`, `timestamp(int)` and `duration + timestamp` fail at evaluation; the conformance cases on `timestamp(timestamp(…))` and on comparing a timestamp with `null` deviate because they build their timestamps with `timestamp(int)`;
-  - **qualified names**: variables named with dots and qualified type names such as `google.protobuf.Timestamp` are not resolved;
-  - **repeated map keys**: a map literal with a repeated key keeps the last value instead of failing.
+The [selection manifest](../../tests/cel/conformance/selection.py) names every included and excluded file.
+It excludes `dynamic`, `namespace`, two-variable `macros2`, message-type `proto2`, `proto3`, `wrappers` and `enums`, `optionals`, `unknowns`, `type_deduction` and all extension files.
+For included files, each exclusion entry identifies a case or a section, its required feature and exact refusal reason.
+Features include message types and qualified names, backtick fields, raw control characters in literals, unavailable narrowed functions and functions outside the standard library.
 
-  Iterating over a map visits its keys in an order that changes between evaluations, so `map()` and `filter()` over a map return their elements in an arbitrary order. The timestamp accessors read the calendar fields in the UTC offset written in the timestamp string rather than in UTC, so `timestamp('2020-12-31T23:00:00-05:00').getFullYear()` is 2020 for an instant in 2021; no included conformance case covers it. The time ranges, time formatting, duration and timestamp accessors, missing overloads, repeated map keys and iteration order are recorded for the schema-driven checker and the evaluator ([issue #166](https://github.com/realkarych/kora/issues/166)).
-- **Reader and parser.** The reader has two layers: a closed generic textproto syntax that parses whole files, and a typed case model that fails on any field outside the subset the selected files use. Every included case also runs through kora's parser and canonical rendering: a case without an entry must be accepted, a listed case must give exactly its listed reason, and every entry must match a case.
+The reader parses each whole file with closed generic textproto syntax.
+A typed case model rejects fields outside the supported subset.
+Every included case passes through kora's parser and canonical renderer.
+Unlisted cases must be accepted, listed refusals must produce the exact reason and each exclusion entry must match a case.
+
+Each accepted fixture runs its upstream text and bindings in the native evaluator and compares the typed result.
+This is a conformance path. Production uses checked renderings and the fixed pattern probe under section 7.2.
+Decode bound and expected durations to microseconds from seconds and nanoseconds.
+The binding returns `int` and `uint` as Python integers, so compare their values alike.
+Check timestamps by type, type values by name and expected map keys by Python equality, which does not distinguish `bool`, `int` and `uint` key kinds.
+Accept any error for an expected error and do not compare a zero double's sign.
+
+For the pinned binding 0.10.0, record deviations from cel-spec in the [deviation manifest](../../tests/cel/conformance/deviations.py) with their category and exact binding outcome.
+Run the cases and fail if a recorded deviation disappears or changes.
+The [dated binding evidence](../research/cel-stack-2026-10-21.md) records the measured corpus and deviation counts.
+
+| Category | Binding behavior |
+|---|---|
+| String size | `size()` of a string counts UTF-8 bytes. |
+| Mixed numeric keys | Equal `int` and `uint` keys miss each other's entries, and maps with those keys compare unequal. A `double` map key, list index or membership test raises a type error. |
+| Error absorption | `all()` returns an earlier error even if a later value is false. |
+| Negated boolean | `-false` is true, which gives a silently wrong result on `dyn` without the checker. |
+| Wrapping negation | Negating the minimum signed 64-bit integer wraps. Typed integer negation uses subtraction and overflows as required (section 7.2). |
+| Invalid UTF-8 | `string()` substitutes replacement characters for invalid bytes. |
+| Time ranges | `duration()` from a string clamps to the signed 64-bit nanosecond range. For example, `duration('9300000000s') == duration('9400000000s')` is true. Duration sums and timestamp differences can exceed the range unchecked. A timestamp string can reach past years 1–9999 via its UTC offset, while other out-of-range timestamps are refused. |
+| Time formatting | `string()` of a timestamp or duration uses a different format from cel-spec. |
+| Duration accessor | `getMilliseconds()` returns total duration milliseconds. |
+| Missing overloads | `int(timestamp)`, `timestamp(int)` and `duration + timestamp` fail. The nested timestamp conversion and timestamp/null comparison cases use `timestamp(int)` to build their timestamp. |
+| Qualified names | Dotted variable names and qualified type names such as `google.protobuf.Timestamp` are unresolved. |
+| Repeated keys | A map literal with repeated keys keeps the last value. |
+
+Map key order varies between evaluations, so `map()` and `filter()` over a map return elements in arbitrary order.
+Timestamp accessors read calendar fields in the offset given in the timestamp string.
+For example, `timestamp('2020-12-31T23:00:00-05:00').getFullYear()` returns 2020 for a UTC instant in 2021.
+The included corpus has no case for that behavior.
+These binding limits inform the checker and evaluator rules above.
 
 ### 7.9 Future contracts
 
@@ -1344,7 +1532,19 @@ Before the first author-expression consumer, the compact regression and golden c
 
 ### 7.10 Prompt templates
 
-Prompt templates (`prompt`, `system_prompt_append`, `cmd` elements) are **Jinja2 in a sandboxed environment** (DD-11): the full template language, the variable names of section 7.1 (the CEL projections of section 7.5 do not apply to templates), no filesystem loaders, no imports or includes, no access to Python attributes beyond the bound data. Templates are rendered once when the nonsecret execution request is sealed before preparation/execution effects; the attempt owns the saved rendered content and availability state. Recovery reads that content and never re-renders over current data (ADR-0018). Run parameters that arrive from a webhook may be used in prompts but never inside `cmd` elements or `workspace.rev` (`IR016`).
+Run full Jinja2 in a sandbox for `prompt`, `system_prompt_append` and each `cmd` element (DD-11).
+Use the variable names in [section 7.1](#71-expression-kinds-and-environments) without applying CEL projections.
+The sandbox disallows filesystem loaders, imports, includes and Python attribute access beyond the bound data.
+
+Seal the authoritative rendered content once in the nonsecret execution request before preparation or execution effects.
+The Worker prepares a proposal and the API independently derives and compares the complete result before upload readiness or the first inline seal.
+A first seal of a ready upload uses its checked identity.
+The attempt owns the saved content and availability, and seal replay and recovery reuse the recorded bytes.
+The [execution request contract](execution-request.md#3-trusted-derivation-and-finite-admission) owns renderer admission and actual stop controls.
+Seal activation belongs to #1453, and upload-to-ready rendering belongs to #1640. [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md)
+
+A graph with a webhook trigger may use run parameters in prompts.
+Using them in a `cmd` element or `workspace.rev` is `IR016` for that graph.
 
 ## 8. Triggers (FR-6.2)
 
