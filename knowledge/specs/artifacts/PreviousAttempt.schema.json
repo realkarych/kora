@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:kora:artifact:PreviousAttempt",
+  "type": "object",
+  "required": [
+    "subgraph_attempt",
+    "reason",
+    "error_class",
+    "artifacts"
+  ],
+  "properties": {
+    "subgraph_attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 99
+    },
+    "reason": {
+      "type": "string"
+    },
+    "error_class": {
+      "enum": [
+        "harness_error",
+        "command_failed",
+        "timeout",
+        "events_exhausted",
+        "budget_exhausted",
+        "artifact_invalid",
+        "attempt_failed",
+        "approval_rejected",
+        "approval_expired",
+        "candidate_moved",
+        "wait_expired",
+        "stalled",
+        "provider_limited",
+        "protected_path_modified",
+        "secret_leak",
+        "integrity_error",
+        "infrastructure",
+        "cancelled",
+        "config_error"
+      ]
+    },
+    "artifacts": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]{0,63}\\.[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/artifact_version_ref"
+      },
+      "maxProperties": 17771
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "artifact_version_ref": {
+      "type": "object",
+      "required": [
+        "artifact_version_id"
+      ],
+      "properties": {
+        "artifact_version_id": {
+          "type": "string",
+          "pattern": "^[0-7][0-9ABCDEFGHJKMNPQRSTVWXYZ]{25}(?![\\s\\S])"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

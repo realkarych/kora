@@ -102,6 +102,7 @@ if TYPE_CHECKING:
     from kora.ir.input_paths import InputPathResult, validate_input_paths
     from kora.ir.node import ErrorClass, ToolPolicy
     from kora.ir.output_schemas import OutputSchemaResult, validate_output_schemas
+    from kora.ir.previous_attempt import PreviousAttempt, PreviousAttemptValidationError
     from kora.ir.retry_expressions import (
         RetryExpressionResult,
         validate_retry_expressions,
@@ -251,6 +252,8 @@ __all__ = [
     "require_command_result_revision",
     "summarize_command_result",
     "verify_command_result_captures",
+    "PreviousAttempt",
+    "PreviousAttemptValidationError",
     "StructuredOutput",
     "StructuredOutputValidationError",
     "canonical_structured_output",
@@ -590,6 +593,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import command_result
 
         return getattr(command_result, name)
+    if name in {"PreviousAttempt", "PreviousAttemptValidationError"}:
+        from kora.ir import previous_attempt
+
+        return getattr(previous_attempt, name)
     if name in {"VcsRef", "PrincipalRef"}:
         from kora.ir import vcs_ref
 
