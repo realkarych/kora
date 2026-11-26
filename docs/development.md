@@ -371,7 +371,7 @@ kora api --port 8443
 
 Set `KORA_URL=https://127.0.0.1:8443` in the CLI and stdio MCP environments. For a private CA, set `KORA_CA_BUNDLE` to the local PEM trust bundle in both environments. Supply the CLI's own personal token through `KORA_TOKEN` and supply the stdio process's own token through `KORA_MCP_TOKEN`. Install `kora[mcp]` in the stdio server's environment and run `kora mcp --server operating`.
 
-Leave the three serving TLS settings unset to use the default loopback HTTP profile. For HTTPS use the ordinary SQLite profile and leave the harness, Worker and Scheduler selectors unset. See the [serving contract](../knowledge/specs/api-and-agent-surface.md#installed-sqlite-loopback-https-1897) for the accepted origin forms and startup refusals. The #1897 setup wording is pending line-by-line owner review.
+Leave the three serving TLS settings unset to use the default loopback HTTP profile. For HTTPS use the ordinary SQLite profile and leave the harness, Worker and Scheduler selectors unset. See the [serving contract](../knowledge/specs/api-and-agent-surface.md#installed-sqlite-loopback-https-1897) for the accepted origin forms and startup refusals. The project owner reviewed the #1897 setup instructions line by line and [accepted them on 2026-11-26](https://github.com/realkarych/kora/pull/1899#issuecomment-7196577109).
 
 ## Documentation and schema checks
 

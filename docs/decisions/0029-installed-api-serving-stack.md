@@ -26,7 +26,7 @@ Under [issue #1897](https://github.com/realkarych/kora/issues/1897), the ordinar
 
 The foreground serving owner closes the listener, settles pending TLS handshakes and drains admitted requests and SQLite on its original selector loop. The shared client verifies the certificate chain and IP subject alternative name before sending a bearer. CLI and stdio MCP can select a private CA bundle explicitly and continue to use their own credentials under [ADR-0011](0011-namespaces-and-personal-tokens.md).
 
-The owner [approved the implementation plan under #1897](https://github.com/realkarych/kora/issues/1897#issuecomment-7194815671). This wording is pending line-by-line owner review.
+The owner [approved the implementation plan under #1897](https://github.com/realkarych/kora/issues/1897#issuecomment-7194815671). The project owner reviewed this wording line by line and [accepted it on 2026-11-26](https://github.com/realkarych/kora/pull/1899#issuecomment-7196577109).
 
 ### Private Unix HTTP for installed selection evidence
 
