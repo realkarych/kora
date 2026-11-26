@@ -385,7 +385,7 @@ def test_cli_compile_does_not_execute_or_log_source(tmp_path: Path) -> None:
     path = write_source(tmp_path / "private-source.py", source)
     invalid = write_source(
         tmp_path / "private-invalid.py",
-        source + f'open("{marker}", "w").close()\n'.encode(),
+        f'open("{marker}", "w").close()\n'.encode() + source,
     )
     environment = {
         "KORA_URL": closed_origin(),
