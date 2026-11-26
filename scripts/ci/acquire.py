@@ -44,6 +44,8 @@ CURL_FAILURES = {
 USAGE = (
     "usage: acquire.py fetch STORE NAME\n"
     f"       acquire.py run SECONDS(1-{MAX_COMMAND_SECONDS}) -- COMMAND [ARGUMENT...]\n"
+    "       python3 -m scripts.ci.acquire browser-system-packages "
+    f"SECONDS(1-{MAX_COMMAND_SECONDS})\n"
 )
 ASSET_HOST = "release-assets.githubusercontent.com"
 NODE_RELEASE = "https://nodejs.org/dist/v24.22.0/"
@@ -468,19 +470,31 @@ async def run_bounded(
     executable = shutil.which(command[0])
     if executable is None:
         raise AcquisitionError(f"The acquisition command {command[0]} is unavailable.")
-    line = shlex.join(command)
+
+    async def attempt(limit: float) -> str | None:
+        return await bounded((executable, *command[1:]), limit)
+
+    await run_attempts(shlex.join(command), seconds, pause, errors, budget, attempt)
+
+
+async def run_attempts(
+    subject: str,
+    seconds: float,
+    pause: Pause,
+    errors: TextIO,
+    budget: Budget,
+    acquire: Callable[[float], Awaitable[str | None]],
+) -> None:
     for attempt in range(1, ATTEMPTS + 1):
-        limit = budget.allowance(seconds, COMMAND_RESERVE_SECONDS, line)
-        failure = await bounded((executable, *command[1:]), limit)
+        limit = budget.allowance(seconds, COMMAND_RESERVE_SECONDS, subject)
+        failure = await acquire(limit)
         if failure is None:
             return
-        report(
-            errors,
-            f"Acquisition attempt {attempt} of {ATTEMPTS} failed ({failure}): {line}",
-        )
+        message = f"Acquisition attempt {attempt} of {ATTEMPTS} failed ({failure})"
+        report(errors, f"{message}: {subject}")
         if attempt < ATTEMPTS:
-            await budget.pause(pause, COMMAND_RESERVE_SECONDS, line)
-    raise AcquisitionError(f"Acquisition failed after {ATTEMPTS} attempts: {line}")
+            await budget.pause(pause, COMMAND_RESERVE_SECONDS, subject)
+    raise AcquisitionError(f"Acquisition failed after {ATTEMPTS} attempts: {subject}")
 
 
 async def fetch_named(
@@ -529,12 +543,45 @@ async def perform(
         )
         output.write(f"{path}\n")
         return
+    if arguments[0] == "browser-system-packages":
+        from scripts.ci.browser_system_packages import (
+            BrowserPackagesRefused,
+            Programs,
+            package_attempt,
+        )
+
+        try:
+            programs = Programs.workflow()
+            work = ("install", str(programs.tool_cache), str(programs.pnpm_bin))
+            latest_settlement = (
+                budget.started
+                + JOB_BUDGET_SECONDS
+                - budget.spent
+                - COMMAND_RESERVE_SECONDS
+            )
+
+            async def attempt(allowance: float) -> str | None:
+                return await package_attempt(work, allowance, latest_settlement)
+
+            await run_attempts(
+                "browser system packages",
+                int(arguments[1]),
+                pause,
+                errors,
+                budget,
+                attempt,
+            )
+        except BrowserPackagesRefused as error:
+            raise AcquisitionError(str(error)) from None
+        return
     await run_bounded(arguments[3:], int(arguments[1]), pause, errors, budget)
 
 
 def well_formed(arguments: Sequence[str]) -> bool:
     if len(arguments) == 3 and arguments[0] == "fetch":
         return True
+    if len(arguments) == 2 and arguments[0] == "browser-system-packages":
+        return command_seconds(arguments[1]) is not None
     return (
         len(arguments) > 3
         and arguments[0] == "run"

@@ -32,7 +32,19 @@ from scripts.ci.acquire import (
     fetch,
     main,
     opened_budget,
+    run_attempts,
     run_bounded,
+)
+from scripts.ci.browser_system_packages import (
+    PROOF_SECONDS,
+    RETURN_SECONDS,
+    START_SECONDS,
+    STOP_PHASE_SECONDS,
+    STOP_SECONDS,
+    WORK_SECONDS,
+    AttemptWindow,
+    BrowserPackagesRefused,
+    package_attempt,
 )
 from tests.support.https_fixture import (
     Authority,
@@ -60,6 +72,10 @@ PLANTED_CREDENTIAL = "kora-fixture-credential-value"
 NAME = "fixture"
 ROOT = Path(__file__).resolve().parents[2]
 COMMAND_LIMIT = re.compile(r'acquire\.py"? run (\d+) --')
+BROWSER_SYSTEM_PACKAGES = "python3 -m scripts.ci.acquire browser-system-packages 120"
+BROWSER_OWNERSHIP_WITNESS = (
+    "python3 -m tests.architecture.browser_system_packages_witness"
+)
 PNPM_SETUP = "scripts/ci/setup_scaffold_pnpm.sh"
 FETCHING_SCRIPTS = {
     PNPM_SETUP: ("pnpm-",),
@@ -671,6 +687,8 @@ def fetch_worst_case(prefix: str) -> float:
 
 def step_worst_cases(run: str) -> list[float]:
     cases = command_worst_cases(run)
+    if BROWSER_SYSTEM_PACKAGES in run:
+        cases.append(worst_case(MAX_COMMAND_SECONDS, COMMAND_RESERVE_SECONDS))
     for script, prefixes in FETCHING_SCRIPTS.items():
         invocation = f"{script} prepare" if script == PNPM_SETUP else script
         if invocation in run:
@@ -755,9 +773,8 @@ def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
         for match in COMMAND_LIMIT.finditer(line)
     ]
     browser_steps = step_list(job_of(workflows, "ci.yml", "browser"))
-    system_packages = step_running(
-        browser_steps, "playwright install-deps chromium-headless-shell"
-    )
+    witness = step_running(browser_steps, BROWSER_OWNERSHIP_WITNESS)
+    system_packages = step_running(browser_steps, BROWSER_SYSTEM_PACKAGES)
     browser = step_running(browser_steps, "playwright install --only-shell chromium")
     build = [step.get("name") for step in browser_steps].index(
         "Check and build browser sources"
@@ -765,7 +782,83 @@ def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
 
     for command, limit in commands:
         assert_root_command_is_bounded(command, limit)
-    assert system_packages < browser < build
+    assert witness < system_packages < browser < build
+    assert browser_steps[witness]["if"] == browser_steps[system_packages]["if"]
+    assert browser_steps[system_packages]["if"] == browser_steps[browser]["if"]
+    assert table(browser_steps[system_packages]["env"])["KORA_BROWSER_PNPM_BIN"] == (
+        "${{ steps.browser_pnpm.outputs.bin_dest }}"
+    )
+    selected_pnpm = next(
+        step for step in browser_steps if step.get("id") == "browser_pnpm"
+    )
+    assert action_of(selected_pnpm) == "pnpm/action-setup"
+    assert (
+        sum(
+            BROWSER_SYSTEM_PACKAGES in str(step.get("run", ""))
+            for _, job in jobs_of(workflows)
+            for step in step_list(job)
+        )
+        == 1
+    )
+    assert START_SECONDS == 5.0
+    assert WORK_SECONDS == 105.0
+    assert STOP_PHASE_SECONDS == 5
+    assert START_SECONDS + WORK_SECONDS + STOP_SECONDS == MAX_COMMAND_SECONDS
+    assert PROOF_SECONDS + RETURN_SECONDS == COMMAND_RESERVE_SECONDS
+
+
+def test_browser_package_attempt_shortens_work_and_reserves_proof() -> None:
+    minimum = START_SECONDS + STOP_SECONDS
+
+    with pytest.raises(BrowserPackagesRefused, match="Insufficient time"):
+        AttemptWindow.allocate(minimum)
+    shortened = AttemptWindow.allocate(minimum + 1)
+
+    assert shortened.work == pytest.approx(1, rel=0, abs=1e-6)
+    assert shortened.settled - shortened.start - shortened.work == pytest.approx(
+        STOP_SECONDS, rel=0, abs=1e-6
+    )
+    assert shortened.prove == shortened.settled + PROOF_SECONDS
+    assert shortened.join == shortened.prove + RETURN_SECONDS
+
+
+def test_browser_package_allowance_does_not_move_the_ledger_cutoff() -> None:
+    cutoff = time.monotonic() + START_SECONDS + STOP_SECONDS + 1
+
+    window = AttemptWindow.allocate(MAX_COMMAND_SECONDS, cutoff)
+
+    assert window.settled == cutoff
+    assert window.prove == cutoff + PROOF_SECONDS
+    assert window.join == window.prove + RETURN_SECONDS
+    assert 0 < window.work <= 1
+
+
+def test_browser_package_attempt_with_insufficient_budget_does_not_retry(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / BUDGET_LEDGER
+    minimum = START_SECONDS + STOP_SECONDS + COMMAND_RESERVE_SECONDS
+    ledger.write_text(str(JOB_BUDGET_SECONDS - minimum))
+    pauses = RecordedPauses()
+    errors = io.StringIO()
+
+    async def attempt(allowance: float) -> str | None:
+        return await package_attempt(("install",), allowance)
+
+    with pytest.raises(BrowserPackagesRefused, match="Insufficient time"):
+        asyncio.run(
+            run_attempts(
+                "browser system packages",
+                MAX_COMMAND_SECONDS,
+                pauses,
+                errors,
+                opened_budget(ledger),
+                attempt,
+            )
+        )
+
+    assert pauses.seconds == []
+    assert errors.getvalue() == ""
 
 
 def action_of(step: dict[str, object]) -> str:

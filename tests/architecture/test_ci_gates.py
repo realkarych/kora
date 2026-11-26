@@ -87,7 +87,13 @@ EDITORIAL_INPUTS = {
         "WORKFLOW_CANCELLED",
     ),
     "cel-measurements": tuple(CEL_SUCCESS),
-    "browser": (*SCOPE, "FULL_SCOPE", "BROWSER_RESULT", "CANCELLED"),
+    "browser": (
+        *SCOPE,
+        "FULL_SCOPE",
+        "BROWSER_PNPM_RESULT",
+        "BROWSER_RESULT",
+        "CANCELLED",
+    ),
 }
 GateCase = tuple[str, dict[str, str]]
 
@@ -173,6 +179,7 @@ def test_outcome_gate_refuses_malformed_requirements(
     values: dict[str, str | None] = {
         **REQUIREMENTS,
         "first_outcome": "success",
+        "BROWSER_PNPM_RESULT": "success",
         "BROWSER_RESULT": "success",
         "FULL_SCOPE": "true",
         "CANCELLED": "false",
@@ -449,24 +456,38 @@ def test_required_measurement_gate_fails_closed(
 
 
 @pytest.mark.parametrize(
-    ("full_scope", "browser", "cancelled", "passes"),
+    ("full_scope", "pnpm", "browser", "cancelled", "passes"),
     [
-        ("true", "success", "false", True),
-        ("true", "failure", "false", False),
-        ("true", "skipped", "false", False),
-        ("true", "cancelled", "false", False),
-        ("true", "success", "true", False),
-        ("false", "skipped", "false", True),
-        ("false", "success", "false", False),
-        ("false", "skipped", "true", False),
+        ("true", "success", "success", "false", True),
+        ("true", "success", "failure", "false", False),
+        ("true", "success", "skipped", "false", False),
+        ("true", "success", "cancelled", "false", False),
+        ("true", "success", "success", "true", False),
+        ("true", "failure", "success", "false", False),
+        ("true", "cancelled", "success", "false", False),
+        ("true", "skipped", "success", "false", False),
+        ("true", None, "success", "false", False),
+        ("false", "skipped", "skipped", "false", True),
+        ("false", "skipped", "success", "false", False),
+        ("false", "skipped", "skipped", "true", False),
+        ("false", "success", "skipped", "false", False),
+        ("false", "failure", "skipped", "false", False),
+        ("false", "cancelled", "skipped", "false", False),
+        ("false", None, "skipped", "false", False),
     ],
 )
 def test_browser_status_requires_its_checks_or_editorial_skip(
-    tmp_path: Path, full_scope: str, browser: str, cancelled: str, passes: bool
+    tmp_path: Path,
+    full_scope: str,
+    pnpm: str | None,
+    browser: str,
+    cancelled: str,
+    passes: bool,
 ) -> None:
     values: dict[str, str | None] = {
         **SCOPE,
         "FULL_SCOPE": full_scope,
+        "BROWSER_PNPM_RESULT": pnpm,
         "BROWSER_RESULT": browser,
         "CANCELLED": cancelled,
     }

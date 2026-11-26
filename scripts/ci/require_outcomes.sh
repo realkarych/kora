@@ -106,9 +106,11 @@ require_browser_checks() {
   test "$SCOPE_RESULT" = success
   test "$SCOPE_VERIFIED" = true
   if test "$FULL_SCOPE" = false; then
+    test "$BROWSER_PNPM_RESULT" = skipped
     test "$BROWSER_RESULT" = skipped
   else
     test "$FULL_SCOPE" = true
+    test "$BROWSER_PNPM_RESULT" = success
     test "$BROWSER_RESULT" = success
   fi
 }
