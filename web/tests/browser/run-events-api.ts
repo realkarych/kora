@@ -354,7 +354,7 @@ async function exactJsonUnicode(): Promise<void> {
 }
 
 async function invalidFrames(): Promise<void> {
-  const duplicate = page.replace('}', ',"n\\u0065xt_cursor":null}')
+  const duplicate = page.slice(0, -1) + ',"n\\u0065xt_cursor":null}'
   const validEventPage = JSON.stringify({ items: [systemEvent], observed_at: observedAt, next_cursor: null })
   const [prefix, suffix] = validEventPage.split(systemEvent.kind)
   assert(prefix !== undefined && suffix !== undefined)
