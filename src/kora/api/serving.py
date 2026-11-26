@@ -1,13 +1,16 @@
 import asyncio
+import errno
 import logging
 import os
 import signal
 import socket
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import Awaitable, Callable, Generator, Mapping
 from contextlib import AsyncExitStack, ExitStack, contextmanager, nullcontext
 from csv import Error as CsvError
 from enum import StrEnum
 from functools import partial
+from pathlib import Path
+from ssl import PROTOCOL_TLS_SERVER, SSLContext
 from types import FrameType
 from typing import Protocol
 
@@ -30,6 +33,13 @@ from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, L
 from kora.protocols.scheduler_lifecycle import SchedulerFailure
 
 LOOPBACK: str = "127.0.0.1"
+TLS_ORIGIN_VARIABLE: str = "KORA_API_HTTPS_ORIGIN"
+TLS_CERT_VARIABLE: str = "KORA_API_TLS_CERT_FILE"
+TLS_KEY_VARIABLE: str = "KORA_API_TLS_KEY_FILE"
+ACCEPT_PRESSURE: frozenset[int] = frozenset(
+    {errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM}
+)
+ACCEPT_RETRY_SECONDS: float = 1.0
 SERVER_LOGGERS: tuple[str, ...] = (
     "uvicorn",
     "uvicorn.error",
@@ -70,6 +80,7 @@ REFUSED: EventSpec = CATALOG.register(
 
 class ServingRefusal(StrEnum):
     DATABASE_CONFIGURATION = "database_configuration"
+    TLS_CONFIGURATION = "tls_configuration"
     DOMAIN_CONFIGURATION = "domain_configuration"
     WORKER_CONFIGURATION = "worker_configuration"
     SCHEDULER_CONFIGURATION = "scheduler_configuration"
@@ -95,6 +106,40 @@ class ServingFailure(Exception):
     def __init__(self, reason: ServingRefusal) -> None:
         self.reason = reason
         super().__init__(reason.value)
+
+
+def _refuse_encrypted_key() -> str:
+    raise ServingFailure(ServingRefusal.TLS_CONFIGURATION)
+
+
+def read_tls_context(
+    environment: Mapping[str, str], port: int, *, ordinary_sqlite: bool
+) -> SSLContext | None:
+    origin = environment.get(TLS_ORIGIN_VARIABLE)
+    certificate = environment.get(TLS_CERT_VARIABLE)
+    key = environment.get(TLS_KEY_VARIABLE)
+    if origin is None and certificate is None and key is None:
+        return None
+    default_origin = f"https://{LOOPBACK}"
+    if (
+        not ordinary_sqlite
+        or not 1 <= port <= 65535
+        or not certificate
+        or not key
+        or (
+            origin != f"{default_origin}:{port}"
+            and (port != 443 or origin != default_origin)
+        )
+    ):
+        raise ServingFailure(ServingRefusal.TLS_CONFIGURATION)
+    try:
+        if not Path(certificate).is_file() or not Path(key).is_file():
+            raise ServingFailure(ServingRefusal.TLS_CONFIGURATION)
+        context = SSLContext(PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certificate, key, password=_refuse_encrypted_key)
+    except (OSError, ValueError):
+        raise ServingFailure(ServingRefusal.TLS_CONFIGURATION) from None
+    return context
 
 
 class ServingSignals:
@@ -154,9 +199,11 @@ def own_server_logs() -> Generator[None]:
 
 class _ServingHttpConnection(H11Protocol):
     _released: asyncio.Event
+    connected: bool = False
 
     def connection_made(self, transport: asyncio.Transport) -> None:
         self._released = asyncio.Event()
+        self.connected = True
         super().connection_made(transport)
 
     def connection_lost(self, exc: Exception | None) -> None:
@@ -165,6 +212,110 @@ class _ServingHttpConnection(H11Protocol):
 
     async def wait_released(self) -> None:
         await self._released.wait()
+
+
+class _TlsListener:
+    failed: bool
+    _listener: socket.socket | None
+    _accept_retry: asyncio.TimerHandle | None
+    _handshakes: dict[asyncio.Task[None], tuple[socket.socket, _ServingHttpConnection]]
+
+    def __init__(
+        self,
+        context: SSLContext,
+        make_protocol: Callable[[], _ServingHttpConnection],
+        stop: Callable[[], None],
+    ) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._context = context
+        self._make_protocol = make_protocol
+        self._stop = stop
+        self._listener = None
+        self._accept_retry = None
+        self._handshakes = {}
+        self.failed = False
+
+    def bind(self, port: int, backlog: int) -> object:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener = listener
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((LOOPBACK, port))
+        listener.listen(backlog)
+        listener.setblocking(False)
+        self._loop.add_reader(listener.fileno(), self._accept, listener)
+        return listener.getsockname()
+
+    def _retry_accept(self, listener: socket.socket) -> None:
+        self._accept_retry = None
+        try:
+            self._loop.add_reader(listener.fileno(), self._accept, listener)
+        except OSError:
+            self._fail()
+
+    def _close_listener(self) -> None:
+        if self._accept_retry is not None:
+            self._accept_retry.cancel()
+            self._accept_retry = None
+        if self._listener is not None:
+            self._loop.remove_reader(self._listener.fileno())
+            self._listener.close()
+            self._listener = None
+
+    def _fail(self) -> None:
+        self.failed = True
+        self._close_listener()
+        self._stop()
+
+    def _accept(self, listener: socket.socket) -> None:
+        try:
+            connection, _ = listener.accept()
+        except (BlockingIOError, InterruptedError, ConnectionAbortedError):
+            return
+        except OSError as error:
+            if error.errno in ACCEPT_PRESSURE:
+                self._loop.remove_reader(listener.fileno())
+                self._accept_retry = self._loop.call_later(
+                    ACCEPT_RETRY_SECONDS, self._retry_accept, listener
+                )
+            else:
+                self._fail()
+            return
+        with ExitStack() as cleanup:
+            cleanup.callback(connection.close)
+            protocol = self._make_protocol()
+            task = self._loop.create_task(self._negotiate(connection, protocol))
+            self._handshakes[task] = (connection, protocol)
+            task.add_done_callback(self._finish_handshake)
+            cleanup.pop_all()
+
+    async def _negotiate(
+        self, connection: socket.socket, protocol: _ServingHttpConnection
+    ) -> None:
+        try:
+            await self._loop.connect_accepted_socket(
+                lambda: protocol,
+                connection,
+                ssl=self._context,
+                ssl_shutdown_timeout=DEFAULT_CLOSE_DEADLINE_SECONDS,
+            )
+        except OSError:
+            return
+
+    def _finish_handshake(self, task: asyncio.Task[None]) -> None:
+        connection, protocol = self._handshakes.pop(task)
+        if not protocol.connected:
+            connection.close()
+        if not task.cancelled() and task.exception() is not None:
+            self._fail()
+
+    async def seal(self) -> None:
+        self._close_listener()
+        handshakes = tuple(self._handshakes)
+        for task, (_, protocol) in self._handshakes.items():
+            if not protocol.connected:
+                task.cancel()
+        if handshakes:
+            await asyncio.wait(handshakes)
 
 
 class _StoppedBeforeBind(Exception):
@@ -217,6 +368,7 @@ class ApiServer(Server):
     _startup_timeout: asyncio.TimerHandle | None
     _drain_unfinished: bool
     _scheduler_task: asyncio.Task[None] | None
+    _tls_listener: _TlsListener | None
 
     def __init__(
         self,
@@ -226,6 +378,7 @@ class ApiServer(Server):
         *,
         worker_startup: bool = False,
         scheduler: ServingScheduler | None = None,
+        tls_context: SSLContext | None = None,
     ) -> None:
         config_type = _WorkerConfig if worker_startup else Config
         config = config_type(
@@ -259,6 +412,26 @@ class ApiServer(Server):
         self._drain_unfinished = False
         self._scheduler = scheduler
         self._scheduler_task = None
+        self._tls_listener = (
+            None
+            if tls_context is None
+            else _TlsListener(tls_context, self._make_protocol, self._stop_listening)
+        )
+
+    def _make_protocol(self) -> _ServingHttpConnection:
+        return _ServingHttpConnection(
+            config=self.config,
+            server_state=self.server_state,
+            app_state=self.lifespan.state,
+            _loop=self._loop,
+        )
+
+    def _stop_listening(self) -> None:
+        self.should_exit = True
+
+    @property
+    def listener_failed(self) -> bool:
+        return self._tls_listener is not None and self._tls_listener.failed
 
     async def _recover_scheduler(self) -> None:
         if self._scheduler is not None and not self.should_exit:
@@ -305,11 +478,30 @@ class ApiServer(Server):
             raise ServingFailure(ServingRefusal.STARTUP_FAILED)
         if self.should_exit:
             return
+        if self._tls_listener is None:
+            address = await self._start_http()
+        else:
+            address = await self._start_tls(self._tls_listener)
+        if address is None:
+            return
+        match address:
+            case ("127.0.0.1", int(port)) if 1 <= port <= 65535:
+                if self._tls_listener is not None and port != self.config.port:
+                    raise ServingFailure(ServingRefusal.BIND_FAILED)
+                self.log.emit(BOUND, port=port)
+                if self._scheduler is not None and not self.should_exit:
+                    self._scheduler_task = asyncio.create_task(
+                        self._run_scheduler(self._scheduler)
+                    )
+            case _:
+                raise ServingFailure(ServingRefusal.BIND_FAILED)
+
+    async def _start_http(self) -> object:
         try:
             await super().startup()
         except _StoppedBeforeBind:
             self._lifespan_shutdown = asyncio.create_task(self.lifespan.shutdown())
-            return
+            return None
         except SystemExit as error:
             reason = (
                 ServingRefusal.STARTUP_FAILED
@@ -322,23 +514,30 @@ class ApiServer(Server):
         )
         if len(listeners) != 1:
             raise ServingFailure(ServingRefusal.BIND_FAILED)
-        address: object = listeners[0].getsockname()
-        match address:
-            case ("127.0.0.1", int(port)) if 1 <= port <= 65535:
-                self.log.emit(BOUND, port=port)
-                if self._scheduler is not None and not self.should_exit:
-                    self._scheduler_task = asyncio.create_task(
-                        self._run_scheduler(self._scheduler)
-                    )
-            case _:
-                raise ServingFailure(ServingRefusal.BIND_FAILED)
+        return listeners[0].getsockname()
+
+    async def _start_tls(self, listener: _TlsListener) -> object:
+        await self.lifespan.startup()
+        if self.lifespan.should_exit:
+            raise ServingFailure(ServingRefusal.STARTUP_FAILED)
+        if self.should_exit:
+            self._lifespan_shutdown = asyncio.create_task(self.lifespan.shutdown())
+            return None
+        try:
+            address = listener.bind(self.config.port, self.config.backlog)
+        except OSError:
+            await listener.seal()
+            await self.lifespan.shutdown()
+            raise ServingFailure(ServingRefusal.BIND_FAILED) from None
+        self.started = True
+        return address
 
     def disarm_listeners(self) -> None:
         for listener in self.servers:
             for bound_socket in listener.sockets:
                 self._loop.remove_reader(bound_socket.fileno())
 
-    async def seal_connections(self) -> tuple[_ServingHttpConnection, ...]:
+    async def _seal_http_listeners(self) -> None:
         self.disarm_listeners()
         accepted: asyncio.Future[None] = self._loop.create_future()
 
@@ -350,6 +549,12 @@ class ApiServer(Server):
         await accepted
         for listener in self.servers:
             listener.close()
+
+    async def seal_connections(self) -> tuple[_ServingHttpConnection, ...]:
+        if self._tls_listener is None:
+            await self._seal_http_listeners()
+        else:
+            await self._tls_listener.seal()
         connections: list[_ServingHttpConnection] = []
         for connection in self.server_state.connections:
             if not isinstance(connection, _ServingHttpConnection):
@@ -413,6 +618,12 @@ class ApiServer(Server):
         await self.wait_for_requests(connections, tuple(self.server_state.tasks))
         for listener in self.servers:
             await listener.wait_closed()
+        if (
+            self._tls_listener is not None
+            and self.started
+            and self._lifespan_shutdown is None
+        ):
+            self._lifespan_shutdown = asyncio.create_task(self.lifespan.shutdown())
         if self._lifespan_shutdown is not None:
             await self._lifespan_shutdown
 
@@ -487,6 +698,7 @@ async def serve_on_loop(
     preparer: DeploymentPreparer | None,
     worker_startup: bool = False,
     make_scheduler: Callable[[Database], ServingScheduler] | None = None,
+    tls_context: SSLContext | None = None,
 ) -> int:
     database = Database(settings, observe_sqlite_serving=True)
     domain: AsyncExitStack | None = None
@@ -521,10 +733,13 @@ async def serve_on_loop(
                     log,
                     worker_startup=worker_startup,
                     scheduler=scheduler,
+                    tls_context=tls_context,
                 )
                 signals.server = server
                 if signals.received is None:
                     await server.serve()
+                    if server.listener_failed:
+                        failure = ServingRefusal.STARTUP_FAILED
     except ServingFailure as error:
         failure = error.reason
     except SystemExit:
@@ -562,6 +777,7 @@ def serve_sqlite(
     preparer: DeploymentPreparer | None = None,
     worker_startup: bool = False,
     make_scheduler: Callable[[Database], ServingScheduler] | None = None,
+    tls_context: SSLContext | None = None,
 ) -> int:
     if not settings.sqlite_path.is_file():
         return refuse(log, ServingRefusal.SQLITE_UNPREPARED, 78)
@@ -584,5 +800,6 @@ def serve_sqlite(
                 preparer,
                 worker_startup,
                 make_scheduler,
+                tls_context,
             )
         )

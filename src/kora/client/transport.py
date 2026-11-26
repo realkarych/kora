@@ -3,6 +3,7 @@ import json
 import math
 import re
 import ssl
+import stat
 from collections.abc import Callable
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -231,10 +232,12 @@ def direct_origin(value: str) -> httpx.URL:
 def verified_context(bundle: Path | None) -> ssl.SSLContext:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     try:
+        if bundle is not None and not stat.S_ISREG(bundle.stat().st_mode):
+            raise OSError
         context.load_verify_locations(
             cafile=bundle if bundle is not None else certifi.where()
         )
-    except OSError:
+    except (OSError, ValueError):
         raise ClientError(Failure.TLS, Outcome.NOT_SENT) from None
     return context
 

@@ -2,7 +2,6 @@ from collections.abc import Mapping
 
 from kora.cli.app import CLI_COMPONENT
 from kora.cli.graphs import report
-from kora.client import KoraClient
 from kora.client.settings import (
     CLI_CREDENTIAL_VARIABLE,
     read_client_settings,
@@ -49,9 +48,7 @@ def events_command(
     async def call() -> ListedRunEvents:
         settings = read_client_settings(environment, CLI_CREDENTIAL_VARIABLE)
         resolved_namespace = read_namespace(environment, namespace)
-        async with KoraClient(
-            settings.url, settings.token, diagnostics=diagnostics
-        ) as client:
+        async with settings.client(diagnostics) as client:
             return await client.list_run_events(
                 resolved_namespace,
                 run_id,

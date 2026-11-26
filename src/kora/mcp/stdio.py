@@ -94,9 +94,7 @@ SERVER_NAMES: dict[str, str] = {
 async def serve_stdio(
     server_name: str, settings: ClientSettings, diagnostics: ProcessDiagnostics
 ) -> None:
-    async with KoraClient(
-        settings.url, settings.token, diagnostics=diagnostics
-    ) as client:
+    async with settings.client(diagnostics) as client:
         tools = (
             AuthoringTools(client, diagnostics)
             if server_name == "authoring"

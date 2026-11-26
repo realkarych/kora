@@ -178,9 +178,20 @@ async def running_app(app: ASGIApp) -> AsyncGenerator[str]:
             await asyncio.wait_for(task, BOUND)
 
 
-def tls_pair(
-    directory: Path, *, include_localhost: bool = False
-) -> tuple[ssl.SSLContext, Path]:
+@dataclass(frozen=True)
+class TlsMaterial:
+    authority: Path
+    certificate: Path
+    key: Path
+
+
+def write_tls_material(
+    directory: Path,
+    *,
+    address: str = "127.0.0.1",
+    include_localhost: bool = False,
+    password: bytes | None = None,
+) -> TlsMaterial:
     ca_key = ec.generate_private_key(ec.SECP256R1())
     server_key = ec.generate_private_key(ec.SECP256R1())
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Client test CA")])
@@ -200,7 +211,7 @@ def tls_pair(
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
         .sign(ca_key, hashes.SHA256())
     )
-    names: list[x509.GeneralName] = [x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))]
+    names: list[x509.GeneralName] = [x509.IPAddress(ipaddress.IPv4Address(address))]
     if include_localhost:
         names.append(x509.DNSName("localhost"))
     server = (
@@ -226,9 +237,20 @@ def tls_pair(
         server_key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
+            serialization.NoEncryption()
+            if password is None
+            else serialization.BestAvailableEncryption(password),
         )
     )
+    return TlsMaterial(ca_path, certificate, key)
+
+
+def tls_pair(
+    directory: Path, *, address: str = "127.0.0.1", include_localhost: bool = False
+) -> tuple[ssl.SSLContext, Path]:
+    material = write_tls_material(
+        directory, address=address, include_localhost=include_localhost
+    )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(certificate, key)
-    return context, ca_path
+    context.load_cert_chain(material.certificate, material.key)
+    return context, material.authority
