@@ -19,7 +19,7 @@ from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, PositiveInt, ValidationError
 
@@ -420,10 +420,14 @@ async def check_withdrawal(
 class NativeAttempts:
     database_opens: int = 0
     socket_binds: int = 0
+    sqlite_admitted: bool = False
 
     def audit(self, name: str, args: tuple[object, ...]) -> None:
         if name == "sqlite3.connect":
             self.database_opens += 1
+            require(
+                self.sqlite_admitted, "SQLite was attempted before the private binding"
+            )
         if name == "socket.bind":
             self.socket_binds += 1
 
@@ -447,11 +451,14 @@ def assert_native_write_refused(main: Path) -> None:
     )
 
 
-async def run_protected_case(scope: ProtectedRead, case: WitnessCase) -> None:
+async def run_protected_case(
+    scope: ProtectedRead, case: WitnessCase, attempts: NativeAttempts
+) -> None:
     scope.require_live()
     assert_native_write_refused(scope.main)
     from kora.db.connection import Database
 
+    attempts.sqlite_admitted = True
     observation = ReadObservations(scope.binding.main)
     database = Database.guarded_sqlite_reader(scope.main, scope.require_live)
     observation.attach(database)
@@ -474,9 +481,13 @@ async def run_child(supplied_fd: int, lifetime_fd: int, case: WitnessCase) -> No
     sys.addaudithook(attempts.audit)
     verified_path: Path | None = None
     try:
+        if case in {WitnessCase.SCHEMA, WitnessCase.INEXACT}:
+            from kora.api.serving import sqlite_schema_ready_for_serving
+
+            assert callable(sqlite_schema_ready_for_serving)
         with consume_binding(supplied_fd, lifetime_fd, case) as scope:
             verified_path = scope.main
-            await run_protected_case(scope, case)
+            await run_protected_case(scope, case, attempts)
     except StartupBindingRejected as error:
         if error.case is not case:
             raise
@@ -578,7 +589,40 @@ def assert_other_uid_refused(*paths: str) -> None:
             )
 
 
-def run_bound_child(binding: LaunchBinding, case: WitnessCase) -> None:
+@dataclass(frozen=True)
+class BoundChild:
+    case: WitnessCase
+    startup: BinaryIO
+    scope: BinaryIO
+    process: subprocess.Popen[bytes]
+
+    def settle(self, binding: LaunchBinding) -> None:
+        if self.case is not WitnessCase.ABSENT:
+            self.startup.write(binding.model_dump_json().encode("ascii"))
+        self.startup.close()
+        child = self.process
+        assert child.stdout is not None
+        if self.case is WitnessCase.SCHEMA:
+            readable, _, _ = select.select([child.stdout], [], [], WITNESS_TIMEOUT)
+            assert readable, "the checked child did not reach the original read barrier"
+            assert child.stdout.readline(128) == b"PREBIND WITHDRAW\n"
+            self.scope.close()
+        output, _ = child.communicate(timeout=WITNESS_TIMEOUT)
+        assert child.returncode == 0
+        assert len(output) < BINDING_LIMIT
+        result = (
+            "SETTLED"
+            if self.case in {WitnessCase.SCHEMA, WitnessCase.INEXACT}
+            else "REFUSED"
+        )
+        assert output.startswith(f"PREBIND {result} {self.case.value} ".encode("ascii"))
+        assert not Path(f"/proc/{child.pid}").exists()
+        sys.stdout.write(output.decode("ascii"))
+        sys.stdout.flush()
+
+
+@contextmanager
+def start_bound_child(case: WitnessCase) -> Generator[BoundChild, None, None]:
     with ExitStack() as owned:
         startup_read, startup_write = os.pipe()
         owned.callback(os.close, startup_read)
@@ -598,26 +642,7 @@ def run_bound_child(binding: LaunchBinding, case: WitnessCase) -> None:
             )
         )
         try:
-            if case is not WitnessCase.ABSENT:
-                startup.write(binding.model_dump_json().encode("ascii"))
-            startup.close()
-            assert child.stdout is not None
-            if case is WitnessCase.SCHEMA:
-                readable, _, _ = select.select([child.stdout], [], [], WITNESS_TIMEOUT)
-                assert readable
-                assert child.stdout.readline(128) == b"PREBIND WITHDRAW\n"
-                scope.close()
-            output, _ = child.communicate(timeout=WITNESS_TIMEOUT)
-            assert child.returncode == 0
-            assert len(output) < BINDING_LIMIT
-            result = (
-                "SETTLED"
-                if case in {WitnessCase.SCHEMA, WitnessCase.INEXACT}
-                else "REFUSED"
-            )
-            assert output.startswith(f"PREBIND {result} {case.value} ".encode("ascii"))
-            sys.stdout.write(output.decode("ascii"))
-            sys.stdout.flush()
+            yield BoundChild(case, startup, scope, child)
         finally:
             if child.poll() is None:
                 child.kill()
@@ -625,13 +650,22 @@ def run_bound_child(binding: LaunchBinding, case: WitnessCase) -> None:
         assert not Path(f"/proc/{child.pid}").exists()
 
 
-def prepare_ordinary_main(path: Path, *, inexact: bool) -> bytes:
-    env = fixture_environment()
-    env["KORA_DATABASE_URL"] = f"sqlite+aiosqlite:///{path}"
-    command(sys.executable, "-B", "-m", "kora", "db", "upgrade", env=env)
+def run_bound_child(binding: LaunchBinding, case: WitnessCase) -> None:
+    with start_bound_child(case) as child:
+        child.settle(binding)
+
+
+def prepare_ordinary_main(path: Path, ordinary: bytes | None) -> bytes:
+    if ordinary is None:
+        env = fixture_environment()
+        env["KORA_DATABASE_URL"] = f"sqlite+aiosqlite:///{path}"
+        command(sys.executable, "-B", "-m", "kora", "db", "upgrade", env=env)
+    else:
+        with path.open("xb") as target:
+            target.write(ordinary)
     with closing(sqlite3.connect(path)) as database:
         assert database.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
-        if inexact:
+        if ordinary is not None:
             from kora.db.run_event_page_v1 import SQLITE_EVENT_PAGE_INDEX
 
             database.execute(f"DROP INDEX {SQLITE_EVENT_PAGE_INDEX}").close()
@@ -647,7 +681,7 @@ def open_launch_anchor(path: Path) -> int:
     raise WitnessScopeClosed("the protected read requires Linux")
 
 
-def witness_bound_image(domain: Path, device: str, *, inexact: bool) -> None:
+def witness_bound_image(domain: Path, device: str, ordinary: bytes | None) -> bytes:
     backing = domain / "backing" / "main.db"
     main = domain / "service" / "api" / "main.db"
     for directory in (domain, main.parent.parent):
@@ -658,10 +692,11 @@ def witness_bound_image(domain: Path, device: str, *, inexact: bool) -> None:
     main.parent.mkdir(mode=0o700)
     os.chown(main.parent, 0, API_UID)
     main.parent.chmod(0o750)
-    ordinary = prepare_ordinary_main(backing, inexact=inexact)
-    main.touch(mode=0o600, exist_ok=False)
-    parents = protected_directories(domain)
-    with ExitStack() as held:
+    case = WitnessCase.SCHEMA if ordinary is None else WitnessCase.INEXACT
+    with ExitStack() as held, start_bound_child(case) as child:
+        prepared = prepare_ordinary_main(backing, ordinary)
+        main.touch(mode=0o600, exist_ok=False)
+        parents = protected_directories(domain)
         command("/usr/bin/mount", "--bind", str(backing), str(main))
         held.callback(command, "/usr/bin/umount", str(main))
         anchors: list[int] = []
@@ -684,19 +719,17 @@ def witness_bound_image(domain: Path, device: str, *, inexact: bool) -> None:
         command(
             *unprivileged(OTHER_UID, "refuse_access", str(main), str(backing), device)
         )
-        if inexact:
-            run_bound_child(binding, WitnessCase.INEXACT)
-        else:
+        child.settle(binding)
+        if case is WitnessCase.SCHEMA:
             run_bound_child(binding, WitnessCase.ABSENT)
             foreign = binding.model_copy(update={"launcher": os.getppid()})
             run_bound_child(foreign, WitnessCase.FOREIGN)
             run_bound_child(binding, WitnessCase.MISSING_FILE)
-            run_bound_child(binding, WitnessCase.SCHEMA)
         assert tuple(identity(os.fstat(fd)) for fd in anchors) == facts
         assert tuple(native_identity(path) for path in (*parents, backing)) == facts
         assert native_identity(main) == binding.main
         assert owned_mounts(domain, main) == binding.mounts
-        assert main.read_bytes() == ordinary
+        assert main.read_bytes() == prepared
         assert list(main.parent.iterdir()) == [main]
         assert list(backing.parent.iterdir()) == [backing]
         fixture_message("ANCHOR reaped=1 exact_main=1 sidecars=0 other_uid_refused=1")
@@ -704,6 +737,7 @@ def witness_bound_image(domain: Path, device: str, *, inexact: bool) -> None:
     backing.unlink()
     for directory in (main.parent, main.parent.parent, backing.parent):
         directory.rmdir()
+    return prepared
 
 
 def release_loop(device: str, indicator: Path, image: Path) -> None:
@@ -757,8 +791,8 @@ def run_launcher(base: Path, outer_namespace: int) -> None:
         readable, _, _ = select.select([sys.stdin.buffer], [], [], WITNESS_TIMEOUT)
         assert readable
         assert sys.stdin.buffer.read(1) == b"1"
-        for inexact in (False, True):
-            witness_bound_image(domain, device, inexact=inexact)
+        ordinary = witness_bound_image(domain, device, None)
+        witness_bound_image(domain, device, ordinary)
     assert not image.exists()
     scoped_paths = {str(domain), str(domain / "service" / "api" / "main.db")}
     assert scoped_paths.isdisjoint(row[4] for row in mount_entries())
@@ -806,9 +840,10 @@ def run_owned_guest() -> None:
                 Path(f"/proc/{launcher.pid}/ns/mnt").stat().st_ino != mount_namespace()
             )
             output, _ = launcher.communicate(input=b"1", timeout=100)
-            assert launcher.returncode == 0
+            assert len(output) < BINDING_LIMIT * 4
             sys.stdout.write(output.decode("ascii"))
             sys.stdout.flush()
+            assert launcher.returncode == 0
         finally:
             if launcher.poll() is None:
                 assert launcher.stdin is not None
