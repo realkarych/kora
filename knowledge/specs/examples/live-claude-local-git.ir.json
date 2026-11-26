@@ -1,0 +1,120 @@
+{
+  "graph": {
+    "id": "live_claude_local_git",
+    "namespace": "example",
+    "nodes": {
+      "agent": {
+        "config": {
+          "harness": "claude",
+          "prompt": "Write exactly one line containing kora live demo followed by a newline to demo.txt. Leave the change in the worktree for kora to publish. Do not edit other files, commit, or push.",
+          "trust_repo_config": false,
+          "workspace": {
+            "repo": "/operator-owned/demo.git",
+            "rev": "1111111111111111111111111111111111111111"
+          }
+        },
+        "kind": "agent",
+        "outputs": {
+          "change": {
+            "type": "VcsRef"
+          },
+          "session": {
+            "type": "AgentSession"
+          }
+        }
+      },
+      "approve": {
+        "config": {
+          "binds": {
+            "gate_digests": [
+              "inputs.gate"
+            ],
+            "vcs_ref": "inputs.change"
+          },
+          "channel": "cli",
+          "on_expiry": "fail",
+          "timeout": "1h"
+        },
+        "inputs": {
+          "change": {
+            "from": "agent",
+            "output": "change",
+            "type": "VcsRef"
+          },
+          "gate": {
+            "from": "gate",
+            "output": "result",
+            "type": "CommandResult"
+          }
+        },
+        "kind": "human_input",
+        "outputs": {
+          "response": {
+            "type": "StructuredOutput"
+          }
+        }
+      },
+      "gate": {
+        "config": {
+          "cmd": [
+            "/operator-owned/bin/python",
+            "-I",
+            "-c",
+            "import os\nimport stat\nimport subprocess\nimport sys\nfrom pathlib import Path\n\nfrom kora.ir.vcs_ref import VcsRefValidationError, parse_vcs_ref_json\nfrom kora.ir.vcs_ref_json import MAX_JSON_BYTES\n\nLINE_END = bytes((10,))\nMARKER = b\"kora live demo\" + LINE_END\nGIT_ENV = dict(\n    GIT_ALLOW_PROTOCOL=\"\",\n    GIT_CONFIG_GLOBAL=os.devnull,\n    GIT_CONFIG_NOSYSTEM=\"1\",\n    GIT_NO_LAZY_FETCH=\"1\",\n    GIT_TERMINAL_PROMPT=\"0\",\n    LC_ALL=\"C\",\n)\n\n\ndef read_commit(input_path: str) -> str:\n    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK\n    try:\n        with os.fdopen(os.open(input_path, flags), \"rb\") as source:\n            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):\n                raise SystemExit(\"invalid VcsRef input file\")\n            reference = parse_vcs_ref_json(source.read(MAX_JSON_BYTES + 1))\n    except (OSError, VcsRefValidationError):\n        raise SystemExit(\"invalid VcsRef input\") from None\n    commit = reference.commit\n    if len(commit) != 40 or any(char not in \"0123456789abcdef\" for char in commit):\n        raise SystemExit(\"invalid Git commit ID\")\n    return commit\n\n\ndef read_git(executable: str, limit: int, *arguments: str) -> bytes:\n    try:\n        process = subprocess.Popen(\n            (executable, \"--no-replace-objects\", \"--git-dir=.git\", *arguments),\n            env=GIT_ENV,\n            stdin=subprocess.DEVNULL,\n            stdout=subprocess.PIPE,\n            stderr=subprocess.DEVNULL,\n        )\n    except OSError:\n        raise SystemExit(\"Git executable unavailable\") from None\n    with process:\n        output = process.stdout\n        if output is None:\n            raise RuntimeError(\"Git output pipe unavailable\")\n        data = output.read(limit + 1)\n        if len(data) > limit:\n            process.kill()\n            raise SystemExit(\"Git output exceeds verifier limit\")\n        if process.wait() != 0:\n            raise SystemExit(\"Git verification query failed\")\n    return data\n\n\ndef verify(executable: str, input_path: str) -> None:\n    if not Path(executable).is_absolute():\n        raise SystemExit(\"Git executable must be absolute\")\n    commit = read_commit(input_path)\n    head = read_git(executable, 41, \"rev-parse\", \"--verify\", \"HEAD^0\")\n    if head != commit.encode(\"ascii\") + LINE_END:\n        sys.stderr.write(\"commit mismatch\" + chr(10))\n        raise SystemExit(3)\n    tree_entry = b\"100644 blob\" + LINE_END\n    entry = read_git(\n        executable,\n        len(tree_entry),\n        \"ls-tree\",\n        \"--format=%(objectmode) %(objecttype)\",\n        commit,\n        \"--\",\n        \"demo.txt\",\n    )\n    if entry != tree_entry:\n        raise SystemExit(\"demo.txt must be a regular non-executable file\")\n    marker_object = commit + \":demo.txt\"\n    size_line = str(len(MARKER)).encode(\"ascii\") + LINE_END\n    if read_git(executable, len(size_line), \"cat-file\", \"-s\", marker_object) != size_line:\n        raise SystemExit(\"demo.txt size mismatch\")\n    if read_git(executable, len(MARKER), \"cat-file\", \"blob\", marker_object) != MARKER:\n        raise SystemExit(\"demo.txt content mismatch\")\n    sys.stdout.write(\"verified_commit=\" + commit + chr(10))\n\n\nverify(sys.argv[1], sys.argv[2])\n",
+            "/operator-owned/bin/git",
+            "{input_root}/change.json"
+          ],
+          "workspace": {
+            "from_ref": "inputs.change",
+            "repo": "/operator-owned/demo.git"
+          }
+        },
+        "depends_on": [
+          "agent"
+        ],
+        "inputs": {
+          "change": {
+            "from": "agent",
+            "output": "change",
+            "type": "VcsRef"
+          }
+        },
+        "kind": "command",
+        "outputs": {
+          "result": {
+            "type": "CommandResult"
+          }
+        }
+      }
+    },
+    "params": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "triggers": [
+      {
+        "kind": "manual"
+      }
+    ]
+  },
+  "ir_version": "1.0",
+  "runtime": {
+    "runtime": "local",
+    "vcs": "git"
+  },
+  "type_contracts": {
+    "AgentSession": {
+      "builtin_revision": "1"
+    },
+    "CommandResult": {
+      "builtin_revision": "1"
+    },
+    "StructuredOutput": {
+      "builtin_revision": "1"
+    },
+    "VcsRef": {
+      "builtin_revision": "1"
+    }
+  }
+}
