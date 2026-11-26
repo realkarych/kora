@@ -56,6 +56,12 @@ class WitnessCase(StrEnum):
     MISSING_FILE = "missing_file"
 
 
+class StartupBindingRejected(DatabaseClosedError):
+    def __init__(self, case: WitnessCase) -> None:
+        self.case = case
+        super().__init__("the original private startup binding was refused")
+
+
 def require(observed: bool, reason: str) -> None:
     if not observed:
         raise DatabaseClosedError(reason)
@@ -88,10 +94,14 @@ def process_status(process: int | str) -> dict[str, str]:
     )
 
 
-def owned_mounts(domain: Path, main: Path) -> tuple[int, int]:
-    mounts = [
+def mount_entries() -> list[list[str]]:
+    return [
         line.split() for line in Path("/proc/self/mountinfo").read_text().splitlines()
     ]
+
+
+def owned_mounts(domain: Path, main: Path) -> tuple[int, int]:
+    mounts = mount_entries()
     roots = [row for row in mounts if row[4] == str(domain)]
     targets = [row for row in mounts if row[4] == str(main)]
     require(len(roots) == len(targets) == 1, "the protected mounts are unavailable")
@@ -186,8 +196,9 @@ class ProtectedRead:
             identity(current) == expected.main
             and stat.S_ISREG(current.st_mode)
             and current.st_nlink == 1
-            and current.st_uid == API_UID
-            and stat.S_IMODE(current.st_mode) == 0o600,
+            and current.st_uid == 0
+            and current.st_gid == API_UID
+            and stat.S_IMODE(current.st_mode) == 0o440,
             "the protected SQLite main changed",
         )
 
@@ -198,8 +209,10 @@ def consume_binding(
 ) -> Generator[ProtectedRead, None, None]:
     with os.fdopen(supplied_fd, "rb") as source:
         data = source.read(BINDING_LIMIT + 1)
+    if not data:
+        raise StartupBindingRejected(WitnessCase.ABSENT)
     require(
-        0 < len(data) <= BINDING_LIMIT,
+        len(data) <= BINDING_LIMIT,
         "the private SQLite startup binding is unavailable",
     )
     try:
@@ -209,10 +222,8 @@ def consume_binding(
             "the private SQLite startup binding is invalid"
         ) from error
     assert_child_credentials()
-    require(
-        binding.launcher == os.getppid(),
-        "the launch binding belongs to a different parent",
-    )
+    if binding.launcher != os.getppid():
+        raise StartupBindingRejected(WitnessCase.FOREIGN)
     domain = Path(binding.directory)
     require(
         domain.is_absolute() and ".." not in domain.parts,
@@ -247,12 +258,16 @@ def held_main_descriptors(main: FileIdentity) -> tuple[int, ...]:
     return tuple(matches)
 
 
-def native_access_mode(descriptor: int) -> int:
-    fields = dict(
-        line.split(":", 1)
-        for line in Path(f"/proc/self/fdinfo/{descriptor}").read_text().splitlines()
-    )
-    return int(fields["flags"].strip(), 8) & os.O_ACCMODE
+def is_read_only_descriptor(descriptor: int) -> bool:
+    if sys.platform == "linux":
+        fields = dict(
+            line.split(":", 1)
+            for line in Path(f"/proc/self/fdinfo/{descriptor}").read_text().splitlines()
+        )
+        return (
+            int(fields["flags"].strip(), 8) & (os.O_ACCMODE | os.O_PATH) == os.O_RDONLY
+        )
+    raise DatabaseClosedError("the protected read requires Linux")
 
 
 @dataclass
@@ -273,7 +288,7 @@ class ReadObservations:
         if self.native_main is not None:
             descriptors = held_main_descriptors(self.native_main)
             assert len(descriptors) == 1
-            assert native_access_mode(descriptors[0]) == os.O_RDONLY
+            assert is_read_only_descriptor(descriptors[0])
             assert worker.native_id is not None
             assert Path(f"/proc/self/task/{worker.native_id}").is_dir()
         self.workers.append(worker)
@@ -283,17 +298,25 @@ class ReadObservations:
         assert all(not worker.is_alive() for worker in self.workers)
         if self.native_main is not None:
             assert not held_main_descriptors(self.native_main)
-            assert all(
-                not Path(f"/proc/self/task/{worker.native_id}").exists()
-                for worker in self.workers
+            worker_paths = tuple(
+                Path(f"/proc/self/task/{worker.native_id}") for worker in self.workers
             )
+            cutoff = time.monotonic() + WITNESS_TIMEOUT
+            while any(path.exists() for path in worker_paths):
+                require(
+                    time.monotonic() < cutoff, "the native SQLite worker is still live"
+                )
+                time.sleep(0.001)
 
 
-async def check_schema(database: Database) -> bool:
+async def check_schema(database: Database, require_live: Callable[[], None]) -> bool:
     try:
-        return await sqlite_schema_ready_for_serving(database)
+        ready = await sqlite_schema_ready_for_serving(database)
     finally:
         await database.close_sqlite_serving()
+    if ready:
+        require_live()
+    return ready
 
 
 async def refused_writer(database: Database) -> None:
@@ -399,14 +422,27 @@ def exchange_withdrawal(lifetime_fd: int) -> None:
     assert poll.poll(int(WITNESS_TIMEOUT * 1000)) == [(lifetime_fd, select.POLLHUP)]
 
 
+def assert_native_write_refused(main: Path) -> None:
+    try:
+        descriptor = os.open(main, os.O_WRONLY | os.O_CLOEXEC)
+    except PermissionError:
+        return
+    os.close(descriptor)
+    raise AssertionError(
+        "the checked process could open the protected main for writing"
+    )
+
+
 async def run_protected_case(scope: ProtectedRead, case: WitnessCase) -> None:
+    scope.require_live()
+    assert_native_write_refused(scope.main)
     observation = ReadObservations(scope.binding.main)
     database = Database.guarded_sqlite_reader(scope.main, scope.require_live)
     observation.attach(database)
     await refused_writer(database)
     assert not observation.workers
     expected_ready = case is WitnessCase.SCHEMA
-    assert await check_schema(database) == expected_ready
+    assert await check_schema(database, scope.require_live) == expected_ready
     observation.assert_retired(2)
     if expected_ready:
         withdrawal = Database.guarded_sqlite_reader(scope.main, scope.require_live)
@@ -420,19 +456,23 @@ async def run_protected_case(scope: ProtectedRead, case: WitnessCase) -> None:
 async def run_child(supplied_fd: int, lifetime_fd: int, case: WitnessCase) -> None:
     attempts = NativeAttempts()
     sys.addaudithook(attempts.audit)
+    verified_path: Path | None = None
     try:
         with consume_binding(supplied_fd, lifetime_fd, case) as scope:
+            verified_path = scope.main
             await run_protected_case(scope, case)
-    except (DatabaseClosedError, FileNotFoundError):
-        if case not in {
-            WitnessCase.ABSENT,
-            WitnessCase.FOREIGN,
-            WitnessCase.MISSING_FILE,
-        }:
+    except StartupBindingRejected as error:
+        if error.case is not case:
             raise
-        assert attempts.database_opens == 0
-        assert attempts.socket_binds == 0
-        sys.stdout.write(f"PREBIND REFUSED {case.value} opens=0 binds=0\n")
+        record_refusal(case, attempts)
+    except FileNotFoundError as error:
+        if (
+            case is not WitnessCase.MISSING_FILE
+            or verified_path is None
+            or error.filename != str(verified_path)
+        ):
+            raise
+        record_refusal(case, attempts)
     else:
         assert case in {WitnessCase.SCHEMA, WitnessCase.INEXACT}
         assert attempts.database_opens == (3 if case is WitnessCase.SCHEMA else 2)
@@ -443,6 +483,12 @@ async def run_child(supplied_fd: int, lifetime_fd: int, case: WitnessCase) -> No
         )
     finally:
         os.close(lifetime_fd)
+
+
+def record_refusal(case: WitnessCase, attempts: NativeAttempts) -> None:
+    assert attempts.database_opens == 0
+    assert attempts.socket_binds == 0
+    fixture_message(f"REFUSED {case.value} opens=0 binds=0")
 
 
 def fixture_message(message: str) -> None:
@@ -571,8 +617,8 @@ def prepare_ordinary_main(path: Path, *, inexact: bool) -> bytes:
         assert database.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
         if inexact:
             database.execute(f"DROP INDEX {SQLITE_EVENT_PAGE_INDEX}").close()
-    path.chmod(0o600)
-    os.chown(path, API_UID, API_UID)
+    os.chown(path, 0, API_UID)
+    path.chmod(0o440)
     assert list(path.parent.iterdir()) == [path]
     return path.read_bytes()
 
@@ -680,14 +726,15 @@ def run_launcher(base: Path, outer_namespace: int) -> None:
             str(domain),
         )
         owned.callback(command, "/usr/bin/umount", str(domain))
-        (base / "media" / "mounted").touch(exist_ok=False)
-        end = time.monotonic() + WITNESS_TIMEOUT
-        while not (base / "media" / "checked").exists():
-            require(time.monotonic() < end, "the outside observer did not settle")
-            time.sleep(0.025)
+        fixture_message("PRIVATE_EXT4")
+        readable, _, _ = select.select([sys.stdin.buffer], [], [], WITNESS_TIMEOUT)
+        assert readable
+        assert sys.stdin.buffer.read(1) == b"1"
         for inexact in (False, True):
             witness_bound_image(domain, device, inexact=inexact)
     assert not image.exists()
+    scoped_paths = {str(domain), str(domain / "service" / "api" / "main.db")}
+    assert scoped_paths.isdisjoint(row[4] for row in mount_entries())
     fixture_message("RELEASE bound_mounts=0 devices=0 image=0")
 
 
@@ -720,26 +767,29 @@ def run_owned_guest() -> None:
                 str(mount_namespace()),
             ),
             env=fixture_environment(),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
         ) as launcher:
             try:
-                end = time.monotonic() + WITNESS_TIMEOUT
-                while not (base / "media" / "mounted").exists():
-                    require(
-                        launcher.poll() is None and time.monotonic() < end,
-                        "the guest launcher did not establish its private mount",
-                    )
-                    time.sleep(0.025)
+                assert launcher.stdout is not None
+                readable, _, _ = select.select(
+                    [launcher.stdout], [], [], WITNESS_TIMEOUT
+                )
+                assert readable
+                assert launcher.stdout.readline(128) == b"PREBIND PRIVATE_EXT4\n"
                 assert not list(domain.iterdir())
                 assert (
                     Path(f"/proc/{launcher.pid}/ns/mnt").stat().st_ino
                     != mount_namespace()
                 )
-                (base / "media" / "checked").touch(exist_ok=False)
-                assert launcher.wait(timeout=100) == 0
+                output, _ = launcher.communicate(input=b"1", timeout=100)
+                assert launcher.returncode == 0
+                sys.stdout.write(output.decode("ascii"))
+                sys.stdout.flush()
             finally:
                 if launcher.poll() is None:
-                    (base / "media" / "checked").touch()
+                    assert launcher.stdin is not None
+                    launcher.stdin.close()
                     launcher.wait(timeout=100)
             assert not Path(f"/proc/{launcher.pid}").exists()
             assert not list(domain.iterdir())

@@ -5,6 +5,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from sqlalchemy import Engine, event
 from sqlalchemy.exc import OperationalError
 
 from kora.api.serving import sqlite_schema_ready_for_serving
@@ -55,7 +56,7 @@ async def test_guarded_sqlite_api_prebind_reads_and_retires_native_connections(
     observations.attach(database)
 
     await refused_writer(database)
-    restored_schema = await check_schema(database)
+    restored_schema = await check_schema(database, scope.require_live)
 
     assert restored_schema
     observations.assert_retired(2)
@@ -88,10 +89,10 @@ async def test_guarded_sqlite_api_prebind_refuses_unowned_or_inexact_input(
     withdrawal_observations.attach(withdrawing)
 
     with pytest.raises(DatabaseClosedError, match="withdrawn"):
-        await check_schema(unavailable)
+        await check_schema(unavailable, lost.require_live)
     with pytest.raises(OperationalError, match="unable to open") as refusal:
-        await check_schema(absent)
-    restored_schema = await check_schema(broken)
+        await check_schema(absent, live.require_live)
+    restored_schema = await check_schema(broken, live.require_live)
     await check_withdrawal(withdrawing, live.withdraw, withdrawal_observations)
 
     assert not restored_schema
@@ -101,6 +102,34 @@ async def test_guarded_sqlite_api_prebind_refuses_unowned_or_inexact_input(
     assert set(tmp_path.iterdir()) == {ordinary, inexact}
     assert ordinary.read_bytes() == ordinary_before
     assert inexact.read_bytes() == inexact_before
+
+
+@pytest.mark.asyncio
+async def test_guarded_sqlite_api_prebind_refuses_withdrawal_at_disposal(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    path = tmp_path / "prepared.db"
+    original = ordinary_image(sqlite_template, path)
+    scope = ReadScope()
+    database = Database.guarded_sqlite_reader(path, scope.require_live)
+    observations = ReadObservations()
+    observations.attach(database)
+
+    def withdraw_before_publication(engine: Engine) -> None:
+        scope.withdraw()
+
+    event.listen(
+        database.reader_engine.sync_engine,
+        "engine_disposed",
+        withdraw_before_publication,
+    )
+
+    with pytest.raises(DatabaseClosedError, match="withdrawn"):
+        await check_schema(database, scope.require_live)
+
+    observations.assert_retired(2)
+    assert list(tmp_path.iterdir()) == [path]
+    assert path.read_bytes() == original
 
 
 @pytest.mark.asyncio
