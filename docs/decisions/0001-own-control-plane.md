@@ -102,6 +102,10 @@ The isolated milestone requires the real API, Worker, LocalRuntime supervisor an
 
 Production custody and affected installed guarantees still require their own exact qualification and activation. An isolated result confers no installed authority, recovery after API or boot loss, or permission to bypass a missing native outcome.
 
+## Pi MVP qualification amendment of 2026-11-27
+
+The project owner approved a direct `pi` adapter in MVP under [issue #1930](https://github.com/realkarych/kora/issues/1930#issuecomment-7205065845). Pi qualifies independently on the same local agent, command gate and CLI approval topology, with equivalent lifecycle, policy and adapter evidence. [The Pi execution profile](../../knowledge/specs/pi-execution-profile.md) governs this separate activation. Baseline first-slice readiness still requires the existing Claude and Codex evidence. The walking skeleton, second-slice scope and milestone order above stay in force.
+
 ## Decision
 
 kora keeps its own control plane for the MVP (requirements decision 12): a scheduler that is a stateless loop over the metadata database, an HTTP API, and workers per runtime (ADR-0003).
