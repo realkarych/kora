@@ -136,42 +136,160 @@ Ordinary publication keeps exclusive staging creation.
 
 ## Resource establishment and ownership transfer
 
-Process acquisition records intent before spawning a core-only gated direct child. An invocation child stays in its group; for a detached domain the parent spawn operation establishes the new session/group before the core gate starts. The parent owns the child and its unreaped wait identity in both cases. The gate cannot execute provider code or create descendants until the parent captures final process/start/group/session identity and records acquisition. It cannot detach again after registration. The journal records the nonsecret acquisition ID before spawn; parent crash before concrete identity persistence never proves absence, and an unobservable partial spawn remains unknown. The parent uses a retained child/wait identity, a pidfd where available, or the accepted local ProcessIdentity recheck method with its stated residual race. Registration is the parent's completion of acquire, not an external callback. A gate EOF or timeout exits without launching. Parent close before activation refuses activation and closes the gated process; close racing activation either wins before release or owns/stops the released process and all registered descendants. An acquisition result arriving after closure joins cleanup, never returns a usable lease.
+The parent journals the nonsecret acquisition ID before spawning a core-only gated direct child.
+An invocation child stays in its registered process group.
+For a detached domain, the spawn establishes the session and group before the core gate starts.
+The parent owns both children and their unreaped wait identities.
+Before the gate permits provider code or descendants, the parent captures final process, start, group and session identity and records acquisition.
+Registration completes the parent's acquire operation.
+The child cannot detach again after registration.
+A parent crash before concrete identity is persisted supplies no proof of absence.
+Treat an unobservable partial spawn as unknown.
+The parent observes through a retained child/wait identity, an available pidfd or the accepted local `ProcessIdentity` recheck with its residual race.
 
-All ordinary children remain in the invocation domain. Deliberate independent sessions/process groups use a new parent-managed acquisition, except managed subdomains of an already registered local_runtime_domain, whose complete lifetime belongs to the fixed runtime controller below. The parent retains an unreaped group anchor until the owned group's membership is observed empty, and records/rechecks individual process identities; a numeric PGID, an exited group leader or pytest's status alone cannot prove emptiness. Unreadable/ambiguous observations are unknown, not absence. On Linux, where membership is found by reading every process status, a process whose status reports that it no longer exists (missing at open, or `ESRCH` on an already-open status descriptor) is skipped as a non-member; every other unreadable or malformed status keeps the whole observation unknown, and a matched member that vanishes before it is read is still reported absent.
+Gate EOF or timeout exits before launch.
+A close before activation refuses activation and closes the gated child.
+In a race, close either wins before release or owns and stops the released process and registered descendants.
+A late acquisition result joins cleanup without granting a useful lease.
 
-A listed exited member keeps its domain non-empty. Existing native watches use pidfd hang-up on Linux or NOTE_REAP on macOS. For a listed late-collection member with either per-PID absence or a complete freshly validated exited snapshot without usable retained native readiness, a single observation pass may internally distinguish waitability from terminal refusal without changing its public result. Only a waitable collection case may use timed re-observation, at intervals of at least 100 ms after the preceding observation completes and within the original absolute deadline. Scope or identity mismatch, unreadable observation, capacity refusal and unexplained native-anchor failure refuse promptly. Ordinary validated live watches retain native waiting. Explicit disposal wakes settlement and returns unknown; an elapsed absolute deadline retains deadline-error priority. Only affirmative absence and the existing empty-domain confirmation establish settlement.
+Ordinary children stay in the invocation domain.
+A deliberate independent session or group needs a new parent acquisition, except for the managed subdomains of a registered `local_runtime_domain` under its fixed controller.
+The parent retains an unreaped group anchor until affirmative empty-domain observation and records and rechecks individual process identities.
+A numeric PGID, exited leader or pytest status alone establishes no emptiness.
+Unreadable or ambiguous observations are unknown.
+Linux enumerates all process statuses to determine group membership.
+A status missing when opened or reporting `ESRCH` on the open descriptor is skipped as a non-member.
+Other unreadable or malformed statuses keep the observation unknown.
+A matched member that vanishes before its status is read is reported absent.
+The cooperative contract forbids unregistered movement from a domain and offers no hostile-process containment.
 
-On Linux this needs a kernel whose pidfd reports the hang-up after the reap; otherwise such a close stays unknown at its deadline. The supported cooperative contract forbids an unregistered move out of a domain; this is not hostile-process containment.
+A listed exited member keeps its domain nonempty.
+Native watches use pidfd hang-up on Linux and `NOTE_REAP` on macOS.
+Linux requires a kernel that reports the hang-up after the reap.
+Otherwise cleanup stays unknown at the deadline.
+For a listed late-collection member, per-PID absence or a fresh, completely validated exited snapshot without usable retained readiness allows the same observation pass to classify waitability internally once terminal failures are excluded.
+The public observation result remains unchanged.
+Only waitable collection permits timed re-observation, at least 100 ms after the previous observation completes and inside the same absolute deadline.
+Scope or identity mismatch, unreadable observation, capacity refusal and unexplained native-anchor failure refuse promptly.
+Ordinary validated live watches use native waiting.
+Explicit disposal wakes settlement and returns unknown.
+An elapsed original deadline takes priority with the deadline error.
+Only affirmative absence with the existing empty-domain confirmation establishes settlement.
 
-A direct child's exit notification is not proof that its parent can collect it. On macOS, `NOTE_EXIT` can be observed before the child is a zombie, and the ordinary identity read can report that same child absent while `waitpid` with `WNOHANG` still returns zero. `GatedProcess.settle` for a Darwin direct child arms one shared non-consuming child-change watch before it probes, and it succeeds only when a separate `proc_pidinfo(PROC_PIDTBSDINFO)` read with a nonzero argument reports that the retained child is a zombie and a fresh domain observation is settled. The probe checks the current parent, pid, start time and process group. A child that is not yet a zombie may wait only when the fresh domain observation is live or settled. A zombie child still waits while that domain remains live or an existing member watch can still change. Unknown, mismatched, incomplete or failed probe and watch results, an unknown anchor, and a domain observation with nothing left to wait for all refuse. A watch completion is only a hint to repeat those checks. Waiting stays inside the caller's original deadline. Linux direct children keep the existing non-consuming `waitid` confirmation and do not attach this extra watch. `release` remains the only operation that collects the child, and it still requires capture EOF; a zero `waitpid` result keeps ownership for the existing cleanup retry. An elapsed deadline keeps priority over both success and a concurrent release. Checks around the probe do not interrupt the call or create a new kernel-latency guarantee.
+For a Darwin direct child, `NOTE_EXIT` can precede a zombie and an ordinary identity read can report absence while `waitpid(WNOHANG)` still returns zero.
+`GatedProcess.settle` arms one shared non-consuming change watch before probing.
+Success requires a separate `proc_pidinfo(PROC_PIDTBSDINFO)` read with a nonzero argument confirming that the retained child is a zombie, plus a fresh settled domain observation.
+The probe checks parent, PID, start time and process group.
+A child that has yet to become a zombie can wait only with a freshly validated live or settled domain.
+A zombie still waits while the domain is live or a member watch can still change.
+Unknown anchors, unknown, mismatched, incomplete or failed probe/watch facts, and a domain with nothing left to wait for refuse.
+Watch completion only requests a new check within the original deadline.
+Linux direct children use non-consuming `waitid` confirmation without the Darwin watch.
+Only `release` collects a child, after capture EOF.
+A zero `waitpid` result preserves ownership for the existing cleanup retry.
+An elapsed deadline takes priority over success and concurrent release.
+Checks around the probe leave the call non-interrupting and establish no new kernel-latency bound.
 
-A local service launched by the command is owned and must use the process-domain operation. A pre-existing service may be borrowed explicitly; all acquired local clients are still closed, and reports distinguish borrowed service continuation from owned-resource quiescence. A command-created daemon/container cannot be labeled borrowed. Owned containers and non-local resource controllers are refused until their protocol-specific typed controller and installed lifecycle tests activate with the Docker/independent runtime implementation; there is no generic arbitrary cleanup callback or command. Pending future controllers do not deactivate any current common/secrets/local-process lifetime case.
+A command-created local service must use the parent-owned process-domain operation.
+A pre-existing service can be borrowed explicitly.
+Close every acquired local client and report borrowed service continuation separately from owned-resource quiescence.
+A command-created daemon or container cannot be borrowed.
+Owned containers and non-local resources are refused until their typed controllers and installed lifecycle tests activate with the Docker or independent runtime.
+There is no generic cleanup callback or command.
+Existing common, secrets and local-process lifetime cases remain required.
 
-Temporary trees are created under a parent-owned private root (0700 directories, 0600 records). Creation/removal is descriptor-relative and no-follow, with identity/owner validation; a substituted path, unknown identity or foreign tree is unresolved and never recursively deleted by name. Cleanup keeps trees while any acquired or still-pending effect may use them. Pipes are continuously drained into bounded discard/content-free result channels, then closed after writers settle. Process-local task/fd/connection settlement is observed within a live core-owned execution context for cooperative cleanup and by confirmed process exit for fallback; a callback boolean never establishes it. Successful command completion requires both, as applicable, plus empty domains and temporary-state deletion.
+The parent creates and removes temporary trees under a private root with 0700 directories and 0600 records. Both operations are descriptor-relative and no-follow with exact identity and owner validation.
+Substitution, unknown identity and a foreign tree stay unresolved without recursive removal by name.
+Keep a tree while any earlier or pending effect can use it.
+Pipes drain continuously into bounded discard or content-free result channels and close after writers settle.
+Observe task, descriptor and connection settlement in the live core-owned context during cooperative cleanup and by confirmed process exit for fallback.
+A callback result alone supplies no settlement.
+Successful command completion requires the applicable observations, empty domains and temporary-state removal.
 
 ## State transitions and bounded settlement
 
-The command parent must stay able to fence, escalate, return unknown and actually exit if journal/filesystem I/O stalls. Potentially blocking durable writes, sync and tree operations run in bounded owned helper processes, not uncancellable executor threads whose shutdown can hold the parent. A helper and its earlier effect remain owned until observed settlement; an unkillable/stalled helper yields unknown with retained prior intent, not a clean exit report. Bootstrap record failure aborts before external fixture/resource acquisition. No retry, logger shutdown or helper join can extend the absolute close deadline. The implementation includes a real stalled-journal/filesystem case demonstrating parent deadline progress, escalation and actual parent exit, plus later helper/effect recovery; ENOSPC alone is insufficient.
+The parent must be able to fence, escalate, return unknown and actually exit through journal or filesystem stalls.
+Bounded owned helper processes perform potentially blocking durable writes, sync and tree operations.
+Uncancellable executor shutdown must not hold the parent.
+The helper and its earlier effect remain owned until observed settlement.
+A stalled or unkillable helper leaves unknown with retained intent.
+Bootstrap record failure refuses before external fixture or resource acquisition.
+A retry, logger shutdown or helper join cannot extend the absolute close deadline.
+Real stalled-I/O evidence must show deadline progress, escalation, actual parent exit and later recovery of the helper and effect.
+An ENOSPC case alone is insufficient.
 
-States are `reserved`, `acquiring`, `gated`, `active`, `closing`, `closed`, `unknown`. `unknown` is a retained unresolved state within irreversible closure, not permission to reopen. State revisions only increase.
+States are `reserved`, `acquiring`, `gated`, `active`, `closing`, `closed` and `unknown`.
+Revisions only increase.
+Unknown retains unresolved ownership within irreversible closure.
 
-- `reserve` precedes `acquiring`. Reservation cancellation before dispatch closes only when the parent proves no operation was dispatched. It retains the terminal token until the invocation's control channels and all earlier operations have settled.
-- `acquiring` precedes any effect. Partial failure records all acquired handles and closes them; no error unwinds ownership. Lost acquire/register/ack replies are reconciled by exact operation identity and parent observation. The same identity cannot bind a second process/tree.
-- `gated` has a concrete parent-owned identity and cannot run independent provider work. `acknowledge` under the gate makes it `active`; closure instead makes it `closing`. Delayed requests under the closed token cannot launch anything.
-- Only short ledger/activation transitions serialize. Spawn, readiness, observations, I/O and grace waits occur outside locks; close fences immediately despite a stalled acquisition. Existing runtime registry-lock and stop-path rules remain in force.
-- `close` seals the complete resource subtree before cooperative adapter cleanup. Fixed core cleanup controllers may open bounded tracked control connections solely to stop/observe existing resources; this is cleanup work under the same close budget, never reopened execution/acquisition authority. It includes acquisition and cleanup operations already in flight. No older operation can outlive `closed`, create a new effect or reopen admission. Cleanup is idempotent and concurrent close calls join one operation.
-- Core invokes `PreparedConformance.cleanup(exact_instance_or_none)` exactly once after successful prepare; a preparation failure has no prepared cleanup object and still receives full registry cleanup. Bound methods/resources created during construction and exercise remain under the same authority.
-- Parent cancellation, child EOF/crash and setup/test errors initiate the same close path. Cooperative cleanup receives its deadline; then TERM and verified KILL escalation apply. The parent keeps its own teardown task and ignores subsequent cancellation requests as teardown cancellation, while retaining the original cancellation result.
-- `closed` requires settled acquisition/cleanup operations, stopped and reaped direct children, affirmative empty owned domains, released task/connection/fd/pipe scopes and removed owned temporary trees. A successful runtime receipt alone does not cover a still-live supervisor.
-- At a deadline, unavailable observations, permission failure, unsettled spawn, identity mismatch or deletion failure yield `unknown` and a nonzero command result. They retain a bounded actionable private journal, exact identities and exclusive roots. The initial failure/cancellation is not overwritten by cleanup failure. Cleanup evidence is released only after closure; observations and pending work never expire into success.
-- Parent SIGKILL/host crash do not promise immediate cleanup. Journal recovery may resume only after confirming the recorded parent's identity is gone. Missing/corrupt journal or unreadable identity is unknown and requires operator handling; it does not authorize a speculative kill or clean result.
+- Reserve before acquiring.
+  Cancellation before dispatch closes a reservation only with proof of no dispatch.
+  Retain the terminal token until invocation channels and earlier operations settle.
+- Record acquiring before any effect.
+  Partial failure records every acquired handle and closes it.
+  Lost acquire, register or acknowledge replies reconcile by exact operation identity and parent observation.
+  One identity cannot bind a second process or tree.
+- A gated resource has concrete parent-owned identity and cannot run independent provider work.
+  Acknowledge activates under the gate.
+  Close moves to closing, and delayed requests under that token cannot launch.
+- Serialize only short ledger and activation transitions.
+  Spawn, readiness, observation, I/O and grace waits occur outside locks.
+  Close fences immediately despite a stalled acquisition, preserving the existing runtime locks and stop path.
+- Close seals the subtree before cooperative cleanup and covers all in-flight acquisition and cleanup.
+  Fixed core controllers may open bounded tracked control connections solely to stop and observe under the original close budget.
+  Older operations cannot outlive closed, create another effect or reopen admission.
+  Replays and concurrent closes join the same idempotent cleanup.
+- After successful preparation call `PreparedConformance.cleanup(exact_instance_or_none)` once.
+  Failed preparation still receives full registry cleanup without a prepared callback.
+  Bound methods and resources created during construction and exercise stay under the same lifetime authority.
+- Parent cancellation, child EOF/crash and setup or test error share closure with bounded cooperation, TERM and verified KILL.
+  Parent-owned teardown survives later cancellations and retains the original cancelled result.
+- Closed requires settled acquisition and cleanup, reaped direct children, affirmative empty owned domains, released task, connection, descriptor and pipe scopes, and removed owned trees.
+  A runtime receipt leaves any live supervisor unresolved.
+- Unavailable observations, permission errors, unsettled spawn, identity mismatch or deletion failure at the deadline yield unknown and a nonzero command result.
+  Retain the bounded actionable private journal, exact identities and exclusive roots.
+  Preserve the original failure or cancellation separately.
+  Release evidence only after closure.
+  Time alone cannot turn pending work into success.
+- Parent SIGKILL or host crash leaves cleanup for recovery.
+  Resume only after confirming that the recorded parent's identity has exited.
+  Missing or corrupt journals or unreadable identity yield unknown and require operator handling.
+  They authorize no speculative kill or successful report.
 
-Default bounds: at most 256 resource records and 16 outstanding operations per invocation; 64 KiB control frames and 1 MiB aggregate private control/recovery metadata (execution input snapshots are separately bounded to 1 MiB and never retained in recovery); 32 unresolved public samples plus totals; 30 s acquisition, 5 s cooperative cleanup, 2 s TERM, 5 s KILL/observation, 2 s final pipe drain. These are product work bounds, not measured performance budgets. Excess is refused before acquisition; unresolved records are never evicted. Deadlines form one absolute close budget and are not restarted per resource or retry. The private conformance state root is `$XDG_STATE_HOME/kora/conformance` (default `~/.local/state/kora/conformance`) on Linux and `~/Library/Application Support/kora/conformance` on macOS, opened/verified with the existing local-runtime owner/no-follow discipline. A root-level admission lock bounds live or unresolved invocation journals to 32; saturation refuses a new run before effects and never evicts evidence. Admission scans only this fixed private directory and refuses after 33 entries; it does not discover cwd/config/plugins. Closed invocations discard their journal after all operation channels and senders are closed, so IDs are never reusable. Cleanup selects an explicit InvocationId in this root. Existing CI's ten-minute cap is unchanged.
+| Default bound | Limit |
+| --- | --- |
+| Invocation records and outstanding operations | 256 records and 16 outstanding operations. |
+| Private transport and recovery | 64 KiB control frames and one MiB aggregate private control/recovery metadata. Separate execution input snapshots are bounded to one MiB and stay out of recovery. |
+| Public unresolved evidence | Up to 32 samples plus totals. |
+| Phase bounds | 30 s acquisition, 5 s cooperative, 2 s TERM, 5 s KILL/observation and 2 s final pipe drain. |
+| State-root admission | At most 32 live or unresolved invocation journals under a root-level lock. Scan only the fixed private root and refuse after 33 entries. |
 
-Preparation, configured exercises and cleanup need compatible async ownership. #215 must run their async work on one core-owned loop for the invocation, by factoring case assertions into shared async checks. Direct-injection tests retain their public fixtures/case interface and call those checks through their synchronous entry; installed command cases call the same checks on the invocation loop with the exact selected object. Current secrets tests call provider methods directly via fresh asyncio.run, so driver wrappers alone cannot route them. No provider proxy, patching or duplicate assertion implementation is permitted. Pending tasks have explicit owners and are settled or terminated with their owning process; returning from an `asyncio.run` call is not an independent-domain cleanup proof.
+These are product work bounds and preserve the existing ten-minute CI cap.
+Refuse excess before acquisition and retain unresolved records.
+Every resource and retry uses the original absolute close budget.
 
-Healthy idle IPC does not consume an acquisition interval or initiate resource closure. Each reader owns one cancellable readiness registration without an idle timer; peer EOF and local close still wake it. After readability, one acquisition deadline covers the complete frame/record and admitted request input; partial prefixes, chunks and metadata do not restart it. Outstanding ordinary and close exchanges retain their original deadlines while the reader waits, and a reply received at or after its original deadline is refused.
+On Linux open `$XDG_STATE_HOME/kora/conformance`, defaulting to `~/.local/state/kora/conformance`.
+On macOS open `~/Library/Application Support/kora/conformance`.
+Use the local-runtime owner and no-follow verification discipline.
+Admission reads no cwd, configuration or plugins and saturation never evicts evidence.
+After closure, remove the journal once all operation channels and senders are closed.
+IDs remain non-reusable.
+Cleanup selects an explicit `InvocationId` in this root.
+
+One core-owned invocation loop runs preparation, configured exercise and cleanup through shared async checks.
+Direct injection retains its public fixtures and cases and calls the same checks from its synchronous entry.
+The installed cases supply the exact selected object.
+Current secrets cases call the provider directly under fresh `asyncio.run`, so driver wrappers alone cannot route them.
+Provider proxies, patching and duplicate assertions are forbidden.
+Settle pending tasks under their owner or terminate the owning process.
+Return from `asyncio.run` supplies no independent-domain closure proof.
+
+Healthy idle IPC uses one cancellable readiness registration per reader and no acquisition timer or closure trigger.
+Peer EOF and local close wake the reader.
+After readiness one acquisition deadline covers the complete frame or record and admitted request input.
+Prefixes, chunks and metadata cannot reset it.
+Ordinary and close operations retain their original exchange deadlines during the wait.
+A reply at or after its original deadline refuses.
 
 ## Local-runtime seam
 
