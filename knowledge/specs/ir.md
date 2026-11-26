@@ -8,12 +8,11 @@ The committed schema is generated from the real `GraphDocument` model by `kora.i
 
 ## 1. Design rules
 
-1. **The IR is data, not code.** The scheduler never imports user Python; everything it needs is materialised in the file, including resolved per-node configuration (FR-3.2) and expressions for branches and predicates (section 7).
-2. **Stable string ids and named references**, never positional edges (FR-1.5). Node ids are unique within a graph document and match `^[a-z][a-z0-9_]{0,63}(?![\s\S])`.
-3. **Three concerns in three sections** (FR-1.3): `graph` (topology and node definitions), `runtime` (graph-level runtime and policy configuration), `secrets` (references only, never values). Compiler provenance (preset and defaults snapshots) lives under `meta`, outside all three.
-4. **Lenient at the root, strict inside typed objects** (FR-1.5): unknown root keys are ignored with a warning; unknown keys inside node, retry, limits and config objects are errors. `x-` prefixed keys are allowed on IR record objects, including nested records, for tool metadata. Named maps (such as nodes, type contracts and secret aliases) still validate their entry names and values; embedded JSON Schemas and user payloads retain their own rules.
-5. **Deterministic output** (NFR-6.2): keys in schema order, lists in source order, no timestamps.
-6. **Two versions, kept apart.** `ir_version` at the root is the format version under semver (NFR-6.3: minor bumps add optional fields, major bumps may remove or re-type fields); `graph.version` is the author's own version string for the graph, informational, distinct from the control plane's deployed version numbers.
+- The scheduler consumes materialised node configuration (FR-3.2) and the expressions in [section 7](#7-expressions-and-templates). Authored Python runs at compilation.
+- Edges use stable string IDs and named references (FR-1.5). Node IDs match `^[a-z][a-z0-9_]{0,63}(?![\s\S])` and are unique within the root node map or one stored body's node map. Independent maps can reuse an ID.
+- `graph` holds topology and node definitions, `runtime` holds graph-level policy and configuration, and `secrets` holds references only (FR-1.3). Compiler provenance belongs to `meta`.
+- Compilation emits deterministic output with schema-ordered keys, source-ordered lists and no generated timestamps (NFR-6.2).
+- `ir_version` follows format semver (NFR-6.3). Minor revisions add optional fields, and major revisions can remove or retype fields. `graph.version` is the author's informational version, distinct from control-plane version numbers.
 
 ## 2. Document layout
 
@@ -56,13 +55,27 @@ secrets:                      # section (c): references only
   aliases: { SERVICE_TOKEN: "secret://env/SERVICE_TOKEN" }   # every reference must fall inside the prefixes the namespace is allowed (IR007)
 ```
 
-`meta.presets` and `meta.defaults` are **informational snapshots**: the scheduler reads only each node's resolved `config` (FR-3.2); they let a reviewer diff a preset change and a UI show provenance.
+`GraphDocument` selects eight node envelopes by `kind`.
+`GraphBody` and `Subgraph` carry node maps, and `Graph` owns the stored body registry.
+Structural parsing preserves omissions of optional fields and inserts no role outputs, predicates, overlap defaults or scheduling settings.
+Timer and branch nodes can carry authored output declarations at this layer, while semantic validation refuses nonempty declarations before execution.
 
-`GraphDocument` is the structural root, with eight kind-specific envelopes behind the discriminated `Node` union. `GraphBody` and `Subgraph` carry stored nodes; `Graph` owns the shared body registry. These records preserve authored omissions and never insert role outputs, predicates, overlap defaults or scheduling settings. Timer and branch output declarations remain structurally optional and may be authored; semantic validation must refuse nonempty declarations before execution.
+The parser discards unknown root keys without visiting their values.
+`inspect_ir_root` counts them before nested validation and excludes bounded root `x-` extensions.
+A successful parse retains only the private `unknown_root_key_count`, outside the schema and export.
+The shared validator must warn on a nonzero count (FR-1.5).
+It owns the public diagnostic codes and collection bounds.
+Typed records refuse unknown fields, with bounded `x-` extensions available on root and nested records.
+Named maps validate every entry, and embedded schemas and payloads follow their own rules.
 
-Unknown root keys are discarded without traversing their values. `inspect_ir_root` counts them before nested validation, and a successful parse retains only `unknown_root_key_count` as non-wire metadata, excluded from schema and canonical export. Root `x-` metadata follows the existing bounded extension contract and is not counted. The Python spelling `schema_` is an ignored root key; only wire `$schema` binds that field. `$schema` retains its raw strict string with `format: uri` as an annotation, without normalization, resolver authority or a claim of URI admission. Public warnings, diagnostic codes and bounded collection remain with the future shared validator.
+Only wire `$schema` binds the optional schema field.
+The parser treats Python spelling `schema_` as an unknown root key.
+The field preserves its strict string as authored.
+`format: uri` is a schema annotation and supplies no normalization, URI admission or resolver authority.
 
-`Provenance` retains typed compiler, source digest and raw partial preset/default snapshots plus arbitrary detached JSON members. It is informational data, including `x-` members, and supplies no execution authority. `export_ir` and `render_ir_json` accept validated IR records and the explicit standalone `Provenance` root. They exclude private parse metadata and preserve wire aliases, authored field sets, map order and list order through iterative canonical export. Arbitrary Pydantic models and sequence roots are not supported.
+`Provenance` keeps the typed compiler and source digest, raw partial preset and default snapshots, and arbitrary detached JSON members including `x-` names.
+A reviewer can compare preset snapshots and a UI can show provenance.
+For execution, the scheduler reads the node's resolved `config` and takes no input from `meta`.
 
 ### Graph parameter schema omission
 
@@ -128,11 +141,19 @@ Derived `List[AgentSession]`, recursively nested lists containing it and schedul
 
 ### Structural declarations
 
-The declaration records preserve authored fields without resolving installed resources or executing schemas. `InputRef` requires only `type`; its producer, output, path and optional flag remain absent when unauthored. `OutputDecl.schema` and custom contract schemas are open JSON objects, including nested boolean schemas. A custom contract requires the literal draft 2020-12 `$schema`, a required nullable `parent`, and nonempty behavior identity strings. Built-in revision and behavior availability, schema validity, recursive type balance and assignability remain semantic checks.
+`InputRef` requires `type` and preserves omission of the producer, output, path and optional flag.
+`OutputDecl.schema` and custom contract schemas require JSON objects and permit nested boolean schemas.
+A custom contract requires the literal draft 2020-12 `$schema`, a required nullable `parent` and nonempty behavior identities.
+Built-in revision and behavior availability, schema validity, recursive type balance and assignability belong to semantic validation.
 
-`IrSourceLocation` preserves the wire `file` string, positive JSON integer `line` and `x-` metadata. It is distinct from the existing safe diagnostic `SourceLocation`; parsing opens no path and grants no diagnostic authority. Trusted public conversion remains with the shared validator.
+`IrSourceLocation` preserves the authored `file` string, positive JSON integer `line` and `x-` metadata without opening a path.
+The shared validator owns conversion to safe diagnostic `SourceLocation`.
 
-The version, type-contract name, retention period, secret reference and artifact-type patterns match the whole authored string, including refusal of trailing newlines. Named maps apply their entry contracts to every key: secret aliases use environment-name keys, approval-channel names are unrestricted strings, and `x-` names in these maps are ordinary entries. Runtime records preserve missing concurrency, retention and retry settings. `provider_retry` accepts ordinary record extensions and does not insert `max_wait`; first-slice disabled-policy normalization and provider support remain consumer responsibilities.
+Patterns for versions, type-contract names, retention periods, secret references and artifact types cover the entire string and refuse trailing newlines.
+Secret alias names follow environment-name rules, and approval-channel names are unrestricted strings.
+Named maps treat `x-` names as ordinary entries.
+Runtime parsing preserves omitted concurrency, retention and retry settings.
+`provider_retry` accepts record extensions and preserves omitted `max_wait` for the consumer to interpret under first-slice disabled-policy normalization and provider support rules.
 
 ## 3. Nodes
 
@@ -235,17 +256,37 @@ The branch fields else and else_reason and the fan-out fields max_parallel and s
 
 ### Structural configuration data and canonical export
 
-The configuration records preserve authored omissions with `MISSING`. Optional fields refuse explicit null, except `human_input.default_value`, whose JSON null is distinct from omission. Empty strings, maps and lists and explicit false values retain their meanings. Structural parsing does not resolve providers, execute CEL/templates, insert execution defaults, admit first-slice capabilities or schedule waits. Pure models and export helpers acquire no operational resources and emit no diagnostics; public error mapping remains with the shared validator under [diagnostics.md](diagnostics.md).
+Configuration records preserve omissions with `MISSING` and retain authored empty strings, maps, lists and false values.
+Optional fields refuse explicit null except `human_input.default_value`, where null is an authored JSON value.
+Parsing checks structure only.
+Provider resolution, CEL and template execution, default insertion, capability admission and wait scheduling belong to consumers.
+Structural models and export helpers acquire no operational resources and emit no diagnostics.
+The shared validator owns [public error mapping](diagnostics.md).
 
-`agent.hooks`, `agent.output_schema`, `human_input.form` and sensor `config` are open object-root JSON data. `human_input.default_value` accepts any finite JSON value. Nested boolean schemas and arbitrary schema keywords remain data; boolean roots for object fields are refused. These fields use the shared iterative IR-data validator rather than the bounded protocol JSON parser. There is no added field depth, byte or integer-size cap. API ingress retains its own whole-request bound, schema/provider consumers retain their admission contracts, and record `x-` extensions retain their existing bounds. An `x-` key inside open data is ordinary data and grants no authority or semantic-validation exception.
+`agent.hooks`, `agent.output_schema`, `human_input.form` and sensor `config` accept open JSON objects, including nested boolean schemas and arbitrary schema keywords.
+`human_input.default_value` accepts any finite JSON value.
+An `x-` key in open data is ordinary data and carries no additional authority.
+Open fields use iterative IR-data validation without additional field depth, byte or integer-size limits.
+API ingress, schema and provider consumers, and record extensions retain their own bounds.
 
-Open fields are detached from caller-owned dictionaries/lists. Non-string keys, non-finite numbers, runtime objects, cycles and repeated dictionary/list identities anywhere inside one open field are refused with content-free errors. Mutable identity shared across separate open fields is allowed; immutable scalar sharing and reuse of validated configuration instances elsewhere are allowed. Alias refusal prevents folded input graphs from expanding while copying and introduces no aggregate field limit.
+Validation detaches open JSON from caller-owned containers.
+It refuses non-string keys, non-finite numbers, runtime objects, cycles and repeated dictionary or list identities within one open field with content-free errors.
+This prevents folded input graphs from expanding during copying.
+Separate fields can share a mutable input identity, and callers can share immutable scalars and reuse validated configuration instances.
+The check imposes no aggregate field limit.
 
-`export_ir(root: IrRecord)` returns a detached JSON object and `render_ir_json(root: IrRecord)` renders its compact JSON representation. These are the canonical export boundary for the implemented record hierarchy. They preserve wire aliases, authored field sets, list/map order, exact integers, finite float values and flattened `x-` extensions. Unauthored defaults, `MISSING` and private metadata do not appear. They preflight mutated open data using the same rules. The writer uses deterministic `ensure_ascii=True` string escaping, lowercase JSON literals, established finite-float encoding, unquoted integer encoding, no insignificant whitespace and no trailing newline. Non-ASCII, astral characters, controls and materialized lone surrogates are escaped without a new Unicode admission rule.
+`export_ir` returns a detached JSON object from a validated `IrRecord` or standalone `Provenance`.
+`render_ir_json` takes the same roots and renders the detached object as compact JSON.
+Both traverse iteratively and recheck mutated open data under the same rules.
+They preserve wire aliases, authored field sets, map and list order, exact integers, finite floats and flattened record extensions.
+Unauthored defaults, `MISSING` and private metadata stay out of the export.
+The writer emits ASCII-escaped strings, including astral characters, controls and materialised lone surrogates, lowercase JSON literals, unquoted integers and the established finite-float representation.
+The JSON text has no insignificant whitespace or trailing newline.
 
-These helpers accept materialized data; they do not replace JSON/YAML text decoders and make no arbitrary-depth decoding claim for `json.loads`, Pydantic JSON parsing or YAML loaders. The IR representation boundary must preserve YAML timestamp tokens as raw strings. No production YAML loader is implemented here.
-
-[Dated implementation and measurement evidence](../research/ir-document-models-2026-10-23.md) distinguishes model, checker and decoder coverage from pending consumers.
+These helpers take materialised data and refuse arbitrary Pydantic or sequence roots.
+Text decoders own their own bounds.
+A YAML decoder must preserve timestamp tokens as raw strings.
+[Dated implementation and measurement evidence](../research/ir-document-models-2026-10-23.md) records the model, checker and decoder coverage, including production YAML loader status.
 
 ### 4.1 Agent node config (resolved, FR-3.1)
 
