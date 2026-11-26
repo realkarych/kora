@@ -11,6 +11,8 @@
 - First-slice amendment dated 2026-10-23: dry-run import activation is deferred under #140; scope and plan approved, wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 - Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/issues/1360#issuecomment-7082919105) on 2026-11-22.
 
+The project owner [reviewed and approved the #1918 wording about the early compiler's installed-wheel evidence line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
+
 ## Context
 
 [ADR-0013](0013-implementation-stack.md) ships one distribution, `kora`, with a `src/` layout and extras. Its processes run in different places:
@@ -50,7 +52,7 @@ Fake modules (amended 2026-10-21, [issue #136](https://github.com/realkarych/kor
 
 **Third-party checks.**
 
-- Only `cel_eval` may import the CEL binding `cel`, and this binds the composition roots too, so `cel`, `ir` and `dsl` work without the `kora[cel]` extra. A root may still import `cel_eval` or `api`, so that the CLI entry point starts without the extra depends on `kora.__main__` deferring those imports; the CLI work item adds the pending contract `test_cli_compile_runs_without_cel_extra`, which runs `kora compile` in an environment without `kora[cel]`.
+- Only `cel_eval` may import the CEL binding `cel`, and this binds the composition roots too, so `cel`, `ir` and `dsl` work without the `kora[cel]` extra. A root may still import `cel_eval` or `api`, so that the CLI entry point starts without the extra depends on `kora.__main__` deferring those imports; [#1918](https://github.com/realkarych/kora/issues/1918) activates `test_cli_compile_runs_without_cel_extra` for the early compiler, which runs `kora compile` against the base wheel without `kora[cel]`.
 - `fastapi`, `starlette`, `uvicorn`, `sqlalchemy`, `alembic`, `asyncpg` and `aiosqlite` may not be imported by `observability`, `cel`, `ir`, `protocols`, `models`, `client`, `executor`, `runner` or `worker`. `mcp` is left out until the MCP SDK's HTTP stack is settled.
 - A call to `importlib.import_module`, `__import__`, `pkgutil.resolve_name` or `runpy.run_module` whose module argument is a string literal naming a kora module is refused outside the provider-loading module `kora.protocols.loading`. The check follows aliases of these functions and of their modules, `builtins.__import__`, the `name` keyword and a relative literal with a literal package. Dynamic edges do not count towards the invariant, which is about static imports.
 

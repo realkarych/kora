@@ -24,7 +24,9 @@ The critique proposed, for MVP, an optional stable target key with namespace sco
 
 ## First-slice amendment of 2026-10-23
 
-The complete MCP inventory is sixteen after the distinct compiled-IR `kora_validate` operation in [ADR-0002](0002-ai-first-api-and-thin-clients.md). `kora_targets` keeps its existing meaning and adds no extra tool. Targets and their tool are outside the first slice; that installation exposes ten tools as [first-slice.md](../../knowledge/specs/first-slice.md) specifies.
+The complete MCP inventory is sixteen after the distinct compiled-IR `kora_validate` operation in [ADR-0002](0002-ai-first-api-and-thin-clients.md). `kora_targets` keeps its existing meaning and adds no extra tool. Targets and their tool are outside the first slice. The [first-slice parity contract](../../knowledge/specs/first-slice.md#included-operation-and-parity-contract) defines the active tool inventory.
+
+The project owner [reviewed and approved the #1918 change to the first-slice parity reference line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
 
 ## Decision
 

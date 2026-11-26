@@ -66,16 +66,19 @@ class DeploymentSelection:
 
 
 @dataclass(frozen=True, slots=True)
-class DeploymentCheckResult:
+class AuthoredCheckResult:
     diagnostics: DiagnosticCollection
     complete: bool
 
+
+@dataclass(frozen=True, slots=True)
+class DeploymentCheckResult(AuthoredCheckResult):
     @property
     def deployable(self) -> bool:
         return self.complete and self.diagnostics.valid
 
 
-def _pass_outcomes(
+def _authored_outcomes(
     document: GraphDocument,
 ) -> tuple[tuple[DiagnosticCollection, bool], ...]:
     links = validate_graph_links(document)
@@ -244,6 +247,18 @@ def merge_diagnostics(
     )
 
 
+def _check_outcomes(
+    outcomes: tuple[tuple[DiagnosticCollection, bool], ...],
+) -> AuthoredCheckResult:
+    diagnostics = merge_diagnostics(tuple(collection for collection, _ in outcomes))
+    complete = not diagnostics.valid or all(established for _, established in outcomes)
+    return AuthoredCheckResult(diagnostics, complete)
+
+
+def check_authored_document(document: GraphDocument) -> AuthoredCheckResult:
+    return _check_outcomes(_authored_outcomes(document))
+
+
 def check_deployment_document(
     document: GraphDocument,
     selection: DeploymentSelection,
@@ -251,20 +266,20 @@ def check_deployment_document(
 ) -> DeploymentCheckResult:
     runtimes = {LOCAL_RUNTIME: selection.runtime}
     outcomes = (
-        *_pass_outcomes(document),
+        *_authored_outcomes(document),
         (installation_findings(document, selection), True),
         (approval_installation_findings(document), True),
         (agent_secret_findings(document, runtimes, policy), True),
         (network_policy_findings(document, runtimes, policy), True),
     )
-    diagnostics = merge_diagnostics(tuple(collection for collection, _ in outcomes))
-    complete = not diagnostics.valid or all(established for _, established in outcomes)
+    checked = _check_outcomes(outcomes)
+    diagnostics = checked.diagnostics
     observed = current_diagnostics()
     if observed is not None:
         observed.logger(COMPONENT).emit(
             COMPLETED,
-            complete=complete,
+            complete=checked.complete,
             errors=len(diagnostics.errors) + diagnostics.errors_omitted,
             warnings=len(diagnostics.warnings) + diagnostics.warnings_omitted,
         )
-    return DeploymentCheckResult(diagnostics, complete)
+    return DeploymentCheckResult(diagnostics, checked.complete)
