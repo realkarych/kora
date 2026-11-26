@@ -1121,7 +1121,7 @@ For example, four `map` calls each joining sixteen copies of a 2 KiB element fro
 
 For runtime consumers, evaluation runs inside the API and Scheduler's existing short transactions. [Scheduler](scheduler.md)
 One process-owned long-lived daemon thread with at least 1 MiB of stack serves all in-process standalone instances.
-Startup sets the thread stack size, creates the thread and restores the previous setting, so no other thread is affected.
+During startup, the evaluator holds its own lock while setting the process-wide default stack size, starting the worker and restoring the previous default.
 The worker starts in an empty context and the process owner loads the binding without inheriting request context.
 It runs one job at a time.
 Transaction evaluations take precedence over queued server compiles and probes.
@@ -1239,6 +1239,8 @@ The checker, required projections and server-side pattern validation exclude tho
 
 #### Record
 
+The evaluator's internal error record has these fields.
+
 | Field | Content |
 |---|---|
 | `kind` | An error kind above |
@@ -1249,7 +1251,7 @@ The checker, required projections and server-side pattern validation exclude tho
 | `at` | Record time from the injected clock |
 | `fault` | Null except for `internal_fault`, where it is `value_error`, `runtime_error`, `panic` or `unmapped` |
 
-A node failed by an evaluation error has class `config_error`, reason `cel_evaluation_error` and this record in its details.
+A node failed by an evaluation error has class `config_error`, reason `cel_evaluation_error` and an evaluation error in its failure details.
 
 #### Effect on consumers
 
@@ -1281,7 +1283,8 @@ The effect rules below extend [section 7.1](#71-expression-kinds-and-environment
 
 #### Safe content
 
-Error records stored on a node failure, a wait, a start binding, an approval request or an event, and every error the API returns, carry only the fields above.
+Stored evaluation errors use only the field set defined for the owning record in the data model, including node failures, waits, start bindings, approval requests and events. [Data model](data-model.md)
+Public evaluation errors carry only the fields allowed by the applicable API contract. [Public evaluation errors](api-and-agent-surface.md#external-observation-and-delivery-diagnostics-adr-0021)
 The evaluator returns frozen error values across its thread boundary.
 It raises operational refusals on the caller loop with cause and context cleared, including inside another exception handler.
 Errors and diagnostics exclude expression text, values, native messages, exception chains and panic payloads, including at DEBUG.
