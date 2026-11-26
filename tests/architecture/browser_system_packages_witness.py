@@ -53,6 +53,24 @@ async def configure(administrative: Path) -> tuple[int, bytes]:
     return code, errors
 
 
+def dpkg_outcome(code: int, errors: bytes) -> str:
+    if code == 0:
+        return "configured"
+    if b"dpkg database lock was locked" in errors:
+        return "database-lock-held"
+    if b"Permission denied" in errors or b"Operation not permitted" in errors:
+        return "permission-refused"
+    return "other-failure"
+
+
+async def check_dpkg(administrative: Path, expected: str) -> None:
+    code, errors = await configure(administrative)
+    observed = dpkg_outcome(code, errors)
+    assert observed == expected, (
+        f"Private dpkg probe returned {observed} (exit {code})."
+    )
+
+
 async def confirm_refused_admission(
     administrative: Path, case: RefusedAdmission
 ) -> None:
@@ -180,17 +198,15 @@ async def check_controller_loss(administrative: Path) -> None:
         await service.require_running(invocation, deadline)
         owned = OriginalService.capture(service, invocation)
         try:
-            code, errors = await configure(administrative)
-            assert code != 0
-            assert b"dpkg database lock was locked" in errors
+            await check_dpkg(administrative, "database-lock-held")
             controller.kill()
             async with asyncio.timeout_at(deadline):
                 assert await controller.wait() == -signal.SIGKILL
 
             succeeded = await owned.finished(deadline)
             assert not succeeded
-            assert (await configure(administrative))[0] == 0
             await owned.settle(deadline + 5)
+            await check_dpkg(administrative, "configured")
         finally:
             os.close(owned.directory)
     finally:
@@ -267,7 +283,7 @@ async def check_collision(administrative: Path) -> None:
         assert after["InvocationID"] == owned.invocation
         assert int(after["MainPID"]) == original_pid
         assert after["ActiveState"] == "active"
-        assert (await configure(administrative))[0] != 0
+        await check_dpkg(administrative, "database-lock-held")
     finally:
         if client.stdin is not None:
             client.stdin.close()
@@ -280,14 +296,16 @@ async def check_collision(administrative: Path) -> None:
             await client.wait()
 
 
-async def check_lifecycle(administrative: Path) -> None:
-    from scripts.ci.browser_system_packages import package_attempt
-
+async def initialize_administrative_database(administrative: Path) -> None:
     for directory in ("info", "updates", "parts", "triggers"):
         (administrative / directory).mkdir()
     for filename in ("lock", "status", "available"):
         (administrative / filename).touch()
-    assert (await configure(administrative))[0] == 0
+    await check_dpkg(administrative, "configured")
+
+
+async def check_timeout_and_retry(administrative: Path) -> None:
+    from scripts.ci.browser_system_packages import package_attempt
 
     for case in RefusedAdmission:
         await confirm_refused_admission(administrative, case)
@@ -299,9 +317,7 @@ async def check_lifecycle(administrative: Path) -> None:
             package_attempt(("witness", str(administrative), "hold"), WITNESS_ALLOWANCE)
         )
         await wait_for_lock(administrative)
-        code, errors = await configure(administrative)
-        assert code != 0
-        assert b"dpkg database lock was locked" in errors
+        await check_dpkg(administrative, "database-lock-held")
     assert original.result() == "original package service failed after settlement"
     sys.stdout.write("Original package service released its cgroup and dpkg lock.\n")
 
@@ -312,16 +328,20 @@ async def check_lifecycle(administrative: Path) -> None:
     assert subsequent is None
     sys.stdout.write("The next package service configured its private dpkg state.\n")
 
-    (administrative / "held").unlink()
+
+async def check_supervision(administrative: Path) -> None:
+    from scripts.ci.browser_system_packages import package_attempt
+
     async with asyncio.TaskGroup() as tasks:
         withdrawing = tasks.create_task(
             package_attempt(("witness", str(administrative), "hold"), WITNESS_ALLOWANCE)
         )
         await wait_for_lock(administrative)
+        await check_dpkg(administrative, "database-lock-held")
         withdrawing.cancel()
 
     assert withdrawing.cancelled()
-    assert (await configure(administrative))[0] == 0
+    await check_dpkg(administrative, "configured")
     sys.stdout.write("Cancellation settled the original package service and lock.\n")
 
     (administrative / "held").unlink()
@@ -335,6 +355,23 @@ async def check_lifecycle(administrative: Path) -> None:
     )
 
 
+async def check_lifecycle() -> None:
+    for check in (check_timeout_and_retry, check_supervision):
+        with tempfile.TemporaryDirectory(
+            prefix="kora-browser-dpkg-", dir=os.environ["RUNNER_TEMP"]
+        ) as directory:
+            administrative = Path(directory)
+            await initialize_administrative_database(administrative)
+            await check(administrative)
+
+
+async def configure_managed(administrative: Path) -> int:
+    code, errors = await configure(administrative)
+    if code != 0:
+        sys.stderr.write(f"Private dpkg probe returned {dpkg_outcome(code, errors)}.\n")
+    return code
+
+
 def main() -> int:
     if len(sys.argv) == 4 and sys.argv[1] == "--abandon":
         asyncio.run(start_unowned_controller(Path(sys.argv[2]), sys.argv[3]))
@@ -345,12 +382,9 @@ def main() -> int:
             hold(administrative)
             return 2
         if sys.argv[2] == "configure":
-            return asyncio.run(configure(administrative))[0]
+            return asyncio.run(configure_managed(administrative))
         return 2
-    with tempfile.TemporaryDirectory(
-        prefix="kora-browser-dpkg-", dir=os.environ["RUNNER_TEMP"]
-    ) as directory:
-        asyncio.run(check_lifecycle(Path(directory)))
+    asyncio.run(check_lifecycle())
     return 0
 
 
