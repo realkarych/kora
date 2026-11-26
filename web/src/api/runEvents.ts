@@ -7,10 +7,8 @@ const originPattern = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})$/u
 const namespacePattern = /^[a-z][a-z0-9_]{0,63}$/u
 const ulidPattern = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/u
 const cursorPattern = /^[A-Za-z0-9_-]{1,8192}$/u
-const credentialPattern = /^Bearer +([A-Za-z0-9._~+/-]+=*)$/iu
 const requestIdPattern = /^(?:req_[a-zA-Z0-9_-]{1,252}|[0-9a-f]{32})$/u
 const serverCodePattern = /^(?:API|IR|DSL|RT|POL)[0-9]{3}$/u
-const unpairedSurrogate = /[\uD800-\uDFFF]/u
 const pageKeys = ['items', 'observed_at', 'next_cursor'] satisfies (keyof ListRunEventsResponse)[]
 const rowKeys = ['id', 'kind', 'at', 'actor', 'run_id', 'node_instance_id', 'attempt_id'] satisfies (keyof RunEvent)[]
 const systemActorKeys = ['kind', 'component']
@@ -83,11 +81,22 @@ function exactMatch(pattern: RegExp, value: string): boolean {
   return pattern.exec(value)?.[0] === value
 }
 
+function validUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index)
+    if (code < 0xd800 || code > 0xdfff) continue
+    if (code >= 0xdc00 || index + 1 === value.length) return false
+    const low = value.charCodeAt(++index)
+    if (low < 0xdc00 || low > 0xdfff) return false
+  }
+  return true
+}
+
 function validJsonUnicode(value: unknown): boolean {
-  if (typeof value === 'string') return !unpairedSurrogate.test(value)
+  if (typeof value === 'string') return validUnicode(value)
   if (Array.isArray(value)) return value.every(validJsonUnicode)
   if (isRecord(value)) {
-    return Object.entries(value).every(([name, item]) => !unpairedSurrogate.test(name) && validJsonUnicode(item))
+    return Object.entries(value).every(([name, item]) => validUnicode(name) && validJsonUnicode(item))
   }
   return true
 }
@@ -112,7 +121,12 @@ function instant(value: unknown): value is string {
 }
 
 function identifier(value: unknown): value is string {
-  return typeof value === 'string' && exactMatch(/^[!-~]{1,256}$/u, value)
+  if (typeof value !== 'string' || value.length === 0 || value.length > 256) return false
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index)
+    if (code < 33 || code > 126) return false
+  }
+  return true
 }
 
 function eventActor(value: unknown): value is RunEvent['actor'] {
@@ -151,7 +165,7 @@ function eventPage(value: unknown, run: string, limit: number): value is ListRun
 }
 
 function safeCorrelation(value: string | null, token: string): string | null {
-  return value !== null && exactMatch(requestIdPattern, value) && !value.includes(token) ? value : null
+  return value !== null && !value.includes(token) && exactMatch(requestIdPattern, value) ? value : null
 }
 
 function errorEnvelope(value: unknown, status: number): value is ErrorEnvelope {
@@ -167,14 +181,33 @@ function errorEnvelope(value: unknown, status: number): value is ErrorEnvelope {
     && (!retryable || known.mayRetry === true))
 }
 
+function bearerCharacter(code: number): boolean {
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+    || code === 43 || code === 45 || code === 46 || code === 47 || code === 95 || code === 126
+}
+
+function bearerToken(authorization: string): string | null {
+  if (authorization.slice(0, 6).toLowerCase() !== 'bearer' || authorization.charCodeAt(6) !== 32) return null
+
+  let start = 7
+  while (authorization.charCodeAt(start) === 32) start++
+  const length = authorization.length - start
+  if (length === 0 || length > 4096) return null
+
+  let index = start
+  while (bearerCharacter(authorization.charCodeAt(index))) index++
+  if (index === start) return null
+  while (authorization.charCodeAt(index) === 61) index++
+  return index === authorization.length ? authorization.slice(start) : null
+}
+
 function destination(input: RunEventsRequest): Destination {
   const origin = originPattern.exec(input.origin)
-  const bearer = credentialPattern.exec(input.authorization)
+  const token = bearerToken(input.authorization)
   const { namespace, run, limit, cursor: position } = input
   const port = origin?.[1]
-  const token = bearer?.[1]
   if (origin?.[0] !== input.origin || port === undefined || Number(port) > 65_535
-    || bearer?.[0] !== input.authorization || token === undefined || token.length > 4096
+    || token === null
     || !exactMatch(namespacePattern, namespace) || !prefixedId(run, 'run_')
     || (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100))
     || (position != null && !cursor(position))) throw new RunEventsFailure('destination_policy')

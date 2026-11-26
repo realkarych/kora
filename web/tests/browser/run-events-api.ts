@@ -127,6 +127,11 @@ function wireOptions(origin: string): Identity & { fetch: typeof globalThis.fetc
   return { ...wireSelectors, origin, fetch: globalThis.fetch }
 }
 
+function regexInputContains(marker: string): boolean {
+  const input: unknown = Reflect.get(RegExp, 'input')
+  return typeof input !== 'string' || input.includes(marker)
+}
+
 function captureNativeBody() {
   const bodies: ReadableStream<Uint8Array>[] = []
   const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -164,17 +169,25 @@ async function releaseCallTimer(): Promise<void> {
 
 async function destinations(): Promise<void> {
   const seen: (string | undefined)[] = []
+  const authorization = 'bEaReR  ' + wireAuthorization.slice('Bearer '.length) + '=='
+  let expectedAuthorizationSent = false
   await withListener((request, response) => {
     seen.push(request.url)
+    expectedAuthorizationSent = request.headers.authorization === authorization
     response.writeHead(302, { location: '/other' }).end()
   }, async (origin) => {
     const options = wireOptions(origin)
     const wrong = await readRunEvents({ ...options, origin: origin.replace('127.0.0.1', '127.1') })
-    const redirected = await readRunEvents({ ...options, limit: 1, cursor: 'YXNkZg' })
+    const retained = regexInputContains(wireAuthorization)
+    const malformed = await readRunEvents({ ...options, authorization: authorization + 'a' })
+    const redirected = await readRunEvents({ ...options, authorization, limit: 1, cursor: 'YXNkZg' })
 
     assert(wrong.kind === 'client-error' && wrong.reason === 'destination_policy')
+    assert(!retained, 'Destination refusal retained authorization.')
+    assert(malformed.kind === 'client-error' && malformed.reason === 'destination_policy')
     assert(redirected.kind === 'client-error')
     assert.deepEqual(seen, [route + '?limit=1&cursor=YXNkZg'])
+    assert(expectedAuthorizationSent)
   })
 }
 
@@ -295,8 +308,7 @@ async function exactJsonNumbers(): Promise<void> {
     }, async (origin) => {
       const result = await readRunEvents(wireOptions(origin))
       if (observeRetention) {
-        const input: unknown = Reflect.get(RegExp, 'input')
-        assert(typeof input === 'string' && !input.includes(marker), 'Numeric refusal retained response content.')
+        assert(!regexInputContains(marker), 'Numeric refusal retained response content.')
       }
 
       if (admitted) {
@@ -304,6 +316,34 @@ async function exactJsonNumbers(): Promise<void> {
         assert.equal(result.error.error.code, 'API901')
         assert.equal(result.requestId, requestId)
         assert.equal(result.errorRequestId, errorId)
+        assert.equal(result.responseText, body)
+      } else {
+        assert(result.kind === 'client-error' && result.reason === 'status_envelope')
+        assert(!('responseText' in result))
+      }
+    })
+  }
+}
+
+async function exactJsonUnicode(): Promise<void> {
+  const marker = wireContent + '-unicode'
+  const cases = [
+    { details: { value: marker + '\ud800' }, admitted: false },
+    { details: { [marker + '\udc00']: true }, admitted: false },
+    { details: { value: marker + '\ud83d\ude00' }, admitted: true },
+  ]
+
+  for (const { details, admitted } of cases) {
+    const body = errorWithDetails(JSON.stringify(details))
+    await withListener((request, response) => {
+      request.resume()
+      send(response, body, 409)
+    }, async (origin) => {
+      const result = await readRunEvents(wireOptions(origin))
+
+      assert(!regexInputContains(marker), 'Unicode validation retained response content.')
+      if (admitted) {
+        assert(result.kind === 'api-error')
         assert.equal(result.responseText, body)
       } else {
         assert(result.kind === 'client-error' && result.reason === 'status_envelope')
@@ -486,6 +526,8 @@ async function wire(): Promise<void> {
   await exactPageShape()
   failureStage = 'json-numbers'
   await exactJsonNumbers()
+  failureStage = 'json-unicode'
+  await exactJsonUnicode()
   failureStage = 'invalid-frames'
   await invalidFrames()
   failureStage = 'compressed-response-limit'
