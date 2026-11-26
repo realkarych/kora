@@ -290,10 +290,12 @@ async def read_bound_port(process: asyncio.subprocess.Process) -> tuple[int, byt
             for record in diagnostics(line):
                 if record["event"] == "api.serving_bound":
                     port = record["port"]
-                    assert type(port) is int
-                    assert 0 < port <= 65535
+                    if type(port) is not int or not 0 < port <= 65535:
+                        raise AssertionError(
+                            "The installed API reported an invalid port."
+                        )
                     return port, bytes(received)
-    raise AssertionError(f"The installed API did not report its listener: {received!r}")
+    raise AssertionError("The installed API did not report its listener.")
 
 
 async def terminate_installed_api(
@@ -449,12 +451,23 @@ async def run_events_node(
     return ProcessResult(process.returncode, stdout, stderr)
 
 
-def assert_typescript_run_ok(result: ProcessResult, markers: tuple[bytes, ...]) -> None:
-    assert all(
-        marker not in result.stdout and marker not in result.stderr
-        for marker in markers
+def assert_private_channels(
+    stdout: bytes, stderr: bytes, markers: tuple[bytes, ...]
+) -> None:
+    private_content_seen = any(
+        marker in stdout or marker in stderr for marker in markers
     )
-    assert result == ProcessResult(0, b"run-events-api-ok\n", b"")
+    assert not private_content_seen, "A process channel exposed private test input."
+
+
+def assert_typescript_run_ok(result: ProcessResult, markers: tuple[bytes, ...]) -> None:
+    assert_private_channels(result.stdout, result.stderr, markers)
+    completed = result.code == 0
+    expected_output = result.stdout == b"run-events-api-ok\n" and not result.stderr
+    assert completed, "The TypeScript verification process did not pass."
+    assert expected_output, (
+        "The TypeScript verification process reported unexpected output."
+    )
 
 
 @pytest.mark.asyncio
@@ -493,7 +506,7 @@ async def test_run_events_codegen_matches_installed_schema(
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        port, _ = await read_bound_port(process)
+        port, early = await read_bound_port(process)
         async with httpx.AsyncClient(
             base_url=f"http://{LOOPBACK}:{port}", trust_env=False, timeout=10
         ) as client:
@@ -503,10 +516,13 @@ async def test_run_events_codegen_matches_installed_schema(
     finally:
         stdout, stderr = await terminate_installed_api(process)
 
-    assert response.status_code == 200
-    assert process.returncode == 0
-    assert stdout == b""
-    assert authorization.removeprefix("Bearer ").encode() not in stderr
+    markers = (authorization.removeprefix("Bearer ").encode(),)
+    assert_private_channels(stdout, early + stderr, markers)
+    assert_private_channels(response.content, b"", markers)
+    expected_schema = response.status_code == 200
+    installed_api_passed = process.returncode == 0 and not stdout
+    assert expected_schema, "The authenticated installed schema was unavailable."
+    assert installed_api_passed, "The installed API reported unexpected process output."
     verify_run_events_codegen(response.content, tmp_path)
 
 
@@ -639,9 +655,9 @@ async def test_installed_sqlite_typescript_client_reads_run_events(
     assert direct_connections == proxied_connections
     for result in (control, accepted, denied, revoked):
         assert_typescript_run_ok(result, markers)
-    assert process.returncode == 0
-    assert stdout == b""
-    assert all(marker not in early + stderr for marker in markers)
+    assert_private_channels(stdout, early + stderr, markers)
+    installed_api_passed = process.returncode == 0 and not stdout
+    assert installed_api_passed, "The installed API reported unexpected process output."
 
 
 @pytest.mark.asyncio

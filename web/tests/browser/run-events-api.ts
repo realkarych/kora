@@ -31,6 +31,9 @@ const errorBody = {
   error: { request_id: errorId, code: 'API901', message: wireContent, location: null, retryable: false, details: {} },
 }
 const standardError = { error: { ...errorBody.error, code: 'API009', message: 'Authentication is required.' } }
+const unsafeIdentityError = {
+  error: { ...errorBody.error, request_id: 'req_' + wireAuthorization.slice('Bearer '.length) },
+}
 let failureStage = 'input'
 
 async function privateInput(): Promise<Record<string, unknown>> {
@@ -145,27 +148,37 @@ async function validPageAndErrors(): Promise<void> {
       case route + '?limit=3':
         send(response, JSON.stringify(standardError), 409)
         break
-      default:
+      case route + '?limit=4':
         response.writeHead(401, { 'Content-Type': 'application/json', 'X-Request-ID': 'invalid header identity' })
         response.end(JSON.stringify(standardError))
+        break
+      default:
+        send(response, JSON.stringify(unsafeIdentityError), 409)
     }
   }, async (origin) => {
     const options = wireOptions(origin)
     const exact = await readRunEvents({ ...options, limit: 1 })
     const additive = await readRunEvents({ ...options, limit: 2 })
     const mismatched = await readRunEvents({ ...options, limit: 3 })
-    const missingHeader = await readRunEvents({ ...options, limit: 4 })
+    const invalidHeader = await readRunEvents({ ...options, limit: 4 })
+    const invalidBodyIdentity = await readRunEvents({ ...options, limit: 5 })
 
-    assert.deepEqual(requests, [true, true, true, true])
+    assert.deepEqual(requests, [true, true, true, true, true])
     assert(exact.kind === 'page')
     assert.equal(exact.requestId, requestId)
     assert(additive.kind === 'api-error')
     assert.equal(additive.requestId, requestId)
+    assert.equal(additive.errorRequestId, errorId)
     assert.deepEqual(additive.error, errorBody)
     assert(mismatched.kind === 'client-error' && mismatched.code === 'CLT003')
-    assert(missingHeader.kind === 'api-error')
-    assert.equal(missingHeader.requestId, null)
-    assert.equal(missingHeader.error.error.request_id, errorId)
+    assert(invalidHeader.kind === 'api-error')
+    assert.equal(invalidHeader.requestId, null)
+    assert.equal(invalidHeader.errorRequestId, errorId)
+    assert.deepEqual(invalidHeader.error, standardError)
+    assert(invalidBodyIdentity.kind === 'api-error')
+    assert.equal(invalidBodyIdentity.requestId, requestId)
+    assert.equal(invalidBodyIdentity.errorRequestId, null)
+    assert.deepEqual(invalidBodyIdentity.error, unsafeIdentityError)
   })
 }
 
@@ -223,38 +236,85 @@ function abortAfter(milliseconds: number): Promise<never> {
   })
 }
 
-async function incomplete(afterDeadline: boolean): Promise<void> {
-  const started = deferred<undefined>()
+async function withIncompleteResponse(
+  initialBody: string,
+  exercise: (origin: string) => Promise<void>,
+): Promise<void> {
   const closed = deferred<boolean>()
-  let lateReply = false
-  const caller = new AbortController()
   await withListener((request, response) => {
     request.resume()
     response.once('close', () => { closed.resolve(response.writableEnded) })
     response.writeHead(200, { 'Content-Type': 'application/json', 'X-Request-ID': requestId })
-    response.write(page)
-    started.resolve(undefined)
+    response.flushHeaders()
+    response.write(initialBody)
   }, async (origin) => {
+    await exercise(origin)
+    const ended = await Promise.race([closed.promise, abortAfter(3_000)])
+    assert.equal(ended, false)
+  })
+}
+
+async function cancelPendingRead(): Promise<void> {
+  const started = deferred<undefined>()
+  const caller = new AbortController()
+  let nativeReader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  let readPending = false
+
+  try {
+    await withIncompleteResponse('', async (origin) => {
+      const fetch: typeof globalThis.fetch = async (input, init) => {
+        const response = await globalThis.fetch(input, init)
+        assert(response.body !== null)
+        const reader = response.body.getReader()
+        nativeReader = reader
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            const read = reader.read()
+            readPending = true
+            started.resolve(undefined)
+            try {
+              const chunk = await read
+              if (chunk.done) controller.close()
+              else controller.enqueue(chunk.value)
+            } finally {
+              readPending = false
+            }
+          },
+          cancel() {
+            return reader.cancel()
+          },
+        }, { highWaterMark: 0 })
+        return new Response(body, { status: response.status, headers: response.headers })
+      }
+      const result = readRunEvents({ ...wireOptions(origin), fetch, signal: caller.signal })
+      await Promise.race([started.promise, abortAfter(3_000)])
+      assert(readPending)
+      caller.abort()
+      const outcome = await result
+
+      assert.equal(outcome.kind, 'cancelled')
+      assert.equal(readPending, false)
+    })
+  } finally {
+    caller.abort()
+    nativeReader?.releaseLock()
+  }
+}
+
+async function rejectLateResponse(): Promise<void> {
+  let returnedAfterAbort = false
+  await withIncompleteResponse(page, async (origin) => {
     const fetch: typeof globalThis.fetch = async (input, init) => {
       const response = await globalThis.fetch(input, init)
       assert(input instanceof Request)
-      if (afterDeadline && !input.signal.aborted) await once(input.signal, 'abort')
-      lateReply = afterDeadline
+      if (!input.signal.aborted) await once(input.signal, 'abort')
+      returnedAfterAbort = input.signal.aborted
       return response
     }
-    const result = readRunEvents({ ...wireOptions(origin), fetch, signal: caller.signal })
-    await started.promise
-    if (!afterDeadline) caller.abort()
-    const outcome = await result
-    const ended = await Promise.race([closed.promise, abortAfter(3_000)])
+    const outcome = await readRunEvents({ ...wireOptions(origin), fetch })
 
-    assert.equal(ended, false)
-    if (afterDeadline) {
-      assert(lateReply)
-      assert(outcome.kind === 'client-error' && outcome.code === 'CLT002')
-    } else {
-      assert.equal(outcome.kind, 'cancelled')
-    }
+    assert(returnedAfterAbort)
+    assert(outcome.kind === 'client-error' && outcome.code === 'CLT002')
   })
 }
 
@@ -270,9 +330,9 @@ async function wire(): Promise<void> {
   failureStage = 'error-response-limit'
   await oversized(409, false)
   failureStage = 'caller-cancellation'
-  await incomplete(false)
+  await cancelPendingRead()
   failureStage = 'operation-deadline'
-  await incomplete(true)
+  await rejectLateResponse()
 }
 
 async function proxyProbe(input: Record<string, unknown>): Promise<void> {
