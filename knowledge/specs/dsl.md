@@ -23,13 +23,28 @@ The token and shape checks admit the two unaliased import declarations in the ex
 3. Use `agent >> command` with those exact local names.
 4. Declare `approval(id, channel="cli", timeout=..., on_expiry="fail")(input=command)`, binding one whole command result to the named input.
 
-IDs and local bindings are distinct in their respective scopes. The function and locals cannot shadow the DSL import names. The remaining strings and identifiers follow the current IR constraints. Templates and input or resource path placeholders are outside this grammar. The author supplies no helper code, graph parameters, other execution settings or resource bundle.
+IDs and local bindings are distinct in their respective scopes. The function and locals cannot shadow the DSL import names. The remaining strings and identifiers follow the current IR constraints. This form refuses templates and input or resource path placeholders. The author supplies no helper code, graph parameters, other execution settings or resource bundle.
 
 The output is IR v1.0 with the authored workspace on the agent and command, the directed edge, one explicit manual trigger and the closed empty parameter schema. It includes `session`, `summary`, `result` and `response` with exactly the required revision-1 built-in type contracts. The CLI approval uses the existing default form and predicate. Offline compilation uses the shared authored IR checks and the deterministic IR JSON exporter. Installation checks, provider bindings and executable CEL binding remain at deploy.
 
 Identical source bytes with the same compiler produce identical JSON bytes. Provenance records the digest of the bytes read. Source locations use the logical relative label `graph.py` and the owning line. The CLI writes the JSON object plus LF to stdout. An ordinary rejection exits nonzero and writes the bounded errors, warnings and omission counts to stderr with no artifact bytes. Duplicate node IDs, unbound references and unknown node fields carry `DSL002`, `DSL003` and `DSL011` respectively. Other unsupported source or syntax carries `DSL016`. Existing shared IR findings retain their safe paths and codes. An incomplete local validation uses the applicable [local error contract](api-and-agent-surface.md#client-and-local-validation-failures).
 
 The stdio authoring tool takes `{path, format: "json"}` and returns the same IR object or an error result. It reads under the process user's permissions, using an absolute or working-directory-relative path. An active call keeps its single physical compile slot until completion. Concurrent compile calls receive a busy refusal. Cancellation suppresses the compile result and shutdown joins the work. A paired local peer must drain stdio. This is a bound on one compiler operation, with no deadline on local filesystem stalls or aggregate transport quota. The tool sends no API request. See the [CLI and stdio compile contract](api-and-agent-surface.md#early-compile-cli-and-stdio-issue-1918).
+
+### Early local-Git authoring with a bound commit (issue #1921)
+
+The same installed compile pair accepts the [local Git example](../../examples/live-claude-local-git/graph.py). It uses the early decorator, limits and four-statement sequence above, with `VcsRef` as the unaliased import from `kora.artifacts`. Use `kora compile examples/live-claude-local-git/graph.py --format json` or pass that path and `format: "json"` to the local `kora_compile` tool.
+
+1. Declare `prepare = node.agent(id, harness="claude", prompt=..., output={"change": VcsRef}, trust_repo_config=False)`. The agent uses the repository and base revision from the decorator and declares the fixed `session: AgentSession` output.
+2. Declare `check = node.command(id, cmd=[...], workspace=prepare.change)(change=prepare.change)`. Both references select the same whole declared agent output. The command keeps the same repository, uses `workspace.from_ref: "inputs.change"` with no explicit `rev`, and declares the fixed `result: CommandResult` output.
+3. Preserve the control edge `prepare >> check`.
+4. Call `approval(id, channel="cli", timeout="1h", on_expiry="fail", binds={"vcs_ref": "inputs.change", "gate_digests": ["inputs.gate"]})(change=prepare.change, gate=check)`. The inputs select the same whole agent output and the declared command result. The fixed `response: StructuredOutput` uses the existing default form and predicate.
+
+The compiler preserves explicit `trust_repo_config: false`, the ordered argv and the whole-artifact bindings. The four artifact types use their revision-1 built-in contracts. The graph retains the manual trigger and closed empty parameter schema. Unbound or divergent workspace and input references fail with `DSL003`.
+
+A whole decoded argv element `{input_root}/change.json` is allowed after the executable only in this form, with the required `change: VcsRef` input and workspace both bound to the same agent output. The compiler copies that argument literally. The executable, all other argument forms and all other fields retain the existing placeholder and template checks. The [command-input contract](ir.md#4-node-kinds-and-their-config) assigns derivation and sealing to the API, transfer to the Worker and materialisation to the runtime.
+
+The example uses illustrative installation paths and a base revision. Substitute the actual repository, base and executable paths in a disposable source copy to use a configured installation. Live publication, gate execution and approval admission have separate activation criteria under [issue #1919](https://github.com/realkarych/kora/issues/1919).
 
 ## 1. Surface
 
