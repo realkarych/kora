@@ -4,6 +4,7 @@ import globals from 'globals'
 import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
+import generatedRunEventsFiles from './openapi/generated-run-events-files.json' with { type: 'json' }
 
 const noComments = {
   meta: {
@@ -27,7 +28,7 @@ const noComments = {
 }
 
 export default defineConfig([
-  globalIgnores(['dist/']),
+  globalIgnores(['dist/', ...generatedRunEventsFiles]),
   js.configs.recommended,
   {
     linterOptions: {

@@ -15,22 +15,26 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 
 from kora.api.routes import RouteName
+from kora.client import KoraClient
 from kora.db.connection import Database, DatabaseSettings
-from kora.db.tables import attempt, graph_version
+from kora.db.tables import api_token, attempt, graph_version
+from kora.db.tokens import revoke_token
 from kora.engine.start_records import AcceptedStart, decode_start_receipt
-from kora.ir.json import JsonObject, parse_json_object
+from kora.ir.json import JsonObject, JsonValue, parse_json_object
 from kora.models.errors import ApiErrorEnvelope
 from kora.models.graphs import DeployResponse
 from kora.models.runs import AcceptedRun
 from tests.api.deployment_cases import GRAPH, NAMESPACE, skeleton_ir
+from tests.api.run_events_codegen import verify_run_events_codegen
 from tests.api.serving_lifecycle_child import SLOW_RESPONSE_BYTES, serving_event
 from tests.api.test_linux_serving_barrier import native_probe_required_here
 from tests.api.test_worker_registration import registry_state
 from tests.cli.test_deploy_command import collect_cli
 from tests.client.support import tls_pair
+from tests.db.test_run_event_reads import SYSTEM, seed_event, seed_run
 from tests.engine.graph_output_cases import child as ir_child
 from tests.engine.start_cases import start_rows
 from tests.plugins.authentication.support import seed_case
@@ -46,6 +50,7 @@ from tests.support.provider_tooling import (
     run_setup,
 )
 
+WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
 LOOPBACK = "127.0.0.1"
 SCHEMA = "/api/v1/openapi.json"
 SERVE_TIMEOUT = 20
@@ -370,6 +375,273 @@ def assert_worker_startup_absent(stderr: bytes) -> None:
         )
         for event in events
     )
+
+
+@pytest.fixture(scope="module")
+def run_events_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    directory = tmp_path_factory.mktemp("run-events-typescript")
+    pnpm = shutil.which("pnpm")
+    if pnpm is None:
+        raise ValueError("The locked pnpm executable is required.")
+    result = subprocess.run(
+        [
+            pnpm,
+            "exec",
+            "vite",
+            "build",
+            "--ssr",
+            "tests/browser/run-events-api.ts",
+            "--outDir",
+            str(directory),
+            "--emptyOutDir",
+        ],
+        cwd=WEB_ROOT,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (directory / "run-events-api.js").is_file()
+    return directory
+
+
+async def run_events_node(
+    bundle: Path,
+    data: JsonObject,
+    *,
+    proxy: str | None = None,
+    proxy_control: bool = False,
+) -> ProcessResult:
+    selected_node = shutil.which("node")
+    if selected_node is None:
+        raise ValueError("The locked Node executable is required.")
+    node = str(Path(selected_node).resolve())
+    launcher = WEB_ROOT / "scripts" / "run-events-node.sh"
+    if proxy_control:
+        arguments = [node, str(bundle / "run-events-api.js")]
+    else:
+        arguments = [str(launcher), node, str(bundle)]
+    environment = (
+        {}
+        if proxy is None
+        else {"NODE_USE_ENV_PROXY": "1", "HTTP_PROXY": proxy, "NO_PROXY": ""}
+    )
+    if proxy is not None and not proxy_control:
+        environment["NODE_OPTIONS"] = "--require /nonexistent-kora-preload.cjs"
+    process = await asyncio.create_subprocess_exec(
+        *arguments,
+        cwd=bundle,
+        env=environment,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        async with asyncio.timeout(24):
+            stdout, stderr = await process.communicate(json.dumps(data).encode("utf-8"))
+    finally:
+        if process.returncode is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            async with asyncio.timeout(3):
+                await process.communicate()
+    assert process.returncode is not None
+    return ProcessResult(process.returncode, stdout, stderr)
+
+
+def assert_typescript_run_ok(result: ProcessResult, markers: tuple[bytes, ...]) -> None:
+    assert all(
+        marker not in result.stdout and marker not in result.stderr
+        for marker in markers
+    )
+    assert result == ProcessResult(0, b"run-events-api-ok\n", b"")
+
+
+@pytest.mark.asyncio
+async def test_run_events_client_wire_contract(run_events_bundle: Path) -> None:
+    markers = (
+        b"private-run-events-wire-credential",
+        b"private-run-events-wire-content",
+    )
+
+    result = await run_events_node(run_events_bundle, {"mode": "wire"})
+
+    assert_typescript_run_ok(result, markers)
+
+
+@pytest.mark.asyncio
+async def test_run_events_codegen_matches_installed_schema(
+    serving_installation: Path, tmp_path: Path, sqlite_template: Path
+) -> None:
+    settings = copy_sqlite_template(
+        sqlite_template, tmp_path / "typescript-schema.sqlite"
+    )
+    database = Database(settings)
+    try:
+        case = await seed_case(database, "typescript_schema")
+    finally:
+        await database.close()
+    authorization = case.request.authorization
+    assert authorization is not None
+
+    process = await asyncio.create_subprocess_exec(
+        *api_command(serving_installation, 0),
+        cwd=tmp_path,
+        env=api_environment(str(settings.url)),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        port, _ = await read_bound_port(process)
+        async with httpx.AsyncClient(
+            base_url=f"http://{LOOPBACK}:{port}", trust_env=False, timeout=10
+        ) as client:
+            response = await client.get(
+                SCHEMA, headers={"Authorization": authorization}
+            )
+    finally:
+        stdout, stderr = await terminate_installed_api(process)
+
+    assert response.status_code == 200
+    assert process.returncode == 0
+    assert stdout == b""
+    assert authorization.removeprefix("Bearer ").encode() not in stderr
+    verify_run_events_codegen(response.content, tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_installed_sqlite_typescript_client_reads_run_events(
+    serving_installation: Path,
+    run_events_bundle: Path,
+    tmp_path: Path,
+    sqlite_template: Path,
+) -> None:
+    settings = copy_sqlite_template(
+        sqlite_template, tmp_path / "typescript-events.sqlite"
+    )
+    namespace = "typescript_history"
+    marker = "private-typescript-installed-event-body"
+    database = Database(settings)
+    try:
+        own = await seed_case(database, "typescript_viewer")
+        other = await seed_case(database, "typescript_other")
+        async with database.transaction() as connection:
+            scope = await seed_run(connection, namespace)
+            await connection.execute(
+                update(api_token)
+                .where(api_token.c.id == own.principal.token_id)
+                .values(
+                    namespaces=[
+                        {"namespace_id": scope.namespace_id, "transcripts": True}
+                    ]
+                )
+            )
+            event_ids = [
+                "event_"
+                + await seed_event(
+                    connection, scope, SYSTEM, 0, payload={"marker": marker}
+                )
+                for _ in range(2)
+            ]
+    finally:
+        await database.close()
+    credential = own.request.authorization
+    foreign = other.request.authorization
+    assert credential is not None
+    assert foreign is not None
+    markers = (
+        credential.removeprefix("Bearer ").encode(),
+        foreign.removeprefix("Bearer ").encode(),
+        marker.encode(),
+    )
+    selector = "run_" + scope.run_id
+    connections = 0
+
+    def proxy_response(
+        _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        nonlocal connections
+        connections += 1
+        writer.write(
+            b"HTTP/1.1 502 Bad Gateway\r\n"
+            b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        writer.close()
+
+    process = await asyncio.create_subprocess_exec(
+        *api_command(serving_installation, 0),
+        cwd=tmp_path,
+        env=api_environment(str(settings.url)),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        port, early = await read_bound_port(process)
+        origin = f"http://{LOOPBACK}:{port}"
+        async with KoraClient(origin, credential.removeprefix("Bearer ")) as canonical:
+            first = (
+                await canonical.list_run_events(namespace, selector, limit="1")
+            ).response
+            assert first.next_cursor is not None
+            second = (
+                await canonical.list_run_events(
+                    namespace, selector, limit="1", cursor=first.next_cursor
+                )
+            ).response
+        ordered: list[JsonValue] = [
+            event.id for page in (first, second) for event in page.items
+        ]
+        payload: JsonObject = {
+            "mode": "installed",
+            "origin": origin,
+            "namespace": namespace,
+            "run": selector,
+        }
+        proxy = await asyncio.start_server(proxy_response, LOOPBACK, 0)
+        async with proxy:
+            [sock] = proxy.sockets
+            proxy_url = f"http://{LOOPBACK}:{sock.getsockname()[1]}"
+            control = await run_events_node(
+                run_events_bundle,
+                {"mode": "proxy-probe", "origin": origin},
+                proxy=proxy_url,
+                proxy_control=True,
+            )
+            proxied_connections = connections
+            accepted = await run_events_node(
+                run_events_bundle,
+                {**payload, "authorization": credential, "expected": ordered},
+                proxy=proxy_url,
+            )
+            direct_connections = connections
+        denied = await run_events_node(
+            run_events_bundle,
+            {**payload, "authorization": foreign, "expected": "API005"},
+        )
+        authority = Database(settings)
+        try:
+            async with authority.transaction() as connection:
+                await revoke_token(connection, own.principal.token_id)
+        finally:
+            await authority.close()
+        revoked = await run_events_node(
+            run_events_bundle,
+            {**payload, "authorization": credential, "expected": "API009"},
+        )
+    finally:
+        stdout, stderr = await terminate_installed_api(process)
+
+    assert ordered == sorted(event_ids, reverse=True)
+    assert second.next_cursor is None
+    assert proxied_connections > 0
+    assert direct_connections == proxied_connections
+    for result in (control, accepted, denied, revoked):
+        assert_typescript_run_ok(result, markers)
+    assert process.returncode == 0
+    assert stdout == b""
+    assert all(marker not in early + stderr for marker in markers)
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,34 @@ import pytest
 
 REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
 PYPROJECT: str = "pyproject.toml"
-GENERATED_FILES: tuple[str, ...] = ("uv.lock", "web/pnpm-lock.yaml")
+RUN_EVENTS_GENERATED_DIRECTORY: str = "web/src/api/generated/run-events"
+RUN_EVENTS_GENERATED_MANIFEST: str = "web/openapi/generated-run-events-files.json"
+RUN_EVENTS_GENERATED_NAMES: tuple[str, ...] = (
+    "client.gen.ts",
+    "client/client.gen.ts",
+    "client/index.ts",
+    "client/types.gen.ts",
+    "client/utils.gen.ts",
+    "core/auth.gen.ts",
+    "core/bodySerializer.gen.ts",
+    "core/params.gen.ts",
+    "core/pathSerializer.gen.ts",
+    "core/queryKeySerializer.gen.ts",
+    "core/serverSentEvents.gen.ts",
+    "core/types.gen.ts",
+    "core/utils.gen.ts",
+    "index.ts",
+    "sdk.gen.ts",
+    "types.gen.ts",
+)
+RUN_EVENTS_GENERATED_FILES: tuple[str, ...] = tuple(
+    f"{RUN_EVENTS_GENERATED_DIRECTORY}/{name}" for name in RUN_EVENTS_GENERATED_NAMES
+)
+GENERATED_FILES: tuple[str, ...] = (
+    "uv.lock",
+    "web/pnpm-lock.yaml",
+    *RUN_EVENTS_GENERATED_FILES,
+)
 SKIPPED_PATHS: frozenset[str] = frozenset(
     {
         "measurements",
@@ -111,7 +138,12 @@ TSCONFIG_TABLES: dict[str, dict[str, object]] = {
         "include": ["tests/browser"],
     },
 }
-WEB_CONFIGURATION: tuple[str, ...] = (*TSCONFIG_TABLES, WEB_PACKAGE, ESLINT_CONFIG)
+WEB_CONFIGURATION: tuple[str, ...] = (
+    *TSCONFIG_TABLES,
+    WEB_PACKAGE,
+    ESLINT_CONFIG,
+    RUN_EVENTS_GENERATED_MANIFEST,
+)
 SHEBANG: str = "#!"
 ENV_PROGRAM: str = "env"
 SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "ksh"})
@@ -1160,6 +1192,25 @@ def generated_file_violations(root: Path) -> Iterator[Violation]:
     for relative in GENERATED_FILES:
         if not (root / relative).is_file():
             yield Violation(relative, 1, "listed generated file is missing")
+    manifest = root / RUN_EVENTS_GENERATED_MANIFEST
+    expected_manifest = [
+        relative.removeprefix("web/") for relative in RUN_EVENTS_GENERATED_FILES
+    ]
+    if (
+        not manifest.is_file()
+        or json.loads(manifest.read_text(encoding="utf-8")) != expected_manifest
+    ):
+        yield Violation(
+            RUN_EVENTS_GENERATED_MANIFEST,
+            1,
+            "differs from the exact generated inventory",
+        )
+    for path in (root / RUN_EVENTS_GENERATED_DIRECTORY).rglob("*"):
+        relative = relative_to(root, path)
+        if path.is_symlink() or (
+            path.is_file() and relative not in RUN_EVENTS_GENERATED_FILES
+        ):
+            yield Violation(relative, 1, "outside the exact generated inventory")
     for relative in (*ALLOWED_WARNING_DIGESTS, ADVERSE_HELPER):
         if not (root / relative).is_file():
             yield Violation(relative, 1, "listed allowance file is missing")
@@ -1271,6 +1322,27 @@ def test_check_configuration_is_not_weakened() -> None:
     violations = configuration_violations(root)
 
     assert violations == []
+
+
+def test_generated_run_events_exception_is_exact(tmp_path: Path) -> None:
+    copy_configuration(tmp_path)
+    sibling = f"{RUN_EVENTS_GENERATED_DIRECTORY}/handwritten.ts"
+    write(tmp_path, sibling, "// eslint-disable-next-line\nexport const value = 1\n")
+    write(
+        tmp_path,
+        RUN_EVENTS_GENERATED_MANIFEST,
+        json.dumps([sibling.removeprefix("web/")]),
+    )
+
+    inventory_violations = configuration_violations(tmp_path)
+    comments = source_violations(tmp_path)
+
+    assert f"{sibling}:1: outside the exact generated inventory" in inventory_violations
+    assert (
+        f"{RUN_EVENTS_GENERATED_MANIFEST}:1: differs from the exact generated inventory"
+        in inventory_violations
+    )
+    assert f"{sibling}:1: tool directive" in comments
 
 
 def test_checker_flags_directives_in_every_language(tmp_path: Path) -> None:

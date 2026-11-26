@@ -1,0 +1,18 @@
+[
+  "src/api/generated/run-events/client.gen.ts",
+  "src/api/generated/run-events/client/client.gen.ts",
+  "src/api/generated/run-events/client/index.ts",
+  "src/api/generated/run-events/client/types.gen.ts",
+  "src/api/generated/run-events/client/utils.gen.ts",
+  "src/api/generated/run-events/core/auth.gen.ts",
+  "src/api/generated/run-events/core/bodySerializer.gen.ts",
+  "src/api/generated/run-events/core/params.gen.ts",
+  "src/api/generated/run-events/core/pathSerializer.gen.ts",
+  "src/api/generated/run-events/core/queryKeySerializer.gen.ts",
+  "src/api/generated/run-events/core/serverSentEvents.gen.ts",
+  "src/api/generated/run-events/core/types.gen.ts",
+  "src/api/generated/run-events/core/utils.gen.ts",
+  "src/api/generated/run-events/index.ts",
+  "src/api/generated/run-events/sdk.gen.ts",
+  "src/api/generated/run-events/types.gen.ts"
+]
