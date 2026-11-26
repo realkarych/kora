@@ -26,6 +26,8 @@ The critique proposed, for MVP, an optional stable target key with namespace sco
 
 The complete MCP inventory is sixteen after the distinct compiled-IR `kora_validate` operation in [ADR-0002](0002-ai-first-api-and-thin-clients.md). `kora_targets` keeps its existing meaning and adds no extra tool. Targets and their tool are outside the first slice. The [first-slice parity contract](../../knowledge/specs/first-slice.md#included-operation-and-parity-contract) defines the active tool inventory.
 
+The project owner [reviewed and approved the #1918 change to the first-slice parity reference line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
+
 ## Decision
 
 **A run may carry a target key** (FR-6.11). `run.target_key` is an optional, stable, opaque string matching `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$`, written to the run row only and never a template variable, with namespace scope: two graphs of one namespace that bind the same key work on the same target, and the key convention is the namespace's. The three keys stay apart: the delivery (`idempotency_key`), the target (`target_key`) and the execution (the attempt id).

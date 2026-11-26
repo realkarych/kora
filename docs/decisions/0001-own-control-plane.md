@@ -82,7 +82,7 @@ The same decision narrows the depth of the first slice:
 
 The project owner [approved an early authoring path for the walking-skeleton demonstration](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699). Authors can compile one sequential graph locally and deploy the resulting IR JSON before first-slice acceptance. This authoring path is an independent delivery. The skeleton run and the first-slice qualification keep their existing gates.
 
-The first-slice inventory now includes eleven stdio tools. The ten API-backed tools are joined by the author-side `kora_compile` operation of [ADR-0002](0002-ai-first-api-and-thin-clients.md#early-authoring-amendment-of-2026-11-26). The general compiler, scenarios and dry-run activate separately. The wording is pending line-by-line owner review.
+The first-slice inventory now includes eleven stdio tools. The ten API-backed tools are joined by the author-side `kora_compile` operation of [ADR-0002](0002-ai-first-api-and-thin-clients.md#early-authoring-amendment-of-2026-11-26). The general compiler, scenarios and dry-run activate separately. The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
 
 ## Milestone-order amendment of 2026-11-11
 

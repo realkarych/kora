@@ -18,7 +18,7 @@ kora orchestrates graphs whose nodes are whole coding-agent sessions. Graph auth
 
 ## Early authoring amendment of 2026-11-26
 
-The project owner [approved a bounded static mode ahead of first-slice acceptance](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699). An explicit `--format json` selects the early mode. It parses one file without importing or executing it, accepts the sequential agent, command and CLI approval graph with a manual trigger, and emits the existing IR v1.0 as deterministic JSON for the installed deploy client. [The early DSL contract](../../knowledge/specs/dsl.md#early-sequential-json-mode-issue-1918) defines the accepted syntax and refusals. The full compiler retains the canonical YAML and module import contract below. The wording is pending line-by-line owner review.
+The project owner [approved a bounded static mode ahead of first-slice acceptance](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699). An explicit `--format json` selects the early mode. It parses one file without importing or executing it, accepts the sequential agent, command and CLI approval graph with a manual trigger, and emits the existing IR v1.0 as deterministic JSON for the installed deploy client. [The early DSL contract](../../knowledge/specs/dsl.md#early-sequential-json-mode-issue-1918) defines the accepted syntax and refusals. The full compiler retains the canonical YAML and module import contract below. The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
 
 ## Decision
 

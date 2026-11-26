@@ -432,7 +432,7 @@ The ADR-0001 amendments place Docker, the trigger kinds other than manual, and t
 The triggers are abbreviated as follows:
 
 - **retry:** node retry policy and the retry and rerun operations;
-- **DSL:** the general compiler, canonical YAML output, `kora test` and scenarios. The [owner-approved #1918 amendment](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699) advances only the bounded JSON authoring pair. The wording is pending line-by-line owner review;
+- **DSL:** the general compiler, canonical YAML output, `kora test` and scenarios. The [owner-approved #1918 amendment](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699) advances only the bounded JSON authoring pair. The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
 - **code host:** the `vcs` approval channel, change requests, a credential issuer and static credentials;
 - **target:** the graph target and target holds;
 - **Docker:** Docker and the protected runtimes;

@@ -46,7 +46,7 @@ CEL amendment dated 2026-10-19: decisions taken and implementation plan approved
 
 MCP-count amendment dated 2026-10-23 (FR-0.1): the sixteen-tool full inventory and ten-tool first slice are approved under #140; wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
-The project owner [approved the early authoring scope for FR-0.1 and FR-1.2](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699) on 2026-11-26. The wording is pending line-by-line owner review.
+The project owner [approved the early authoring scope for FR-0.1 and FR-1.2](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699) on 2026-11-26. The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
 
 ## 0. AI-first parity
 

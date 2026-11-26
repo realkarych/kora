@@ -304,7 +304,7 @@ Bounded-read contracts for TM-07, TM-10 and TM-11 separate metadata from selecte
 
 ### Early author-side compilation
 
-The project owner [approved this scope under #1918](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699) on 2026-11-26. The wording is pending line-by-line owner review. The [early DSL contract](../knowledge/specs/dsl.md#early-sequential-json-mode-issue-1918) owns the controls and limits.
+The project owner [approved this scope under #1918](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699) on 2026-11-26. The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27. The [early DSL contract](../knowledge/specs/dsl.md#early-sequential-json-mode-issue-1918) owns the controls and limits.
 
 - TM-04 covers static parsing without execution, local authored checks and the compiled-data boundary. Deployment still checks the installation and validates the submitted IR.
 - TM-06 and TM-07 distinguish the authorized local compiler result, which contains authored literals, from content-free diagnostics and logs.

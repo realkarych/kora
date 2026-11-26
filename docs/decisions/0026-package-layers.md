@@ -11,6 +11,8 @@
 - First-slice amendment dated 2026-10-23: dry-run import activation is deferred under #140; scope and plan approved, wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 - Codex native approval amendment: the owners approved the policy mechanism on 2026-11-11 under [#1360](https://github.com/realkarych/kora/issues/1360). The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/issues/1360#issuecomment-7082919105) on 2026-11-22.
 
+The project owner [reviewed and approved the #1918 wording about the early compiler's installed-wheel evidence line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
+
 ## Context
 
 [ADR-0013](0013-implementation-stack.md) ships one distribution, `kora`, with a `src/` layout and extras. Its processes run in different places:

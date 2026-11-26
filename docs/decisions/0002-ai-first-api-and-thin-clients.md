@@ -34,7 +34,7 @@ Exactly `GET /healthz`, `GET /readyz` and `GET /metrics` are excluded from CLI/M
 
 The project owner [approved the early compile pair](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699). `kora compile graph.py --format json` and the local authoring server's `kora_compile` use the same compiler to produce deploy-ready IR v1.0 JSON. Both parse a bounded subset of Python syntax in the author's environment. They send no request and execute no source. The HTTP-mounted tools and control plane acquire no compilation operation. The first-slice stdio inventory is eleven tools including this local operation. The complete future inventory is sixteen.
 
-The person who starts the stdio authoring server grants its paired peer selection of a source file under the process user's filesystem permissions. The stdio tool returns the compiled document with authored literal values. The namespace credential governs API calls. [The early DSL contract](../../knowledge/specs/dsl.md#early-sequential-json-mode-issue-1918) defines the source and resource limits. The wording is pending line-by-line owner review.
+The person who starts the stdio authoring server grants its paired peer selection of a source file under the process user's filesystem permissions. The stdio tool returns the compiled document with authored literal values. The namespace credential governs API calls. [The early DSL contract](../../knowledge/specs/dsl.md#early-sequential-json-mode-issue-1918) defines the source and resource limits. The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
 
 ## Decision
 
