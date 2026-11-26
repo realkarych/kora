@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import errno
 import os
@@ -17,22 +19,16 @@ from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, PositiveInt, ValidationError
-from sqlalchemy import event, text
-from sqlalchemy.engine.interfaces import DBAPIConnection
-from sqlalchemy.ext.asyncio import AsyncConnection
-from sqlalchemy.pool.base import ConnectionPoolEntry
 
-from kora.api.serving import sqlite_schema_ready_for_serving
-from kora.db.connection import (
-    Database,
-    DatabaseClosedError,
-    DatabaseWriterRejected,
-    SqliteDriverConnection,
-)
-from kora.db.run_event_page_v1 import SQLITE_EVENT_PAGE_INDEX
+if TYPE_CHECKING:
+    from sqlalchemy.engine.interfaces import DBAPIConnection
+    from sqlalchemy.ext.asyncio import AsyncConnection
+    from sqlalchemy.pool.base import ConnectionPoolEntry
+
+    from kora.db.connection import Database
 
 API_UID: int = 65532
 OTHER_UID: int = 65533
@@ -42,7 +38,7 @@ CAPABILITY_FIELDS: tuple[str, ...] = ("CapInh", "CapPrm", "CapEff", "CapBnd", "C
 WITNESS_MODULE: str = "tests.api.guarded_sqlite_prebind_child"
 OWNED_GUEST_RELEASE: str = "6.8.0-147-generic"
 FILESYSTEM_BYTES: int = 32 * 1024 * 1024
-SCHEMA_READ = text(
+SCHEMA_READ: str = (
     "SELECT version_num FROM alembic_version WHERE kora_prebind_witness_barrier()"
 )
 
@@ -57,7 +53,11 @@ class WitnessCase(StrEnum):
     MISSING_FILE = "missing_file"
 
 
-class StartupBindingRejected(DatabaseClosedError):
+class WitnessScopeClosed(RuntimeError):
+    pass
+
+
+class StartupBindingRejected(WitnessScopeClosed):
     def __init__(self, case: WitnessCase) -> None:
         self.case = case
         super().__init__("the original private startup binding was refused")
@@ -65,7 +65,7 @@ class StartupBindingRejected(DatabaseClosedError):
 
 def require(observed: bool, reason: str) -> None:
     if not observed:
-        raise DatabaseClosedError(reason)
+        raise WitnessScopeClosed(reason)
 
 
 def identity(info: os.stat_result) -> FileIdentity:
@@ -219,7 +219,7 @@ def consume_binding(
     try:
         binding = LaunchBinding.model_validate_json(data)
     except ValidationError as error:
-        raise DatabaseClosedError(
+        raise WitnessScopeClosed(
             "the private SQLite startup binding is invalid"
         ) from error
     assert_child_credentials()
@@ -241,7 +241,7 @@ def consume_binding(
         finally:
             os.close(parent_fd)
     else:
-        raise DatabaseClosedError("the protected read requires Linux")
+        raise WitnessScopeClosed("the protected read requires Linux")
 
 
 def held_main_descriptors(main: FileIdentity) -> tuple[int, ...]:
@@ -268,7 +268,7 @@ def is_read_only_descriptor(descriptor: int) -> bool:
         return (
             int(fields["flags"].strip(), 8) & (os.O_ACCMODE | os.O_PATH) == os.O_RDONLY
         )
-    raise DatabaseClosedError("the protected read requires Linux")
+    raise WitnessScopeClosed("the protected read requires Linux")
 
 
 @dataclass
@@ -277,9 +277,13 @@ class ReadObservations:
     workers: list[threading.Thread] = field(default_factory=list[threading.Thread])
 
     def attach(self, database: Database) -> None:
+        from sqlalchemy import event
+
         event.listen(database.reader_engine.pool, "connect", self.opened)
 
     def opened(self, raw: DBAPIConnection, record: ConnectionPoolEntry) -> None:
+        from kora.db.connection import SqliteDriverConnection
+
         driver: object = record.driver_connection
         assert isinstance(driver, SqliteDriverConnection)
         worker: object = getattr(driver, "_thread", None)
@@ -311,6 +315,8 @@ class ReadObservations:
 
 
 async def check_schema(database: Database, require_live: Callable[[], None]) -> bool:
+    from kora.api.serving import sqlite_schema_ready_for_serving
+
     try:
         ready = await sqlite_schema_ready_for_serving(database)
     finally:
@@ -321,6 +327,8 @@ async def check_schema(database: Database, require_live: Callable[[], None]) -> 
 
 
 async def refused_writer(database: Database) -> None:
+    from kora.db.connection import DatabaseClosedError, DatabaseWriterRejected
+
     assert not database.writer_is_free()
     try:
         _writer = database.writer_engine
@@ -350,6 +358,11 @@ class BarrierRegistration(Protocol):
 async def check_withdrawal(
     database: Database, withdraw: Callable[[], None], observations: ReadObservations
 ) -> None:
+    from sqlalchemy import text
+
+    from kora.api.serving import sqlite_schema_ready_for_serving
+    from kora.db.connection import DatabaseClosedError, SqliteDriverConnection
+
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     leave = threading.Event()
@@ -367,11 +380,11 @@ async def check_withdrawal(
         await cast(BarrierRegistration, driver).create_function(
             "kora_prebind_witness_barrier", 0, native_barrier
         )
-        value = await connection.scalar(SCHEMA_READ)
+        value = await connection.scalar(text(SCHEMA_READ))
         assert isinstance(value, str)
         try:
             await connection.scalar(text("SELECT version_num FROM alembic_version"))
-        except DatabaseClosedError:
+        except (DatabaseClosedError, WitnessScopeClosed):
             return value
         raise AssertionError(
             "the original connection accepted a new statement after withdrawal"
@@ -385,7 +398,7 @@ async def check_withdrawal(
             assert not read.done()
             try:
                 await sqlite_schema_ready_for_serving(database)
-            except DatabaseClosedError:
+            except (DatabaseClosedError, WitnessScopeClosed):
                 pass
             else:
                 raise AssertionError("the withdrawn scope admitted a second read")
@@ -394,7 +407,7 @@ async def check_withdrawal(
             leave.set()
             try:
                 await read
-            except DatabaseClosedError:
+            except (DatabaseClosedError, WitnessScopeClosed):
                 pass
             else:
                 raise AssertionError("the withdrawn scope published a successful read")
@@ -437,6 +450,8 @@ def assert_native_write_refused(main: Path) -> None:
 async def run_protected_case(scope: ProtectedRead, case: WitnessCase) -> None:
     scope.require_live()
     assert_native_write_refused(scope.main)
+    from kora.db.connection import Database
+
     observation = ReadObservations(scope.binding.main)
     database = Database.guarded_sqlite_reader(scope.main, scope.require_live)
     observation.attach(database)
@@ -617,6 +632,8 @@ def prepare_ordinary_main(path: Path, *, inexact: bool) -> bytes:
     with closing(sqlite3.connect(path)) as database:
         assert database.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
         if inexact:
+            from kora.db.run_event_page_v1 import SQLITE_EVENT_PAGE_INDEX
+
             database.execute(f"DROP INDEX {SQLITE_EVENT_PAGE_INDEX}").close()
     os.chown(path, 0, API_UID)
     path.chmod(0o440)
@@ -627,7 +644,7 @@ def prepare_ordinary_main(path: Path, *, inexact: bool) -> bytes:
 def open_launch_anchor(path: Path) -> int:
     if sys.platform == "linux":
         return os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
-    raise DatabaseClosedError("the protected read requires Linux")
+    raise WitnessScopeClosed("the protected read requires Linux")
 
 
 def witness_bound_image(domain: Path, device: str, *, inexact: bool) -> None:
@@ -690,8 +707,17 @@ def witness_bound_image(domain: Path, device: str, *, inexact: bool) -> None:
 
 
 def release_loop(device: str, indicator: Path, image: Path) -> None:
+    require(indicator.read_text().strip() == str(image), "the loop image is not owned")
     command("/usr/sbin/losetup", "--detach", device)
-    assert not indicator.exists()
+    cutoff = time.monotonic() + WITNESS_TIMEOUT
+    while True:
+        try:
+            backing = indicator.read_text().strip()
+        except FileNotFoundError:
+            break
+        require(backing == str(image), "the original loop image is unverified")
+        require(time.monotonic() < cutoff, "the original loop image is still attached")
+        time.sleep(0.01)
     image.unlink()
 
 
