@@ -66,7 +66,7 @@ What MVP guarantees and what it does not:
 |---|---|---|
 | agent with `secret_env` | refused unless egress is enforced, or run with an explicit recorded option | that an allowed host is not an exfiltration channel |
 | MCP-server secrets | absent from the agent's environment, files and processes, and the server's egress limited to its own allowlist, on runtimes declaring `isolates_tool_secrets` and `enforces_network_policy` | anything on runtimes without them (`local`) |
-| model API key | redacted from logs, transcripts and results | absence from the agent's environment: the harness needs it until a credential proxy exists (DD-30) |
+| model API key | redacted from logs, transcripts and results | absence from the selected candidate process: Claude and Codex receive the key in the constructed environment. Pi receives it through the [private in-memory handoff](../../knowledge/specs/pi-execution-profile.md#credential-handoff-and-prompt-admission). The same-user residual on local remains (DD-30). |
 | redaction and secret scan | literal values and common key patterns | encoded, split or transformed values |
 | rights of a secret | none: kora passes what the secrets provider holds | that a token is read-only; least privilege is the operator's configuration, and a secret handed to an agent's tools should be read-only unless the node's purpose needs more |
 
