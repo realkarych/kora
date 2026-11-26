@@ -642,144 +642,338 @@ A `timer` takes a `duration` or absolute `at` time without expression evaluation
 
 ### 7.4 Schema-driven checker
 
-Types come from the saved type closure (section 2.1). It is resolved lazily and memoized within one validation, so recursive `$ref` structures are checked in bounded time. Each input is typed from the producer's effective saved output contract at its call site.
+#### Schema types and bounds
 
-A schema is mapped after resolving `$ref` and a single-schema `allOf`. Its type then comes from `type`, or, when `type` is absent, from its keywords: `properties` means an object, `items` or `prefixItems` an array, and `enum` or `const` the JSON type of their values. The first matching row wins:
+Resolve types lazily from the saved closure (section 2.1) and memoize them within the validation.
+Type each input at its call site under the producer's effective saved output contract.
+Follow local JSON pointers within their document and cross-type references only through the saved closure.
+A `$ref` or single-schema `allOf` takes the target's type, independent of sibling keywords.
+
+The type comes from `type` or, when absent, the applicable schema keywords.
+`properties` can infer an object, `items` or `prefixItems` an array, and `enum` or `const` the JSON type of their values.
+Apply the first matching row.
 
 | JSON Schema | CEL type |
 |---|---|
-| pure `type: null`, `const: null` or `enum: [null]` under `kora.structured-output-view.v1` | existing `NULL` / `null_type`; produced null remains distinct from absence |
-| `type: [T, "null"]`, `anyOf`/`oneOf` of `T` and `null`, or an `enum` of one type plus `null` | nullable `T`, following CEL wrapper types; when `T` is already nullable, that same nullable type, so no nullable type wraps another |
-| object with `properties` | record of the declared fields, with the `required` set; `additionalProperties` types index reads |
-| object without `properties`, or with only `patternProperties` | `map(string, V)`; `V` from `additionalProperties` or `patternProperties`, else `dyn` |
-| string, or an `enum` or `const` of strings | `string`, with its allowed values |
-| integer | `int` |
-| number, or an `enum` or `const` of numbers | `double` (`int` under `type: integer`) |
-| boolean | `bool` |
-| array with `items` | `list(T)`; with `prefixItems` or without `items`, `list(dyn)` |
-| a `type` array of several non-null types, any other `anyOf`, `oneOf` or multi-schema `allOf`, an `enum` of mixed types, the boolean schema `true`, a schema with no type, keyword or `$ref` | `dyn` |
+| Pure `type: null`, `const: null` or `enum: [null]` under `kora.structured-output-view.v1` | Existing `NULL` / `null_type`. Produced null stays distinct from absence. |
+| `type: [T, "null"]`, `anyOf` or `oneOf` of `T` and `null`, or an `enum` of one type plus `null` | Nullable `T` under CEL wrapper types. An already nullable `T` stays the same. |
+| Object with `properties` | Record of declared fields and their `required` flags. Additional properties type index reads. |
+| Object without `properties`, including an object with only `patternProperties` | `map(string, V)`. Determine `V` by the undeclared-key rules below. |
+| String, or `enum` or `const` of strings | `string` with its allowed values |
+| Integer | `int` |
+| Number, or `enum` or `const` of numbers | `double`, or `int` under `type: integer` |
+| Boolean | `bool` |
+| Array | `list(T)` with `items`. With `prefixItems` or without `items`, use `list(dyn)`. |
+| Several non-null `type` members, other `anyOf`, `oneOf` or multi-schema `allOf`, mixed `enum`, Boolean schemas, pure null outside the saved view, or no type, keyword or `$ref` | `dyn` |
 
-The checker uses `dyn` for `payload` and `observation`. The following rules apply to dynamic checking.
+An object with `additionalProperties: false` and no `patternProperties` admits no undeclared key.
+When `patternProperties` is absent, an undeclared key uses the `additionalProperties` type.
+With exactly one pattern and `additionalProperties: false`, use that pattern's type.
+All other open cases use `dyn`.
+Apply the same rules to the value type of a map without `properties`.
 
-- dot selection on `payload`, `observation` or another `dyn` value is allowed and needs no guard, and a missing key is the evaluation error `missing_field`; a schema-typed `map(string, V)` is read by index, guarded by `in` like an open object's extra keys;
-- a `dyn` operand satisfies the same-type rule for `==`;
-- a `dyn` result passes checking and is checked for exact `bool` (or `string`) when evaluated.
+A nested schema object's `$id` is a closure fault, including on a JSON pointer's route.
+A map member named `$id` inside `properties`, `$defs` or a similar map does not declare a schema resource.
+Malformed keywords, unresolved references and noncanonical pointer indexes are also `IR022` before CEL checking.
+Visit each schema object at most once per root and view, resolving chains without interpreter recursion.
+Recursive, shared and deeply nested closures use counted linear steps.
+A failed mapping or failed caller resolver leaves no partial types.
 
-These rules give `IR011`, reported at the expression's YAML path and offset:
+`SchemaTypes.variable` yields a type and its value bound.
+A list's element limit is the smaller of `maxItems` and 1,000.
+A string's UTF-8 limit is the smaller of four bytes per `maxLength` code point and 16 KiB.
+Derived element bounds follow `items` and the additional-property type, and field bounds follow `properties`, under the same reference, single-`allOf`, nullable and view rules as type mapping.
+Other kinds' size keywords, siblings of `$ref`, `prefixItems` positions and multi-type schemas tighten nothing.
+Every declared bound retains 4,096 bytes and 256 values.
+Declare a child bound only if it tightens something below the parent.
+Revisiting an open recursive mapping declares no bound there, so recursive bounds stay acyclic and can only loosen.
+When a record has a tightened additional-property bound, declare a bound for every property, using data defaults for untightened or recursive properties.
+Otherwise an undeclared field would use the additional-element bound.
+A read `maxItems` or `maxLength` that is not a non-negative integer is a schema closure fault (`IR022`).
+Keywords that the mapper never reads are outside this check.
 
-- **Identifiers and fields.**
-  - An unknown identifier is rejected. `inputs` and `outputs` may appear only under field selection.
-  - A dot selection of a field outside `properties` is an unknown field, also on an object that allows additional properties. Undeclared keys of an open object are read only by index, `x['key']`.
-  - A comprehension variable that shadows an environment variable is rejected.
-- **Enum literals.** A string literal compared with an `enum`-typed value must be one of its allowed values.
-- **Numbers.**
-  - `==` and `!=` require the same type, so `int == double` is rejected, as in the cel-go and cel-cpp checkers.
-  - Ordering across `int`, `uint` and `double` is allowed.
-  - Arithmetic that mixes numeric types needs `double()` or `int()`.
-- **Optional fields.** Reading a non-required field without a guard on the same path is rejected.
-  - The guards are:
-    - `has(p)` as any conjunct to the left of the read in an `&&` chain;
-    - `!has(p)` as any disjunct to the left of the read in an `||` chain;
-    - `has(p)` as the condition of `?:` for its true branch.
-  - `'k' in x` guards `x['k']` in the same positions.
-  - The parent of a `has()` operand must itself be present or guarded, as in `has(a.b) && has(a.b.c) && a.b.c`.
-- **Null.** A comparison with `null` yields `bool`. Selection, ordering, arithmetic or a call on a `null` value is an evaluation error.
-- **`size()`** on a `string` or a `dyn` value is rejected while the binding counts UTF-8 bytes instead of code points.
-- **`matches()`** takes a string-literal pattern only, checked by the parser of section 7.2. kora parses the pattern in a closed subset of the binding's regular-expression syntax:
-  - **Supported:** literal characters and escaped ASCII punctuation other than `<` and `>`; the escapes `\n`, `\t`, `\r`, `\f`, `\v`, `\a`, `\xHH` and `\x{H…}`; `.`; the class escapes `\d`, `\D`, `\w`, `\W`, `\s` and `\S`; `\p{…}` and `\P{…}`, or their one-letter forms, for the Unicode classes of the class-size table (`L`, `Lu`, `Ll`, `N`, `Nd`, `P`, `S`, `Z`, `Greek`, `Latin`, `Han`, `Cyrillic`); bracketed classes, negated or not, with ranges and nested bracketed classes; the anchors `^`, `$`, `\b`, `\B`, `\A` and `\z`; capturing, non-capturing and named groups, each name unique within the pattern and starting with a letter or underscore; the flags `i`, `m` and `s`, with at most one `-` that a flag follows; alternation; and the repetitions `*`, `+`, `?`, `{n}`, `{n,}` and `{n,m}`, each optionally lazy.
-  - **Rejected** (`IR011`): every other construct, among them verbose mode `(?x)`, the flags `U`, `u` and `R`, look-around, backreferences, `\Q…\E`, `\<` and `\>` (word-boundary assertions in the binding), POSIX classes, class set operations (`&&`, `--`, `~~`), a range that starts or ends at a class escape, and Unicode classes outside the table.
-  - **Nesting.** Groups and bracketed classes share one nesting counter of at most 32, checked before the parser recurses.
-  - **Size estimate.** Pattern units are a positive fixed base plus the maximum of atom/class/repetition units and a syntax-character floor. Each atom uses the provisional class-size tables pinned under `kora.execution.v1`. Empty patterns, sibling empty captures, empty alternatives and flag-only groups therefore retain a nonzero charge. The base and syntax-character coefficients are each 1. An `i` flag anywhere in the pattern applies the case-insensitive weights to the whole pattern. A bracketed class is charged the sum of its members' weights, and a negated one at least the weight of `.`; a range that reaches beyond ASCII and a negated Unicode class are also charged at least the weight of `.`. A repetition multiplies by its upper bound, or by its lower bound plus one when it is unbounded (so `+` multiplies by two and `*` by one), and adds a fixed overhead.
+Binding verifies that each JSON kind matches its declared CEL type and otherwise returns `invalid_value`.
+Numbers feed `int`, `uint` and `double`, strings feed `string`, booleans feed `bool`, and null feeds `null`.
+Arrays feed lists and objects feed maps or records.
+A nullable type also accepts `null`, and `dyn` accepts every JSON kind.
+These checks enforce types inferred by keyword even when the JSON Schema admits other kinds.
+A child type preserves the CEL type of every parent property, so `number` to `integer` narrowing is `IR003` (section 2.1).
 
-  A pattern over the nesting limit or the provisional estimate cap of 1,048,576 is `IR027`. The tables, base, syntax floor and cap remain unchanged under the lightweight validation of section 7.6; they are not a calibrated native-memory or compiled-size envelope. The server-side compile also compiles the pattern in the binding.
-- **Result type.** The result must have the field's type from section 7.1.
+#### Environments, selections and guards
 
-**Settled cases** (decided on [issue #330](https://github.com/realkarych/kora/issues/330)). Where the table and rules above leave a case open:
+The checker receives the variable types, the required result type and the roots that require field selection.
+It rejects unknown identifiers and a comprehension variable that shadows an environment variable.
+`inputs` and `outputs` appear only under field selection.
+`payload` and `observation` are `dyn`.
+Dot selection on `dyn` needs no guard and a missing key gives `missing_field` at evaluation.
+A `dyn` operand satisfies the same-type equality rule.
+A `dyn` result is checked for exact `bool` or `string` when evaluated.
 
-- **Mapping.** Pure null outside `kora.structured-output-view.v1`, and the boolean schema `false`, are `dyn`. `$ref` and a single-schema `allOf` take their target's type; sibling keywords do not change it. Local references are JSON pointers within their document and cross-type references resolve only through the saved closure. A `$id` on a schema object below a document root, also one a JSON pointer passes through (a member of `properties`, `$defs` or a similar map named `$id` is not a resource), a malformed keyword, an unresolvable reference and a pointer index that is not canonical are closure faults the validator reports as `IR022` before checking. Mapping resolves every reference chain and visits every schema object at most once per document root and view, and never recurses on the interpreter stack, so recursive, repeatedly referenced and deeply nested closures map in counted linear steps; a failed mapping, including a failure of the caller's resolver, leaves no partial types behind.
-- **Additional and pattern properties.** An object with `additionalProperties: false` and no `patternProperties` declares no further keys. Otherwise an undeclared key has the `additionalProperties` type when there are no `patternProperties`, the single pattern's type when `additionalProperties` is `false` and exactly one pattern exists, and `dyn` in every other case; a map without `properties` takes its value type the same way. This replaces reading a map's value type from `patternProperties` alone, which keys outside the pattern would not satisfy.
-- **Conversion checks JSON kinds.** Before evaluation, conversion refuses a value whose JSON kind does not match its declared CEL type with `invalid_value` (section 7.7): numbers for `int`, `uint` and `double`, strings, booleans, `null`, arrays for lists and objects for maps and records; a nullable type also admits `null`, and `dyn` admits any kind. Keyword-inferred object and array types therefore hold for every bound value even though JSON Schema validation alone admits other kinds there.
-- **Schema-tightened bounds** ([issue #374](https://github.com/realkarych/kora/issues/374)). With each CEL type the mapping derives the variable's value bound: a schema whose type maps to a list declares an element count of the smaller of `maxItems` and 1,000, and one whose type maps to `string` declares a UTF-8 length of the smaller of four bytes per `maxLength` code point and 16 KiB. Element bounds follow `items` and the additional-properties type, field bounds follow `properties`, through the same reference, single-`allOf`, nullable and view rules as the types; a keyword on another type, a sibling of `$ref`, `prefixItems` positions and a schema of several types tighten nothing. Byte and value counts are never tightened: every declared bound keeps the 4,096 bytes and 256 values of the data bounds. A node declares children only when something below it is tightened, and a node reached again while its own mapping is open (a recursive reference) declares nothing, so recursive closures never produce cyclic bounds and only loosen. A record whose additional-properties bound is tightened declares every property, an untightened or recursive one at the data bounds, because an undeclared field reads the element bound. A `maxItems` or `maxLength` that is not a non-negative integer on a schema the mapping classifies is a closure fault (`IR022`); keywords the mapping never reads, such as siblings of `$ref`, are not checked here. `SchemaTypes.variable` returns the type and bound together.
-- **Environment.** The checker receives each variable's CEL type, the field's required result type and the roots that may appear only under field selection. `payload` and `observation` enter as `dyn`, which gives them the unguarded dot selection above.
-- **Undeclared keys.** A literal-key index read of an undeclared key on an object that declares no further keys is an unknown field. Otherwise the read has the undeclared-key type above and needs a guard, as the key is optional.
-- **Guards.** A guard and a read match on a section 7.3 path: field selections and literal indexes from the same variable or comprehension binding, where a field and a string key of the same name are the same step, so `has(x.f)` and `'f' in x` guard both `x.f` and `x['f']`. A dynamic-key read of a map or object needs no guard: it reads the whole subtree (section 7.5) and a missing key is the evaluation error `missing_field`. A read whose operand is not a path, such as an element of a list literal, cannot be guarded. Guard facts compose: the true facts of `has(p)` are `p`, of a literal `'k' in x` are `x['k']`, of `a && b` the union and of `!a` the false facts of `a`; the false facts of `a || b` are the union and of `!a` the true facts of `a`. The right operand of `&&` sees the true facts of its left operand, the right operand of `||` the false facts of its left operand, and the true branch of `?:` the true facts of its condition; facts stay valid inside comprehension bodies.
-- **Null.** `==` and `!=` with `null` accept a nullable, `null` or `dyn` operand only; presence is tested with `has()`. Selection, ordering, arithmetic and calls on a nullable value are checked against its inner type. A nullable result is not the required `bool` or `string`.
-- **Maps and joins.** Dot selection on any map, schema-typed or literal, is an unknown field; maps are read by index. Every map literal key is `int`, `uint`, `bool`, `string` or `dyn`, and so is the left operand of `in` on a map; a repeated literal key is `IR011`, because the binding keeps the last value where cel-spec fails. List indexes are `int` or `dyn`; map indexes match the key type. Heterogeneous list and map literal elements and `?:` branches join to `dyn`, and `T` with `null` to nullable `T`.
-- **Equality and literals.** Scalars compare only with the same kind, and a string with allowed values compares with any string; a list compares with a list and a map or object with a map or object; `dyn` compares with anything. Enum literals are checked in `==`, `!=` and the list-literal elements of `in`.
-- **Overloads.** Operators and functions follow the cel-spec standard overloads restricted to what the binding evaluates correctly: `int(timestamp)`, `timestamp(int)`, `string(bool)`, `duration + timestamp`, the date accessors and `getMilliseconds()` of a duration are absent, and unary `-` and `getMilliseconds()` do not accept a `dyn` operand, where the binding negates booleans and returns a duration's total milliseconds; all of these are `IR011`. `string()` of time values, accessor time zones, invalid UTF-8 in `string(bytes)`, time ranges, error absorption, iteration order, repeated map keys computed from data and mixed `int` and `uint` keys reached through `dyn` remain the deviations of section 7.8.
-- **Diagnostics.** The `IR011` reasons are `unknown_identifier`, `root_not_selected`, `unknown_field`, `shadowed_variable`, `unknown_enum_value`, `no_matching_overload`, `unguarded_optional`, `string_size`, `repeated_map_key` and `wrong_result_type`, each with a fixed message and the code-point offset of the failing node; a wrong result type is reported at offset 0. CEL types carry field names and enum values from the schemas, so consumers never log them or place them in diagnostics.
+On a record, dot selection requires a declared field.
+Open records expose undeclared keys only by index, with the undeclared-key type.
+A literal read of an undeclared key on a closed record is an unknown field.
+Read maps only by index.
+Dot selection on a map, including a literal map, gives `unknown_field`.
+A list index is `int` or `dyn`, and a map index matches the map's key type.
+A literal-key map read needs the `in` guard used for an open record's extra keys.
+A dynamic-key read of a map or object projects the complete subtree and needs no guard.
+A missing key in such a read gives `missing_field`.
 
-A child type must keep the CEL type of every parent property: assignability (`IR003`, section 2.1) rejects a child that narrows `number` to `integer`.
+A non-required read needs a guard on the same path.
+A guard matches field selections and literal indexes from the same variable or comprehension binding, with dot and equivalent string-key steps treated alike.
+Thus `has(x.f)` and `'f' in x` guard both `x.f` and `x['f']`.
+An operand without a path, such as a list literal, cannot be guarded.
+A `has()` parent must be present or already guarded, as in `has(a.b) && has(a.b.c) && a.b.c`.
 
-**Prepared environments** ([issue #376](https://github.com/realkarych/kora/issues/376)). The library's `prepare(environment, meter)` returns an opaque sealed `PreparedEnvironment`; `check_typed` accepts it or the existing `Environment`. Preparation validates every variable, including unused ones, validates shared type nodes once and converts source bounds once with counted work. It snapshots the outer variable mapping into a private dictionary. Nested types and source-bound graphs remain trusted kora-builder data and must not change after preparation; copying the mapping does not make those graphs immutable. Malformed preparation raises `BoundError`. Reusing a prepared environment preserves diagnostics, integer-negation rewriting, renderings, digests and complete estimates of an unprepared check.
+The true facts of `has(p)` are `p`.
+The true facts of a literal-key `'k' in x` are `x['k']`.
+The true facts of `a && b` and false facts of `a || b` are their respective unions.
+Negation exchanges true and false facts.
+The right operand of `&&` sees true facts of the left and the right of `||` sees false facts.
+The true branch of `?:` sees the condition's true facts.
+Facts remain valid inside comprehensions.
 
-Diagnostics use the [shared representation and collection contract](diagnostics.md): canonical segmented document paths, code-point offsets and optional source locations. Keep one diagnostic per expression; the enclosing collection owns deterministic path/offset ordering, error and warning bounds and separate omitted counts. An offset is preserved only while the final safe path still identifies the exact expression field.
+#### Type and overload rules
+
+- An `enum` string literal used with an enum-typed value must be allowed by that enum.
+  Check literals in `==`, `!=` and the list-literal elements of `in`.
+- Equality compares scalars of the same kind, lists with lists, and maps or objects with maps or objects.
+  A string with allowed values compares with any string, and `dyn` compares with any kind.
+  Ordering can mix `int`, `uint` and `double`.
+  Arithmetic across numeric types needs an explicit `double()` or `int()` conversion.
+- `==` and `!=` with `null` yield `bool` and require a nullable, `null` or `dyn` operand.
+  Check presence with `has()`.
+  Check selection, ordering, arithmetic and calls against the inner type of a nullable operand.
+  At evaluation these operations on a null value fail, with two admitted calls.
+  `type(null)` returns `null_type` and `dyn(null)` returns `null`.
+  A nullable result does not satisfy a required `bool` or `string`.
+- Map literal keys and the left operand of map `in` are `int`, `uint`, `bool`, `string` or `dyn`.
+  A repeated literal key gives `IR011`.
+  Heterogeneous list and map elements and `?:` branches join to `dyn`.
+  `T` joined with `null` yields nullable `T`.
+- `size()` rejects `string` and `dyn` while the binding sizes strings in UTF-8 bytes.
+  Operators and functions use the supported cel-spec overloads.
+  Exclude `int(timestamp)`, `timestamp(int)`, `string(bool)`, `duration + timestamp`, duration date accessors and duration `getMilliseconds()`.
+  Unary minus and `getMilliseconds()` reject a `dyn` operand because of native Boolean negation and total duration milliseconds.
+  These exclusions are `IR011`.
+  Time strings, time zones, invalid UTF-8 in `string(bytes)`, time ranges, error absorption, iteration order, repeated computed map keys and mixed `int`/`uint` keys reached through `dyn` retain their [conformance rules](#78-conformance).
+- The result must satisfy the field type in [section 7.1](#71-expression-kinds-and-environments).
+
+#### Literal regular expressions
+
+`matches()` takes a string literal under the [parser and native check](#72-parser-limits-and-canonical-rendering).
+The static pattern grammar allows these constructs.
+
+- Literal characters and escaped ASCII punctuation except `<` and `>`.
+- `\n`, `\t`, `\r`, `\f`, `\v`, `\a`, `\xHH`, `\x{H…}`, and dot.
+- `\d`, `\D`, `\w`, `\W`, `\s`, `\S`, plus `\p{…}` and `\P{…}` and their one-letter forms.
+  The class-size table covers `L`, `Lu`, `Ll`, `N`, `Nd`, `P`, `S`, `Z`, `Greek`, `Latin`, `Han` and `Cyrillic`.
+- Bracketed classes, including negation, ranges and nested classes.
+- Anchors `^`, `$`, `\b`, `\B`, `\A` and `\z`.
+- Capturing, non-capturing and named groups, with names unique within the pattern and beginning with a letter or underscore.
+- Flags `i`, `m` and `s`, with at most one `-` followed by a flag.
+- Alternation and repetitions `*`, `+`, `?`, `{n}`, `{n,}` and `{n,m}`, each optionally lazy.
+
+All other constructs are `IR011`, including `(?x)`, flags `U`, `u` and `R`, look-around, backreferences, `\Q…\E`, `\<` and `\>`, POSIX classes, class set operations (`&&`, `--`, `~~`), ranges with a class escape endpoint and Unicode classes outside the table.
+Groups and bracketed classes share a nesting limit of 32, checked before recursion.
+
+Estimate pattern units as a fixed base plus the larger of atom/class/repetition units and the syntax-character floor.
+The base and syntax-character coefficients are both 1, so empty patterns, sibling empty captures, empty alternatives and flag-only groups carry nonzero charges.
+Use the provisional class-size tables pinned under `kora.execution.v1`.
+Any `i` flag selects case-insensitive weights for the entire pattern.
+Charge a bracketed class by the sum of member weights, with a dot-weight minimum for a negated class.
+A range extending beyond ASCII and a negated Unicode class also have that minimum.
+A bounded repetition multiplies by the greater of its upper bound and one, and then adds fixed overhead.
+An unbounded one uses lower bound plus one and the same overhead.
+For example, `+` multiplies by two and `*` by one.
+Exceeding the 32 nesting limit or the provisional 1,048,576-unit cap is `IR027`.
+The tables, base, syntax floor and cap carry over under the lightweight validation of section 7.6.
+The estimate does not establish native memory or compiled size.
+
+#### Prepared environments and diagnostics
+
+`prepare(environment, meter)` supplies a sealed opaque `PreparedEnvironment` to `check_typed`, which also accepts the unprepared `Environment`.
+Validate every variable, including unused variables, and validate shared type nodes and convert source bounds once under the meter.
+Snapshot the outer mapping into a private dictionary.
+Nested types and source-bound graphs are trusted kora-builder data and must remain unchanged after preparation.
+Malformed preparation raises `BoundError`.
+Prepared and plain checks have identical diagnostics, integer-negation rewriting, renderings, digests and complete estimates.
+
+Static typing refuses with `IR011` at the expression path and the failing node's code-point offset.
+The fixed reasons are `unknown_identifier`, `root_not_selected`, `unknown_field`, `shadowed_variable`, `unknown_enum_value`, `no_matching_overload`, `unguarded_optional`, `string_size`, `repeated_map_key` and `wrong_result_type`.
+Wrong result type uses offset 0.
+Schema field names and enum values in CEL types stay outside logs and diagnostics.
+Report one finding per expression under the [shared diagnostic contract](diagnostics.md), with optional source locations and an offset only while the final safe segmented path still identifies the exact field.
+The enclosing collector owns deterministic path/offset order, error and warning bounds and their separate omitted counts.
 
 ### 7.5 Projections and typed conversion
 
-**Projection path sets.** Deployment freezes the normalized set for run parameters and for every saved output declaration in the [CEL projection path section](data-model.md#saved-cel-projection-path-sets). Unread declarations have explicit empty sets. The [saved CEL expression facts](data-model.md#saved-cel-expression-facts) separately preserve checker-local reads. Under the first-slice disabled retry binding, checked authored retry reads remain local facts and contribute no runtime projection paths.
+#### Saved projection paths
 
-Expression-local `payload`, `observation` and approval `response` reads retain their own consumers and lifetimes. Form-response ingress checks the approval condition's local reads and the entire frozen response-output path set. The latter represents reads of that output through artifact routes.
+Freeze a normalized [path set](data-model.md#saved-cel-projection-path-sets) at deployment for run parameters and for each saved output declaration.
+Save an explicit empty set for an unread declaration.
+Keep checker-local reads in [saved expression facts](data-model.md#saved-cel-expression-facts).
+Under the disabled first-slice retry binding, authored retry reads remain local facts and contribute no runtime projection paths.
 
-- **Notation.** A frozen path set is a pair of sorted lists, `whole` and `presence`. Paths are relative to the variable: `.name` selects a field, `['k']` a map key or non-identifier field, `[*]` every list element, and the empty string the whole variable. String keys use single-quoted literals with canonical escapes; keyword and reserved names use brackets. The parser round-trips generated canonical paths under the rendering-length bound, including escaped non-BMP keys. Whole paths subsume the same path's presence and every deeper path. A presence ancestor may coexist with a deeper read; it never discards the selected descendants.
-- **Composition.** Paths compose through every route by which a value reaches an expression:
-  - `inputs[*].path`;
-  - `$inputs` forwarding into a body;
-  - the fan-out element, which becomes `[*]` on the mapped list;
-  - `collect` and subgraph exports;
-  - `$params`, cut from the validated run parameter object;
-  - `$previous_attempt`, including `artifacts['n.o']`, whose paths compose into the earlier iteration's output.
-- **Binding routes.** Resolve the producer through the exact pinned graph binding. Compose parsed steps by removing the selected input or output name before prefixing a supported selector. Preserve root presence for a presence-only read of that selected value. An ordinary retry's `outputs.<name>` resolves to the node's own output or the body's declared export. Follow every matching caller declaration of a shared body and include internal routes of unused bodies. For collections and exports, propagate requirements to the applicable children with wildcard steps where the mapping requires them. The synthetic `PreviousAttempt` value owns its metadata projection. Prior-artifact reads contribute to the earlier output declarations, and whole or dynamic prior-attempt reads require the complete applicable route set.
-- **Coverage.** The initial implementation scope is direct `params` reads and same-body direct artifact input bindings. Selected paths, list-position translation, reserved sources, wrappers, collection/export and previous-attempt routes require complete supported derivation before contributing to a section. Refuse an uncovered route before new effects. Apply the pinned producer view before every cut.
-- **Whole subtrees.** A dynamic index, a comprehension range and a whole-value read or operation project the whole subtree at their path. A literal integer index into a typed list projects `[*]` followed by the remaining path; an integer index into `dyn` projects the operand whole. A path read only through `has()`, or a key of a map or record tested only by a literal-string-key `in`, projects its presence; a `dyn` operand of `in` projects its whole subtree. Selection and index receivers alone do not mark an ancestor whole. Index expressions and external-variable reads inside comprehensions retain their own paths; scoped comprehension reads are covered by their whole range.
+Expression-local `payload`, `observation` and approval `response` reads keep their own consumers and lifetimes.
+Form-response ingress checks the condition's local reads and the complete frozen response-output path set, which represents separate reads through artifact routes.
 
-**Library extraction and cutting** ([issue #375](https://github.com/realkarych/kora/issues/375)). A typed checked expression exposes an immutable per-variable `projections` mapping of frozen `PathSet(whole, presence)` values; the untyped `check` has an empty mapping. Both prepared and unprepared environments produce the same path sets. Extraction preserves exact integer-index guard identities separately from wildcard projection steps. Its intern/read tables are local to one check, and normalized tries are temporary. Canonical ASCII paths are sorted by character distribution with a bounded alphabet; key, prefix, rendering and sorting work is counted.
+A path set has sorted `whole` and `presence` lists relative to a variable.
+`.name` selects a field, `['k']` a map key or non-identifier field, `[*]` each list element, and the empty string the whole variable.
+Use single-quoted keys with canonical escapes, including brackets for keyword and reserved names.
+Generated canonical paths, including escaped non-BMP keys, round-trip under the rendering-length bound.
+A whole path subsumes presence there and all deeper paths.
+A presence ancestor can coexist with deeper reads and preserves them.
 
-`cut(value, path_set, meter)` is an iterative library walk over JSON values. It copies whole reads, skips absent keys, and cuts list elements under `[*]` without changing list cardinality or positions. A presence-only terminal keeps the empty value of the stored value's JSON kind: `""`, integer `0`, float `0.0`, `[]` or `{}`; booleans and `null` remain unchanged. If a value's kind cannot support the next step, the walk keeps that kind's empty value, preserving selection errors on `dyn` data. Whole numeric reads retain their original kind and signed zero. The result never grows relative to the source.
+Compose paths through `inputs[*].path`, body forwarding via `$inputs`, a fan-out element as `[*]` on the mapped list, `collect`, and subgraph exports.
+`$params` reads use the validated run parameters.
+`$previous_attempt` reads of `artifacts['n.o']` compose into the earlier iteration's output.
 
-The full validated producer may exceed the evaluation data bounds when the selected projection fits. The cut checks canonical bytes, value occurrences, depth, string and container bounds incrementally while constructing its output, using iterator frames rather than a source-sized pending frontier; whole copies use the same bounded walk. Exceeding an output bound, reaching a cycle while copying, or copying a non-JSON scalar raises a content-free `BoundError`; unsupported JSON kinds and subclasses are refused before walking them. This does not add a full-producer evaluation quota or validate unused source descendants. The library equivalence test compares consistently converted full and cut values in the binding's admitted reference domain, including missing selections and wrong kinds within `dyn`; larger-original/small-projection behavior has separate cutting coverage.
+Resolve each producer through the exact pinned graph binding.
+Remove the selected input or output name before prefixing the supported selector.
+Keep root presence for a presence-only read of that value.
+An ordinary retry's `outputs.<name>` resolves to the node's own output or the body's declared export.
+Follow all matching caller declarations of a shared body and internal routes of unused bodies.
+Propagate collection and export requirements to their applicable children, with wildcard steps where required.
+The synthetic `PreviousAttempt` owns its metadata projection.
+Earlier artifact reads contribute to the exact earlier output declarations, and whole or dynamic previous-attempt reads require the complete applicable route set.
 
-This library implementation does not freeze or persist deployment path sets, compose projections through graph edges, cut producers, bind stored projections, enforce `AgentSession` policy or choose a numeric persistence codec. Those activation requirements below retain their implementing owners.
+The initial path composer supports direct `params` reads and same-body direct artifact input bindings.
+Selected paths, list-position translation, reserved sources, wrappers, collection/export and previous-attempt routes require complete supported derivation before contributing to a path set.
+Refuse uncovered routes before new effects.
+Use the pinned producer view before each cut.
 
-**Cutting and storing.** Every projection is cut once, by whichever step produces its value. For `AgentSession`, whose stored payload is the transcript, the projectable fields remain its fixed session-metadata allowlist: harness name and installed version, session id, billing class, normalized usage with completeness and derived cost/basis, turn count, integer millisecond duration, stop reason and worker/image provenance. The exact flattened fields, nested exclusions and checker schema are frozen as [kora.agent-session-view.v1](artifacts/AgentSession.cel-policy.json), bound into the saved effective contract. Core constructs this fixed view from the validated logical value before cutting deployment-frozen paths. Denials, transcript content/references/descriptors/capture/availability, opaque vendor evidence and observation/price identities cannot enter it through whole, dynamic, forwarded, collection/export or previous-attempt reads. The permitted metadata projection survives transcript expiry and remains distinct from the separately saved `summary`; a missing or mismatched projection is unavailable, never recomputed from current behavior. Reading an excluded field is `IR011`. CEL needs no `transcripts` capability.
+#### Extracting and cutting projections
 
-- **Uploaded outputs.** An uploaded output is cut when it is validated at upload, including a staged target-source output (ADR-0019).
-- **Scheduler-produced outputs.** Each is cut by the owner producing it: a `human_input` response, a `wait_event` payload output, a `PreviousAttempt`, a fan-out collection and a subgraph export. A collection or export is prepared from its children's stored original cuts under the destination's frozen view and path set, then applied only after the transition rechecks its exact current owner and input identities. No storage I/O or full JSON work happens inside a scheduler transaction. Each child's original and converted logical cuts independently fit 4 KiB and 256 values; its complete [version-1 record](data-model.md#lossless-artifact-cel-projection-storage) fits 8,515 encoded bytes. At most 1,000 children require at most 8,515,000 cumulative encoded bytes acquired one child at a time, not 1,000 retained decoded records. Acquire, check and release each child while retaining only the bounded destination, fixed child references and current-child state. Stop at the first original or converted destination bound; charge all visited encoded bytes, checking/conversion work and source metadata. One re-cut counts as progress under the existing allowance. This accounting grants no new aggregate caller allowance or route activation; actual acquisition admission and current-owner checks remain required.
-- **Run parameters.** Run creation cuts from the validated parameter object under the exact pinned parameter path set. For [versioned run input storage](data-model.md#1323-run-input-storage), save the original unconverted cut with the run. Perform the required typed conversions and original and converted data checks before acceptance. Evaluation binds only the saved cut under the verified pinned types and existing conversion rules. Each applicable expression binds the same result as the corresponding conversion of the admitted full value. For a nonempty runtime parameter path set, the detached manual-start check uses the same parameter mapper as static checking to verify the original and converted CEL data bounds for the pinned parameter view.
+A dynamic index, comprehension range or whole-value use reads the whole subtree at its path.
+A literal integer index into a typed list projects `[*]` followed by the remaining path.
+An integer index into `dyn` projects its operand whole.
+A path read only through `has()` contributes presence.
+A literal-string key tested by `in` contributes presence for a map or record.
+A `dyn` operand of `in` contributes its whole subtree.
+Selection and index receivers alone leave the ancestor without a whole read.
+Keep the paths for index expressions and external variables read inside comprehensions.
+The whole range covers reads of the local comprehension binding.
 
-kora cuts artifact projections from the validated value, converts as described below and checks the data bounds of section 7.6. The [lossless version-1 representation](data-model.md#lossless-artifact-cel-projection-storage), accepted under #1633, stores both cuts as one native byte value in the metadata database under the explicit CEL derived owner; the artifact's legacy projection column contains only a marker. A projection keeps its artifact's retention class: the artifact-payload period, forever for reference-only types, and for `AgentSession` the lifetime of its session metadata, which outlives the transcript ([data-model.md](data-model.md) section 10). Listings never load projections.
+Each typed check exposes an immutable per-variable `projections` map of frozen `PathSet(whole, presence)` values.
+Untyped `check` returns an empty map, and prepared and unprepared environments yield the same typed paths.
+Keep exact integer-index guard identities separate from wildcard projection steps.
+Intern and read tables belong to one check, and normalized tries are temporary.
+Sort canonical ASCII paths by character distribution with a bounded alphabet.
+Count key, prefix, rendering and sorting work.
 
-Affected StructuredOutput projections preserve original and converted numeric kind, binary64 signed zero and NUL-bearing strings/keys through that exact representation on both databases. Canonical payload bytes alone do not establish projection fidelity. The #1637 detached producer/checker implements same-call effective validation, original cutting and byte checking, with `test_cel_projection_number_kinds_round_trip` and the library composition tests. It adds no migration, native acquisition or accepting writer. Work items 4/8/10 still supply their actual ownership/acquisition evidence before activation. Complete effective validation and cutting use the same checked output binding in one preparation; standalone model validity or an unassociated validation result is insufficient. Original/converted bounds and collection/export re-cutting remain required.
+`cut(value, path_set, meter)` walks JSON iteratively.
+It copies whole reads, skips absent keys and cuts `[*]` elements without changing list positions or cardinality.
+A presence-only terminal uses the empty value of the original JSON kind (`""`, integer `0`, float `0.0`, `[]` or `{}`).
+Booleans and `null` stay unchanged.
+If a kind cannot support the next step, keep its empty value so a `dyn` selection still fails.
+Whole numeric reads retain original kind and signed zero, and the result never grows relative to the source.
 
-Collection/export projections must equal conversion of the admitted full value under each destination's frozen checker view, including downstream whole-subtree and presence reads. Re-cut the stored original value before applying the destination's conversion; retaining only the already converted values is insufficient. An integer-view child containing `-0.0` converts to int `0`, but collection into `List[StructuredOutput]` with dyn items must still bind double `-0.0`. A number-view child containing integer `9007199254740993` must export that exact integer into an integer-view wrapper, rather than reconstruct it from rounded double `9007199254740992.0`. Both cases extend `test_cel_projection_matches_full_binding` and `test_cel_projection_composes_through_collect_and_exports`. Every re-cut keeps the existing original/converted bounds and saved views; it cannot recover pre-admission source tokens, load storage in a transaction or consult current schemas. The selected representation retains only the admitted cut, never the full original payload. Collection/export ownership, native acquisition and overhead evidence remain implementation gates under work items 4/8/10.
+A validated producer may exceed the evaluation bounds if the selected projection fits.
+Enforce canonical bytes, value counts, depth, strings and containers as the cut grows.
+Iterator frames keep the pending frontier for whole and partial cuts independent of source size.
+Exceeding a cut bound, a cycle in copied data or a non-JSON scalar raises a content-free `BoundError`.
+Refuse unsupported JSON kinds and subclasses before walking them.
+Unused source descendants stay outside this cut and evaluation quota and receive no validation from it.
+Existing equivalence coverage compares consistently converted full and cut values in the admitted native domain, including missing and wrong-kind `dyn` selections, and separately checks a large original with a small cut.
+Freezing, graph composition, producer cutting, stored binding, `AgentSession` policy and the storage codec remain with their own owners.
 
-**Binding.** Evaluation binds only stored projections.
+#### Producer and storage rules
 
-- **Absent and unavailable.** A path missing from the value is absent in the projection, as it would be in the payload. A projection that is itself unavailable is the error kind `projection_unavailable`, never absent data. A projection is unavailable when retention has deleted it, when it was never cut, or when it was cut under a different path set. Version-1 availability belongs to its matching CEL derived owner; a present primary payload or marker cannot revive it. Its retention class follows the artifact's rules, except that an `AgentSession` projection, which holds only session metadata, stays available after its transcript expires.
-- **Summaries.** The artifact type's `summary` serves API and console views and is never visible to CEL ([protocols.md](protocols.md) section 8).
-- **`payload` and `observation`.** They are projected once per event or observation and per frozen path-set digest, by a bounded walker, and the bounds are checked against that path set. A wait's result therefore never depends on which other waits are open. The projection is a disposable cache bounded by entry count, released when the event's batches finish, and recomputed after a restart.
+The owner producing a value cuts its projection once.
+Upload cuts during validation, including staged target-source outputs (ADR-0019).
+The Scheduler producer owns the cuts for a `human_input` response, `wait_event` payload output, `PreviousAttempt`, fan-out collection or subgraph export.
 
-**Conversion.** It follows the producer's saved contract:
+For a collection or export, re-cut each child's stored original value under the destination's frozen view and path set before converting.
+The result must equal conversion of the admitted full value under that view, including whole-subtree and presence reads.
+An integer view can convert original `-0.0` to `0`.
+A destination with `dyn` items must still see double `-0.0`.
+A number view can round integer `9007199254740993` to double `9007199254740992.0`.
+An integer-view export still receives the exact original integer.
+Keep the existing full-versus-cut and composition checks for both cases.
+Re-cutting uses only the stored original cut and saved views, without recovering pre-admission tokens or reading live schemas.
 
-- **Integers.** `integer` becomes `int`, and `1.0` becomes `1`.
-- **Numbers.** `number` becomes `double`.
-- **Values without a schema** (`payload`, `observation`, `dyn` subtrees). Every JSON number becomes `double`, as in CEL's JSON mapping.
-- **Strings.** They stay strings, whatever their `format`.
-- **Schema defaults** are not filled in.
+Each child's original and converted logical cuts independently fit 4 KiB and 256 values.
+One complete [version-1 record](data-model.md#lossless-artifact-cel-projection-storage) fits 8,515 bytes and at most 1,000 children contribute up to 8,515,000 encoded bytes.
+Acquire, check and release one child at a time, holding only the bounded destination, fixed child references and current child state.
+Stop at the first original or converted destination bound.
+Charge visited encoded bytes, checking, conversion and source metadata.
+A re-cut counts as progress under the existing allowance.
+Acquisition requires its existing aggregate caller admission.
+The scheduler transaction performs no storage I/O or full JSON work.
+Before applying, recheck the exact current transition owner and all input identities.
+The accounting neither activates a route nor supplies the required owner, native acquisition and overhead evidence of work items 4/8/10.
 
-**Invalid values at entry.** Required CEL conversion refuses a value outside signed 64-bit range under `integer`, a nonfinite `number`/`dyn` conversion or data over a section 7.6 bound. Under the saved `kora.structured-output-view.v1` binding, standalone artifact admission separately permits the [StructuredOutput numerical domain](artifacts/StructuredOutput.md#2-numerical-values-and-canonical-bytes), including larger unprojected integers; required conversion still fails explicitly, never truncating. Unrelated contracts keep their existing entry rules. Direct and polled approvals and run-parameter ingress retain the independently stricter entry checks below, including unused integer fields:
+Run creation cuts validated parameters under the pinned path set.
+For [versioned run inputs](data-model.md#1323-run-input-storage), save the original unconverted cut with the run after checking required conversions and original and converted bounds.
+Bind only that saved cut under its verified types and conversion rules, with the same result each expression would obtain from the admitted full value.
+For a nonempty detached manual-start path set, use the static parameter mapper to check the pinned view's original and converted bounds.
 
-- an output fails with `artifact_invalid`;
-- a direct form response, and run parameters at trigger, webhook start and rerun, are refused with `API003`, and the static `params` of cron, sensor and graph triggers are `IR027` at deployment;
-- a polled channel response is not applied, the request stays `pending`, and a diagnostic is recorded ([scheduler.md](scheduler.md) section 16.3).
+Artifact preparation cuts from the validated value, converts under the pinned view and checks section 7.6's bounds.
+The [version-1 encoding](data-model.md#lossless-artifact-cel-projection-storage) stores the original and converted cuts together as native bytes in the CEL derived owner.
+The legacy projection column holds a marker.
+Affected StructuredOutput cuts retain original and converted numeric kind, binary64 signed zero and NUL-bearing strings and keys on both databases.
+Complete effective validation and cutting use the same checked output binding in one preparation.
+Canonical payload bytes, standalone model validity or detached unassociated validation results cannot prove projection fidelity.
+The detached checker validates the value and encoding under the existing view. [Detached preparation evidence](../research/artifact-cel-projection-producer-2026-11-15.md)
+Existing [StructuredOutput activation checks](artifacts/StructuredOutput.md#5-verification-and-activation) retain actual acquisition and producer evidence, including round-trip numeric kinds, native ownership and source integration.
 
-These narrower approval rules also remain in the [API approvals contract](api-and-agent-surface.md). For delayed event/observation/approval producers, StructuredOutput preservation begins at the selected typed snapshot admitted from the retained source. Existing `inbound_event.payload`, `wait.observation` and `approval_request.response` normalization before that boundary is unchanged; no original numeric token or already normalized signed zero is recovered. The producer freezes the admitted artifact once rather than recomputing it through current providers. Both-database source-to-output cases and the harness absence-versus-null gate are assigned in the [activation table](artifacts/StructuredOutput.md#5-verification-and-activation).
+Projections follow the matching artifact's retention class (data-model section 10).
+The artifact-payload retention applies to payloads, reference-only types retain indefinitely, and `AgentSession` retains for the lifetime of its session metadata.
+Listings never load projections.
 
-**The FR-2.5 example.** In the IR it reads `inputs.review.verdict == "approved" && inputs.bench.cpu < inputs.baseline.cpu * 0.85`.
+#### AgentSession projection
 
-- With `cpu` declared `number`, a stored `100` becomes `100.0`, so both operands of `*` are `double`.
-- With `cpu` declared `integer`, the checker rejects `int * double` and the author writes `double(inputs.baseline.cpu) * 0.85`.
-- Without conversion, the binding fails with `TypeError` whenever the JSON value happens to be whole (probe).
+Core constructs [`kora.agent-session-view.v1`](artifacts/AgentSession.cel-policy.json) from the validated logical value before applying deployment-frozen paths.
+The saved effective contract binds its exact fields, nested exclusions and checker schema.
+It allows harness name/version, session ID, billing class, normalized usage with completeness and derived cost/basis, turn count, integer millisecond duration, stop reason and worker/image provenance.
+It excludes denials, transcript content, references, descriptors, capture and availability, opaque vendor evidence and observation/price identities.
+Whole, dynamic, forwarded, collected, exported and previous-attempt reads retain those exclusions.
+An excluded field is `IR011`.
+No `transcripts` capability is needed for the metadata projection.
+It outlives transcript expiry and stays distinct from the saved `summary`.
+
+#### Binding and conversion
+
+Evaluation binds only stored projections for saved values.
+A missing key remains absent.
+A missing, expired or mismatched projection yields `projection_unavailable`.
+For version 1 the exact matching CEL derived owner controls availability.
+A present primary payload or legacy marker cannot revive the projection or permit recomputation through current behavior.
+Artifact `summary` serves API and console, outside CEL. [Artifact type protocol](protocols.md#8-artifact-type-fr-4143)
+
+Project `payload` and `observation` once per event or observation and frozen path-set digest.
+A bounded walker checks that set's bounds, independent of other open waits.
+Keep a disposable entry-count-bounded cache, release it when the event's batches finish and recompute after a restart.
+
+Use the producer's saved contract for conversion.
+`integer` yields `int`, including whole input `1.0` as `1`.
+`number` yields `double`.
+Every JSON number in schema-free `payload`, `observation` or a `dyn` subtree yields `double`.
+Strings remain strings for every `format`, and schema defaults leave values unchanged.
+
+Required conversion refuses out-of-range signed 64-bit integers, nonfinite `number` or `dyn` results and section 7.6 bound violations.
+Standalone artifact admission under `kora.structured-output-view.v1` separately permits the [standalone numerical domain](artifacts/StructuredOutput.md#2-numerical-values-and-canonical-bytes), including large integers outside the projection.
+Required conversions of those values still fail without truncation.
+Other contracts retain their entry rules.
+Direct and polled approvals and run-parameter ingress keep their stricter entry checks, including unused integer fields.
+
+- An output fails with `artifact_invalid`.
+- A direct form response or a run parameter at trigger, webhook start or rerun is refused with `API003`.
+- A static cron, sensor or graph-trigger `params` refusal at deployment is `IR027`.
+- A refused polled response is unapplied, retains `pending` and records a diagnostic ([Scheduler](scheduler.md) section 16.3).
+
+Delayed event, observation and approval producers preserve StructuredOutput numbers from the selected typed snapshot admitted from retention.
+The earlier `inbound_event.payload`, `wait.observation` and `approval_request.response` normalization stays in force.
+The snapshot cannot reconstruct source numeric tokens or a sign of zero already normalized.
+Freeze the admitted artifact once, independent of current providers.
+Verify the source-to-output legs on both databases.
+The separate harness gate covers absence versus explicit null. [StructuredOutput activation](artifacts/StructuredOutput.md#5-verification-and-activation)
+
+**FR-2.5 example.**
+In `inputs.review.verdict == "approved" && inputs.bench.cpu < inputs.baseline.cpu * 0.85`, a stored `100` becomes `100.0` for a `number` schema and both multiplication operands are `double`.
+With `integer`, `int * double` is refused and the author uses `double(inputs.baseline.cpu) * 0.85`.
+Without typed conversion, whole JSON numbers raised `TypeError` in the probe. [Binding probe](../research/cel-binding-probe-2026-10-19.md)
 
 ### 7.6 Data bounds, cost and evaluation
 
