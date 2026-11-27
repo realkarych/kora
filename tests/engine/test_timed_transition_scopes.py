@@ -2,7 +2,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 from sqlalchemy import Connection, event, text
@@ -14,6 +14,7 @@ from sqlalchemy.util import await_
 from kora.conformance.capture import captured
 from kora.db.connection import (
     Database,
+    DatabaseSettings,
     DatabaseWriterFailure,
     DatabaseWriterRejected,
     Dialect,
@@ -31,11 +32,13 @@ from kora.observability import Level, LoggingSettings
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     ConnectionLedger,
+    WriterCutoffLoop,
     narrow_settings,
     until,
 )
 from tests.db.test_graph_read_admission import executed_queries
 from tests.db.test_postgres_writer_settings import postgres_driver
+from tests.db.test_read_snapshot import PostgresNativeConnection
 
 CREATE_PROBE: str = "CREATE TABLE scope_deadline_probe (id INTEGER PRIMARY KEY)"
 INSERT_PROBE: str = "INSERT INTO scope_deadline_probe VALUES (17)"
@@ -156,7 +159,7 @@ async def observe_postgresql_wait(
 
 
 async def verify_settled_postgresql_backend(
-    database: Database, waiter: Backend
+    database: Database, waiter: Backend, *, absent: bool | None = None
 ) -> None:
     async with asyncio.timeout(CONDITION_DEADLINE_SECONDS):
         while True:
@@ -171,7 +174,9 @@ async def verify_settled_postgresql_backend(
                     ),
                     {"pid": waiter.pid, "started": waiter.started},
                 )
-            if present is None or present is True:
+            if (absent is not False and present is None) or (
+                absent is not True and present is True
+            ):
                 return
 
 
@@ -555,11 +560,7 @@ async def test_scope_contender_reports_early_native_refusal(database: Database) 
     assert values == [17]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("late_phase", ["arm", "readback"])
-async def test_late_scope_setup_never_hands_off_a_committable_writer(
-    database: Database, late_phase: str
-) -> None:
+async def check_late_scope_arm(database: Database) -> None:
     loop = asyncio.get_running_loop()
     ledger = ConnectionLedger(database)
     postgres = database.dialect is Dialect.POSTGRESQL
@@ -574,7 +575,7 @@ async def test_late_scope_setup_never_hands_off_a_committable_writer(
         except asyncio.CancelledError:
             consumed.set()
 
-    def hold_final_readback(
+    def hold_timeout_arm(
         connection: object,
         cursor: object,
         statement: str,
@@ -585,9 +586,7 @@ async def test_late_scope_setup_never_hands_off_a_committable_writer(
         nonlocal reads
         if "FROM pg_catalog.pg_settings" in statement:
             reads += 1
-            if late_phase == "readback" and reads == 2:
-                await_(return_after_timer())
-        if late_phase == "arm" and "set_config" in statement:
+        if "set_config" in statement:
             await_(return_after_timer())
 
     async with database.transaction() as writer:
@@ -601,9 +600,7 @@ async def test_late_scope_setup_never_hands_off_a_committable_writer(
             locks = TransitionLocks(writer)
             sync_connection = writer.sync_connection
             if postgres:
-                event.listen(
-                    sync_connection, "after_cursor_execute", hold_final_readback
-                )
+                event.listen(sync_connection, "after_cursor_execute", hold_timeout_arm)
             else:
                 await cross_clock_boundary(max(0.0, cutoff - loop.time()))
             try:
@@ -623,7 +620,7 @@ async def test_late_scope_setup_never_hands_off_a_committable_writer(
             finally:
                 if postgres:
                     event.remove(
-                        sync_connection, "after_cursor_execute", hold_final_readback
+                        sync_connection, "after_cursor_execute", hold_timeout_arm
                     )
 
     with captured(
@@ -640,10 +637,9 @@ async def test_late_scope_setup_never_hands_off_a_committable_writer(
 
     assert consumed.is_set() is postgres
     if postgres:
-        assert reads == (2 if late_phase == "readback" else 1)
-        assert len(queries) == (5 if late_phase == "readback" else 2)
-        if late_phase == "arm":
-            assert all("pg_advisory_xact_lock" not in sql for sql, _ in queries)
+        assert reads == 1
+        assert len(queries) == 2
+        assert all("pg_advisory_xact_lock" not in sql for sql, _ in queries)
     else:
         assert reads == 0
         assert queries == []
@@ -652,3 +648,255 @@ async def test_late_scope_setup_never_hands_off_a_committable_writer(
     assert "scope_deadline_probe" not in json.dumps(records)
     assert values == []
     assert ledger.outstanding == database.units_in_flight() == 0
+
+
+async def observe_final_readback_lock(observer: Database, pid: int) -> Backend:
+    kind, identity = EARLIER.key
+    async with observer.read_transaction() as reader:
+        started: object = await reader.scalar(
+            text(
+                "SELECT activity.backend_start FROM pg_catalog.pg_stat_activity "
+                "AS activity JOIN pg_catalog.pg_locks AS lock USING (pid) "
+                "WHERE activity.pid = :pid "
+                "AND activity.pid <> pg_catalog.pg_backend_pid() "
+                "AND activity.xact_start IS NOT NULL AND lock.locktype = 'advisory' "
+                "AND lock.granted AND lock.mode = 'ExclusiveLock' "
+                "AND lock.objsubid = 2 "
+                "AND lock.classid::bigint = :kind AND lock.objid::bigint = :identity"
+            ),
+            {"pid": pid, "kind": kind & 0xFFFFFFFF, "identity": identity & 0xFFFFFFFF},
+        )
+    assert isinstance(started, datetime)
+    return Backend(pid, started)
+
+
+async def refuse_final_scope_readback(
+    database: Database,
+    cutoff: float,
+    ready: asyncio.Future[int | None],
+    resume_sqlite: asyncio.Event,
+    queries: list[tuple[str, tuple[object, ...]]],
+    *,
+    invalidate: bool,
+) -> None:
+    async with database.transaction(admission_deadline=cutoff) as writer:
+        await writer.exec_driver_sql(INSERT_PROBE)
+        locks = TransitionLocks(writer)
+        with executed_queries(writer) as submitted:
+            try:
+                if database.dialect is Dialect.POSTGRESQL:
+                    await park_final_postgresql_readback(
+                        writer, locks, cutoff, ready, invalidate=invalidate
+                    )
+                else:
+                    ready.set_result(None)
+                    await resume_sqlite.wait()
+                    try:
+                        await locks.acquire_scopes((EARLIER,), deadline=cutoff)
+                    except ScopeDeadlineExpired:
+                        assert writer.in_transaction()
+                        with pytest.raises(LockError, match="cannot be used"):
+                            locks.require(None, (EARLIER,))
+                        raise
+            finally:
+                queries.extend(submitted)
+        pytest.fail("the expired scope set was handed off")
+
+
+async def park_final_postgresql_readback(
+    writer: AsyncConnection,
+    locks: TransitionLocks,
+    cutoff: float,
+    ready: asyncio.Future[int | None],
+    *,
+    invalidate: bool,
+) -> None:
+    raw = await writer.get_raw_connection()
+    driver = postgres_driver(raw.driver_connection)
+    native = cast(PostgresNativeConnection, driver)
+    parked = asyncio.Event()
+    reads = 0
+    cutoff_cancelled = False
+
+    async def wait_for_cutoff() -> None:
+        nonlocal cutoff_cancelled
+        try:
+            await parked.wait()
+        except asyncio.CancelledError:
+            cutoff_cancelled = True
+            if invalidate:
+                raise
+
+    def hold_readback(
+        connection: object, cursor: object, statement: str, *arguments: object
+    ) -> None:
+        nonlocal reads
+        if "FROM pg_catalog.pg_settings" in statement:
+            reads += 1
+            if reads == 2:
+                ready.set_result(driver.get_server_pid())
+                await_(wait_for_cutoff())
+
+    sync_connection = writer.sync_connection
+    event.listen(sync_connection, "after_cursor_execute", hold_readback)
+    try:
+        await locks.acquire_scopes((EARLIER,), deadline=cutoff)
+    except ScopeDeadlineExpired:
+        assert cutoff_cancelled
+        assert writer.in_transaction()
+        assert writer.invalidated is invalidate
+        assert native.is_closed() is invalidate
+        if invalidate:
+            with pytest.raises(WriterTransactionError, match="not current"):
+                locks.require(None, (EARLIER,))
+        else:
+            assert raw.is_valid
+            assert driver.is_in_transaction()
+            with pytest.raises(LockError, match="cannot be used"):
+                locks.require(None, (EARLIER,))
+        raise
+    finally:
+        event.remove(sync_connection, "after_cursor_execute", hold_readback)
+
+
+async def check_final_scope_readback(
+    database: Database, observer: Database, loop: WriterCutoffLoop, *, invalidate: bool
+) -> None:
+    postgres = database.dialect is Dialect.POSTGRESQL
+    ledger = ConnectionLedger(database)
+    ready: asyncio.Future[int | None] = loop.create_future()
+    resume_sqlite = asyncio.Event()
+    queries: list[tuple[str, tuple[object, ...]]] = []
+    cutoff = loop.time() + 2 * CONDITION_DEADLINE_SECONDS
+    commits = 0
+
+    def record_commit(connection: Connection) -> None:
+        nonlocal commits
+        commits += 1
+
+    engine = database.writer_engine.sync_engine
+    event.listen(engine, "commit", record_commit)
+    original: Backend | None = None
+    try:
+        with captured(
+            "engine",
+            LoggingSettings(level=Level.DEBUG),
+            "scope-test",
+            lambda: datetime.now(UTC),
+        ) as capture:
+            task = asyncio.create_task(
+                refuse_final_scope_readback(
+                    database,
+                    cutoff,
+                    ready,
+                    resume_sqlite,
+                    queries,
+                    invalidate=invalidate,
+                )
+            )
+            try:
+                async with asyncio.timeout(CONDITION_DEADLINE_SECONDS):
+                    await asyncio.wait(
+                        (ready, task), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if task.done():
+                        await task
+                        pytest.fail("the writer ended before the readback cutoff")
+                    pid = ready.result()
+                    if postgres:
+                        assert pid is not None
+                        original = await observe_final_readback_lock(observer, pid)
+                    else:
+                        assert pid is None
+                    assert not task.done()
+                assert loop.time() < cutoff
+                loop.advance_to(cutoff)
+                if not postgres:
+                    resume_sqlite.set()
+                with pytest.raises(ScopeDeadlineExpired) as refused:
+                    await asyncio.wait_for(
+                        asyncio.shield(task), CONDITION_DEADLINE_SECONDS
+                    )
+            finally:
+                await settle_scope_contender(task)
+            records = capture.finish()
+    finally:
+        event.remove(engine, "commit", record_commit)
+
+    assert str(refused.value) == "the scope lock deadline expired"
+    assert refused.value.__cause__ is refused.value.__context__ is None
+    assert all(record["event"] != "engine.locks.acquired" for record in records)
+    assert "scope_deadline_probe" not in json.dumps(records)
+    assert commits == 0
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert database.writer_is_free()
+    if postgres:
+        assert original is not None
+        assert len(queries) == 5
+        read, arm, acquire, restore, readback = queries
+        assert "FROM pg_catalog.pg_settings" in read[0] == readback[0]
+        assert "pg_advisory_xact_lock" in acquire[0]
+        assert acquire[1] == EARLIER.key
+        assert "set_config" in arm[0] == restore[0]
+        await verify_settled_postgresql_backend(observer, original, absent=invalidate)
+    else:
+        assert queries == []
+
+    async with observer.read_transaction() as reader:
+        values = (await reader.exec_driver_sql(READ_PROBE)).scalars().all()
+    assert values == []
+    replacement_cutoff = loop.time() + CONDITION_DEADLINE_SECONDS
+    async with database.transaction(
+        admission_deadline=replacement_cutoff
+    ) as replacement:
+        locks = TransitionLocks(replacement)
+        await locks.acquire_scopes((EARLIER,), deadline=replacement_cutoff)
+        locks.require(None, (EARLIER,))
+        await replacement.exec_driver_sql(
+            "INSERT INTO scope_deadline_probe VALUES (23)"
+        )
+    async with observer.read_transaction() as reader:
+        committed = (await reader.exec_driver_sql(READ_PROBE)).scalars().all()
+    assert committed == [23]
+    assert ledger.outstanding == database.units_in_flight() == 0
+
+
+async def run_late_scope_case(
+    settings: DatabaseSettings, loop: WriterCutoffLoop, late_phase: str
+) -> None:
+    database = Database(narrow_settings(settings, pool_size=1))
+    if late_phase == "arm":
+        try:
+            await check_late_scope_arm(database)
+        finally:
+            await database.close()
+        return
+
+    postgres = database.dialect is Dialect.POSTGRESQL
+    observer = (
+        Database(narrow_settings(settings, pool_size=1)) if postgres else database
+    )
+    try:
+        async with database.transaction() as writer:
+            await writer.exec_driver_sql(CREATE_PROBE)
+        await check_final_scope_readback(database, observer, loop, invalidate=False)
+        if postgres:
+            async with database.transaction() as writer:
+                await writer.exec_driver_sql("DELETE FROM scope_deadline_probe")
+            await check_final_scope_readback(database, observer, loop, invalidate=True)
+    finally:
+        try:
+            await database.close()
+        finally:
+            if postgres:
+                await observer.close()
+
+
+@pytest.mark.parametrize("late_phase", ["arm", "readback"])
+def test_late_scope_setup_never_hands_off_a_committable_writer(
+    database_settings: DatabaseSettings, late_phase: str
+) -> None:
+    loop = WriterCutoffLoop()
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        runner.run(run_late_scope_case(database_settings, loop, late_phase))
