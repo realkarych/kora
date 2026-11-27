@@ -68,6 +68,8 @@ LANE_NAMES = [
     ("macos-15", "general-3", True),
     ("ubuntu-24.04", "storage", True),
     ("macos-15", "local-runtime", True),
+    ("ubuntu-24.04", "local-runtime-launch", True),
+    ("macos-15", "local-runtime-launch", True),
     ("ubuntu-24.04", "general-0", False),
     ("macos-15", "general-10", True),
     ("macos-15", "general-13", True),
@@ -99,6 +101,7 @@ LANE_NAMES = [
     ("macos-15", "static-checks", False),
     ("ubuntu-24.04", "", False),
     ("macos-26", "general-1", False),
+    ("macos-26", "local-runtime-launch", False),
 ]
 
 

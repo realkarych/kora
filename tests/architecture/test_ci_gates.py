@@ -40,6 +40,7 @@ LANE_OUTCOMES = {
     f"general-{MAXIMUM_LANES}": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "local-runtime": WITHOUT_STATIC_CHECKS,
+    "local-runtime-launch": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     STATIC_CHECK_LANE: {
         **WITHOUT_FIXTURES,
         **WITHOUT_TESTS,

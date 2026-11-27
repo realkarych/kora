@@ -24,7 +24,7 @@ require_scaffold_lane() {
   test "$FINAL_SYNC_OUTCOME" = success
   test "$WORKFLOW_CANCELLED" = false
   case "$KORA_SCAFFOLD_LANE" in
-    general-[1-9]|general-1[0-9]|general-2[0-2]|storage)
+    general-[1-9]|general-1[0-9]|general-2[0-2]|storage|local-runtime-launch)
       require_test_lane
       test "$PREPARATION_OUTCOME" = skipped
       test "$TEARDOWN_OUTCOME" = skipped
