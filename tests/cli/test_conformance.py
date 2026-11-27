@@ -668,6 +668,99 @@ def test_installed_provider_supports_local_tooling(
         assert timed_steps == VCS_PREPARATION_STEPS
 
 
+def test_installed_harness_output_profile_is_selected_by_the_operator(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    home = private_home(tmp_path / "home")
+    config = tmp_path / "config.json"
+    config.write_text('{"prefix":"terminal-exercise-"}')
+    fixture_data = tmp_path / "fixture-data.json"
+    fixture_data.write_text(
+        '{"exercise":"terminal-only","harness_output_profile":"terminal-text"}'
+    )
+    arguments = conformance_arguments(
+        "harness", "configured", config, "fixtures_harness", fixture_data
+    )
+    environment = {
+        "HOME": str(home),
+        "XDG_STATE_HOME": str(home / "state"),
+    }
+
+    omitted = installed_conformance.run(*arguments, environment=environment)
+    tool = installed_conformance.run(
+        *arguments, "--harness-output-profile", "tool-channel", environment=environment
+    )
+    terminal = installed_conformance.run(
+        *arguments, "--harness-output-profile", "terminal-text", environment=environment
+    )
+
+    for process, accepted in ((omitted, False), (tool, False), (terminal, True)):
+        assert process.code == (0 if accepted else 1), (
+            process.stdout,
+            process.stderr,
+        )
+        outcome = CommandResult.model_validate_json(process.stdout)
+        assert outcome.outcome is (
+            OriginalOutcome.COMPLETE if accepted else OriginalOutcome.FAILED
+        )
+        assert outcome.completed == (10 if accepted else 9)
+        assert outcome.expected == 10
+        assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+
+
+@pytest.mark.parametrize(
+    ("protocol", "profile"),
+    [
+        ("harness", "unrecognized"),
+        ("secrets", "terminal-text"),
+        ("secrets", "tool-channel"),
+        ("cleanup", "terminal-text"),
+    ],
+)
+def test_installed_conformance_rejects_invalid_profile_before_launch(
+    installed_conformance: InstalledTooling,
+    tmp_path: Path,
+    protocol: str,
+    profile: str,
+) -> None:
+    home = private_home(tmp_path / "home")
+    config = tmp_path / "config.json"
+    arguments: tuple[str, ...]
+    if protocol == "cleanup":
+        arguments = ("conformance", "cleanup", "0" * 32)
+    elif protocol == "harness":
+        config.write_text('{"prefix":"configured-"}')
+        arguments = conformance_arguments(
+            protocol, "configured", config, "fixtures_harness"
+        )
+    else:
+        config.write_text('{"value":"configured"}')
+        arguments = conformance_arguments(
+            protocol, "configured", config, "fixtures_configured"
+        )
+
+    process = installed_conformance.run(
+        *arguments,
+        "--harness-output-profile",
+        profile,
+        environment={
+            "HOME": str(home),
+            "XDG_STATE_HOME": str(home / "state"),
+            "KORA_LOG_COMPONENT_LEVELS": (
+                "protocols.loading=DEBUG,conformance.lifetime=DEBUG"
+            ),
+        },
+    )
+
+    assert process.code == 1, (process.stdout, process.stderr)
+    assert CommandResult.model_validate_json(process.stdout) == CommandResult(
+        outcome=OriginalOutcome.FAILED, reason="refused"
+    )
+    assert not process.records()
+    assert not (home / "state").exists()
+
+
 @pytest.mark.parametrize(
     ("occupied_repository", "expected_steps"),
     [("remote", ("init_remote",)), ("gone", ("init_remote", "init_gone"))],

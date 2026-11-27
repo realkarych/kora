@@ -335,6 +335,15 @@ Listing captures metadata-import/factory output separately from its public resul
 
 Install the `kora[conformance]` extra, then run `kora conformance <protocol> <name> --config <provider.json> --fixtures <installed.python.module> [--fixture-data <exercise.json>]`. The fixture module must be installed and explicitly selected. Omitted configuration means `{}` only when it validates; omitted exercise data means `{}`. Unsupported suites fail explicitly. The command does not install providers.
 
+Harness conformance defaults to `tool-channel` and checks the structured-output tool and result-text fallback. For a harness that supplies JSON through its terminal response, select `terminal-text` and use an installed fixture that prepares that profile's scenarios.
+
+```sh
+kora conformance harness example_harness --config provider.json \
+    --fixtures installed.exercise --harness-output-profile terminal-text
+```
+
+Record the command, selected profile, provider and fixture with the result. [Conformance command contract](../knowledge/specs/protocols.md#local-conformance-command).
+
 The command owns local setup and cleanup independently of pytest. An uncertain cleanup returns nonzero and an invocation ID; run `kora conformance cleanup <invocation-id>` to resume fixed local cleanup. Retained recovery state is private. The accepted cooperative local lifetime contract and the runtime/testing-runner activation limits are in the [lifetime specification](../knowledge/specs/conformance-lifetime.md).
 
 `kora db upgrade` applies every pending migration to the database named by `KORA_DATABASE_URL` and prints the head revision; the accepted forms are `sqlite+aiosqlite:///<path>` (relative paths resolve against the working directory, and a new file is created with mode 0600) and a complete `postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>`, whose query string, if any, carries the driver's connection options such as the TLS mode (`?ssl=require`); the driver's `PGSSL*` variables apply only when the URL sets no `ssl` option, and no other `PG*` variable or password file is consulted. A missing, malformed or incomplete URL exits 78 with one line on stderr that never repeats the value; an unreachable database is an unhandled error (code 70) with content-free records. There is no command-line option for the URL, so it never appears in a process listing.

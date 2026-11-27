@@ -621,6 +621,7 @@ def conformance(
     config: str | None,
     fixtures: str | None,
     fixture_data: str | None,
+    harness_output_profile: str | None,
 ) -> None:
     from kora.protocols.lifetime import OriginalOutcome
 
@@ -631,7 +632,10 @@ def conformance(
         except ImportError:
             return CommandResult(outcome=OriginalOutcome.FAILED, reason="refused")
         if protocol == "cleanup":
-            if any(value is not None for value in (config, fixtures, fixture_data)):
+            if any(
+                value is not None
+                for value in (config, fixtures, fixture_data, harness_output_profile)
+            ):
                 return CommandResult(outcome=OriginalOutcome.FAILED, reason="refused")
             return await cleanup_command(name)
         try:
@@ -640,6 +644,7 @@ def conformance(
                     "protocol": protocol,
                     "name": name,
                     "fixtures": fixtures,
+                    "harness_output_profile": harness_output_profile,
                     "files": InputFiles(
                         configuration=None
                         if config is None
@@ -1270,8 +1275,21 @@ def compose_application(
         config: str | None = typer.Option(None, "--config"),
         fixtures: str | None = typer.Option(None, "--fixtures"),
         fixture_data: str | None = typer.Option(None, "--fixture-data"),
+        harness_output_profile: str | None = typer.Option(
+            None,
+            "--harness-output-profile",
+            help="Select tool-channel (default) or terminal-text for a harness.",
+        ),
     ) -> None:
-        conformance(diagnostics, protocol, name, config, fixtures, fixture_data)
+        conformance(
+            diagnostics,
+            protocol,
+            name,
+            config,
+            fixtures,
+            fixture_data,
+            harness_output_profile,
+        )
 
     @app.command(name="doctor", help="Check the local installation prerequisites.")
     def check_installation(

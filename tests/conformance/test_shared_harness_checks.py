@@ -4,6 +4,7 @@ from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import replace
 from functools import partial
+from typing import Literal
 
 import pytest
 
@@ -19,7 +20,7 @@ from kora.conformance.common import (
     utc_now,
 )
 from kora.conformance.harness import kora_capture as kora_capture
-from kora.ir.json import JsonObject
+from kora.ir.json import JsonObject, JsonValue
 from kora.observability import LoggingSettings
 from kora.plugins.harness.fake import FakeHarness, ListedScript
 from kora.plugins.harness.fake.script import EventStep, Step
@@ -40,8 +41,10 @@ from tests.conformance.test_shared_secrets_checks import assert_capture_released
 from tests.plugins.harness.fake.fake_support import (
     CASES,
     DENIED_TOOL,
+    result,
     scope,
     scripted,
+    tool_call,
     turn,
 )
 
@@ -202,7 +205,7 @@ async def exercise_harness(captures: list[Capture]) -> ConfiguredHarness:
             runs: dict[checks.HarnessCase, checks.HostedRun] = {}
             check_capabilities_are_frozen_and_consistent(provider)
             check_config_schema_is_an_object_schema(provider)
-            for case in checks.HarnessCase:
+            for case in CASES:
                 runs[case] = await checks.run_harness_case(
                     host,
                     provider,
@@ -385,3 +388,161 @@ def test_harness_policy_rejects_denied_success_result(kora_capture: Capture) -> 
 
     with pytest.raises(pytest.fail.Exception, match="no successful result"):
         checks.check_harness_policy_precedes_every_tool_call(run)
+
+
+def result_text_candidate(value: JsonValue) -> JsonObject:
+    return {"kind": "output", "source": "result_text", "value": value}
+
+
+@pytest.mark.parametrize(
+    ("case", "steps"),
+    [
+        pytest.param(
+            checks.HarnessCase.TERMINAL_JSON_OBJECT,
+            [turn("m1", '{"answer":true}'), result_text_candidate({"answer": True})],
+            id="object",
+        ),
+        pytest.param(
+            checks.HarnessCase.TERMINAL_JSON_NULL,
+            [turn("m1", "null"), result_text_candidate(None)],
+            id="present-null",
+        ),
+        pytest.param(
+            checks.HarnessCase.EARLIER_JSON_WITHOUT_TERMINAL_TEXT,
+            [turn("m1", '{"answer":true}'), turn("m2")],
+            id="earlier-json-ignored",
+        ),
+        pytest.param(
+            checks.HarnessCase.MALFORMED_TERMINAL_JSON,
+            [turn("m1", '{"answer":')],
+            id="malformed-final-ignored",
+        ),
+    ],
+)
+def test_harness_terminal_output_accepts_fixed_completed_scenarios(
+    kora_capture: Capture, case: checks.HarnessCase, steps: list[JsonObject]
+) -> None:
+    provider = FakeHarness(
+        scripted([*steps, result()]), scope(), context_for(kora_capture)
+    )
+    expected = dict(checks.TERMINAL_OUTPUT_CASES)[case]
+
+    run = checks.HarnessHost().run(provider, DENIED_TOOL, None)
+    checks.check_harness_terminal_output(run, expected)
+
+    assert run.events[-1].kind == "result"
+
+
+@pytest.mark.parametrize(
+    ("case", "steps", "refusal"),
+    [
+        pytest.param(
+            checks.HarnessCase.TERMINAL_JSON_OBJECT,
+            [
+                {
+                    "kind": "output",
+                    "source": "structured_output",
+                    "value": {"answer": True},
+                }
+            ],
+            "result-text candidate",
+            id="wrong-source",
+        ),
+        pytest.param(
+            checks.HarnessCase.TERMINAL_JSON_OBJECT,
+            [result_text_candidate({"answer": False})],
+            "expected JSON value",
+            id="wrong-value",
+        ),
+        pytest.param(
+            checks.HarnessCase.TERMINAL_JSON_OBJECT,
+            [result_text_candidate({"answer": 1})],
+            "expected JSON value",
+            id="number-is-not-boolean",
+        ),
+        pytest.param(
+            checks.HarnessCase.TERMINAL_JSON_NULL,
+            [],
+            "result-text candidate",
+            id="missing-is-not-null",
+        ),
+        pytest.param(
+            checks.HarnessCase.TERMINAL_JSON_OBJECT,
+            [
+                tool_call("StructuredOutput", "output", outcome=None),
+                result_text_candidate({"answer": True}),
+            ],
+            "does not use an output-channel tool",
+            id="output-channel-event",
+        ),
+        pytest.param(
+            checks.HarnessCase.EARLIER_JSON_WITHOUT_TERMINAL_TEXT,
+            [
+                turn("m1", '{"answer":true}'),
+                turn("m2"),
+                result_text_candidate({"answer": True}),
+            ],
+            "yields no JSON candidate",
+            id="earlier-json-accepted",
+        ),
+        pytest.param(
+            checks.HarnessCase.MALFORMED_TERMINAL_JSON,
+            [turn("m1", '{"answer":'), result_text_candidate({"answer": True})],
+            "yields no JSON candidate",
+            id="malformed-final-accepted",
+        ),
+    ],
+)
+def test_harness_terminal_output_rejects_wrong_candidates_and_channel_events(
+    kora_capture: Capture,
+    case: checks.HarnessCase,
+    steps: list[JsonObject],
+    refusal: str,
+) -> None:
+    provider = FakeHarness(
+        scripted([*steps, result()]), scope(), context_for(kora_capture)
+    )
+    expected = dict(checks.TERMINAL_OUTPUT_CASES)[case]
+
+    run = checks.HarnessHost().run(provider, DENIED_TOOL, None)
+
+    with pytest.raises(pytest.fail.Exception, match=refusal):
+        checks.check_harness_terminal_output(run, expected)
+
+
+@pytest.mark.parametrize(
+    ("status", "stop_reason", "result_observed"),
+    [
+        pytest.param("success", "completed", False, id="missing-result"),
+        pytest.param("error", "completed", True, id="error-result"),
+        pytest.param("success", "cli_exit_without_result", True, id="premature-stop"),
+    ],
+)
+def test_harness_terminal_output_requires_observable_successful_completion(
+    kora_capture: Capture,
+    status: Literal["success", "error"],
+    stop_reason: str,
+    result_observed: bool,
+) -> None:
+    provider = FakeHarness(
+        scripted([turn("m1", '{"answer":'), result(status)]),
+        scope(),
+        context_for(kora_capture),
+    )
+    expected = dict(checks.TERMINAL_OUTPUT_CASES)[
+        checks.HarnessCase.MALFORMED_TERMINAL_JSON
+    ]
+
+    completed = checks.HarnessHost().run(provider, DENIED_TOOL, None)
+    run = replace(
+        completed,
+        result=completed.result.model_copy(update={"stop_reason": stop_reason}),
+        events=tuple(
+            event
+            for event in completed.events
+            if result_observed or event.kind != "result"
+        ),
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="completed successfully"):
+        checks.check_harness_terminal_output(run, expected)

@@ -2249,6 +2249,12 @@ The storage suite exposes all nine named caller-loop checks: staging-reader life
 
 `kora conformance <protocol> <name> --fixtures <installed.python.module> [--config <provider.json>] [--fixture-data <exercise.json>]` runs the selected installed provider's active suite in an isolated local child.
 `kora conformance cleanup <invocation-id>` resumes cleanup of an earlier invocation.
+Only `kora conformance harness` accepts `--harness-output-profile <tool-channel|terminal-text>`.
+Omission selects `tool-channel`.
+The parent refuses invalid values and use with other protocols or cleanup before launching the child.
+The child selects the required `output` check from the private invocation before pytest or fixture loading.
+Provider metadata, provider configuration, and fixture inputs and results have no authority over that selection.
+Qualification evidence records the command, selected profile, provider and fixture for the invocation.
 The command exercises trusted, cooperative installed code.
 It provides local lifecycle ownership and evidence, with no sandbox for hostile same-user code, daemonization or arbitrary external services.
 
@@ -2367,7 +2373,10 @@ A check that finishes a capture requires a separate capture for later cases.
   The malformed-policy case retains its separate input.
   Shared checks await decisions with an explicit context and retain all six cases, request matrices and decision checks.
 - `HarnessConformanceInputs` supplies `failure: Callable[[HarnessAdapter, JsonObject, ProtocolContext, str], Awaitable[object]]`, `prepare_case: Callable[[HarnessAdapter, JsonObject, HarnessCase, ProtocolContext], Awaitable[None]]`, `denied_tool: str`, `configuration_effect: Callable[[HarnessAdapter, JsonObject, ProtocolContext], Awaitable[None]]` and appended `context_factory: HarnessContextFactory | None = None`.
-  Shared checks retain the five checks, six scenarios and exact three-event limit for the existing host's `HostedRun`.
+  The installed suite runs five harness checks after the five common checks. Both profiles run the required `output` check last and share the exact three-event limit exercise.
+  `tool-channel` uses `structured_output` and `result_text` to check the output-channel tool and the result-text fallback. The direct pytest wrappers use those same scenarios and assertions.
+  `terminal-text` runs four scenarios on the same retained receiver. Fixtures prepare `terminal_json_object` with `{"answer":true}`, `terminal_json_null` with literal `null`, `earlier_json_without_terminal_text` with valid earlier JSON and no final text, and `malformed_terminal_json` with malformed text in a completed final response.
+  Each terminal scenario requires an observed successful result, `stop_reason=completed`, no error class and no output-channel tool call. The first two require a present `result_text` candidate with the exact canonical JSON value, including a present candidate for literal null. The last two require an absent candidate.
   The runner snapshots configuration before entering the same exercise-owned per-session context used by direct pytest and the installed command.
   Preparation runs inside that context with a separate deep copy and supplies only declared injected inputs or owned external exercise state.
   It supplies no provider, factory, session result or configuration replacement.

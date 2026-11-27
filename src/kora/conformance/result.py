@@ -1,11 +1,13 @@
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self, TypeAlias
 from xml.parsers import expat
 
-from pydantic import Field, StrictBool, StrictInt
+from pydantic import Field, StrictBool, StrictInt, model_validator
 
 from kora.conformance.capture import MAX_CAPTURE_BYTES
 from kora.protocols.common import BoundaryModel
 from kora.protocols.metadata import ProtocolName
+
+HarnessOutputProfile: TypeAlias = Literal["tool-channel", "terminal-text"]
 
 
 class InputFiles(BoundaryModel):
@@ -20,6 +22,16 @@ class ChildInput(BoundaryModel):
         str, Field(max_length=255, pattern=r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$")
     ]
     files: InputFiles | None = None
+    harness_output_profile: HarnessOutputProfile | None = None
+
+    @model_validator(mode="after")
+    def profile_matches_protocol(self) -> Self:
+        if (
+            self.harness_output_profile is not None
+            and self.protocol is not ProtocolName.HARNESS
+        ):
+            raise ValueError("the output profile requires the harness protocol")
+        return self
 
 
 class ChildResult(BoundaryModel):

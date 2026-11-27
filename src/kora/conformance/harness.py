@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from copy import deepcopy
@@ -100,6 +101,18 @@ class HarnessCase(StrEnum):
     NO_USAGE = "no_usage"
     STRUCTURED_OUTPUT = "structured_output"
     RESULT_TEXT = "result_text"
+    TERMINAL_JSON_OBJECT = "terminal_json_object"
+    TERMINAL_JSON_NULL = "terminal_json_null"
+    EARLIER_JSON_WITHOUT_TERMINAL_TEXT = "earlier_json_without_terminal_text"
+    MALFORMED_TERMINAL_JSON = "malformed_terminal_json"
+
+
+TERMINAL_OUTPUT_CASES: Final[tuple[tuple[HarnessCase, str | None], ...]] = (
+    (HarnessCase.TERMINAL_JSON_OBJECT, '{"answer":true}'),
+    (HarnessCase.TERMINAL_JSON_NULL, "null"),
+    (HarnessCase.EARLIER_JSON_WITHOUT_TERMINAL_TEXT, None),
+    (HarnessCase.MALFORMED_TERMINAL_JSON, None),
+)
 
 
 @dataclass(frozen=True)
@@ -507,4 +520,33 @@ def check_harness_structured_output_and_fallbacks(
     check(
         text.result.output is not None and text.result.output.source == "result_text",
         "result text is the fallback",
+    )
+
+
+def check_harness_terminal_output(run: HostedRun, expected_json: str | None) -> None:
+    results = tuple(event for event in run.events if event.kind == "result")
+    check(
+        bool(results)
+        and all(not event.data.is_error for event in results)
+        and run.result.stop_reason == "completed"
+        and run.result.error_class is None,
+        "the terminal response completed successfully",
+    )
+    check(
+        not any(
+            event.kind == "tool_call" and event.data.output_channel
+            for event in run.events
+        ),
+        "the terminal response does not use an output-channel tool",
+    )
+    output = run.result.output
+    if expected_json is None:
+        check(output is None, "the terminal response yields no JSON candidate")
+        return
+    if output is None or output.source != "result_text":
+        fail("the terminal response yields a result-text candidate")
+    check(
+        json.dumps(output.value, sort_keys=True, separators=(",", ":"))
+        == expected_json,
+        "the terminal response yields the expected JSON value",
     )

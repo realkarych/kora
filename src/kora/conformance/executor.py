@@ -16,6 +16,7 @@ from kora.conformance.common import (
     fail,
     utc_now,
 )
+from kora.conformance.result import HarnessOutputProfile
 from kora.ir.json import JsonObject
 from kora.observability import LoggingSettings
 from kora.protocols.common import ProtocolContext, ProviderProtocol
@@ -258,9 +259,10 @@ def policy_cases() -> tuple[Case, ...]:
     )
 
 
-def harness_cases() -> tuple[Case, ...]:
+def harness_cases(output_profile: HarnessOutputProfile | None) -> tuple[Case, ...]:
     from kora.conformance.harness import (
         MAX_EVENTS,
+        TERMINAL_OUTPUT_CASES,
         HarnessCase,
         HarnessConformanceInputs,
         HarnessHost,
@@ -269,6 +271,7 @@ def harness_cases() -> tuple[Case, ...]:
         check_harness_max_events_denies_at_exact_count,
         check_harness_policy_precedes_every_tool_call,
         check_harness_structured_output_and_fallbacks,
+        check_harness_terminal_output,
         check_harness_usage_completeness,
         run_harness_case,
     )
@@ -310,6 +313,12 @@ def harness_cases() -> tuple[Case, ...]:
 
         return Case(name, exercise)
 
+    async def terminal_output(
+        i: PreparedInvocation, c: Capture, x: ProtocolContext
+    ) -> None:
+        for scenario, expected_json in TERMINAL_OUTPUT_CASES:
+            check_harness_terminal_output(await run(i, x, scenario), expected_json)
+
     return (
         single("events", HarnessCase.TOOL_CALLS, check_harness_events_are_normalised),
         single(
@@ -328,7 +337,9 @@ def harness_cases() -> tuple[Case, ...]:
             HarnessCase.NO_USAGE,
             check_harness_usage_completeness,
         ),
-        paired(
+        Case("output", terminal_output)
+        if output_profile == "terminal-text"
+        else paired(
             "output",
             HarnessCase.STRUCTURED_OUTPUT,
             HarnessCase.RESULT_TEXT,
@@ -576,14 +587,17 @@ def authentication_cases() -> tuple[Case, ...]:
 
 
 def selected_cases(
-    protocol: ProtocolName, *, change_requests: bool = False
+    protocol: ProtocolName,
+    *,
+    change_requests: bool = False,
+    harness_output_profile: HarnessOutputProfile | None = None,
 ) -> tuple[Case, ...]:
     builders = {
         ProtocolName.AUTHENTICATION: authentication_cases,
         ProtocolName.RUNTIME: lambda: (),
         ProtocolName.SECRETS: secrets_cases,
         ProtocolName.POLICY: policy_cases,
-        ProtocolName.HARNESS: harness_cases,
+        ProtocolName.HARNESS: lambda: harness_cases(harness_output_profile),
         ProtocolName.VCS: lambda: vcs_cases(change_requests),
         ProtocolName.ARTIFACT_STORAGE: storage_cases,
         ProtocolName.ARTIFACT_TYPE: artifact_type_cases,
@@ -593,9 +607,17 @@ def selected_cases(
 
 class Executor:
     def __init__(
-        self, protocol: ProtocolName, *, change_requests: bool = False
+        self,
+        protocol: ProtocolName,
+        *,
+        change_requests: bool = False,
+        harness_output_profile: HarnessOutputProfile | None = None,
     ) -> None:
-        self.cases = selected_cases(protocol, change_requests=change_requests)
+        self.cases = selected_cases(
+            protocol,
+            change_requests=change_requests,
+            harness_output_profile=harness_output_profile,
+        )
         self._completed: list[str] = []
         self._capture_settings: LoggingSettings
         if protocol is ProtocolName.AUTHENTICATION:
