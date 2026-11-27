@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+import threading
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, closing
 from dataclasses import replace
@@ -32,6 +33,11 @@ from kora.db.connection import (
 from kora.db.tables import namespace
 from kora.observability import Level, LoggingSettings
 from kora.sqlite.driver import Connection as GuardedConnection
+from kora.sqlite.driver import NativeRetirement
+from tests.api.guarded_sqlite_prebind_child import (
+    held_main_descriptors,
+    native_identity,
+)
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     REFUSAL_DEADLINE_SECONDS,
@@ -41,11 +47,55 @@ from tests.db.closing import (
 )
 from tests.db.seed import Seeder
 from tests.db.test_sqlite_writer_entry import sqlite_driver
+from tests.support.databases import copy_sqlite_template
 
 
 class PostgresNativeConnection(Protocol):
     def is_closed(self) -> bool: ...
     def terminate(self) -> None: ...
+
+
+def test_declined_native_open_settles_after_the_original_writer(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    path = tmp_path / "incumbent.sqlite"
+    copy_sqlite_template(sqlite_template, path)
+    main = native_identity(path)
+    released = threading.Event()
+
+    def release_declined(connection: GuardedConnection) -> None:
+        NativeRetirement.retain(path, connection, released.set)
+
+    with (
+        closing(GuardedConnection()) as owner,
+        closing(GuardedConnection(release_declined)) as declined,
+    ):
+        owner.open(path, False, 0, lambda descriptor, empty: not empty)
+        owner.execute("CREATE TABLE owned_write (value INTEGER)").close()
+        owner.execute("BEGIN IMMEDIATE").close()
+        owner.execute("INSERT INTO owned_write VALUES (41)").close()
+        original_descriptors = held_main_descriptors(main)
+
+        with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+            declined.open(path, False, 0, lambda descriptor, empty: False)
+        declined.close()
+        retained_descriptors = held_main_descriptors(main)
+        settlement_while_owned = NativeRetirement.drain(path)
+        released_while_owned = released.is_set()
+        owner.commit()
+        committed_row = owner.execute("SELECT value FROM owned_write").fetchone()
+        owner.close()
+        settled = NativeRetirement.drain(path)
+
+    assert len(original_descriptors) == 1
+    assert len(retained_descriptors) == 2
+    assert set(original_descriptors) < set(retained_descriptors)
+    assert not settlement_while_owned
+    assert not released_while_owned
+    assert committed_row == (41,)
+    assert settled
+    assert released.is_set()
+    assert not held_main_descriptors(main)
 
 
 def physical_handle(database: Database, driver: object) -> object:
@@ -941,7 +991,7 @@ async def test_timed_snapshot_cold_driver_failure_is_private(
         replace(database_settings, url=database_settings.url.set(database=target))
     )
     if database.dialect is Dialect.SQLITE:
-        database.settings.sqlite_path.unlink()
+        assert not database.settings.sqlite_path.exists()
         database.settings.sqlite_path.mkdir()
     ledger = ConnectionLedger(database)
     deadline = asyncio.get_running_loop().time() + CONDITION_DEADLINE_SECONDS
@@ -1008,7 +1058,10 @@ async def test_timed_snapshot_distinguishes_a_native_read_timeout(
                 with pytest.raises(DatabaseSnapshotRejected) as refused:
                     await read_locked_metadata(database, deadline)
         else:
-            with closing(sqlite3.connect(settings.sqlite_path)) as writer:
+            with closing(GuardedConnection()) as writer:
+                writer.open(
+                    settings.sqlite_path, False, 5000, lambda fd, empty: not empty
+                )
                 writer.execute("PRAGMA journal_mode=DELETE")
                 async with database.read_transaction() as reader:
                     await reader.exec_driver_sql("PRAGMA busy_timeout=100")

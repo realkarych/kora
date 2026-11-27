@@ -164,28 +164,44 @@ static PyObject *databaseSettled(PyObject *module, PyObject *capsule) {
   Py_RETURN_FALSE;
 }
 
-typedef struct {
-  sqlite3_stmt *statement;
-  PyObject *database;
-} NativeStatement;
-
 static const char *statementCapsuleName = "kora.sqlite.statement";
+static const char *blobCapsuleName = "kora.sqlite.blob";
+static const char *closedCapsuleName = "kora.sqlite.closed";
 
-static void finishStatement(NativeStatement *cursor) {
-  if (cursor->statement) {
-    Py_BEGIN_ALLOW_THREADS
-    sqlite3_finalize(cursor->statement);
-    cursor->statement = NULL;
-    Py_END_ALLOW_THREADS
+static PyObject *newChild(void *resource, const char *name,
+                         PyCapsule_Destructor destroy, PyObject *database) {
+  PyObject *capsule = PyCapsule_New(resource, name, NULL);
+  if (capsule && (PyCapsule_SetContext(capsule, database) != 0 ||
+                  PyCapsule_SetDestructor(capsule, destroy) != 0)) {
+    Py_DECREF(capsule);
+    return NULL;
   }
+  if (capsule) Py_INCREF(database);
+  return capsule;
+}
+
+static int closeChild(PyObject *capsule, const char *name, int (*close)(void *)) {
+  if (PyCapsule_IsValid(capsule, closedCapsuleName)) return SQLITE_OK;
+  void *resource = PyCapsule_GetPointer(capsule, name);
+  if (!resource) return SQLITE_MISUSE;
+  PyObject *database = PyCapsule_GetContext(capsule);
+  if (PyCapsule_SetDestructor(capsule, NULL) != 0 ||
+      PyCapsule_SetName(capsule, closedCapsuleName) != 0) return SQLITE_MISUSE;
+  int result;
+  Py_BEGIN_ALLOW_THREADS
+  result = close(resource);
+  Py_END_ALLOW_THREADS
+  Py_DECREF(database);
+  return result;
+}
+
+static int finalizeNative(void *statement) {
+  sqlite3_finalize(statement);
+  return SQLITE_OK;
 }
 
 static void destroyStatement(PyObject *capsule) {
-  NativeStatement *cursor = PyCapsule_GetPointer(capsule, statementCapsuleName);
-  if (!cursor) return;
-  finishStatement(cursor);
-  Py_DECREF(cursor->database);
-  free(cursor);
+  closeChild(capsule, statementCapsuleName, finalizeNative);
 }
 
 static PyObject *prepareStatement(PyObject *module, PyObject *args) {
@@ -195,26 +211,23 @@ static PyObject *prepareStatement(PyObject *module, PyObject *args) {
   NativeDb *db = PyCapsule_GetPointer(database, dbCapsuleName);
   if (!db) return NULL;
   if (!db->connection) return dbError(SQLITE_MISUSE, "Cannot operate on a closed database.");
-  NativeStatement *cursor = calloc(1, sizeof(*cursor));
-  if (!cursor) return PyErr_NoMemory();
-  cursor->database = Py_NewRef(database);
-  PyObject *capsule = PyCapsule_New(cursor, statementCapsuleName, destroyStatement);
-  if (!capsule) {
-    Py_DECREF(cursor->database);
-    free(cursor);
-    return NULL;
-  }
+  sqlite3_stmt *statement = NULL;
   const char *tail = NULL;
   int result;
   Py_BEGIN_ALLOW_THREADS
-  result = sqlite3_prepare_v2(db->connection, sql, -1, &cursor->statement, &tail);
+  result = sqlite3_prepare_v2(db->connection, sql, -1, &statement, &tail);
   Py_END_ALLOW_THREADS
   if (result == SQLITE_OK) {
     while (isspace((unsigned char)*tail)) tail++;
-    if (!*tail) return capsule;
+    if (!*tail) {
+      if (!statement) Py_RETURN_NONE;
+      PyObject *capsule = newChild(statement, statementCapsuleName, destroyStatement, database);
+      if (!capsule) sqlite3_finalize(statement);
+      return capsule;
+    }
     result = SQLITE_MISUSE;
   }
-  Py_DECREF(capsule);
+  sqlite3_finalize(statement);
   return dbError(result, sqlite3_errstr(result));
 }
 
@@ -246,10 +259,8 @@ static int bindValue(sqlite3_stmt *statement, int index, PyObject *value) {
 static PyObject *bindStatement(PyObject *module, PyObject *args) {
   PyObject *capsule, *parameters;
   if (!PyArg_ParseTuple(args, "OO", &capsule, &parameters)) return NULL;
-  NativeStatement *cursor = PyCapsule_GetPointer(capsule, statementCapsuleName);
-  if (!cursor) return NULL;
-  sqlite3_stmt *statement = cursor->statement;
-  if (!statement) Py_RETURN_NONE;
+  sqlite3_stmt *statement = PyCapsule_GetPointer(capsule, statementCapsuleName);
+  if (!statement) return NULL;
   int count = sqlite3_bind_parameter_count(statement), named = PyDict_Check(parameters);
   if (!named && PySequence_Size(parameters) != count) {
     return dbError(SQLITE_RANGE, "Incorrect number of SQLite bindings");
@@ -284,10 +295,8 @@ static PyObject *columnValue(sqlite3_stmt *statement, int index) {
 }
 
 static PyObject *statementValues(PyObject *capsule, int columns) {
-  NativeStatement *cursor = PyCapsule_GetPointer(capsule, statementCapsuleName);
-  if (!cursor) return NULL;
-  sqlite3_stmt *statement = cursor->statement;
-  if (!statement) Py_RETURN_NONE;
+  sqlite3_stmt *statement = PyCapsule_GetPointer(capsule, statementCapsuleName);
+  if (!statement) return NULL;
   if (!columns) {
     int result;
     Py_BEGIN_ALLOW_THREADS
@@ -320,9 +329,8 @@ static PyObject *statementColumns(PyObject *module, PyObject *capsule) {
 }
 
 static PyObject *closeStatement(PyObject *module, PyObject *capsule) {
-  NativeStatement *cursor = PyCapsule_GetPointer(capsule, statementCapsuleName);
-  if (!cursor) return NULL;
-  finishStatement(cursor);
+  int result = closeChild(capsule, statementCapsuleName, finalizeNative);
+  if (result != SQLITE_OK) return dbError(result, sqlite3_errstr(result));
   Py_RETURN_NONE;
 }
 
@@ -490,19 +498,12 @@ static PyObject *registerFunction(PyObject *module, PyObject *args) {
   Py_RETURN_NONE;
 }
 
-static const char *blobCapsuleName = "kora.sqlite.blob";
-
-typedef struct {
-  sqlite3_blob *blob;
-  PyObject *database;
-} NativeBlob;
+static int closeNativeBlob(void *blob) {
+  return sqlite3_blob_close(blob);
+}
 
 static void destroyBlob(PyObject *capsule) {
-  NativeBlob *blob = PyCapsule_GetPointer(capsule, blobCapsuleName);
-  if (!blob) return;
-  if (blob->blob) sqlite3_blob_close(blob->blob);
-  Py_DECREF(blob->database);
-  free(blob);
+  closeChild(capsule, blobCapsuleName, closeNativeBlob);
 }
 
 static PyObject *openBlob(PyObject *module, PyObject *args) {
@@ -512,39 +513,25 @@ static PyObject *openBlob(PyObject *module, PyObject *args) {
   if (!PyArg_ParseTuple(args, "OssL", &database, &table, &column, &row)) return NULL;
   NativeDb *db = connectedDatabase(database);
   if (!db) return NULL;
-  NativeBlob *blob = calloc(1, sizeof(*blob));
-  if (!blob) return PyErr_NoMemory();
-  blob->database = Py_NewRef(database);
-  PyObject *capsule = PyCapsule_New(blob, blobCapsuleName, destroyBlob);
-  if (!capsule) {
-    Py_DECREF(blob->database);
-    free(blob);
-    return NULL;
-  }
+  sqlite3_blob *blob;
   int result;
   Py_BEGIN_ALLOW_THREADS
-  result = sqlite3_blob_open(db->connection, "main", table, column, row, 0, &blob->blob);
+  result = sqlite3_blob_open(db->connection, "main", table, column, row, 0, &blob);
   Py_END_ALLOW_THREADS
-  if (result == SQLITE_OK) return capsule;
-  Py_DECREF(capsule);
-  return dbError(result, sqlite3_errstr(result));
+  if (result != SQLITE_OK) return dbError(result, sqlite3_errstr(result));
+  PyObject *capsule = newChild(blob, blobCapsuleName, destroyBlob, database);
+  if (!capsule) sqlite3_blob_close(blob);
+  return capsule;
 }
 
 static PyObject *blobLength(PyObject *module, PyObject *capsule) {
-  NativeBlob *blob = PyCapsule_GetPointer(capsule, blobCapsuleName);
+  sqlite3_blob *blob = PyCapsule_GetPointer(capsule, blobCapsuleName);
   if (!blob) return NULL;
-  if (!blob->blob) return dbError(SQLITE_MISUSE, "Cannot operate on a closed blob.");
-  return PyLong_FromLong(sqlite3_blob_bytes(blob->blob));
+  return PyLong_FromLong(sqlite3_blob_bytes(blob));
 }
 
 static PyObject *closeBlob(PyObject *module, PyObject *capsule) {
-  NativeBlob *blob = PyCapsule_GetPointer(capsule, blobCapsuleName);
-  if (!blob) return NULL;
-  int result = SQLITE_OK;
-  if (blob->blob) {
-    result = sqlite3_blob_close(blob->blob);
-    blob->blob = NULL;
-  }
+  int result = closeChild(capsule, blobCapsuleName, closeNativeBlob);
   if (result != SQLITE_OK) return dbError(result, sqlite3_errstr(result));
   Py_RETURN_NONE;
 }

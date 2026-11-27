@@ -1989,6 +1989,38 @@ def test_installed_api_and_upgrade_refuse_a_marker_only_main(
     main = tmp_path / "marker.sqlite"
     image = marker_only_sqlite(main, marker)
     url = f"sqlite+aiosqlite:///{main}"
+    root = tmp_path / "storage"
+    provider_probe = """
+import asyncio
+import sys
+from pathlib import Path
+
+from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
+from kora.protocols.errors import KoraProtocolError
+from kora.protocols.storage_models import StorageLimits
+
+root, marker = map(Path, sys.argv[1:])
+configuration = LocalStorageConfiguration(
+    root=str(root), limits=StorageLimits(version=1)
+)
+provider = LocalArtifactStorage(configuration)
+asyncio.run(provider.aclose())
+main = root / "control.sqlite"
+image = marker.read_bytes()
+main.write_bytes(image)
+sidecar = root / "control.sqlite-wal"
+sidecar.write_bytes(b"owned sidecar witness")
+try:
+    LocalArtifactStorage(configuration)
+except KoraProtocolError as error:
+    assert error.code == "storage_io"
+else:
+    raise AssertionError("the installed provider accepted the isolated marker")
+assert main.read_bytes() == image
+assert sidecar.read_bytes() == b"owned sidecar witness"
+assert not (root / "control.sqlite-shm").exists()
+assert not (root / "control.sqlite-journal").exists()
+"""
 
     api = api_startup_result(serving_installation, tmp_path, url, 0)
     upgrade = subprocess.run(
@@ -2000,14 +2032,23 @@ def test_installed_api_and_upgrade_refuse_a_marker_only_main(
         check=False,
         timeout=SERVE_TIMEOUT,
     )
+    provider = subprocess.run(
+        [str(serving_installation), "-I", "-c", provider_probe, str(root), str(main)],
+        cwd=tmp_path,
+        env={"PATH": os.defpath},
+        capture_output=True,
+        check=False,
+        timeout=SERVE_TIMEOUT,
+    )
 
     assert api.returncode == 78
     assert api.stdout == b""
     assert refusal_reason(api) == "sqlite_unprepared"
     assert upgrade.returncode != 0
     assert upgrade.stdout == b""
+    assert provider.returncode == 0, provider.stderr
     assert main.read_bytes() == image
-    assert set(tmp_path.iterdir()) == {main}
+    assert set(tmp_path.iterdir()) == {main, root}
 
 
 @pytest.mark.asyncio
