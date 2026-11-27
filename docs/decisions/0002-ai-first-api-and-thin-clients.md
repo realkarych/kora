@@ -26,9 +26,15 @@ Two questions had to be settled: how the agent-facing surface is produced (a fir
 
 ## First-slice amendment of 2026-10-23
 
-A separate authoring `kora_validate` tool validates compiled IR through `POST /validate`. The complete future inventory is sixteen tools; this explicitly supersedes the fifteen-tool cap. The first slice exposes the ten stdio tools and complete included-operation mappings in [first-slice.md](../../knowledge/specs/first-slice.md#included-operation-and-parity-contract). Compile/test pair-presence and skill-reference parity activate with their implementations; Python compilation and scenario execution remain prohibited on the server at all times.
+A separate authoring `kora_validate` tool validates compiled IR through `POST /validate`. The complete future inventory is sixteen tools; this explicitly supersedes the fifteen-tool cap. The first slice exposes the ten API-backed stdio tools with the complete included-operation mappings in [first-slice.md](../../knowledge/specs/first-slice.md#included-operation-and-parity-contract). Compile/test pair-presence and skill-reference parity activate with their implementations; Python compilation and scenario execution remain prohibited on the server at all times.
 
 Exactly `GET /healthz`, `GET /readyz` and `GET /metrics` are excluded from CLI/MCP operation parity as infrastructure probes, alongside the existing worker and auth exclusions. This is not an authentication exemption: the route-authorization contract governs each probe. Doctor, provider listing/conformance, database maintenance and standalone remain local operations, not remotely callable API work.
+
+## Early authoring amendment of 2026-11-26
+
+The project owner [approved the early compile pair](https://github.com/realkarych/kora/issues/1918#issuecomment-7202498699). `kora compile graph.py --format json` and the local authoring server's `kora_compile` use the same compiler to produce deploy-ready IR v1.0 JSON. Both parse a bounded subset of Python syntax in the author's environment. They send no request and execute no source. The HTTP-mounted tools and control plane acquire no compilation operation. The first-slice stdio inventory is eleven tools including this local operation. The complete future inventory is sixteen.
+
+The person who starts the stdio authoring server grants its paired peer selection of a source file under the process user's filesystem permissions. The stdio tool returns the compiled document with authored literal values. The namespace credential governs API calls. [The early DSL contract](../../knowledge/specs/dsl.md#early-sequential-json-mode-issue-1918) defines the source and resource limits. The project owner [reviewed and approved the wording line by line](https://github.com/realkarych/kora/pull/1923#issuecomment-7203293573) on 2026-11-27.
 
 ## Decision
 

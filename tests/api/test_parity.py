@@ -65,6 +65,7 @@ async def test_parity_operations_are_reachable(
 
     paths = schema["paths"]
     assert isinstance(paths, dict)
+    assert all("compile" not in path.lower() for path in paths)
     assert DEPLOY in schema_operations(paths)
     assert ("POST", "/api/v1/workers") in schema_operations(paths)
     assert uncovered_operations(paths, SOURCE_ROOT) == []

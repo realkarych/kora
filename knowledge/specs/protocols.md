@@ -2237,95 +2237,247 @@ The storage suite exposes all nine named caller-loop checks: staging-reader life
 
 ### Local conformance command
 
-The first-slice command is `kora conformance <protocol> <name> --config <provider.json> --fixtures <installed.python.module> [--fixture-data <exercise.json>]`. `--config` may be omitted only when `{}` validates against the selected provider's `config_schema`. Before that validation, external fixture loading or provider construction, core saves a private bounded canonical snapshot of the metadata schema and uses it for validation and later comparison; a shallowly frozen metadata object is not an immutable nested schema. Public metadata/schema views receive defensive copies. Validate configuration before preparation or construction. Configuration and optional exercise data are JSON objects read with a one-MiB input limit and the existing JsonObject depth-16/one-MiB value bounds. Omitted exercise data is `{}`. Invalid input is a content-free nonzero refusal, never echoed through validation or pytest diagnostics.
+`kora conformance <protocol> <name> --fixtures <installed.python.module> [--config <provider.json>] [--fixture-data <exercise.json>]` runs the selected installed provider's active suite in an isolated local child.
+`kora conformance cleanup <invocation-id>` resumes cleanup of an earlier invocation.
+The command exercises trusted, cooperative installed code.
+It provides local lifecycle ownership and evidence, with no sandbox for hostile same-user code, daemonization or arbitrary external services.
 
-Configuration schemas use their recognized declared root JSON Schema dialect; absent root `$schema` selects Draft 2020-12. Unknown root dialects, schemas rejected by the selected validator's meta-schema check, and references unresolved when encountered during validation fail before external fixture preparation or provider construction. Reference resolution uses only the retained schema and bundled in-memory resources, never network or filesystem retrieval. Format keywords retain the selected dialect's standard annotation semantics. Validation runs within the owned command phase and its bounds; schema/configuration values and library exception messages never enter public reports.
+**Installed selection and startup.**
 
-Schema well-formedness is checked by the selected upstream validator's `check_schema` on the advertised root. Configuration validation then follows that validator's reference and nested-dialect semantics; an unknown nested `$schema` may fall back to the current dialect, and kora does not independently revalidate every encountered reference target as a schema. A target inside annotation data can therefore escape meta-schema checking: for example, `{"type":"object","default":{"required":"x"},"$ref":"#/default"}` may accept `{"x":1}` even though the target's `required` value is malformed. Known evaluation failures return fixed refusals. Provider authors remain responsible for well-formed referenced schemas. This library performs no retrieval or execution. Acceptance establishes only the checks described here and may allow the authorized conformance command to proceed to preparation or construction. Installed providers remain trusted code.
+The parent owns the invocation tree, process domain and pipes.
+It creates three private startup channels in a registered subordinate startup tree.
+A fixed helper binds short socket names in its anchored working directory and transfers the listening descriptors.
+The parent acknowledges receipt before the helper closes its copies.
+All channels connect and the parent verifies and unlinks the socket entries before releasing input.
+The startup deadline includes acquisition, channel setup and validation through the child's private READY record.
+Healthy idle exercise time after READY consumes no startup budget.
+Partial records and cleanup use their own original deadlines.
 
-The bounded input-library prerequisite is implemented in `kora.conformance.inputs` under [#280](https://github.com/realkarych/kora/issues/280): private canonical snapshots, defensive views, offline validation and exact instance-schema comparison. Upstream evaluation failure is a distinct content-free refusal; it never grants construction authority. The [dependency and limitation record](../research/conformance-inputs-2026-10-26.md) describes the validated domain. Owned command execution, external preparation and command activation remain #215.
+The child uses explicit opt-in pytest loading, with ambient plugins, conftest, configuration discovery and current-directory or checkout imports disabled.
+It loads only the selected provider, explicit installed fixture module and active protocol suite with its declared dependencies.
+Neither serving processes nor provider listing load the fixture module.
+No automatic installation, core dynamic-import exemption, plugin-manager access exemption or unlisted pytest hook is authorized.
+ADR-0026 and the existing suppression and import checks apply.
 
-The common and secrets suites expose reusable checks on the caller's event loop under [#282](https://github.com/realkarych/kora/issues/282), together with `SecretsConformanceInputs`. The existing direct-injection pytest cases share the same assertion bodies and retain their fixtures and markers. Synchronous cases finish their owned event loop, including provider task and async-generator finalization, before checking returned values, handlers and captured output; shared asynchronous checks leave the caller's loop ownership unchanged. Each capture retains its own lifetime; checks that finish it require a separate capture from subsequent cases. The configured command, selected-instance/configuration enforcement and completion accounting remain #215.
+**Bounded inputs and validation.**
 
-The policy and harness suites expose shared checks under [#286](https://github.com/realkarych/kora/issues/286). Policy checks await decisions on the caller's loop with an explicit `ProtocolContext`, retaining all six cases, request matrices and decision checks. Harness checks inspect the existing host's `HostedRun` results, retaining the five checks, six scenarios and exact three-event limit. Direct pytest wrappers retain their fixtures, markers and owned-loop shutdown before result assertions. These library interfaces do not activate the installed command.
+The parent passes input paths. The child alone reads configuration and fixture data.
+The child opens regular files nonblocking and reads at most one MiB plus the byte needed to detect excess.
+Configuration and exercise data are JSON objects subject to the existing depth-16 and one-MiB value bounds.
+Omitted exercise data is `{}`.
+Configuration may be omitted when `{}` passes validation.
 
-`--fixtures` is one required explicit installed Python module, loaded as the selected pytest plugin. It is not guessed from the provider name, loaded from the checkout, registered through another entry-point group or added to `ProviderMetadata`. It must export the ordinary pytest fixture `kora_conformance_adapter() -> ConformanceAdapter`. The fixture only returns the adapter; resource acquisition starts in preparation after lifetime authority is supplied. A missing fixture, wrong adapter interface or wrong activated-protocol exercise bundle is a content-free nonzero refusal. The public adapter and prepared-instance library below are implemented under #303; installed command composition remains #215. The accepted [local conformance lifetime ABI](conformance-lifetime.md), specified under [#231](https://github.com/realkarych/kora/issues/231), defines typed acquisition, acknowledgement and closure, including the local-runtime pre-live launch seam. Its closed values, generic parent controller, private client/endpoint, fixed mutation helper, journal and explicit recovery library are implemented under [#247](https://github.com/realkarych/kora/issues/247), with [dated ownership evidence](../research/local-lifetime-recovery-observations-2026-10-23.md) and lifecycle workloads in `tests/measurements/test_conformance_lifetime.py`. Installed listing is implemented under #248; the configured conformance and cleanup commands remain #215, and runtime/testing-runner integration remains in work items 7/14. All required first-slice lifecycle gates remain binding.
+Before validation, external fixture loading or construction, core keeps a private bounded canonical metadata-schema snapshot and the selected implementation callable.
+Core validates configuration before preparation and construction and retains private canonical configuration and exercise-data snapshots.
+Shallow immutability of metadata provides no nested-schema authority.
+Public views receive defensive copies.
 
-| interface | required signature or fields |
+The recognized root `$schema` selects the upstream validator, with Draft 2020-12 as the default when absent.
+Core applies that validator's `check_schema` to the advertised root and validates configuration within the owned startup bounds.
+An unknown root dialect, a rejected schema or a reference unresolved during validation fails before preparation and construction.
+Resolution uses only the retained schema and bundled in-memory resources.
+Format keywords retain the dialect's annotation semantics.
+No filesystem or network retrieval occurs.
+
+Configuration validation follows the selected validator's reference and nested-dialect semantics.
+An unknown nested `$schema` may fall back to the current dialect.
+Referenced targets receive no independent meta-schema check.
+For example, a reference to `default` data containing `{"required":"x"}` may accept an object despite the malformed target.
+Provider authors are responsible for well-formed referenced schemas.
+Known evaluation failures produce fixed refusals, with a separate content-free result for unavailable evaluation.
+Acceptance qualifies only this validation step of an authorized invocation.
+The input library performs no external retrieval or code execution.
+The [dependency and limitation record](../research/conformance-inputs-2026-10-26.md) describes that checked domain.
+
+**Fixture interface and retained receiver.**
+
+`--fixtures` names one explicit installed Python module with the ordinary pytest fixture `kora_conformance_adapter() -> ConformanceAdapter`.
+The module name is independent of the provider name and is neither an entry point nor a `ProviderMetadata` field.
+The fixture returns the adapter without acquiring resources.
+Preparation first receives the [local lifetime authority](conformance-lifetime.md).
+
+| Interface | Required signature or fields |
 |---|---|
 | `ConformanceAdapter` | `async prepare(config: JsonObject, fixture_data: JsonObject, lifetime: ConformanceLifetime) -> PreparedConformance` |
-| `PreparedConformance` | `bind_configuration(config: JsonObject) -> ConstructorArguments`; `exercises: ProtocolExerciseBundle`; `async cleanup(instance: object \| None) -> None` |
-| `ConstructorArguments` | a frozen record with `args: tuple[object, ...]` and a read-only snapshot `kwargs: Mapping[str, object]`; referenced resources remain preparation-owned |
-| `ProtocolExerciseBundle` | a closed union of the activated protocol suites' named typed input bundles, never an untyped fixture dictionary; a suite defines its bundle before command activation |
-| `ConformanceLifetime` | the parent-owned acquisition/cleanup authority; preparation receives it before acquisition; the operations below use the closed records, replay rules, bounds and transitions of the [normative ABI](conformance-lifetime.md#public-operations-and-closed-shapes) |
+| `PreparedConformance` | `bind_configuration(config: JsonObject) -> ConstructorArguments`, `exercises: ProtocolExerciseBundle`, and `async cleanup(instance: object \| None) -> None` |
+| `ConstructorArguments` | Frozen `args: tuple[object, ...]` and read-only snapshot `kwargs: Mapping[str, object]`. Preparation retains ownership of referenced resources. |
+| `ProtocolExerciseBundle` | Closed union of named frozen typed bundles for activated suites. Each suite defines its bundle before installed activation. |
+| `ConformanceLifetime` | Parent-owned acquisition and cleanup authority. The asynchronous operations, record types, replay and bounds are defined by the [lifetime ABI](conformance-lifetime.md#public-operations-and-closed-shapes). |
 
-The prepared-instance library in `kora.conformance.bridge` is implemented under [#303](https://github.com/realkarych/kora/issues/303). `ConformanceSelection` retains the selected callable/protocol and constructs the existing validated input snapshots before external preparation. Its prepared context supplies the exact constructed object and selected typed bundle, checks the instance schema before exercises, and owns exact-instance or None cleanup. Storage reconstruction retains each distinct auxiliary before schema checking and closes all auxiliaries before adapter cleanup. Cleanup runs on the same loop, settles through repeated owner cancellation and preserves an original failure with any cleanup failure chained. The library neither changes working directories nor disposes of case domains. The storage case runner under #305 and installed executor under #307 compose this bridge; the parent/CLI composition under #215 supplies command activation.
+Core passes defensive copies of the validated configuration and exercise data to `prepare`.
+It gives `bind_configuration` a fresh copy of the same retained configuration.
+The binding derives constructor arguments from that configuration. Fixture data supplies exercise setup.
+Changing a supplied view cannot change core's snapshot, digest or later binding input.
+Core calls its retained implementation with the returned arguments and retains the exact returned object, including a wrapper returned by the implementation.
+The adapter supplies neither the callable nor a replacement receiver.
+Public metadata, configuration and exercise-data fixtures never supply authority back to the command.
 
-`test_bridge_preserves_selected_object_configuration_and_loop` exercises two effective configurations, a wrapper-returning factory, defensive inputs and the existing common/secrets assertions. `test_bridge_cleanup_retains_exact_primary_and_original_failure`, `test_bridge_repeated_cancellation_waits_for_real_cleanup` and `test_bridge_refuses_malformed_handoffs_without_losing_cleanup` cover failure/cleanup identity. `test_bridge_storage_reconstruction_closes_actual_receivers` and `test_bridge_storage_refusals_keep_existing_cleanup_owners` cover real storage receivers, admitted-reader cancellation, schema refusal and alias ownership. `test_bridge_loads_only_the_selected_bundle` and `test_bridge_public_types_keep_other_suites_unloaded` retain selective imports. These library tests do not substitute for installed-distribution and final parent-lifetime evidence.
+Before configured operations or exercises, core checks the exact instance's advertised `config_schema` as a bounded JSON object and requires its canonical JSON to equal the original private metadata snapshot.
+Reordered object keys compare equal.
+Changed constraints, defaults or types, and malformed, oversized or unreadable instance schemas, refuse before exercises and invoke ordinary exact-instance cleanup.
+The metadata schema stays authoritative for listing and input validation.
+No substitute schema triggers a second input validation.
+The core fixtures supply the exact retained receiver and refuse external provider or factory overrides.
 
-Storage case ownership is implemented in `kora.conformance.storage_cases` under [#305](https://github.com/realkarych/kora/issues/305). A core case runner uses the caller's invocation loop, acquires a distinct parent-owned tree before preparation, and keeps its working directory fixed through receiver/adapter cleanup and actual default-executor settlement. Successful cases restore the verified startup directory and require parent-confirmed tree closure before another case. A failed case stops the sequence and retains its domain for the caller's shutdown path. The installed wrapper under #307 retains failed domains before pytest regains control; public command activation is implemented under #215.
+Each active suite identifies the real configuration consumer.
+Construction can consume it, or a configured operation such as `Sensor.observe(config, ...)` or `Policy.validate(policy)` receives the retained value unchanged.
+Operation-time consumers do not require a matching constructor parameter.
+Configured operation drivers receive the exact receiver, authoritative configuration and protocol context explicitly.
+A same-name type, equality or digest echo, or a claimed-consumed flag does not demonstrate effective configuration.
 
-The core caller supplies a fresh dedicated `asyncio.Runner` with no earlier default-executor work and gives the case runner exclusive ownership of that executor slot throughout the sequence. The caller and adapter do not replace it or submit default work outside a case. The caller also leaves the loop's task factory unset, and the caller and adapter do not replace it during a case; core refuses an occupied factory before acquiring a case tree. For each case, core installs a tracking task factory that holds every pending task created through the case loop (`asyncio.create_task`, `loop.create_task`, `asyncio.ensure_future`, `TaskGroup`) with a strong reference until the remaining-task check, and on every case exit restores the unset factory and releases those references. The factory forwards `name` and `context` and does not accept `eager_start`. After joining a case's native pool, core keeps cwd fixed while queued executor-completion work runs through an explicit loop barrier and checks for remaining case tasks. The check covers every task the case created through the case loop, referenced or not, including one that garbage collection would otherwise destroy first; a directly constructed `asyncio.Task` is covered while it is referenced. Adapter cleanup remains responsible for its own callback/future chains, async generators and custom resources; this barrier does not establish general event-loop quiescence. Separate verified invocation-root and startup-directory anchors preserve the parent registration and restoration boundaries.
+Preparation registers cleanup ownership before acquisition.
+After successful preparation, core calls `cleanup` once on every ending, on the same loop, with the exact primary instance or `None` if binding or construction returned no instance.
+A malformed handoff does not discard an already valid cleanup obligation.
+Partially failed preparation remains under the parent lifetime registry.
+Cleanup survives repeated owner cancellation, preserves the original failure with a cleanup error chained, and cannot turn failure into success.
+The bridge supplies exact-instance and schema checks and closes auxiliary receivers before adapter cleanup.
+The case runner owns directory changes and case disposal.
 
-`test_storage_case_runner_preserves_configuration_and_loop` proves two effective relative roots, fresh domains, the shared reconstruction check and the refusal of an occupied task factory. `test_storage_case_runner_waits_for_native_work` covers cancelled awaiters, blocked native work and late completion-created tasks. `test_storage_case_runner_retains_failed_domain` covers preparation before yield, binding, construction, exercise, cleanup, remaining tasks and failed restoration; its remaining-task legs include an unreferenced task after a forced `gc.collect()`, released once the case ends, and a directly constructed referenced task. Every leg whose case returns checks that the loop's task factory is unset afterwards. `test_storage_case_runner_refuses_substituted_directory` preserves substituted state with UNKNOWN cleanup. These library tests use an actual parent-owned child. Installed wrapper evidence is supplied under #307; complete-command evidence is recorded under #215.
+**Suite execution and configured exercises.**
 
-The lifetime operations are asynchronous. Every request uses the exact typed records in the normative ABI; the parent retains ownership independently of the caller waiter.
+One core pytest wrapper runs every active common and selected protocol case, with private completion accounting, exact receiver identities and one invocation loop.
+Storage is the exception to a single prepared instance for all cases.
+Direct-injection wrappers keep their existing fixtures, markers and shared assertions.
+Synchronous common and secrets wrappers close their owned loop, including task and async-generator finalization, before checking returned values, handlers or output.
+Direct policy and harness wrappers also close their owned loop before result assertions.
+Storage retains its [in-loop assertions](#artifact-storage-contracts-issue-229).
+Shared asynchronous checks leave that work to the caller.
+A check that finishes a capture requires a separate capture for later cases.
 
-| Operation | Signature and authority |
-|---|---|
-| `reserve` | `(request: ReservationRequest) -> Reservation`; records ownership before an effect |
-| `acquire` | `(token: ReservationToken, operation_id: OperationId, request: ProcessLaunch \| LocalRuntimeLaunch \| TemporaryTreeRequest \| BorrowedServiceRequest) -> Acquisition`; parent executes one replayable acquisition |
-| `acknowledge` | `(token: ReservationToken, acquisition_operation_id: OperationId, revision: int) -> ActivationAcknowledgement`; parent checks admission and releases the pre-live gate |
-| `close` | `(resource_id: ResourceId \| None) -> ClosureReport`; seals the subtree, joins bounded cleanup and requires observed settlement |
-| `observe` | `(resource_id: ResourceId \| None) -> tuple[ResourceObservation, ...]`; reads bounded parent-authoritative state |
+- `RuntimeConformanceInputs` supplies `failure: Callable[[Runtime, JsonObject, ProtocolContext, str], Awaitable[object]]` and `configuration_effect: Callable[[Runtime, JsonObject, ProtocolContext], Awaitable[None]]` for the active common runtime cases.
+  The runtime-specific scenarios and managed runtime controller remain separate activation obligations.
+- `SecretsConformanceInputs` supplies `failure: Callable[[SecretsProvider, JsonObject, ProtocolContext, str], Awaitable[object]]`, a resolvable `(reference, expected_value): tuple[str, str]`, `missing_reference: str`, `forbidden_reference: str`, `listed_prefix: str` and `configuration_effect: Callable[[SecretsProvider, JsonObject, ProtocolContext], Awaitable[None]]`.
+  Core forwards the resolvable, missing, forbidden and listing inputs unchanged, preserving direct-injection checks and `StreamMasker` output redaction.
+  Failure and logging receive the original common marker, exact provider, a fresh authoritative configuration copy and the same context.
+  The driver uses that marker as the failing or logged input.
+  An installed negative case with an echoing provider must expose missing redaction.
+  The configuration-effect driver demonstrates observable behavior at the declared consumer.
+- `PolicyConformanceInputs` supplies `failure: Callable[[Policy, JsonObject, ProtocolContext, str], Awaitable[object]]`, `calls: PolicyCalls` and `configuration_effect: Callable[[Policy, JsonObject, ProtocolContext], Awaitable[None]]`.
+  The configured consumer is `Policy.validate`.
+  The malformed-policy case retains its separate input.
+  Shared checks await decisions with an explicit context and retain all six cases, request matrices and decision checks.
+- `HarnessConformanceInputs` supplies `failure: Callable[[HarnessAdapter, JsonObject, ProtocolContext, str], Awaitable[object]]`, `prepare_case: Callable[[HarnessAdapter, JsonObject, HarnessCase, ProtocolContext], Awaitable[None]]`, `denied_tool: str`, `configuration_effect: Callable[[HarnessAdapter, JsonObject, ProtocolContext], Awaitable[None]]` and appended `context_factory: HarnessContextFactory | None = None`.
+  Shared checks retain the five checks, six scenarios and exact three-event limit for the existing host's `HostedRun`.
+  The runner snapshots configuration before entering the same exercise-owned per-session context used by direct pytest and the installed command.
+  Preparation runs inside that context with a separate deep copy and supplies only declared injected inputs or owned external exercise state.
+  It supplies no provider, factory, session result or configuration replacement.
+  The host uses the exact provider's `build_session_spec` and `run` with the retained configuration, including explicitly empty configuration, and uses the existing sink, recording policy and `EventCount`.
+  Direct injection retains `HarnessExercise.adapter`.
+  The installed shared path never invokes that factory.
 
-Installed conformance execution is implemented under #307. A core-owned pytest wrapper runs every currently active shared check against the selected provider on one invocation loop, retaining authoritative configuration and exact receiver identities. Storage cases use separate parent-owned directories and retain unresolved domains for parent shutdown. Complete private check accounting and a bounded private pytest report jointly verify execution and fixture teardown; neither substitutes for parent-confirmed resource closure. The public conformance and cleanup commands are implemented under #215. The [command evidence record](../research/configured-command-2026-10-27.md) distinguishes ordinary installed-wheel regressions from the extended nightly/manual and exact-revision release qualification.
+`VcsConformanceInputs` supplies `failure: Callable[[Vcs, JsonObject, ProtocolContext, str], Awaitable[object]]`, `remote: VcsRemote`, `head_remote: VcsRemote`, `binding: VcsBinding`, `bench: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[VcsBench]]`, and `configuration_effect: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[None]]`.
+The bench driver receives the exact selected instance and supplies owned exercise infrastructure, with no provider or factory in its result.
+The native executor uses that same receiver for destination, inspection-source and head operations.
+The ordinary remote serves checkout, private-file, sealed-transfer, credential and repeated-finalization checks.
+The head case keeps the configured repository, base and binding with `head_remote`, choosing a distinct fresh branch and an absent derived missing branch.
+Repeated finalize and reconciliation keep the same prepared operation and destination.
+Fixtures preserve existing remotes and refs across cases.
 
-`test_installed_provider_supports_local_tooling` covers the full current case inventory. `test_installed_provider_configuration_is_effective`, `test_installed_conformance_rejects_fixture_replacement` and the related invalid-input and VCS-receiver tests cover exact configuration and receiver authority; `test_conformance_inputs_are_not_disclosed` refuses a missing adapter and a wrong fixture bundle through the public command. `test_installed_conformance_requires_fixture_teardown` exercises real setup, exercise and teardown skip/xfail. `test_installed_conformance_report_is_bounded` and `test_installed_conformance_drains_each_fixture_phase` cover private report acceptance and output draining. `test_installed_conformance_owns_storage_cases` and the installed failure/native-work controls cover case ownership and parent stop; `test_installed_conformance_keeps_imports_isolated` covers the installed import boundary. These tests supplement the bridge and case-runner evidence; the first two now exercise the public command from built and installed wheels.
+The bundle also has `change_requests: ChangeRequestConformanceInputs | None = None`.
+For an installed `vcs.git` selection with non-null retained `change_requests` configuration, core requires the selected receiver's advertised capability and operations and the typed change-request fixture before running its additional case.
+Its fixture prepares the scenario with the protocol context. Core alone calls the selected provider for the case.
+The [installed GitHub provider evidence](github-pull-request-publication.md#4-first-provider-evidence-and-activation) governs that case.
+The ordinary local Git fields and cases still apply.
 
-The command parent owns a subordinate startup tree and three private local channels. A fixed helper binds their short names in its own anchored working directory and transfers the listening descriptors; the parent acknowledges receipt before the helper closes its copies. All channels connect and their socket entries are identity-checked and unlinked before input release. The parent never reads the configuration or fixture-data files. The isolated child opens regular files nonblocking, bounds each read to one MiB plus an over-limit byte, and applies the existing bounded JSON/schema rules. The original startup deadline includes acquisition, channel setup and validation through a private READY record. Once ready, idle exercise time does not consume that startup deadline; bounded partial-record reads and cleanup retain their own deadlines.
+VCS shared checks leave loop and temporary-root ownership with their caller.
+The owner retains roots through Runner/default-executor shutdown before deletion.
+Cancellation of a waiter or an empty task list leaves possible native thread work outstanding.
+The command's bridge and parent retain that cleanup obligation without adding executor cancellation, publication authority or hostile-process isolation guarantees.
 
-The result is one fixed JSON `CommandResult` with original outcome, reason, invocation ID, completed/expected check counts and cleanup report. Expected refusal returns 1, observed cancellation returns 130, and accepted checks with CLOSED cleanup return 0. `cleanup` can return success for verified closure of an earlier failed invocation; it never certifies those earlier checks. An optional core-only outcome latch keeps the invocation report and root until final check/teardown classification, while EOF immediately fences admission and starts stopping resources. It preserves the original close deadline and sticky first failure/cancellation. A missing final outcome or unverified publication yields UNKNOWN; when publication completes within the original close deadline, the retained journal acknowledges the final outcome before the immutable report. Otherwise durability remains unverified and closure is UNKNOWN. Scoped closure remains independent of this latch.
+`ArtifactStorageConformanceInputs` supplies `failure: Callable[[ArtifactStorage, JsonObject, ProtocolContext, str], Awaitable[object]]` and `configuration_effect: Callable[[ArtifactStorage, JsonObject, ProtocolContext], Awaitable[None]]`.
+Both receive the exact provider, configuration and context.
+Failure and logging also receive the common marker.
+The shared checks own other operation inputs.
+Core owns reconstruction callbacks, with no provider, constructor or replacement configuration supplied by the bundle.
 
-Core generates invocation/resource identities; `new_operation_id()` supplies replay identities before requests. The fixed core recovery controller exposes `resume_close(reference: CleanupReference, limits: LifetimeLimits) -> ClosureReport` through `kora conformance cleanup <invocation-id>`. Recovery cannot reacquire or import provider/fixture code. The [resource ownership](conformance-lifetime.md#resource-establishment-and-ownership-transfer), [state and deadline rules](conformance-lifetime.md#state-transitions-and-bounded-settlement), [runtime seam](conformance-lifetime.md#local-runtime-seam) and [required tests](conformance-lifetime.md#required-tests-and-evidence) are part of this command contract. In particular, a callback, pytest exit or runtime receipt alone never proves cleanup; uncertainty retains bounded private recovery information and returns nonzero.
+**Storage case and native-work ownership.**
 
-Before external fixtures load, core privately retains the selected metadata implementation callable and the validated configuration/exercise-data snapshots. Core calls `prepare` with defensive copies of those exact inputs and its lifetime authority, then calls `bind_configuration` with a fresh copy of its retained validated configuration. The binding derives configuration-dependent constructor arguments from this input; fixture data supplies exercise setup, not substitute configuration. Mutating a supplied copy cannot change core's validated snapshot, later binding input or digest. Core passes the returned arguments directly to its retained callable and retains the exact returned object. The adapter returns neither a factory nor a replacement provider. Before any configured operation or suite exercise, core obtains the exact constructed instance's advertised `config_schema`, validates its bounded JSON-object shape and compares its canonical JSON with the private canonical metadata-schema snapshot saved before fixture loading and construction. Require equality; a mismatch is a content-free failure followed by normal exact-instance cleanup, never a second validation against a different schema or a fixture-selected substitute. Metadata remains the schema used for listing and pre-construction validation. Core-owned command suite fixtures supply only the exact object retained for the current prepared exercise and reject external provider/factory overrides. The artifact-storage case and receiver scopes below are the sole exception to constructing one provider for the complete suite. Public metadata/config/exercise-data fixtures are input views, never authority read back by the command.
+The wrapper runs every required common/storage case and each declared size parameter in its own prepared domain on the one invocation loop.
+Each case uses fresh copies of the same retained inputs and the same retained implementation.
+Core retains the primary instance immediately when the callable returns, checks its schema and supplies only that instance to the case.
+The primary cleanup identity remains independent of auxiliary objects.
+Preparation uses explicitly lifetime-owned disposable state and cannot silently reset persistent or borrowed storage.
+A subsequent case begins only after the preceding one actually closes.
 
-There is no universal provider constructor. Each activated protocol suite declares the actual configuration consumer: construction where applicable, or the configured operation (for example `Sensor.observe(config, ...)` and `Policy.validate(policy)`). Where configuration belongs to an operation, constructor arguments need not contain it; core-owned exercises pass the retained validated configuration to that operation unchanged. Every exercise driver receives the exact provider and authoritative configuration explicitly, never an alternative captured provider or stale configuration. A same-name class check, digest/equality echo or a claimed consumed flag does not prove configuration use.
+The case runner checks separate invocation-root and startup-directory anchors, then acquires a fresh parent-owned tree as the child's case working directory.
+That directory remains fixed through preparation, binding, construction, exercises, receiver and adapter cleanup, and actual native work settlement.
+Core restores the verified original working directory before closing the tree.
+Any failed case stops the sequence.
+Core retains any acquired domain for nonzero parent cleanup before pytest can regain control, including after preparation, binding, construction, exercise or cleanup failure, failed restoration or unresolved work.
+The built-in local fixture accepts relative roots inside its case directory and refuses absolute or escaping roots before construction.
+It retains the configured root and does not adopt or reset another store.
+Two distinct relative roots must produce their respective storage locations.
+Other fixtures must establish compatible disposable case domains or refuse before construction while preserving the original configuration.
 
-The frozen `RuntimeConformanceInputs` bundle, implemented under #303, contains `failure: Callable[[Runtime, JsonObject, ProtocolContext, str], Awaitable[object]]` and `configuration_effect: Callable[[Runtime, JsonObject, ProtocolContext], Awaitable[None]]`. It supplies inputs to the currently active common runtime checks; it does not activate the pending runtime-specific scenarios or managed runtime controller.
+An explicit cross-instance or reconstruction check obtains an auxiliary receiver only from core.
+Core binds another fresh copy of the same authoritative configuration against the same case store, calls its retained implementation, retains the return value before schema inspection and supplies only that checked receiver.
+A repeated identity, including the primary or an older auxiliary, refuses while retaining its original cleanup owner.
+Replacement follows actual closure of the predecessor's jobs, streams, executors and descriptors.
+Only the named cross-instance read check keeps concurrent receivers.
+Core closes all auxiliaries on every ending before primary adapter cleanup.
+Reconstruction grants no useful work to a released owner.
+Failure or uncertainty during closure retains recovery obligations and prevents success.
+The [accepted case and receiver decision](https://github.com/realkarych/kora/issues/215#issuecomment-6422704090) governs those scopes.
 
-The secrets bundle `SecretsConformanceInputs` contains a failure driver `Callable[[SecretsProvider, JsonObject, ProtocolContext, str], Awaitable[object]]`, a resolvable `(reference, expected_value): tuple[str, str]`, `missing_reference: str`, `forbidden_reference: str`, `listed_prefix: str`, and a configuration-effect driver `Callable[[SecretsProvider, JsonObject, ProtocolContext], Awaitable[None]]`. Core-owned wrappers supply the resolvable, missing-reference, forbidden-reference and listed-prefix inputs unchanged to their matching activated secrets cases; those cases retain their direct-injection interface, including captured-stream redaction through `StreamMasker`. For failure and logging cases, a wrapper forwards the exact provider, a fresh authoritative configuration copy, the same protocol context and the existing common suite's supplied marker. The driver exercises that marker as failing/logged input; dropping or substituting it cannot make the content-exclusion checks pass. A command-wrapper negative case with an echoing provider must expose that failure. The configuration-effect driver exercises the declared configured consumer and asserts its observable behavior against the authoritative configuration. Other activated suites define equivalent explicit typed bundles and consumers before their command support ships.
+The caller gives the runner a fresh dedicated `asyncio.Runner`, with no earlier default-executor work, exclusive default-executor ownership and an unset task factory.
+The caller and adapter neither replace the executor or task factory nor submit default work outside a case.
+Core refuses an occupied factory before acquiring the case tree.
+It tracks pending tasks created through the case loop, including `asyncio.create_task`, `loop.create_task`, `asyncio.ensure_future` and `TaskGroup`, with strong references through the remaining-task check.
+The factory forwards `name` and `context` and accepts no `eager_start`.
+On each exit core restores the unset factory and releases its references.
+With the case cwd still fixed, core joins the native pool, uses an explicit loop barrier for queued executor completions and checks remaining tasks, even unreferenced tracked tasks and referenced directly constructed `asyncio.Task` instances.
+The adapter owns its callback/future chains, async generators and custom resources.
+The barrier establishes the named task and completion facts, without general event-loop quiescence.
 
-The frozen `PolicyConformanceInputs` bundle contains `failure: Callable[[Policy, JsonObject, ProtocolContext, str], Awaitable[object]]`, `calls: PolicyCalls`, and `configuration_effect: Callable[[Policy, JsonObject, ProtocolContext], Awaitable[None]]`. The configured consumer remains `Policy.validate` with the retained configuration; the existing malformed-policy case keeps its separate exercise input. The installed executor under #307 supplies the authoritative configuration and exact provider; public command activation is implemented under #215.
+**Completion, refusal and recovery.**
 
-The frozen `HarnessConformanceInputs` bundle appends `context_factory: HarnessContextFactory | None = None`, preserving existing positional construction. The shared runner snapshots configuration before entering this per-session context and invokes preparation inside it; both direct pytest and installed execution use the same exercise-owned factory. Its original fields are `failure: Callable[[HarnessAdapter, JsonObject, ProtocolContext, str], Awaitable[object]]`, `prepare_case: Callable[[HarnessAdapter, JsonObject, HarnessCase, ProtocolContext], Awaitable[None]]`, `denied_tool: str`, and `configuration_effect: Callable[[HarnessAdapter, JsonObject, ProtocolContext], Awaitable[None]]`. Preparation selects declared injected fixture inputs or owned external exercise state and returns no provider, factory, session result or replacement configuration. `run_harness_case` retains a deep JSON copy before awaiting preparation, supplies preparation a separate deep copy, and passes the retained configuration to the existing host. The host calls the exact provider's `build_session_spec` and `run`, preserving an explicitly empty configuration. Its sink, recording policy and `EventCount` remain the existing implementation. The direct-injection `HarnessExercise.adapter` interface stays available; the configured shared path never invokes that factory.
+Core requires exact expected/completed check accounting, a bounded accepted private pytest report and completed fixture teardown.
+Neither the checks nor pytest exit, an adapter callback or a runtime receipt certify resource closure.
+Missing modules, adapter, fixtures or active suites, zero collected tests, invalid input, wrong interfaces or exercise bundles, attempted receiver replacement and test failure refuse.
+Invalid configuration reaches neither preparation nor construction.
+The command publishes bounded, content-free reports and diagnostics.
+It excludes configuration, exercise data and upstream exception messages from public stdout, stderr and diagnostic output.
+The parent drains and discards raw child stdout and stderr, including pytest failure rendering.
+The child checks its bounded private pytest report and sends only the fixed completion record.
 
-The frozen `VcsConformanceInputs` bundle contains `failure: Callable[[Vcs, JsonObject, ProtocolContext, str], Awaitable[object]]`, `remote: VcsRemote`, `head_remote: VcsRemote`, `binding: VcsBinding`, `bench: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[VcsBench]]`, and `configuration_effect: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[None]]`. The bench driver receives the exact selected instance after construction and supplies owned exercise infrastructure; it returns no provider or provider factory. The native executor's destination, inspection-source and head interfaces use that same instance. The ordinary remote serves checkout, private-file, sealed-transfer, credential and repeated-finalization cases. The head case uses `head_remote`, retaining the configured repository/base/binding while selecting a distinct fresh branch whose derived missing branch is absent. Repeated finalize and reconciliation within one case retain the identical prepared operation/destination. No fixture resets a remote or overwrites an existing ref to make another case pass.
+An ordinary fixture subprocess stays in its invocation domain.
+Any deliberate detached domain, including a runtime test domain, must register its identity and cleanup before it can become independently live.
+Ownership records survive child exit.
+Success, setup/test failure, cancellation and shutdown share bounded cooperative teardown, identity-checked escalation and verification of actual owned-domain quiescence.
+Cancellation during registration or partial setup leaves the effect with its original owner.
+Parent cleanup releases pipes and temporary state after their owners settle.
+Uncertain closure returns nonzero and retains bounded private unresolved evidence.
+The [ownership](conformance-lifetime.md#resource-establishment-and-ownership-transfer), [settlement](conformance-lifetime.md#state-transitions-and-bounded-settlement), [runtime seam](conformance-lifetime.md#local-runtime-seam) and [evidence requirements](conformance-lifetime.md#required-tests-and-evidence) remain part of the command contract.
 
-VCS shared checks leave loop and temporary-root ownership with their caller. The owner retains exercise roots through Runner/default-executor shutdown before deleting them. Cancellation of an executor waiter can precede thread settlement; an empty task list or cancellation return does not prove native work has stopped. Configured-invocation cleanup during native threaded work remains an explicit #215 bridge/parent integration obligation. These library checks add no executor cancellation, publication-authority or hostile-process-isolation guarantee.
+The command produces one fixed JSON `CommandResult` with original outcome, reason, invocation ID, completed and expected check counts, and cleanup report.
+Accepted checks with CLOSED cleanup return 0, observed cancellation returns 130 and refusal returns 1.
+The optional core-only outcome latch retains the invocation report and root through final check and teardown classification.
+EOF fences admission and begins resource stopping immediately.
+The latch keeps the original close deadline and sticky first failure or cancellation.
+Missing outcome or unverified publication yields UNKNOWN.
+When final-outcome publication fits the original deadline, the journal acknowledges that outcome before the immutable report.
+Scoped closure remains independent of the latch.
 
-The frozen `ArtifactStorageConformanceInputs` bundle contains `failure: Callable[[ArtifactStorage, JsonObject, ProtocolContext, str], Awaitable[object]]` and `configuration_effect: Callable[[ArtifactStorage, JsonObject, ProtocolContext], Awaitable[None]]`. Both drivers receive the exact selected provider, authoritative configuration and protocol context; failure/logging also receives the existing common marker. Protocol-specific operation inputs remain in the shared checks. The bundle supplies no provider, constructor factory or replacement configuration. The installed bridge supplies reconstruction callbacks from its privately retained callable and enforces the accepted case/receiver scopes below when #215 activates.
+Core generates invocation and resource identities. Clients use `new_operation_id()` before requests for exact replay.
+`cleanup` invokes the fixed core `resume_close(reference: CleanupReference, limits: LifetimeLimits) -> ClosureReport` without reacquiring resources or importing provider or fixture code.
+Verified closure of an earlier failed invocation can make cleanup succeed.
+It supplies no certification of the earlier check results.
 
-Preparation registers cleanup ownership before independently live resources are acquired. After successful preparation, core calls `cleanup` once on every ending path, passing the exact constructed instance or `None` if binding/construction failed. Partial preparation failure remains owned by the lifetime registry and parent cleanup. Cleanup failure cannot erase the original failure or produce success; cancellation cannot skip required teardown. This establishes input delivery, callable/object provenance and observable conformance for installed trusted code, not honesty or sandboxing of arbitrary provider/exercise internals.
+**Required evidence.**
 
-Artifact-storage conformance preserves the direct suite's fresh-state and reconstruction boundaries. One core wrapper runs all required common/storage cases and each declared size parameter on the same invocation loop, with a distinct prepared case domain. For each domain, core prepares through the selected adapter using fresh copies of the same authoritative configuration and exercise-data snapshots, binds that configuration, constructs through the same privately retained metadata implementation callable, checks the exact instance schema and supplies only that retained object. Each successfully prepared domain receives exactly one cleanup call with its exact primary instance or None. Case preparation may establish only its explicitly lifetime-owned disposable state; it does not alter the authoritative configuration or silently reset persistent or borrowed storage. A subsequent case starts after the previous domain has actually closed. Core retains the primary object immediately on return, before schema inspection, and keeps its cleanup identity independent of auxiliary receivers. Cleanup receives None only if primary construction returned no object; partial effects remain under lifetime authority.
+Installed-distribution checks use built and installed wheels and nonempty valid and invalid configurations.
+Two distinct valid configurations must visibly reach the declared constructor or operation, with controls for conflicting fixture data, stale or constant binding and attempted input mutation.
+Tests exercise exact callable/object and wrapper provenance, missing fixture, module or suite and zero tests, override and decoy refusal, schema equality/refusal and selective imports with serving and listing exclusion.
+They cover private marker exclusion, setup/exercise/teardown failures and skip/xfail refusal, bounded reports, draining of each fixture phase, storage domains and delayed native work, cancellation, and exact or `None` cleanup.
+Parent evidence covers every ending, including pytest exit with a live child, TERM resistance, registered detachment, partial setup and cancellation during registration.
+The all-ending and repeated lifecycle method and local runtime/testing-runner handoff retain their separate evidence owners.
+A bare injected provider or a library-level check cannot establish the installed command boundary.
 
-For storage case isolation, core establishes a fresh parent-owned temporary tree as the isolated child's case working directory before preparation and binding, after the preceding case has closed. The case working directory stays fixed through preparation, binding, all receiver construction, exercises, receiver closure and adapter cleanup. Core restores the anchored original directory only after all case producers and native work settle, before disposing of the case tree. Failed restoration or unresolved work prevents the next case and follows the existing nonzero parent-cleanup path. Configuration stays unchanged. The built-in local fixture accepts relative storage roots that resolve inside this case directory and refuses absolute or escaping roots before construction; it never replaces the configured root with a fixture-selected value or adopts/resets an existing store. Other fixtures must establish a compatible disposable case domain under the same ownership and configuration rules or refuse before construction. Two distinct relative local roots must produce the corresponding actual storage locations.
-
-Named storage cross-instance/reconstruction steps may request an auxiliary receiver from core, never from an adapter factory. Core binds a fresh copy of the same authoritative configuration against the same prepared store, calls its retained implementation, retains the returned object before checking its schema, and supplies only that exact receiver. Auxiliary receivers must be distinct objects from the primary and every previous receiver; a repeated object identity is refused and retains its existing cleanup owner rather than becoming a second receiver. Replacement follows actual closure of the previous receiver's jobs, streams, executors and descriptors; the existing cross-instance read case retains concurrent receivers only for that explicit check. Core closes every auxiliary receiver on every ending before prepared-domain cleanup. Reconstruction does not authorize new useful work for a released owner. Failure or uncertainty during any closure prevents successful completion and preserves the existing recovery obligations.
-
-These accepted installed storage case and receiver scopes are recorded under [#295](https://github.com/realkarych/kora/issues/295), following [the owner-approved clarification](https://github.com/realkarych/kora/issues/215#issuecomment-6422704090). The #303 bridge, #305 case runner and #307 installed executor implement case-directory switching, retained-constructor authority and private completion accounting. Public command enforcement remains #215.
-
-`test_installed_provider_configuration_is_effective` builds an external distribution with nonempty configuration and two distinct valid settings. Both must produce their respective observable behavior through the selected constructor/operation; conflicting fixture data, stale/constant configuration binding and attempted input mutation cannot substitute another setting. Invalid configuration invokes neither preparation nor construction. `test_conformance_fixture_contract_is_complete` covers the named adapter, signatures, activated typed bundle and exact selected-instance guarantee, including wrapper-returning factories and a constructed-instance/metadata schema mismatch that invokes no configured exercise and still tears down the exact instance. The existing input-disclosure and lifecycle gates include preparation, binding, construction and cleanup failures, `None`/exact-instance cleanup delivery and cancellation. `test_installed_provider_schema_matches_metadata` accepts reordered schema object keys but refuses changed constraints/defaults/types, malformed/oversized or unreadable instance schemas and metadata-schema mutation before exercises, with exact-instance cleanup. Mutation of public schema views cannot change the private validation/comparison snapshot. The bridge types are implemented under #303; installed-child execution and complete command composition are implemented under #215 using the accepted lifetime ABI in #231.
-
-Run pytest through its explicit opt-in loading in an isolated local child, disabling ambient plugin, conftest and configuration discovery and current-directory/checkout imports. Load only the selected provider, explicit fixture module and the selected protocol's activated kora conformance suite with its declared dependencies. Serving processes and provider listing never load the fixture module. This is trusted installed test code, not a sandbox. No automatic installation, core dynamic-import exception, plugin-manager access exception or unlisted pytest hook is authorized; #215 must follow ADR-0026 and the suppression/import checks or obtain a separately approved narrow amendment.
-
-Missing modules, required fixtures or activated suites, zero collected tests, attempted provider/factory replacement, invalid inputs and test failures return nonzero. Output remains bounded and content-free: config and exercise values cannot appear in JSON/stdout, stderr, traceback or pytest failure rendering. The parent owns the invocation's process group or equivalent local execution domain, pipes and temporary state. Ordinary fixture subprocesses stay in that domain. Deliberately detached resources, including runtime test domains, register their process/domain identities and cleanup information with the parent before becoming independently live; unregistered detachment is prohibited. Ownership records survive child exit until closure is verified.
-
-On success, setup/test failure, cancellation and shutdown, allow bounded cooperative fixture teardown, then identity-checked escalation and verify quiescence of all owned children/domains. Reaping pytest alone is insufficient. Cancellation during registration or partial setup retains the acquired resource's owner until it is closed; a failed or uncertain cleanup is nonzero with bounded unresolved-resource evidence, never a clean result. Parent cleanup releases pipes and temporary state after their owners settle. This covers cooperative registered resources, not hostile daemonization or containment of arbitrary external services.
-
-Under #215, `test_installed_provider_supports_local_tooling` covers configured installed cases with nonempty valid/invalid config; a bare injected provider does not establish this command boundary. `test_targeted_conformance_loads_only_selected_provider` proves selective imports and serving/listing exclusion. `test_conformance_fixture_contract_is_complete` rejects missing fixtures/suites, zero tests, same-name decoys and provider/factory overrides, and proves that the retained selected callable is invoked and its exact returned instance reaches the cases, including a factory returning a wrapper. `test_conformance_inputs_are_not_disclosed` asserts private markers are absent from all output/failure paths. `test_conformance_fixture_resources_are_released` applies the existing repeated lifecycle method to all completion paths, including pytest exit before teardown with a live child, a TERM-resistant child, registered detached resources, partial setup and cancellation during registration. Ordinary installed-command and parent-lifetime checks are implemented under #215. Complete instrumented qualification follows the accepted nightly/manual and exact-release schedule; local-runtime/testing-runner handoff evidence remains with work items 7 and 14.
+Bridge checks independently exercise effective binding, exact primary and auxiliary identities, selective bundle imports, failure identity, admitted-reader cancellation, malformed handoffs and repeated cancellation while real cleanup settles.
+Storage case-runner checks use an actual parent-owned child to exercise fresh native domains, relative roots, reconstruction, task-factory refusal and restoration, blocked native work and completion-created tasks, including unreferenced tracked tasks through collection and directly constructed referenced tasks.
+They also cover failures during preparation, binding, construction, exercise, cleanup and restoration, and retention of substituted or unsettled directories with UNKNOWN cleanup.
+The [command evidence record](../research/configured-command-2026-10-27.md) distinguishes ordinary installed-wheel evidence from the required extended nightly/manual and exact-revision release qualification.
+The [local lifetime observations](../research/local-lifetime-recovery-observations-2026-10-23.md) record the native ownership assumptions and their evidence.
 
 ### External observation conformance gates
 

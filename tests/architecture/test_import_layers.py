@@ -515,6 +515,18 @@ def test_server_free_packages_never_reach_server_packages() -> None:
     assert reach == {}
 
 
+def test_control_plane_never_imports_compiler() -> None:
+    source_root = SOURCE_ROOT
+
+    imports = package_import_graph(source_root)
+    consumers = {
+        package for package in imports if "dsl" in reachable_packages(imports, package)
+    }
+
+    assert consumers == {"cli", "mcp.stdio"}
+    assert "cel_eval" not in reachable_packages(imports, "dsl")
+
+
 def test_checker_flags_forbidden_import_forms(tmp_path: Path) -> None:
     write_packages(tmp_path, ["kora", "kora.db", "kora.runner"])
     write_module(tmp_path, "kora.runner.absolute", "import kora.db\n")

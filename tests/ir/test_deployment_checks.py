@@ -7,6 +7,7 @@ from kora.ir.agent_secrets import UNENFORCED
 from kora.ir.deployment_checks import (
     INSTALLATION_HINT,
     DeploymentSelection,
+    check_authored_document,
     check_deployment_document,
 )
 from kora.ir.diagnostics import Diagnostic
@@ -71,6 +72,27 @@ def test_deployment_checks_collect_findings_from_every_pass() -> None:
     assert not result.deployable
     assert result.complete
     assert {"IR002", "IR013", "IR018", "IR028"} <= codes
+
+
+def test_authored_and_deployment_checks_report_the_same_link_location() -> None:
+    nodes = installable_chain_nodes()
+    nodes["gate"]["source"] = {"file": "graph.py", "line": 13}
+    nodes["gate"]["depends_on"] = ["unknown"]
+    document = chain_document(nodes)
+
+    authored = check_authored_document(document)
+    deployed = check_deployment_document(document, SELECTION, DEFAULT_POLICY)
+
+    assert authored.complete
+    assert deployed.complete
+    assert authored.diagnostics == deployed.diagnostics
+    (error,) = authored.diagnostics.errors
+    assert (error.code, error.path) == (
+        "IR002",
+        ("graph", "nodes", "gate", "depends_on", 0),
+    )
+    assert error.location is not None
+    assert (error.location.file, error.location.line) == ("graph.py", 13)
 
 
 def test_deployment_checks_refuse_unselected_providers() -> None:

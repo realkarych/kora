@@ -689,6 +689,12 @@ async def settle_serving(
     return not unfinished
 
 
+async def sqlite_schema_ready_for_serving(database: Database) -> bool:
+    return await database_is_at_head(database) and await database.read(
+        sqlite_run_event_page_available
+    )
+
+
 async def serve_on_loop(
     settings: DatabaseSettings,
     port: int,
@@ -705,9 +711,7 @@ async def serve_on_loop(
     server: ApiServer | None = None
     failure: ServingRefusal | None = None
     try:
-        if not await database_is_at_head(database) or not await database.read(
-            sqlite_run_event_page_available
-        ):
+        if not await sqlite_schema_ready_for_serving(database):
             failure = ServingRefusal.SQLITE_UNPREPARED
         elif signals.received is None:
             if preparer is not None:

@@ -25,8 +25,10 @@ from tests.api.support import (
     deployment_services,
     lifespan,
 )
+from tests.cli.test_deploy_command import closed_origin, kora
 from tests.db.closing import ConnectionLedger
 from tests.db.seed import START
+from tests.mcp.test_stdio_deploy import start
 from tests.plugins.authentication.support import seed_case
 
 __all__ = ["api_capture", "preparer"]
@@ -439,9 +441,22 @@ async def test_parity_client_side_operations(
         database, api_capture, deployment_services(database, preparer, HARNESS)
     ).application
     assert isinstance(framework, FastAPI)
+    session = await start({"KORA_URL": closed_origin(), "KORA_MCP_TOKEN": "token"})
 
     schema = parse_json_object(framework.openapi())
+    compiled = await kora(["compile", "--help"], {})
+    listed = await session.request("tools/list", {})
+    exit_status, _ = await session.close()
 
+    assert compiled.code == exit_status == 0
+    assert b"--format" in compiled.stdout
+    result = parse_json_object(listed["result"])
+    tools = result["tools"]
+    assert isinstance(tools, list)
+    assert [parse_json_object(tool)["name"] for tool in tools] == [
+        "kora_deploy",
+        "kora_compile",
+    ]
     assert isinstance(schema["paths"], dict)
     assert set(schema["paths"]) == {
         "/healthz",
