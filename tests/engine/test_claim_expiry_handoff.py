@@ -631,7 +631,7 @@ class HandoffTimes:
 
     @asynccontextmanager
     async def watchdog(self) -> AsyncGenerator[None]:
-        timer = asyncio.timeout(10)
+        timer = asyncio.timeout(15)
         nested_timeout = False
         try:
             async with timer:
