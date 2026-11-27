@@ -204,12 +204,11 @@ class Cursor:
             and not self.connection.in_transaction
         ):
             self.connection.execute(f"BEGIN {self.connection.isolation_level}").close()
-        statement = native.prepare(self.connection.handle, query)
+        statement = native.prepare(self.connection.handle, query, parameters)
         if statement is None:
             self.description = None
             return self
         self._statement = statement
-        native.bind(statement, parameters)
         self._row = native.step(statement)
         columns = native.columns(statement)
         self.description = (

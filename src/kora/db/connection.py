@@ -471,7 +471,11 @@ def sqlite_empty_admitted(path: Path, descriptor: int) -> bool:
         return False
     main = path.lstat()
     opened = os.fstat(descriptor)
-    if (main.st_dev, main.st_ino, main.st_size) != (opened.st_dev, opened.st_ino, 0):
+    if opened.st_size or (main.st_dev, main.st_ino, main.st_size) != (
+        opened.st_dev,
+        opened.st_ino,
+        0,
+    ):
         return False
     for ending in ("-wal", "-shm", "-journal"):
         try:

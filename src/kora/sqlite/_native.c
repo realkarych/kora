@@ -61,7 +61,7 @@ static int closeDatabase(NativeDb *db) {
     if (result == SQLITE_OK) db->connection = NULL;
   }
   PyThread_release_lock(db->lifetime);
-  if (db->main->state == KORA_FD_RETAINED) koraSettleFd(db->main);
+  koraSettleFd(db->main);
   Py_END_ALLOW_THREADS
   if (result == SQLITE_OK) {
     Py_CLEAR(db->progress);
@@ -82,13 +82,10 @@ static void destroyDatabase(PyObject *capsule) {
 static PyObject *allocateDatabase(PyObject *module, PyObject *unused) {
   NativeDb *db = calloc(1, sizeof(*db));
   if (!db) return PyErr_NoMemory();
-  db->main = calloc(1, sizeof(*db->main));
+  db->main = koraNewFd();
   db->lifetime = PyThread_allocate_lock();
   PyObject *capsule = NULL;
   if (db->main && db->lifetime) {
-    atomic_init(&db->main->references, 1);
-    atomic_init(&db->main->state, KORA_FD_ABSENT);
-    atomic_init(&db->main->unresolvedSidecar, 0);
     capsule = PyCapsule_New(db, dbCapsuleName, destroyDatabase);
   } else {
     PyErr_NoMemory();
@@ -152,16 +149,11 @@ static PyObject *closeDatabaseOwner(PyObject *module, PyObject *capsule) {
 static PyObject *databaseSettled(PyObject *module, PyObject *capsule) {
   NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
   if (!db) return NULL;
-  if (db->main->state == KORA_FD_RETAINED) {
-    Py_BEGIN_ALLOW_THREADS
-    koraSettleFd(db->main);
-    Py_END_ALLOW_THREADS
-  }
-  if (!db->main->unresolvedSidecar && !db->connection &&
-      (db->main->state == KORA_FD_ABSENT || db->main->state == KORA_FD_RETIRED)) {
-    Py_RETURN_TRUE;
-  }
-  Py_RETURN_FALSE;
+  int settled;
+  Py_BEGIN_ALLOW_THREADS
+  settled = koraSettleFd(db->main);
+  Py_END_ALLOW_THREADS
+  return PyBool_FromLong(settled && !db->connection);
 }
 
 static const char *statementCapsuleName = "kora.sqlite.statement";
@@ -204,33 +196,6 @@ static void destroyStatement(PyObject *capsule) {
   closeChild(capsule, statementCapsuleName, finalizeNative);
 }
 
-static PyObject *prepareStatement(PyObject *module, PyObject *args) {
-  PyObject *database;
-  const char *sql;
-  if (!PyArg_ParseTuple(args, "Os", &database, &sql)) return NULL;
-  NativeDb *db = PyCapsule_GetPointer(database, dbCapsuleName);
-  if (!db) return NULL;
-  if (!db->connection) return dbError(SQLITE_MISUSE, "Cannot operate on a closed database.");
-  sqlite3_stmt *statement = NULL;
-  const char *tail = NULL;
-  int result;
-  Py_BEGIN_ALLOW_THREADS
-  result = sqlite3_prepare_v2(db->connection, sql, -1, &statement, &tail);
-  Py_END_ALLOW_THREADS
-  if (result == SQLITE_OK) {
-    while (isspace((unsigned char)*tail)) tail++;
-    if (!*tail) {
-      if (!statement) Py_RETURN_NONE;
-      PyObject *capsule = newChild(statement, statementCapsuleName, destroyStatement, database);
-      if (!capsule) sqlite3_finalize(statement);
-      return capsule;
-    }
-    result = SQLITE_MISUSE;
-  }
-  sqlite3_finalize(statement);
-  return dbError(result, sqlite3_errstr(result));
-}
-
 static int bindValue(sqlite3_stmt *statement, int index, PyObject *value) {
   if (value == Py_None) return sqlite3_bind_null(statement, index);
   if (PyLong_Check(value)) {
@@ -256,25 +221,53 @@ static int bindValue(sqlite3_stmt *statement, int index, PyObject *value) {
   return SQLITE_MISMATCH;
 }
 
-static PyObject *bindStatement(PyObject *module, PyObject *args) {
-  PyObject *capsule, *parameters;
-  if (!PyArg_ParseTuple(args, "OO", &capsule, &parameters)) return NULL;
-  sqlite3_stmt *statement = PyCapsule_GetPointer(capsule, statementCapsuleName);
-  if (!statement) return NULL;
+static int bindParameters(sqlite3_stmt *statement, PyObject *parameters) {
   int count = sqlite3_bind_parameter_count(statement), named = PyDict_Check(parameters);
   if (!named && PySequence_Size(parameters) != count) {
-    return dbError(SQLITE_RANGE, "Incorrect number of SQLite bindings");
+    return SQLITE_RANGE;
   }
   for (int index = 1; index <= count; index++) {
     const char *name = sqlite3_bind_parameter_name(statement, index);
     PyObject *value = named ? (name ? PyMapping_GetItemString(parameters, name + 1) : NULL)
                             : PySequence_GetItem(parameters, index - 1);
-    if (!value) return dbError(SQLITE_RANGE, "Missing SQLite binding");
+    if (!value) return SQLITE_RANGE;
     int result = bindValue(statement, index, value);
     Py_DECREF(value);
-    if (result != SQLITE_OK) return dbError(result, "Invalid SQLite binding");
+    if (result != SQLITE_OK) return result;
   }
-  Py_RETURN_NONE;
+  return SQLITE_OK;
+}
+
+static PyObject *prepareStatement(PyObject *module, PyObject *args) {
+  PyObject *database, *parameters;
+  const char *sql;
+  if (!PyArg_ParseTuple(args, "OsO", &database, &sql, &parameters)) return NULL;
+  NativeDb *db = PyCapsule_GetPointer(database, dbCapsuleName);
+  if (!db) return NULL;
+  if (!db->connection) return dbError(SQLITE_MISUSE, "Cannot operate on a closed database.");
+  sqlite3_stmt *statement = NULL;
+  const char *tail = NULL;
+  int result;
+  Py_BEGIN_ALLOW_THREADS
+  result = sqlite3_prepare_v2(db->connection, sql, -1, &statement, &tail);
+  Py_END_ALLOW_THREADS
+  if (result == SQLITE_OK) {
+    while (isspace((unsigned char)*tail)) tail++;
+    if (!*tail) {
+      if (!statement) Py_RETURN_NONE;
+      result = bindParameters(statement, parameters);
+      if (result != SQLITE_OK) {
+        sqlite3_finalize(statement);
+        return dbError(result, "Invalid SQLite binding");
+      }
+      PyObject *capsule = newChild(statement, statementCapsuleName, destroyStatement, database);
+      if (!capsule) sqlite3_finalize(statement);
+      return capsule;
+    }
+    result = SQLITE_MISUSE;
+  }
+  sqlite3_finalize(statement);
+  return dbError(result, sqlite3_errstr(result));
 }
 
 static PyObject *columnValue(sqlite3_stmt *statement, int index) {
@@ -542,7 +535,6 @@ static PyMethodDef methods[] = {
   {"close", closeDatabaseOwner, METH_O, NULL},
   {"settled", databaseSettled, METH_O, NULL},
   {"prepare", prepareStatement, METH_VARARGS, NULL},
-  {"bind", bindStatement, METH_VARARGS, NULL},
   {"step", stepStatement, METH_O, NULL},
   {"columns", statementColumns, METH_O, NULL},
   {"finalize", closeStatement, METH_O, NULL},

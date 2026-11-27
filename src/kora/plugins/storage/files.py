@@ -158,6 +158,8 @@ class RootAnchor:
             canonical, descriptor = open_anchored_root(path)
             with ExitStack() as rollback:
                 rollback.callback(os.close, descriptor)
+                if not NativeRetirement.drain(canonical / "control.sqlite"):
+                    refuse("storage_busy")
                 info = os.fstat(descriptor)
                 filesystem_name, filesystem_id = filesystem(descriptor)
                 try:

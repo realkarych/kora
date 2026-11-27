@@ -21,6 +21,7 @@ static KoraMainKind koraMainHeader(int descriptor, const struct stat *identity) 
   if (size != sizeof(header) || memcmp(header, "SQLite format 3", 16)) {
     return KORA_MAIN_UNCERTAIN;
   }
+  if (memcmp(header + 72, (unsigned char[20]){0}, 20)) return KORA_MAIN_UNCERTAIN;
   unsigned page = (unsigned)header[16] * 256 + header[17];
   if (page == 1) page = 65536;
   if (page < 512 || page > 65536 || (page & (page - 1)) != 0 ||

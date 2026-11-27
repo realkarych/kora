@@ -18,10 +18,9 @@ from hatchling.builders.config import BuilderConfig
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 SQLITE_ARCHIVE = "sqlite-amalgamation-3540100"
-SQLITE_INPUTS = {
-    "sqlite3.c": "e2b869d3003b33c942b7dd7063604fbc53553e1b66609570df39b9b7b558ee81",
-    "sqlite3.h": "15ef3f5dbc4a7a980f828fa0d1e473cee5a124e7bb77e9bc70fc0bfa3f9a2af8",
-}
+SQLITE_SOURCE_DIGEST = (
+    "e2b869d3003b33c942b7dd7063604fbc53553e1b66609570df39b9b7b558ee81"
+)
 SQLITE_ARCHIVE_DIGEST = (
     "92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30"
 )
@@ -117,13 +116,13 @@ def build_sqlite_native(source: Path, output: Path, *, editable: bool) -> str:
             ZipFile(archive) as packaged,
         ):
             isolated = Path(location)
-            for name, digest in SQLITE_INPUTS.items():
-                value = packaged.read(f"{SQLITE_ARCHIVE}/{name}")
-                if hashlib.sha3_256(value).hexdigest() != digest:
-                    raise ValueError(
-                        "The pristine SQLite source digest does not match."
-                    )
-                (isolated / name).write_bytes(value)
+            pristine = packaged.read(f"{SQLITE_ARCHIVE}/sqlite3.c")
+            if hashlib.sha3_256(pristine).hexdigest() != SQLITE_SOURCE_DIGEST:
+                raise ValueError("The pristine SQLite source digest does not match.")
+            (isolated / "sqlite3.c").write_bytes(pristine)
+            (isolated / "sqlite3.h").write_bytes(
+                packaged.read(f"{SQLITE_ARCHIVE}/sqlite3.h")
+            )
             subprocess.run(
                 ["/usr/bin/patch", "-s", "-f", "-F", "0", "-p1", "-i", patch],
                 cwd=isolated,

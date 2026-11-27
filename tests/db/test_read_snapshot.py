@@ -60,6 +60,8 @@ def test_declined_native_open_settles_after_the_original_writer(
 ) -> None:
     path = tmp_path / "incumbent.sqlite"
     copy_sqlite_template(sqlite_template, path)
+    alias = path.with_name("same-main.sqlite")
+    alias.hardlink_to(path)
     main = native_identity(path)
     released = threading.Event()
 
@@ -69,8 +71,10 @@ def test_declined_native_open_settles_after_the_original_writer(
     with (
         closing(GuardedConnection()) as owner,
         closing(GuardedConnection(release_declined)) as declined,
+        closing(GuardedConnection()) as other_name,
     ):
         owner.open(path, False, 0, lambda descriptor, empty: not empty)
+        journal = owner.execute("PRAGMA journal_mode=DELETE").fetchone()
         owner.execute("CREATE TABLE owned_write (value INTEGER)").close()
         owner.execute("BEGIN IMMEDIATE").close()
         owner.execute("INSERT INTO owned_write VALUES (41)").close()
@@ -82,20 +86,135 @@ def test_declined_native_open_settles_after_the_original_writer(
         retained_descriptors = held_main_descriptors(main)
         settlement_while_owned = NativeRetirement.drain(path)
         released_while_owned = released.is_set()
+        with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+            other_name.open(alias, False, 0, lambda descriptor, empty: True)
+        other_name.close()
+        alias_descriptors = held_main_descriptors(main)
+        alias_settled_while_owned = other_name.settled()
         owner.commit()
         committed_row = owner.execute("SELECT value FROM owned_write").fetchone()
-        owner.close()
         settled = NativeRetirement.drain(path)
+        alias_settled = other_name.settled()
+        descriptors_after_unlock = held_main_descriptors(main)
+        with closing(GuardedConnection()) as retry:
+            retry.open(alias, False, 0, lambda descriptor, empty: True)
+            retried_row = retry.execute("SELECT value FROM owned_write").fetchone()
 
+    assert journal == ("delete",)
     assert len(original_descriptors) == 1
     assert len(retained_descriptors) == 2
     assert set(original_descriptors) < set(retained_descriptors)
+    assert len(alias_descriptors) == 3
+    assert set(retained_descriptors) < set(alias_descriptors)
     assert not settlement_while_owned
     assert not released_while_owned
-    assert committed_row == (41,)
+    assert not alias_settled_while_owned
+    assert committed_row == retried_row == (41,)
     assert settled
+    assert alias_settled
     assert released.is_set()
+    assert descriptors_after_unlock == original_descriptors
     assert not held_main_descriptors(main)
+
+
+def test_live_shm_refuses_main_and_keeps_the_original_writer(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    path = tmp_path / "wal-owner.sqlite"
+    copy_sqlite_template(sqlite_template, path)
+    shm = path.with_name(path.name + "-shm")
+
+    with (
+        closing(GuardedConnection()) as owner,
+        closing(GuardedConnection()) as ordinary_reader,
+        closing(GuardedConnection()) as declined,
+    ):
+        owner.open(path, False, 0, lambda descriptor, empty: not empty)
+        journal = owner.execute("PRAGMA journal_mode=WAL").fetchone()
+        owner.execute("CREATE TABLE wal_write (value INTEGER)").close()
+        ordinary_reader.open(path, False, 0, lambda descriptor, empty: not empty)
+        initial_rows = ordinary_reader.execute("SELECT value FROM wal_write").fetchall()
+        identity = native_identity(shm)
+        main = native_identity(path)
+        original = held_main_descriptors(identity)
+        original_main = held_main_descriptors(main)
+        owner.execute("BEGIN IMMEDIATE").close()
+        owner.execute("INSERT INTO wal_write VALUES (12)").close()
+
+        with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+            declined.open(shm, False, 0, lambda descriptor, empty: True)
+        declined.close()
+        retained = held_main_descriptors(identity)
+        owner.commit()
+        owner.close()
+        shared = held_main_descriptors(identity)
+        first_settled = owner.settled()
+        main_while_shared = held_main_descriptors(main)
+        was_retained = not declined.settled()
+        committed = ordinary_reader.execute("SELECT value FROM wal_write").fetchone()
+        ordinary_reader.close()
+        settled = declined.settled()
+        pool_settled = ordinary_reader.settled() and owner.settled()
+
+    assert journal == ("wal",)
+    assert initial_rows == []
+    assert len(original) == 1
+    assert len(retained) == 2
+    assert set(original) < set(retained)
+    assert shared == retained
+    assert not first_settled
+    assert main_while_shared == original_main
+    assert was_retained
+    assert committed == (12,)
+    assert settled
+    assert pool_settled
+    assert not held_main_descriptors(identity)
+    assert not held_main_descriptors(main)
+
+
+def test_live_main_refuses_shm_and_keeps_the_original_writer(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    path = tmp_path / "main-owner.sqlite"
+    wal_path = tmp_path / "wal-reader.sqlite"
+    copy_sqlite_template(sqlite_template, path)
+    copy_sqlite_template(sqlite_template, wal_path)
+    with closing(GuardedConnection()) as prepare:
+        prepare.open(wal_path, False, 0, lambda descriptor, empty: not empty)
+        journal = prepare.execute("PRAGMA journal_mode=WAL").fetchone()
+        prepare.execute("CREATE TABLE wal_read (value INTEGER)").close()
+    wal_path.with_name(wal_path.name + "-shm").hardlink_to(path)
+    identity = native_identity(path)
+
+    with closing(GuardedConnection()) as owner, closing(GuardedConnection()) as reader:
+        owner.open(path, False, 0, lambda descriptor, empty: not empty)
+        owner_journal = owner.execute("PRAGMA journal_mode=DELETE").fetchone()
+        owner.execute("CREATE TABLE main_write (value INTEGER)").close()
+        owner.execute("BEGIN IMMEDIATE").close()
+        owner.execute("INSERT INTO main_write VALUES (93)").close()
+        original = held_main_descriptors(identity)
+        reader.open(wal_path, False, 0, lambda descriptor, empty: not empty)
+
+        with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+            reader.execute("SELECT value FROM wal_read")
+        retained = held_main_descriptors(identity)
+        reader.close()
+        was_retained = not reader.settled()
+        owner.commit()
+        committed = owner.execute("SELECT value FROM main_write").fetchone()
+        settled = reader.settled()
+        after_unlock = held_main_descriptors(identity)
+
+    assert journal == ("wal",)
+    assert owner_journal == ("delete",)
+    assert len(original) == 1
+    assert len(retained) == 2
+    assert set(original) < set(retained)
+    assert was_retained
+    assert committed == (93,)
+    assert settled
+    assert after_unlock == original
+    assert not held_main_descriptors(identity)
 
 
 def physical_handle(database: Database, driver: object) -> object:
