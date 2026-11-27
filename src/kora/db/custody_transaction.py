@@ -1,4 +1,3 @@
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, Self
 
@@ -155,12 +154,11 @@ class OriginalCustodyTransaction:
     def resources_released(self) -> bool:
         return self._sqlite_released
 
-    async def release_sqlite(self, prove_release: Callable[[], None]) -> None:
-        if self._sqlite_released:
-            raise CustodyUnavailable
+    async def close_sqlite(self) -> None:
         await self._sqlite.require_native_closed()
         await self._connection.close()
-        prove_release()
+
+    def confirm_sqlite_release(self) -> None:
         self._sqlite_released = True
 
     @property

@@ -143,23 +143,13 @@ def register_custody_fork() -> None:
 
     global _fork_registered
 
-    def before() -> None:
-        before_custody_fork()
-        _native.prepare_custody_fork()
-
-    def parent() -> None:
-        _native.finish_custody_fork_parent()
-        after_custody_fork_parent()
-
-    def child() -> None:
-        _native.finish_custody_fork_child()
-        after_custody_fork_child()
-
     with FORK_CONDITION:
         if not _fork_registered:
             _native.initialize_custody_fork()
             os.register_at_fork(
-                before=before, after_in_parent=parent, after_in_child=child
+                before=before_custody_fork,
+                after_in_parent=after_custody_fork_parent,
+                after_in_child=after_custody_fork_child,
             )
             _fork_registered = True
 
@@ -329,6 +319,7 @@ class CustodyNativeDirectory:
             named = os.stat(
                 journal, dir_fd=self._root.descriptor, follow_symlinks=False
             )
+            require_native_stat(named, directory=False, device=root.st_dev)
             if file_anchor(named, self.path / journal) != self.file_anchors[journal]:
                 raise CustodyUnavailable
             for name, handle in self._files.items():

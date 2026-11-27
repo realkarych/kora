@@ -486,6 +486,13 @@ async def test_journal_schema_and_physical_profile_survive_reopen(
     path = journal_path(tmp_path)
     root = CustodyNativeDirectory(path, NativeCustodyPlatform(), provision=True)
     try:
+        with closing(
+            CustodyNativeDirectory(path, NativeCustodyPlatform(), provision=False)
+        ) as existing:
+            async with journal_lease(existing) as lease:
+                with pytest.raises(CustodyUnavailable):
+                    await lease.initialize()
+        assert (path / "authority.sqlite3").stat().st_size == 0
         async with journal_lease(root) as lease:
             await lease.initialize()
         with sqlite_contender(path / "authority.sqlite3") as raw:

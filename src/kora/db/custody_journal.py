@@ -225,17 +225,21 @@ class CustodyJournalPhase:
         self._retired = False
         self._closing_order = False
         self._resume: Callable[[], None] | None = None
+        self.released_event = asyncio.Event()
 
     @property
     def released(self) -> bool:
         return self._order is None
 
     def start_job(self) -> None:
+        self.released_event.clear()
         self._running = True
 
     def finish_job(self) -> None:
         self._running = False
         self._finish_retirement()
+        if self.released:
+            self.released_event.set()
 
     def after_release(self, resume: Callable[[], None]) -> None:
         if self._order is None:
@@ -296,6 +300,7 @@ class CustodyJournalPhase:
         except (OSError, CustodyUnavailable):
             custody_log(CUSTODY_UNFINISHED, "ordinary_admission")
             return
+        self.released_event.set()
         resume, self._resume = self._resume, None
         if resume is not None:
             resume()
@@ -913,6 +918,7 @@ class CustodyJournalLease:
     _original: OriginalCustodyTransaction | None
     _prepared: CustodyPendingCommit | None
     _sqlite_checkout: object | None
+    _deferred_close: Callable[[], None] | None
 
     def __init__(
         self, root: CustodyNativeDirectory, ownership: CustodyDescriptor
@@ -931,6 +937,7 @@ class CustodyJournalLease:
         self._original = None
         self._prepared = None
         self._sqlite_checkout = None
+        self._deferred_close = None
         ACTIVE_LEASES.add(self)
 
     @property
@@ -1062,11 +1069,15 @@ class CustodyJournalLease:
         applied = await complete(
             original.advance_frontier_before_dispatch(pending, self._original_owner)
         )
-        await self._run_transaction(
-            lambda journal: journal.permit_original_dispatch(applied),
-            completion_owner=self._original_owner,
-        )
-        await original.commit(custody_owner=self._original_owner)
+
+        async def dispatch_and_commit() -> None:
+            await self._run_transaction(
+                lambda journal: journal.permit_original_dispatch(applied),
+                completion_owner=self._original_owner,
+            )
+            await original.commit(custody_owner=self._original_owner)
+
+        await complete(dispatch_and_commit())
 
     async def settle_original(self, original: OriginalCustodyTransaction) -> None:
         self._require_available(allow_closing=True)
@@ -1124,16 +1135,27 @@ class CustodyJournalLease:
         self._phase.start_job()
         self._pending = task
         try:
-            return await complete_native_journal_job(task)
+            try:
+                result = await complete_native_journal_job(task)
+            finally:
+                self._phase.finish_job()
+            if not self._phase.released:
+                await self._phase.released_event.wait()
+            return result
         finally:
             self._pending = None
-            self._phase.finish_job()
 
-    def after_journal_release(self, resume: Callable[[], None]) -> bool:
-        if self._phase.released:
-            return False
-        self._phase.after_release(resume)
-        return True
+    def defer_close(self, resume: Callable[[], None]) -> None:
+        if not self._phase.released or self._sqlite_checkout is not None:
+            self._deferred_close = resume
+            if not self._phase.released:
+                self._phase.after_release(self.resume_close)
+
+    def resume_close(self) -> None:
+        if self._phase.released and self._sqlite_checkout is None:
+            resume, self._deferred_close = self._deferred_close, None
+            if resume is not None:
+                resume()
 
     def _transaction(
         self,
@@ -1176,6 +1198,8 @@ class CustodyJournalLease:
         return value
 
     def _initialize(self) -> None:
+        self._root.require_fresh_provision()
+
         def create(connection: Connection) -> None:
             for relation in RELATIONS:
                 with closing(connection.execute(relation.create)):
@@ -1243,7 +1267,11 @@ async def journal_lease(
     charged = False
 
     async def close_original() -> None:
-        await lease.close()
+        try:
+            await lease.close()
+        except CustodyUnavailable:
+            lease.defer_close(resume_close)
+            raise
         if charged and sqlite_accounting is not None:
             await sqlite_accounting[1]()
 
@@ -1269,8 +1297,4 @@ async def journal_lease(
             root.require_open_latch()
         yield lease
     finally:
-        try:
-            await complete_native_journal_job(close_original())
-        except CustodyUnavailable:
-            lease.after_journal_release(resume_close)
-            raise
+        await complete_native_journal_job(close_original())

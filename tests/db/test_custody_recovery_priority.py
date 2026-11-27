@@ -470,11 +470,30 @@ async def test_custody_priority_preserves_incumbent_journal_phase(
     assert published["recovery_priority_incarnation"] == incarnation
 
 
+class EarlierForkObserver:
+    live: Connection | None = None
+    inspected: int = 0
+    child_fenced: bool = False
+
+    def observe_parent(self) -> None:
+        if self.live is not None:
+            self.inspected += int(not self.live.settled())
+
+    def observe_child(self) -> None:
+        if self.live is not None:
+            try:
+                self.live.settled()
+            except sqlite3.ProgrammingError:
+                self.child_fenced = True
+
+
 def check_fork_child(
     inherited: dict[int, os.stat_result],
     priority: CustodyRecoveryPriority,
     live: Connection,
+    earlier: EarlierForkObserver,
 ) -> None:
+    assert earlier.child_fenced
     assert not DESCRIPTORS
     for descriptor, previous in inherited.items():
         try:
@@ -530,7 +549,10 @@ def native_fork_receipts(
 
 
 def verify_fork_closed_copies(
-    live: Connection, receipts: tuple[int, ...], priority: CustodyRecoveryPriority
+    live: Connection,
+    receipts: tuple[int, ...],
+    priority: CustodyRecoveryPriority,
+    earlier: EarlierForkObserver,
 ) -> None:
     with FORK_GUARD:
         inherited = {
@@ -541,13 +563,16 @@ def verify_fork_closed_copies(
             )
         }
     child = multiprocessing.get_context("fork").Process(
-        target=check_fork_child, args=(inherited, priority, live)
+        target=check_fork_child, args=(inherited, priority, live, earlier)
     )
+    earlier.live = live
     child.start()
     try:
         child.join(BARRIER_TIMEOUT)
         assert child.exitcode == 0
+        assert earlier.inspected == 2
     finally:
+        earlier.live = None
         if child.is_alive():
             child.kill()
             child.join(BARRIER_TIMEOUT)
@@ -578,6 +603,12 @@ async def run_fork_during_wait(path: Path) -> None:
 
 
 async def exercise_fork_during_wait(path: Path, observer: NativeWaitObserver) -> None:
+    earlier = EarlierForkObserver()
+    os.register_at_fork(
+        before=earlier.observe_parent,
+        after_in_parent=earlier.observe_parent,
+        after_in_child=earlier.observe_child,
+    )
     root = CustodyNativeDirectory(path, NativeCustodyPlatform(), provision=True)
     priority = CustodyRecoveryPriority(root)
     try:
@@ -602,7 +633,7 @@ async def exercise_fork_during_wait(path: Path, observer: NativeWaitObserver) ->
             ) as native_root:
                 await initialize(native_root)
                 with native_fork_receipts(native_root) as (live, receipts):
-                    verify_fork_closed_copies(live, receipts, priority)
+                    verify_fork_closed_copies(live, receipts, priority, earlier)
             with pytest.raises(BlockingIOError), root.acquire("commit.lock"):
                 pytest.fail("fork stole the parent's ownership")
             await start_phase(control)

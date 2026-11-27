@@ -60,9 +60,14 @@ from kora.db.custody_recovery import CustodyRecoveryPriority
 from kora.db.custody_schema import AUTHORITY
 from kora.db.custody_sqlite import CustodySQLiteConnection, CustodySQLiteRoot
 from kora.db.custody_writer import CustodyDriverConnection, LocalSQLiteWriterLoan
+from kora.db.token_statements import REVOKED
 from kora.observability import LoggingSettings
 from kora.sqlite.driver import Cursor
 from kora.standalone.custody import NativeCustodyPlatform, local_sqlite_writer
+from tests.api.guarded_sqlite_prebind_child import (
+    held_main_descriptors,
+    native_identity,
+)
 from tests.db.closing import CONDITION_DEADLINE_SECONDS, sqlite_contender, until
 from tests.db.seed import FakeClock, Seeder
 from tests.db.test_custody_journal import authority
@@ -175,9 +180,12 @@ def read_metadata(path: Path) -> MetadataState:
             )
         ) as cursor:
             row = cast("tuple[object, ...] | None", cursor.fetchone())
-        expiry_query = "SELECT expires_at IS NOT NULL FROM api_token ORDER BY digest"
+        expiry_query = "SELECT expires_at FROM api_token ORDER BY digest"
         with closing(reader.execute(expiry_query)) as cursor:
-            revoked = tuple(cast("tuple[object]", row)[0] == 1 for row in cursor)
+            expiry = tuple(cast("tuple[object]", row)[0] for row in cursor)
+        expected = REVOKED.isoformat(timespec="microseconds")
+        assert set(expiry) <= {None, expected}
+        revoked = tuple(value == expected for value in expiry)
     assert row is not None
     return MetadataState(
         CustodyFrontier(
@@ -263,6 +271,8 @@ def assert_confirmed(authority_row: NativeRow, frontier: CustodyFrontier) -> Non
 class WriterCut(Enum):
     ADMISSION = auto()
     NATIVE_CLOSE = auto()
+    COLD_MAIN_ADMISSION = auto()
+    DISPATCHING = auto()
     MUTATION = auto()
     PREPARING = auto()
     PREPARED = auto()
@@ -302,6 +312,17 @@ class WriterProfile:
         cut = self.cut
         if code is CustodySQLiteConnection.close.__code__:
             self._observe_retirement(frame, event)
+        if event == "call" and (
+            (
+                code is CustodySQLiteConnection.admit_main.__code__
+                and cut is WriterCut.COLD_MAIN_ADMISSION
+            )
+            or (
+                code is CustodyJournalTransaction.permit_original_dispatch.__code__
+                and cut is WriterCut.DISPATCHING
+            )
+        ):
+            self._pause()
         if code.co_qualname == "CustodySQLiteRoot._execute":
             self._observe_statement(frame, operation, event)
         if (
@@ -1152,8 +1173,7 @@ async def test_custody_writer_retires_driver_after_failed_cold_configuration(
         try:
             await until(lambda: native.entered.is_set() or task.done())
             assert native.entered.is_set()
-            assert len(pool.opened) == 1
-            assert pool.checked_out == []
+            assert pool.opened == pool.checked_out == []
             assert native.closed_connections == []
             assert_commit_lock_owned(owners.root)
             assert database.units_in_flight() == 1
@@ -1162,6 +1182,7 @@ async def test_custody_writer_retires_driver_after_failed_cold_configuration(
             with pytest.raises(DBAPIError) as refused:
                 await task
             assert len(native.closed_connections) == 1
+            assert native.closed_connections[0].acquired_main()
             assert_native_closed(native.closed_connections[0])
         finally:
             native.release.set()
@@ -1173,8 +1194,7 @@ async def test_custody_writer_retires_driver_after_failed_cold_configuration(
     assert failure.sqlite_errorcode == sqlite3.SQLITE_NOTADB
     assert file_anchor(metadata.stat(), metadata) == anchor
     assert metadata.read_bytes() == malformed
-    assert len(pool.opened) == 1
-    assert pool.checked_out == pool.checked_in == []
+    assert pool.opened == pool.checked_out == pool.checked_in == []
     assert native.statements == []
     assert database.writer_is_free()
     assert database.units_in_flight() == 0
@@ -1182,6 +1202,55 @@ async def test_custody_writer_retires_driver_after_failed_cold_configuration(
     assert read_pending(owners.root) is None
     with owners.root.acquire("commit.lock"), owners.root.acquire("journal-order.lock"):
         assert owners.root.read_latch() is CustodyLatch.OPEN
+
+
+@pytest.mark.asyncio
+async def test_custody_cold_main_refusal_settles_original_after_incumbent_close(
+    writer_owners: WriterOwners,
+) -> None:
+    owners = writer_owners
+    metadata = owners.settings.sqlite_path.resolve(strict=True)
+    identity = native_identity(metadata)
+    database, entry = local_sqlite_writer(
+        owners.settings, owners.root, owners.lifetime, owners.participant
+    )
+    before = read_metadata(metadata)
+    with (
+        sqlite_contender(metadata) as incumbent,
+        observe_writer(WriterCut.COLD_MAIN_ADMISSION) as observed,
+    ):
+        incumbent.execute("BEGIN IMMEDIATE").close()
+        original_fds = held_main_descriptors(identity)
+        task = asyncio.create_task(
+            database.run(LocalSQLiteWriterUnit(entry, owners.tokens[0]))
+        )
+        try:
+            await until(observed.entered.is_set)
+            attempted_fds = held_main_descriptors(identity)
+            assert len(original_fds) == 1
+            assert len(attempted_fds) == 2
+            assert set(original_fds) < set(attempted_fds)
+            metadata.chmod(0o640)
+            observed.release.set()
+            with pytest.raises(CustodyUnavailable):
+                await task
+            metadata.chmod(0o600)
+            assert held_main_descriptors(identity) == attempted_fds
+            assert_commit_lock_owned(owners.root)
+            assert database.units_in_flight() == 1
+            assert not observed.statements
+            incumbent.commit()
+            await asyncio.to_thread(incumbent.close)
+            await until(lambda: database.units_in_flight() == 0)
+            assert not held_main_descriptors(identity)
+            assert read_metadata(metadata) == before
+            assert read_pending(owners.root) is None
+            assert_released(owners.root, metadata)
+        finally:
+            metadata.chmod(0o600)
+            observed.release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await database.close()
 
 
 @dataclass
@@ -1567,6 +1636,44 @@ async def test_custody_sqlite_prepare_cancellation_preserves_original_owner(
     assert database.writer_is_free()
     assert database.units_in_flight() == 0
     assert_released(owners.root, metadata)
+
+
+@pytest.mark.asyncio
+async def test_custody_dispatch_cancellation_joins_original_commit(
+    writer_owners: WriterOwners,
+) -> None:
+    owners = writer_owners
+    database, entry = local_sqlite_writer(
+        owners.settings, owners.root, owners.lifetime, owners.participant
+    )
+    metadata = owners.settings.sqlite_path.resolve(strict=True)
+
+    async def revoke() -> None:
+        async with database.transaction(_local_sqlite_writer=entry) as loan:
+            assert await loan.revoke_token(owners.tokens[0]) == 1
+
+    with observe_writer(WriterCut.DISPATCHING) as native, observe_pool() as pool:
+        task = asyncio.create_task(revoke())
+        try:
+            await until(native.entered.is_set)
+            await deliver_cancellation(task)
+            assert not task.done()
+            assert_open_ownership(owners.root, metadata)
+            assert not pool.checked_in
+            native.release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert_native_commands(native, ORIGINAL_COMMIT)
+            committed = read_metadata(metadata)
+            assert committed.revoked == (True, False, False)
+            assert_confirmed(read_authority(owners.root.path), committed.frontier)
+            assert read_pending(owners.root) is None
+            assert pool.checked_in == pool.checked_out
+            assert_released(owners.root, metadata)
+        finally:
+            native.release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await database.close()
 
 
 @pytest.mark.asyncio

@@ -241,6 +241,21 @@ class CustodyRecoveryPriority:
         finally:
             self._busy = False
             self._journal.finish_job()
+            if not self._commit_uncertain and (
+                self._registrar is not None
+                or (self._registration is None and self._turn is not None)
+            ):
+                self._journal.after_release(self._release_failed_admission)
+
+    def _release_failed_admission(self) -> None:
+        try:
+            if self._registrar is not None:
+                self._registrar.close()
+                self._registrar = None
+            if self._registration is None and self._turn is not None:
+                self._close_turn(self._turn)
+        except (CustodyUnavailable, OSError):
+            custody_log(CUSTODY_UNFINISHED, "coordinator_closure")
 
     def _transaction(
         self, operation: Callable[[CustodyJournalTransaction], Result]
@@ -260,6 +275,8 @@ class CustodyRecoveryPriority:
                 journal.close()
                 if connection.in_transaction:
                     connection.rollback()
+        if not self._journal.released:
+            raise CustodyUnavailable
         return result
 
     def close(self) -> None:

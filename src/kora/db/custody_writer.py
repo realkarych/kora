@@ -43,7 +43,36 @@ LOCAL_SQLITE_NATIVE_SEQUENCE = count(1)
 
 class CustodyDriverConnection(SqliteDriverConnection):
     native_candidate: CustodySQLiteConnection | None = None
-    retired: bool = False
+    _joined: bool = False
+    _on_retired: Callable[[], None] | None = None
+
+    def __init__(self, connector: Callable[[], Connection]) -> None:
+        super().__init__(connector)
+        self._loop = asyncio.get_running_loop()
+
+    @property
+    def retired(self) -> bool:
+        native = self.native_candidate
+        return self._joined and (native is None or native.settled())
+
+    def observe_retirement(self, connection: Connection) -> None:
+        if connection is self.native_candidate:
+            try:
+                self._loop.call_soon_threadsafe(self._resume_if_retired)
+            except RuntimeError:
+                if not self._loop.is_closed():
+                    raise
+
+    def after_retirement(self, resume: Callable[[], None]) -> None:
+        if self._joined and self.native_candidate is not None:
+            self._on_retired = resume
+            self._resume_if_retired()
+
+    def _resume_if_retired(self) -> None:
+        resume = self._on_retired
+        if resume is not None and self.retired:
+            self._on_retired = None
+            resume()
 
     async def bind_custody_root(
         self, installation: CustodySQLiteInstallation, journal_id: bytes
@@ -84,8 +113,7 @@ class CustodyDriverConnection(SqliteDriverConnection):
         finally:
             if self._thread.ident is not None:
                 await asyncio.to_thread(self._thread.join)
-        native = self.native_candidate
-        self.retired = native is None or native.settled()
+            self._joined = True
 
 
 class SQLitePhysicalWriter:
@@ -144,9 +172,15 @@ class SQLitePhysicalWriter:
         if connection is not None and record.driver_connection is self.driver:
             self.returned = self.driver
 
-    def require_release(self) -> None:
-        if self.driver is not self.returned:
-            self.require_retirement()
+    def observe_retirement(self, connection: Connection) -> None:
+        if self.driver is not None:
+            self.driver.observe_retirement(connection)
+
+    @property
+    def released(self) -> bool:
+        return (
+            self.driver is self.returned or self.driver is None or self.driver.retired
+        )
 
 
 @dataclass

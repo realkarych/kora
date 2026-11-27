@@ -52,10 +52,12 @@ from sqlalchemy.util import await_, greenlet_spawn
 
 from kora.db import (
     CLOSE_TIMED_OUT,
+    CUSTODY_UNFINISHED,
     DB_COMPONENT,
     DB_LOGGER_NAME,
     TRANSACTION_FAILED,
     CustodyUnavailable,
+    custody_log,
 )
 from kora.db.completion import complete as complete
 from kora.db.completion import finish_releasing as finish_releasing
@@ -562,7 +564,13 @@ def open_sqlite_file(
             if owned.reused_main():
                 release()
             else:
-                NativeRetirement.retain(path, owned, release)
+
+                def released() -> None:
+                    release()
+                    if custody is not None:
+                        custody.observe_retirement(owned)
+
+                NativeRetirement.retain(path, owned, released)
 
     def admit(descriptor: int, empty: int) -> bool:
         if guarded_reader is not None:
@@ -941,7 +949,6 @@ class LocalSQLiteCheckout:
     connection: AsyncConnection | None = None
     worker: SQLiteWorkerOriginal | None = None
     original: OriginalCustodyTransaction | None = None
-    released: bool = False
     attempted: bool = False
 
 
@@ -1141,13 +1148,28 @@ class Database:
         _local_sqlite_writer: LocalSQLiteWriterEntry | None = None,
     ) -> AsyncGenerator[AsyncConnection | LocalSQLiteWriterLoan, None]:
         if _local_sqlite_writer is not None:
-            async with self._admit_local_sqlite_writer(
-                _local_sqlite_writer, admission_deadline
-            ) as admitted:
-                async with self._local_sqlite_transaction(
-                    *admitted, admission_deadline
-                ) as loan:
-                    yield loan
+            async with AsyncExitStack() as stack:
+                try:
+                    admitted = await stack.enter_async_context(
+                        self._admit_local_sqlite_writer(
+                            _local_sqlite_writer, admission_deadline
+                        )
+                    )
+                    loan = await stack.enter_async_context(
+                        self._local_sqlite_transaction(*admitted, admission_deadline)
+                    )
+                except (CustodyUnavailable, *WRITER_ENTRY_NATIVE_ERRORS):
+                    if admission_deadline is None:
+                        raise
+                    reason = (
+                        DatabaseWriterFailure.DEADLINE
+                        if type(admission_deadline) is float
+                        and math.isfinite(admission_deadline)
+                        and asyncio.get_running_loop().time() >= admission_deadline
+                        else DatabaseWriterFailure.UNAVAILABLE
+                    )
+                    raise_private_metadata_error(DatabaseWriterRejected(reason))
+                yield loan
             return
         self._require_ordinary_database()
         if admission_deadline is None:
@@ -1164,9 +1186,6 @@ class Database:
     ) -> AsyncGenerator[
         tuple[LocalSQLiteWriterScope, CustodyJournalLease, CustodySQLiteInstallation]
     ]:
-        from kora.db.custody_journal import journal_lease
-        from kora.db.custody_sqlite import require_sqlite_anchor
-
         scope = self._local_sqlite_writer
         if (
             scope is None
@@ -1174,6 +1193,9 @@ class Database:
             or self._lifecycle is not Lifecycle.OPEN
         ):
             raise CustodyUnavailable
+        from kora.db.custody_journal import journal_lease
+        from kora.db.custody_sqlite import require_sqlite_anchor
+
         self._require_local_sqlite_entry(deadline)
         async with journal_lease(
             scope.root,
@@ -1335,15 +1357,11 @@ class Database:
     async def _close_local_sqlite_checkout(
         self, checkout: LocalSQLiteCheckout, physical: SQLitePhysicalWriter
     ) -> None:
-        from kora.db.custody_models import CustodyNativeOutcome
-
         original = checkout.original
         if original is not None:
             if original.outcome is None:
                 await original.rollback()
-            await original.release_sqlite(physical.require_release)
-            if original.outcome is CustodyNativeOutcome.UNKNOWN:
-                raise CustodyUnavailable
+            await original.close_sqlite()
         else:
             worker = checkout.worker
             if worker is not None:
@@ -1359,8 +1377,6 @@ class Database:
                 if self._lifecycle is not Lifecycle.OPEN:
                     await checkout.connection.invalidate()
                 await checkout.connection.close()
-            physical.require_release()
-        checkout.released = True
 
     async def _finish_local_sqlite_checkout(
         self,
@@ -1370,12 +1386,40 @@ class Database:
     ) -> None:
         if not checkout.attempted:
             return
-        try:
-            await complete(self._close_local_sqlite_checkout(checkout, scope.physical))
-        except asyncio.CancelledError:
-            if checkout.released:
-                await complete(self._settle_local_sqlite_checkout(checkout, journal))
-            raise
+
+        async def close_and_settle() -> None:
+            physical = scope.physical
+            await self._close_local_sqlite_checkout(checkout, physical)
+            if not physical.released:
+                driver = physical.driver
+                if driver is not None:
+                    driver.after_retirement(schedule_retirement)
+                raise CustodyUnavailable
+            await self._confirm_local_sqlite_release(checkout, journal)
+
+        def schedule_retirement() -> None:
+            asyncio.create_task(resume_retirement())
+
+        async def resume_retirement() -> None:
+            try:
+                await self._confirm_local_sqlite_release(checkout, journal)
+            except (CustodyUnavailable, *WRITER_ENTRY_NATIVE_ERRORS):
+                custody_log(CUSTODY_UNFINISHED, "ordinary_admission")
+            finally:
+                journal.resume_close()
+
+        await complete(close_and_settle())
+
+    async def _confirm_local_sqlite_release(
+        self, checkout: LocalSQLiteCheckout, journal: CustodyJournalLease
+    ) -> None:
+        from kora.db.custody_models import CustodyNativeOutcome
+
+        original = checkout.original
+        if original is not None:
+            original.confirm_sqlite_release()
+            if original.outcome is CustodyNativeOutcome.UNKNOWN:
+                raise CustodyUnavailable
         await self._settle_local_sqlite_checkout(checkout, journal)
 
     async def _settle_local_sqlite_checkout(

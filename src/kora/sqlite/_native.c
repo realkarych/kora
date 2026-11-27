@@ -3,6 +3,7 @@
 #include <Python.h>
 #include <pythread.h>
 #include <ctype.h>
+#include <pthread.h>
 
 #include "sqlite3.c"
 
@@ -217,33 +218,32 @@ static PyObject *relatedRetirement(PyObject *module, PyObject *args) {
   return PyBool_FromLong(related);
 }
 
-static PyObject *initializeCustodyFork(PyObject *module, PyObject *unused) {
-  if (forkedCustodyChild) return dbError(SQLITE_MISUSE, "SQLite owner belongs to the parent process.");
-  int result = sqlite3_initialize();
-  if (result != SQLITE_OK) return dbError(result, sqlite3_errstr(result));
-  Py_RETURN_NONE;
+static void prepareCustodyFork(void) {
+  if (!forkedCustodyChild) unixEnterMutex();
 }
 
-static PyObject *prepareCustodyFork(PyObject *module, PyObject *unused) {
-  if (!forkedCustodyChild) {
-    Py_BEGIN_ALLOW_THREADS
-    unixEnterMutex();
-    Py_END_ALLOW_THREADS
-  }
-  Py_RETURN_NONE;
-}
-
-static PyObject *finishCustodyForkParent(PyObject *module, PyObject *unused) {
+static void finishCustodyForkParent(void) {
   if (!forkedCustodyChild) unixLeaveMutex();
-  Py_RETURN_NONE;
 }
 
-static PyObject *finishCustodyForkChild(PyObject *module, PyObject *unused) {
+static void finishCustodyForkChild(void) {
   if (!forkedCustodyChild) {
     forkedCustodyChild = 1;
     for (KoraFd *owner = koraFiles; owner; owner = owner->next) {
       if (owner->custody && owner->descriptor >= 0) close(owner->descriptor);
     }
+  }
+}
+
+static PyObject *initializeCustodyFork(PyObject *module, PyObject *unused) {
+  static int registered;
+  if (forkedCustodyChild) return dbError(SQLITE_MISUSE, "SQLite owner belongs to the parent process.");
+  if (!registered) {
+    int result = sqlite3_initialize();
+    if (result != SQLITE_OK) return dbError(result, sqlite3_errstr(result));
+    if (pthread_atfork(prepareCustodyFork, finishCustodyForkParent, finishCustodyForkChild))
+      return dbError(SQLITE_IOERR, "SQLite fork ownership could not be registered.");
+    registered = 1;
   }
   Py_RETURN_NONE;
 }
@@ -638,9 +638,6 @@ static PyMethodDef methods[] = {
   {"settled", databaseSettled, METH_O, NULL},
   {"related", relatedRetirement, METH_VARARGS, NULL},
   {"initialize_custody_fork", initializeCustodyFork, METH_NOARGS, NULL},
-  {"prepare_custody_fork", prepareCustodyFork, METH_NOARGS, NULL},
-  {"finish_custody_fork_parent", finishCustodyForkParent, METH_NOARGS, NULL},
-  {"finish_custody_fork_child", finishCustodyForkChild, METH_NOARGS, NULL},
   {"prepare", prepareStatement, METH_VARARGS, NULL},
   {"step", stepStatement, METH_O, NULL},
   {"columns", statementColumns, METH_O, NULL},
