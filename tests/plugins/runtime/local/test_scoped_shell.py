@@ -49,11 +49,13 @@ from kora.runner.identity import CommandRead, IdentityState, NativeIdentityReade
 from kora.runner.installed_executable import ExecutablePin, verify_installed_executable
 from kora.runner.processes import start_gated
 from tests.plugins.runtime.local.test_command import opaque_environment_process
+from tests.support.event_loop import turn
 from tests.support.local_peers import until
 from tests.support.local_runners import short_directory
 from tests.support.local_runtime import open_descriptors
 
 WINDOW_NS: Final[int] = 12_000_000_000
+OBSERVATION_NS: Final[int] = 50_000_000
 ATTEMPT_MARKER: Final[str] = "scoped-shell-attempt-token"
 PRIVATE_TEXT: Final[str] = "private-sensitive-split"
 WRITE_PID: Final[str] = """
@@ -68,6 +70,7 @@ DESCENDANT: Final[str] = (
     + """
 import os
 import signal
+import sys
 import time
 record('leader', os.getpid())
 if os.fork() == 0:
@@ -75,7 +78,8 @@ if os.fork() == 0:
         os._exit(0)
     os.setsid()
     record('descendant', os.getpid())
-    signal.pause()
+    if not sys.argv[1:]:
+        signal.pause()
     os._exit(0)
 os.wait()
 record('ready', 1)
@@ -133,6 +137,7 @@ async def shell_owner(
     siblings: Callable[[], tuple[ProcessRegistration, ...]] = tuple,
     *,
     altered_stamp: bool = False,
+    start_reaper: bool = True,
 ) -> AsyncGenerator[tuple[ScopedShell, BoundCheckout, AdoptedReaper]]:
     content = BASH_PATH.read_bytes()
     pin = ExecutablePin(len(content), hashlib.sha256(content).hexdigest())
@@ -142,7 +147,8 @@ async def shell_owner(
     checkout = BoundCheckout.capture(workspace)
     reaper = AdoptedReaper(grace_ns=0, interval=0.02)
     with subreaper():
-        reaper.start()
+        if start_reaper:
+            reaper.start()
         owner = ScopedShell(
             checkout,
             executable,
@@ -176,6 +182,55 @@ def current_identity(path: Path) -> ProcessIdentity:
     observation = NativeIdentityReader().read(int(path.read_text()))
     assert observation.process is not None
     return observation.process.identity
+
+
+async def assert_adopted_zombie_retains_shell_call(
+    workspace: Path, diagnostics: Capture, clock: SystemClock
+) -> None:
+    workspace.mkdir(mode=0o700)
+    async with shell_owner(workspace, diagnostics, clock, start_reaper=False) as (
+        owner,
+        _,
+        reaper,
+    ):
+        invocation = admit(clock, python_command(DESCENDANT, "exit-now"))
+        task = asyncio.create_task(owner.run(invocation))
+        try:
+            await until(lambda: (workspace / "descendant").exists())
+            pid = int((workspace / "descendant").read_text())
+            reader = NativeIdentityReader()
+
+            def adopted_zombie() -> bool:
+                process = reader.read(pid).process
+                return (
+                    process is not None
+                    and process.dead
+                    and (process.parent_pid == os.getpid())
+                )
+
+            await until(adopted_zombie)
+            zombie = reader.read(pid).process
+            assert zombie is not None
+            leader = current_identity(workspace / "leader")
+            assert zombie.process_group_id != leader.pid
+            (workspace / "finish").touch()
+            with pytest.raises(ScopedShellError) as unresolved:
+                await task
+            assert unresolved.value.reason is ScopedShellFailure.UNRESOLVED
+            assert_gone(leader)
+            assert adopted_zombie()
+            assert owner.occupied
+            replacement = admit(clock, "printf replacement")
+            with pytest.raises(ScopedShellError) as busy:
+                await owner.run(replacement)
+            assert busy.value.reason is ScopedShellFailure.BUSY
+        finally:
+            reaper.start()
+            reaper.wake()
+        assert await owner.settle(before(clock))
+        assert_gone(zombie.identity)
+        assert not owner.occupied
+        assert await owner.run(replacement) == ScopedShellResult(0, "replacement")
 
 
 def gate_descriptors() -> set[tuple[int, str]]:
@@ -307,6 +362,10 @@ async def test_scoped_shell_keeps_registered_sibling_and_settles_descendants(
                     await peer.drain(before(clock))
                     peer.release(before(clock))
             assert gate_descriptors() == descriptors
+    if sys.platform == "linux":
+        await assert_adopted_zombie_retains_shell_call(
+            workspace / "adopted", shell_diagnostics, clock
+        )
 
 
 class ExpiringClock(SystemClock):
@@ -584,6 +643,11 @@ async def test_scoped_shell_keeps_unresolved_ownership(
             try:
                 leader = current_identity(workspace / "retained.pid")
                 owner.stop()
+                assert not await asyncio.wait_for(owner.settle(clock.monotonic_ns()), 2)
+                assert not await asyncio.wait_for(
+                    owner.settle(clock.monotonic_ns() + OBSERVATION_NS), 2
+                )
+                assert not task.done()
                 replacement = admit(clock, "printf replacement")
                 with pytest.raises(ScopedShellError) as busy:
                     await owner.run(replacement)
@@ -596,9 +660,15 @@ async def test_scoped_shell_keeps_unresolved_ownership(
                 with pytest.raises(ScopedShellError) as still_busy:
                     await owner.run(replacement)
                 assert still_busy.value.reason is ScopedShellFailure.BUSY
+                retry = asyncio.create_task(owner.settle(before(clock)))
+                await turn()
+                assert not await asyncio.wait_for(
+                    owner.settle(clock.monotonic_ns() + OBSERVATION_NS), 2
+                )
+                assert not retry.done()
             finally:
                 os.close(retained)
-        assert await owner.settle(before(clock))
+        assert await retry
         assert not owner.occupied
         assert_gone(leader)
         assert gate_descriptors() == descriptors

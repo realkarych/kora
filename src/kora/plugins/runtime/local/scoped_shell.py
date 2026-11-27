@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, TypeVar
 
 from pydantic import ValidationError
 
@@ -38,7 +38,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope, SecretValue
 from kora.protocols.time import Clock
-from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.channels import ChannelError, ChannelFailure, cancel_task
 from kora.runner.identity import SCAN_NS, NativeIdentityReader
 from kora.runner.installed_executable import (
     ExecutablePin,
@@ -50,6 +50,7 @@ from kora.runner.native_io import NativeExecutor, NativeIOUnresolved, observed
 from kora.runner.processes import GatedProcess, ProcessError, start_gated
 
 OUTPUT_BYTES: Final[int] = 8192
+Observation = TypeVar("Observation")
 SCOPE_VARIABLE: Final[str] = "KORA_SCOPED_SHELL"
 BASH_PATH: Final[Path] = Path(
     "/bin/bash" if sys.platform == "darwin" else "/usr/bin/bash"
@@ -262,15 +263,32 @@ class ScopedShell:
         if call is None:
             return True
         call.stop(ScopedShellFailure.STOPPED)
-        if call.task is not None and await observed(call.task):
-            raise asyncio.CancelledError
+        if call.task is not None and not await self._settled_by(call.task, cutoff_ns):
+            return False
         if self._call is not call:
             return True
         if call.native_unresolved or self._clock.monotonic_ns() >= cutoff_ns:
             return False
         if call.retry is None or call.retry.done():
+            if call.retry is not None:
+                call.retry.result()
             call.retry = asyncio.create_task(self._retry(call, cutoff_ns))
-        return await asyncio.shield(call.retry)
+        retry = call.retry
+        return await self._settled_by(retry, cutoff_ns) and retry.result()
+
+    async def _settled_by(
+        self, task: asyncio.Future[Observation], cutoff_ns: int
+    ) -> bool:
+        if self._clock.monotonic_ns() >= cutoff_ns:
+            return False
+        if task.done():
+            return True
+        timeout = asyncio.create_task(self._clock.sleep_until(cutoff_ns))
+        try:
+            await asyncio.wait((task, timeout), return_when=asyncio.FIRST_COMPLETED)
+            return task.done() and self._clock.monotonic_ns() < cutoff_ns
+        finally:
+            await cancel_task(timeout)
 
     async def _retry(self, call: _Call, cutoff_ns: int) -> bool:
         closed = await self._close(call, cutoff_ns, None)

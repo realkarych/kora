@@ -821,6 +821,12 @@ class NativeIdentityReader:
         original_group = listed_in_group or current.process_group_id == group
         group_overlap = original_group and scope.overlaps_group()
         exact_sibling = any(identity == sibling.process for sibling in scope.siblings)
+        adopted_zombie = (
+            sys.platform == "linux"
+            and current.dead
+            and current.parent_pid == self._owner
+            and not exact_sibling
+        )
         sibling_group = any(
             current.process_group_id == sibling.process_group_id
             for sibling in scope.siblings
@@ -854,7 +860,7 @@ class NativeIdentityReader:
             if relevant
             else None
         )
-        if not stable or marked is CommandRead.UNSTABLE:
+        if not stable or marked is CommandRead.UNSTABLE or adopted_zombie:
             return member, CommandRead.UNSTABLE
         if marked is None and not exact_sibling:
             return member, CommandRead.OPAQUE

@@ -12,6 +12,7 @@ from typing import cast
 
 import pytest
 
+from kora.plugins.runtime.local.reaper import AdoptedReaper
 from kora.protocols.lifetime import (
     CleanupOutcome,
     OriginalOutcome,
@@ -47,6 +48,17 @@ from tests.support.event_loop import turn
 CHILD = "pass"
 
 
+class FailedWaitReceipt(AdoptedReaper):
+    def __init__(self) -> None:
+        super().__init__()
+        self.releases: int = 0
+
+    def release(self, pid: int) -> None:
+        super().release(pid)
+        self.releases += 1
+        raise OSError("direct wait receipt recorded")
+
+
 def launch(script: str) -> ProcessLaunch:
     return ProcessLaunch(
         executable=sys.executable,
@@ -58,6 +70,38 @@ def launch(script: str) -> ProcessLaunch:
         stderr=ProcessOutput.CAPTURE,
         domain=ProcessDomain.INVOCATION,
     )
+
+
+@pytest.mark.asyncio
+async def test_unactivated_gate_reuses_consumed_wait_receipt(tmp_path: Path) -> None:
+    clock = SystemClock()
+    cutoff = clock.monotonic_ns() + 5_000_000_000
+    waiter = FailedWaitReceipt()
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        owner = start_gated(
+            launch(CHILD),
+            new_operation_id(),
+            directory,
+            cutoff,
+            clock,
+            wait_owner=waiter,
+        )
+        registration = await owner.prepare()
+
+        with pytest.raises(OSError, match="direct wait receipt recorded"):
+            await owner.release_unactivated(cutoff)
+        original_status = owner.returncode
+        resumed = await owner.release_unactivated(cutoff)
+
+        assert resumed == original_status
+        assert resumed is not None
+        assert owner.closed
+        assert waiter.releases == 1
+        with pytest.raises(ChildProcessError):
+            os.waitpid(registration.process.pid, os.WNOHANG)
+    finally:
+        os.close(directory)
 
 
 class OffsetClock(SystemClock):

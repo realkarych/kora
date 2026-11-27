@@ -1136,11 +1136,24 @@ class GatedProcess:
         self.close_gate()
         if self._released:
             return self.returncode
+        if self.returncode is not None:
+            return self._release_child()
         await self.wait_exit(deadline_ns)
         if self._stdio is not None:
             await self._stdio.settle(deadline_ns, self._clock)
         await self.drain(deadline_ns)
-        return self._release_child()
+        if self._child_watch is None:
+            return self._release_child()
+        try:
+            while not self._deadline_reached(deadline_ns):
+                self._arm_leader_watch()
+                result = self._try_release_child()
+                if result is not None:
+                    return result
+                await self._wait_for_reap_hint(deadline_ns)
+        finally:
+            self._close_leader_watch()
+        raise ChannelError(ChannelFailure.DEADLINE)
 
     async def _settle_domain(self, deadline_ns: int) -> None:
         while True:
@@ -1334,6 +1347,8 @@ class GatedProcess:
             if self.returncode is None:
                 raise ProcessError(ProcessCondition.START_FAILED)
             return self.returncode
+        if self.returncode is not None:
+            return self._release_child()
         if self._stdio is not None and not self._stdio.closed:
             raise ProcessError(ProcessCondition.UNKNOWN)
         observation = self.observe(deadline_ns)
@@ -1342,16 +1357,25 @@ class GatedProcess:
         return self._release_child()
 
     def _release_child(self) -> int:
+        result = self._try_release_child()
+        if result is None:
+            raise ProcessError(ProcessCondition.UNKNOWN)
+        return result
+
+    def _try_release_child(self) -> int | None:
         process = self._process
         anchor = self._anchor
         if process is None or anchor is None:
             raise ProcessError(ProcessCondition.UNKNOWN)
-        pid, status = os.waitpid(process.pid, os.WNOHANG)
-        if pid != process.pid:
-            raise ProcessError(ProcessCondition.UNKNOWN)
-        process.returncode = os.waitstatus_to_exitcode(status)
-        if self._wait_owner is not None:
-            self._wait_owner.release(pid)
+        if process.returncode is None:
+            pid, status = os.waitpid(process.pid, os.WNOHANG)
+            if pid == 0:
+                return None
+            if pid != process.pid:
+                raise ProcessError(ProcessCondition.UNKNOWN)
+            process.returncode = os.waitstatus_to_exitcode(status)
+            if self._wait_owner is not None:
+                self._wait_owner.release(pid)
         anchor.close()
         self._watches.dispose()
         self.close_gate()
