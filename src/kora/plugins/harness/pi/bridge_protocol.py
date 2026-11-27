@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import re
+import sys
+import time
 from collections.abc import Awaitable, Callable
 from typing import Final, Literal, Protocol, cast
 
@@ -68,7 +70,11 @@ class BridgeChannel:
         self._waiting: tuple[int, DescriptorReadiness] | None = None
 
     async def initialize(self, origin: str, model: str) -> None:
-        profile = {} if self._shell is None else {"profile": "bash"}
+        profile = (
+            {}
+            if self._shell is None
+            else {"profile": "bash", "cutoff": str(self._native_cutoff())}
+        )
         await self._exchange(
             "init", "ready", "credential", origin=origin, model=model, **profile
         )
@@ -121,6 +127,15 @@ class BridgeChannel:
         finally:
             if not complete:
                 self.revoke()
+
+    def _native_cutoff(self) -> int:
+        native = (
+            time.CLOCK_MONOTONIC_RAW
+            if sys.platform == "darwin"
+            else time.CLOCK_MONOTONIC
+        )
+        earlier_native = time.clock_gettime_ns(native)
+        return earlier_native + (self._cutoff_ns - self._clock.monotonic_ns()) - 1
 
     def _remaining(self) -> float:
         if self._revoked:
@@ -194,16 +209,14 @@ class BridgeChannel:
         except OSError:
             raise BridgeRefused("closed") from None
 
-    async def _read(
-        self, challenge: str, permit_input: Callable[[], bool] | None = None
-    ) -> JsonObject:
+    async def _read(self, challenge: str | Callable[[], str | None]) -> JsonObject:
         try:
             async with asyncio.timeout(self._remaining()):
                 prefix = b""
-                if permit_input is not None:
+                if callable(challenge):
                     prefix = await self._reader.readexactly(1)
                     self._remaining()
-                    if not permit_input():
+                    if challenge() is None:
                         raise BridgeRefused("protocol")
                 record = (
                     prefix
@@ -218,11 +231,13 @@ class BridgeChannel:
             raise BridgeRefused("protocol" if oversized else "closed") from None
         self._remaining()
         frame = decode_strict_json(record, MAX_FRAME_BYTES, 1)
+        expected = challenge() if callable(challenge) else challenge
         if (
             b"\r" in record
             or not isinstance(frame, dict)
             or frame.pop("nonce", None) != self._nonce
-            or frame.pop("challenge", None) != challenge
+            or expected is None
+            or frame.pop("challenge", None) != expected
         ):
             raise BridgeRefused("protocol")
         self._require_binding(frame.get("kind") in ("failure", "terminal"))
@@ -266,8 +281,8 @@ class BridgeChannel:
                     self._reply(frame, "terminal")
                 raise BridgeRefused("protocol")
 
-        released = False
-        peer = asyncio.create_task(self._read(challenge, lambda: released))
+        released: str | None = None
+        peer = asyncio.create_task(self._read(lambda: released))
 
         def require_current() -> None:
             self._remaining()
@@ -297,8 +312,9 @@ class BridgeChannel:
                 id=id_,
                 result=result,
             )
-            await self._send("activate", require_current, challenge=operation)
-            released = True
+            terminal_challenge = new_operation_id()
+            await self._send("activate", require_current, challenge=terminal_challenge)
+            released = terminal_challenge
 
         work = asyncio.create_task(shell.run(call, self._cutoff_ns, current))
         operation_task: asyncio.Task[str] | asyncio.Task[None] = work
@@ -311,7 +327,11 @@ class BridgeChannel:
             if not delivery.done():
                 require_current()
             delivery.result()
-            return self._reply(await peer, "terminal")
+            frame = await peer
+            self._remaining()
+            self._require_binding(frame.get("kind") in ("failure", "terminal"))
+            self._remaining()
+            return self._reply(frame, "terminal")
         except ShellCallRefused:
             raise BridgeRefused("prompt") from None
         finally:

@@ -39,7 +39,11 @@ from kora.plugins.harness.pi.installation import (
     PiInstallation,
     verify_pi_installation,
 )
-from kora.plugins.harness.pi.shell_call import PiShellCall, ShellCallRefused
+from kora.plugins.harness.pi.shell_call import (
+    BashRequest,
+    PiShellCall,
+    ShellCallRefused,
+)
 from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.plugins.runtime.local.bound_checkout import BoundCheckout, BoundCheckoutError
 from kora.plugins.runtime.local.reaper import AdoptedReaper
@@ -1512,6 +1516,7 @@ class BashQualification:
         self.scoped = scoped
         self.policy = checked_policy
         self.results: list[str] = []
+        self.dispatches: int = 0
         self.on_admission_check: Callable[[], None] | None = None
 
     async def dispatch(
@@ -1521,6 +1526,8 @@ class BashQualification:
         cutoff: int,
         current: Callable[[], bool],
     ) -> str:
+        self.dispatches += 1
+
         def still_admitted() -> bool:
             if self.on_admission_check is not None:
                 self.on_admission_check()
@@ -1730,6 +1737,7 @@ async def test_pi_bash_executes_exact_approved_call_once(
         }
         expected = '{"exit_code":7,"stdout":"shell-output-marker"}'
         assert witness_.results == [expected]
+        assert witness_.dispatches == 1
         assert continuation.document["messages"] == [
             {"role": "user", "content": [{"type": "text", "text": PROMPT}]},
             {
@@ -1802,6 +1810,7 @@ async def test_pi_bash_namespace_deny_prevents_launch(
             )
         ]
         assert witness_.results == []
+        assert witness_.dispatches == 0
         assert not witness_.scoped.occupied
         files.assert_unchanged()
         gate.assert_reaped()
@@ -1908,6 +1917,7 @@ async def test_pi_bash_refuses_unbound_or_abandoned_call(
         assert len(peer.requests) == 1
         assert peer.connections == 1
         assert witness_.policy.requests == witness_.results == []
+        assert witness_.dispatches == 0
         assert not witness_.scoped.occupied
         assert not effect.exists()
         gate.assert_reaped()
@@ -1961,6 +1971,7 @@ async def test_pi_bash_abandons_pending_policy_before_dispatch(
         else:
             assert witness_.policy.cancelled.is_set()
         assert witness_.results == []
+        assert witness_.dispatches == 0
         assert not witness_.scoped.occupied
         assert not effect.exists()
         gate.assert_reaped()
@@ -1974,6 +1985,7 @@ async def test_pi_bash_abandons_pending_policy_before_dispatch(
         "missing-start",
         "missing-delimiter",
         "another-call",
+        "non-string-text-seed",
         "wrong-model",
     ],
 )
@@ -1992,6 +2004,9 @@ async def test_pi_bash_requires_complete_continued_response(
         second = second[:-1]
     elif reason == "another-call":
         second = first
+    elif reason == "non-string-text-seed":
+        second = second.replace(b'"type":"text","text":""', b'"type":"text","text":123')
+        assert second != end_stream(MODEL)
     else:
         second = end_stream("unexpected-model")
     async with (
@@ -2299,6 +2314,7 @@ async def test_pi_bash_refuses_wrong_control_binding(
 
         assert refused.value.code == "protocol"
         assert witness_.policy.requests == witness_.results == []
+        assert witness_.dispatches == 0
         assert not (gate.checkout.path / "effects").exists()
 
 
@@ -2450,9 +2466,9 @@ async def test_pi_bash_sdk_refuses_unbound_result(
             "challenge": challenge,
             "result": '{"exit_code":0,"stdout":"fixture"}',
         }
-        activation = operation
+        activation = new_operation_id()
         if wrong_field == "activation":
-            activation = new_operation_id()
+            activation = challenge
         else:
             result_fields[wrong_field] = new_operation_id()
 
@@ -2475,5 +2491,140 @@ async def test_pi_bash_sdk_refuses_unbound_result(
         assert exit_status == 1
         assert len(peer.requests) == 1
         assert witness_.policy.requests == witness_.results == []
+        assert witness_.dispatches == 0
         assert not (gate.checkout.path / "effect").exists()
+        gate.assert_reaped()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("condition", ["stale-challenge", "revoked-at-consumption"])
+async def test_pi_bash_requires_current_terminal_authority(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, condition: str
+) -> None:
+    async with (
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        loop = asyncio.get_running_loop()
+        channel: BridgeChannel
+
+        def binding(allow_exit: bool) -> None:
+            gate.require_binding(allow_exit)
+            if allow_exit and condition == "revoked-at-consumption":
+                loop.call_soon(channel.revoke)
+
+        async with prepared_channel(
+            kora_capture, SystemClock(), require_binding=binding, shell=gate.shell
+        ) as (channel, reader, streams, _):
+            async with asyncio.timeout(5):
+                pending = asyncio.create_task(channel.prompt(PROMPT))
+                challenge = await control_challenge(streams[0], "prompt")
+                reader.feed_data(bash_call_frame(challenge))
+                result = decode_strict_json(
+                    await streams[0].readline(), MAX_FRAME_BYTES, 1
+                )
+                activation = decode_strict_json(
+                    await streams[0].readline(), MAX_FRAME_BYTES, 1
+                )
+                assert result == {
+                    "kind": "bash_result",
+                    "nonce": NONCE,
+                    "challenge": challenge,
+                    "call": "c" * 32,
+                    "id": BASH_CALL_ID,
+                    "result": '{"exit_code":0,"stdout":""}',
+                }
+                assert isinstance(activation, dict)
+                terminal_challenge = activation["challenge"]
+                assert isinstance(terminal_challenge, str)
+                assert terminal_challenge not in (challenge, NONCE, "c" * 32)
+
+                observed_challenge = (
+                    challenge if condition == "stale-challenge" else terminal_challenge
+                )
+                reader.feed_data(bridge_reply("terminal", observed_challenge))
+                with pytest.raises(BridgeRefused) as refused:
+                    await pending
+
+        assert refused.value.code == (
+            "protocol" if condition == "stale-challenge" else "closed"
+        )
+        assert witness_.dispatches == 1
+        assert (gate.checkout.path / "effects").read_text() == "one"
+        assert not witness_.scoped.occupied
+        assert peer.requests == []
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_native_cutoff_refuses_late_continuation(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    command = "printf one >> effects"
+    response = requested_bash(command)
+    async with (
+        model_peer(responses=(response, end_stream(MODEL))) as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+        reader, writer = gate.streams
+        challenge = new_operation_id()
+        writer.write(
+            control_wire("prompt", gate.nonce, text=PROMPT)
+            + control_wire("activate", gate.nonce, challenge=challenge)
+        )
+        async with asyncio.timeout(5):
+            request = decode_strict_json(
+                await reader.readuntil(b"\n"), MAX_FRAME_BYTES, 1
+            )
+        assert isinstance(request, dict)
+        assert request["kind"] == "bash_call"
+        assert request["nonce"] == gate.nonce
+        assert request["id"] == BASH_CALL_ID
+        assert request["command"] == command
+        assert request["challenge"] == challenge
+        operation = request["call"]
+        assert isinstance(operation, str)
+        assert gate.shell is not None
+        result = await gate.shell.run(
+            BashRequest(BASH_CALL_ID, operation, command),
+            gate.cutoff_ns,
+            lambda: not gate.stopped,
+        )
+        assert not witness_.scoped.occupied
+        terminal_challenge = new_operation_id()
+        writer.write(
+            control_wire(
+                "bash_result",
+                gate.nonce,
+                id=BASH_CALL_ID,
+                call=operation,
+                challenge=challenge,
+                result=result,
+            )
+        )
+        await writer.drain()
+        await gate.clock.sleep_until(gate.cutoff_ns)
+
+        writer.write(control_wire("activate", gate.nonce, challenge=terminal_challenge))
+        async with asyncio.timeout(5):
+            refused = decode_strict_json(
+                await reader.readuntil(b"\n"), MAX_FRAME_BYTES, 1
+            )
+        exit_status = await gate.release(natural=True)
+
+        assert refused == {
+            "kind": "failure",
+            "code": "prompt",
+            "nonce": gate.nonce,
+            "challenge": terminal_challenge,
+        }
+        assert exit_status == 1
+        assert peer.connections == peer.header_count == len(peer.requests) == 1
+        assert witness_.dispatches == 1
+        assert (gate.checkout.path / "effects").read_text() == "one"
+        assert not witness_.scoped.occupied
         gate.assert_reaped()

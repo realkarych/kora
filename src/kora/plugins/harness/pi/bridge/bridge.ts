@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { cwd, exit, stdin, stdout } from "node:process";
+import { cwd, exit, hrtime, stdin, stdout } from "node:process";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { type ServerSentEvent, SseDecoder } from "@earendil-works/pi-ai/utils/sse";
 import {
@@ -22,6 +22,7 @@ const messagesPath = "/v1/messages?beta=true";
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const exchangeId = /^[0-9a-f]{32}$/;
 const callId = /^[a-zA-Z0-9_-]{1,64}$/;
+const cutoffText = /^[1-9][0-9]{0,18}$/;
 const shellResultLimit = 8 * 1024;
 const commandLimit = frameLimit / 2;
 const bashDescription = "Run the approved command in the prepared checkout.";
@@ -159,7 +160,10 @@ class MessageWitness {
           || !callId.test(block.id) || Object.keys(object(block.input)).length) throw new Error();
         this.open = { type: block.type, input: { id: block.id, parts: [], bytes: 0 } };
       } else {
-        if (block.type !== "text" && block.type !== "thinking") throw new Error();
+        const text = block.type === "text" && typeof block.text === "string";
+        const thinking = block.type === "thinking" && typeof block.thinking === "string"
+          && (!Object.hasOwn(block, "signature") || typeof block.signature === "string");
+        if ((!text && !thinking) || typeof block.type !== "string") throw new Error();
         this.open = { type: block.type };
       }
     } else if (this.state === "blocks" && data.type === "content_block_delta") {
@@ -250,6 +254,7 @@ class ModelExchange {
   private readonly model: string;
   private readonly bash: boolean;
   private readonly signal: AbortSignal;
+  private readonly cutoff: bigint | undefined;
   private readonly credential: () => string | undefined;
 
   constructor(
@@ -257,13 +262,20 @@ class ModelExchange {
     model: string,
     bash: boolean,
     signal: AbortSignal,
+    cutoff: bigint | undefined,
     credential: () => string | undefined,
   ) {
     this.destination = destination;
     this.model = model;
     this.bash = bash;
     this.signal = signal;
+    this.cutoff = cutoff;
     this.credential = credential;
+  }
+
+  private requireCurrent(signal: AbortSignal): void {
+    signal.throwIfAborted();
+    if (this.cutoff !== undefined && hrtime.bigint() >= this.cutoff) throw new Error();
   }
 
   readonly fetch: typeof fetch = async (input, init) => {
@@ -281,7 +293,7 @@ class ModelExchange {
     const body = object(strictJson(source));
     requireCredentialFree(body, key);
     this.requireRequest(body, first);
-    signal.throwIfAborted();
+    this.requireCurrent(signal);
     const response = await fetch(request.url, {
       method: request.method,
       headers: request.headers,
@@ -352,7 +364,6 @@ class Bridge {
   private pendingWrite: Promise<void> | undefined;
   private nonce: string | undefined;
   private staged: (() => void) | undefined;
-  private activation: string | undefined;
   private readonly challenges: string[] = [];
   private session: AgentSession | undefined;
   private models: ModelRuntime | undefined;
@@ -400,7 +411,7 @@ class Bridge {
   }
 
   private accept(fields: Record<string, string>): void {
-    const { kind, nonce, challenge, origin, model, key, text, id, call, result, profile } = fields;
+    const { kind, nonce, challenge, origin, model, key, text, id, call, result, profile, cutoff } = fields;
     const count = Object.keys(fields).length;
     if (!nonce || !exchangeId.test(nonce) || (this.nonce !== undefined && nonce !== this.nonce)) throw new Error();
     if (!this.staged && kind === "bash_result" && this.phase === "running" && count === 6
@@ -408,28 +419,30 @@ class Bridge {
       && challenge === this.challenges.at(-1) && result !== undefined
       && Buffer.byteLength(result) <= shellResultLimit) {
       const pending = this.pendingCall;
-      this.stage("running", async () => pending.resolve(result), "prompt", pending.challenge);
+      this.stage("running", async () => pending.resolve(result), "prompt");
       return;
     }
     if (kind === "activate") {
       const activate = this.staged;
       if (!activate || count !== 3 || !challenge || !exchangeId.test(challenge)
-        || this.challenges.includes(challenge)
-        || (this.activation !== undefined && challenge !== this.activation)) throw new Error();
+        || challenge === nonce || challenge === this.pendingCall?.challenge
+        || this.challenges.includes(challenge)) throw new Error();
       this.staged = undefined;
-      if (this.activation === undefined) this.challenges.push(challenge);
-      this.activation = undefined;
+      this.challenges.push(challenge);
       activate();
       return;
     }
 
     if (this.staged) throw new Error();
     if (this.phase === "init" && kind === "init"
-      && (count === 4 && profile === undefined || count === 5 && profile === "bash")
+      && (count === 4 && profile === undefined && cutoff === undefined
+        || count === 6 && profile === "bash" && cutoff !== undefined && cutoffText.test(cutoff))
       && origin && model && /^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(origin)
       && new URL(origin).origin === origin && /^[a-z0-9][a-z0-9-]{0,127}$/.test(model)) {
       this.nonce = nonce;
-      this.stage("starting", () => this.start(origin, model, profile === "bash"), "startup");
+      const deadline = cutoff === undefined ? undefined : BigInt(cutoff);
+      if (deadline !== undefined && deadline > (1n << 63n) - 1n) throw new Error();
+      this.stage("starting", () => this.start(origin, model, deadline), "startup");
     } else if (this.phase === "credential" && kind === "credential" && count === 3 && key !== undefined) {
       this.stage("installing", () => this.installCredential(key), "credential");
     } else if (this.phase === "prompt" && kind === "prompt" && count === 3 && text !== undefined) {
@@ -439,15 +452,15 @@ class Bridge {
     }
   }
 
-  private stage(phase: Phase, action: () => Promise<void>, code: Failure, activation?: string): void {
-    this.activation = activation;
+  private stage(phase: Phase, action: () => Promise<void>, code: Failure): void {
     this.staged = () => {
       this.phase = phase;
       void action().catch(() => this.fail(code));
     };
   }
 
-  private async start(origin: string, modelId: string, bash: boolean): Promise<void> {
+  private async start(origin: string, modelId: string, cutoff: bigint | undefined): Promise<void> {
+    const bash = cutoff !== undefined;
     const models = await ModelRuntime.create({
       credentials: new InMemoryCredentialStore(),
       modelsPath: null,
@@ -501,7 +514,7 @@ class Bridge {
       || active.parameters !== tool.parameters || typeof active.execute !== "function"
       || active.execute === execute)) throw new Error();
     const stream = session.agent.streamFunction;
-    const exchange = new ModelExchange(origin + messagesPath, modelId, bash, this.stop.signal, () => this.key);
+    const exchange = new ModelExchange(origin + messagesPath, modelId, bash, this.stop.signal, cutoff, () => this.key);
     this.exchange = exchange;
     session.agent.streamFunction = (selected, context, options) => {
       if (this.phase !== "running" || selected.id !== modelId || selected.provider !== provider
@@ -573,7 +586,9 @@ class Bridge {
       || message.rawStopReason !== "end_turn" || message.provider !== provider
       || message.model !== this.model
       || (Object.hasOwn(message, "responseModel") && message.responseModel !== this.model)) throw new Error();
-    const answer = message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+    const segments = message.content.flatMap((part) => part.type === "text" ? [part.text] : []);
+    if (segments.some((segment) => typeof segment !== "string" || !segment.isWellFormed())) throw new Error();
+    const answer = segments.join("");
     if (!answer.length || answer.includes(this.key)) throw new Error();
     session.dispose();
     this.phase = "closed";
