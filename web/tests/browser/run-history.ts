@@ -15,13 +15,13 @@ type Theme = 'light' | 'dark'
 type RouteClass = 'timeline' | 'asset' | 'event' | 'canonical' | 'signIn' | 'signOut'
 type SignInStep = 'start' | 'open-page' | 'navigate' | 'redemption' | 'redirect-headers'
   | 'fetch-metadata' | 'document-headers' | 'cookies' | 'cookie-visibility'
-  | 'event-response' | 'event-headers' | 'event-body' | 'event-parity' | 'latest-dom'
+  | 'event-response' | 'event-headers' | 'event-selector' | 'latest-dom'
   | 'clean-page' | 'open-replay' | 'replay-navigation' | 'replay-response' | 'close-replay'
   | 'canonical-cookie' | 'complete'
 type PageSelection = 'earlier' | 'latest'
 type PaginationStep = 'start' | 'focus-reload' | 'tab-sign-out' | 'tab-earlier'
-  | 'earlier-selector' | 'restored-focus' | 'complete'
-  | `${PageSelection}-${'enter' | 'response' | 'headers' | 'body' | 'parity' | 'dom'}`
+  | 'restored-focus' | 'complete'
+  | `${PageSelection}-${'enter' | 'response' | 'headers' | 'selector' | 'dom'}`
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 const lines = input[Symbol.asyncIterator]()
@@ -34,6 +34,11 @@ function object(value: unknown): Document {
 function string(value: unknown): string {
   assert(typeof value === 'string')
   return value
+}
+
+function pageItems(document: Document): Document[] {
+  assert(Array.isArray(document.items))
+  return (document.items as unknown[]).map(object)
 }
 
 async function receive(): Promise<Document> {
@@ -56,7 +61,6 @@ const namespace = string(bootstrap.namespace)
 const run = string(bootstrap.run_id)
 const empty = string(bootstrap.empty_run)
 const denied = string(bootstrap.denied_run)
-const earliest = string(bootstrap.earliest)
 const timeline = `/console/runs/${namespace}/${run}`
 const eventPath = `/console/api/v1/namespaces/${namespace}/runs/${run}/events`
 const knownScopes = [
@@ -67,9 +71,11 @@ const knownEventPaths = new Set(knownScopes.map(([ns, run]) =>
   `/console/api/v1/namespaces/${ns}/runs/${run}/events`))
 const knownTimelinePaths = new Set(knownScopes.map(([ns, run]) =>
   `/console/runs/${ns}/${run}`))
+
 const canonical = object(bootstrap.page)
-assert(Array.isArray(canonical.items))
-const canonicalRows = (canonical.items as unknown[]).map(object)
+const canonicalCursor = string(canonical.next_cursor)
+const canonicalRows = pageItems(canonical)
+const canonicalEarlierRows = pageItems(object(bootstrap.earlier_page))
 
 const evidence = {
   status: 'failed',
@@ -300,15 +306,17 @@ const refresh = (page: Page) => page.getByRole('button', { name: 'Reload latest'
 const earlier = (page: Page) => page.getByRole('button', { name: 'Earlier events' })
 const signOut = (page: Page) => page.getByRole('button', { name: 'Sign out' })
 
-async function checkedResponse(response: Response, selection?: PageSelection): Promise<Document> {
+async function assertPageResponse(response: Response, cursor: string | null): Promise<void> {
+  const selection: PageSelection = cursor === null ? 'latest' : 'earlier'
   signInStep('event-headers')
-  if (selection !== undefined) paginationStep(`${selection}-headers`)
+  paginationStep(`${selection}-headers`)
   assert.equal(response.status(), 200)
   assert.match(string(await response.headerValue('cache-control')), /no-store/iu)
-  signInStep('event-body')
-  if (selection !== undefined) paginationStep(`${selection}-body`)
-  const content: unknown = await response.json()
-  return object(content)
+  signInStep('event-selector')
+  paginationStep(`${selection}-selector`)
+  const query = new URL(response.url()).searchParams
+  assert.deepEqual(query.getAll('limit'), ['20'])
+  assert.deepEqual(query.getAll('cursor'), cursor === null ? [] : [cursor])
 }
 
 async function assertPageRows(page: Page, expected: Document[]): Promise<void> {
@@ -336,23 +344,22 @@ async function assertPageRows(page: Page, expected: Document[]): Promise<void> {
   }
 }
 
-async function latest(page: Page, response: Response, began: number): Promise<void> {
-  const body = await checkedResponse(response, 'latest')
-  signInStep('event-parity')
-  paginationStep('latest-parity')
-  const query = new URL(response.url()).searchParams
-  assert.equal(query.get('limit'), '20')
-  assert(!query.has('cursor'))
-  assert.deepEqual(body.items, canonicalRows)
-  assert.equal(body.next_cursor, canonical.next_cursor)
-  const observed = Date.parse(string(body.observed_at))
+async function assertRenderedPage(page: Page, expected: Document[], began: number): Promise<void> {
+  await assertPageRows(page, expected)
+  const observation = page.locator('.timeline-observed time')
+  await observation.waitFor({ state: 'visible' })
+  const [datetime, text] = await observation.evaluate(element =>
+    [element.getAttribute('datetime'), element.textContent])
+  assert.equal(datetime, text)
+  const observed = Date.parse(string(datetime))
   assert(began <= observed && observed <= Date.now())
+}
+
+async function latest(page: Page, response: Response, began: number): Promise<void> {
+  await assertPageResponse(response, null)
   signInStep('latest-dom')
   paginationStep('latest-dom')
-  const observation = page.locator('time').filter({ hasText: string(body.observed_at) })
-  await observation.waitFor({ state: 'visible' })
-  assert.equal(await observation.getAttribute('datetime'), body.observed_at)
-  await assertPageRows(page, canonicalRows)
+  await assertRenderedPage(page, canonicalRows, began)
   assert(await earlier(page).isVisible())
   validatedReads.add(response.request())
 }
@@ -449,21 +456,13 @@ async function paginate(page: Page): Promise<void> {
   assert(await earlier(page).evaluate(element => element === document.activeElement))
   paginationStep('earlier-enter')
   const first = waitEventPage(page)
+  const earlierBegan = Date.now()
   await page.keyboard.press('Enter')
   paginationStep('earlier-response')
   const response = await first
-  paginationStep('earlier-selector')
-  const query = new URL(response.url()).searchParams
-  assert.equal(query.get('cursor'), canonical.next_cursor)
-  const older = await checkedResponse(response, 'earlier')
-  paginationStep('earlier-parity')
-  assert(Array.isArray(older.items))
-  const items = (older.items as unknown[]).map(object)
-  assert.equal(items.length, 1)
-  assert.equal(items[0]?.id, earliest)
-  assert.equal(older.next_cursor, null)
+  await assertPageResponse(response, canonicalCursor)
   paginationStep('earlier-dom')
-  await assertPageRows(page, items)
+  await assertRenderedPage(page, canonicalEarlierRows, earlierBegan)
   assert.equal(await earlier(page).count(), 0)
   validatedReads.add(response.request())
   paginationStep('restored-focus')
@@ -580,15 +579,7 @@ async function navigateLatest(page: Page, navigate: () => Promise<Response | nul
   const response = waitEventPage(page)
   const began = Date.now()
   assert.equal((await navigate())?.status(), 200)
-  const events = await response
-  assert.equal(events.status(), 200)
-  assert.match(string(await events.headerValue('cache-control')), /no-store/iu)
-  assert.equal(new URL(events.url()).searchParams.get('limit'), '20')
-  await assertPageRows(page, canonicalRows)
-  const observed = Date.parse(string(await page.locator('time').first().getAttribute('datetime')))
-  assert(began <= observed && observed <= Date.now())
-  assert(await earlier(page).isVisible())
-  validatedReads.add(events.request())
+  await latest(page, await response, began)
 }
 
 function reload(page: Page): Promise<void> {

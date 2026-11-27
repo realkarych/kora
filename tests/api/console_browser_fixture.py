@@ -658,6 +658,19 @@ async def exercise_browser(
                 canonical = await canonical_page(
                     python, root, client, environment, data
                 )
+                assert canonical.next_cursor is not None
+                earlier = await raw_event_page(
+                    client,
+                    data.run_id,
+                    data.first_credential,
+                    canonical.next_cursor,
+                    PAGE_SIZE,
+                )
+                assert (
+                    tuple(event.id for event in earlier.items)
+                    == data.event_ids[PAGE_SIZE:]
+                )
+                assert earlier.next_cursor is None
             channels.stage = "native-opener"
             opener = NativeOpener.provision(root)
             await opener.open(
@@ -681,7 +694,7 @@ async def exercise_browser(
                 "namespace": TLS_EVENTS_NAMESPACE,
                 "inert_event": INERT_EVENT,
                 "page": parse_json_object(canonical.model_dump(mode="json")),
-                "earliest": data.event_ids[-1],
+                "earlier_page": parse_json_object(earlier.model_dump(mode="json")),
             }
 
             async def exchange(
