@@ -318,10 +318,11 @@ class NativeRetirement:
     def _result(
         cls, path: Path, report: bool, observed: Exception | None = None
     ) -> bool:
-        failure = cls._errors.pop(path, None) if report else None
         if observed is not None:
+            if cls._errors.get(path) is observed:
+                del cls._errors[path]
             raise observed
-        if failure is not None:
+        if report and (failure := cls._errors.pop(path, None)) is not None:
             raise failure
         return True
 

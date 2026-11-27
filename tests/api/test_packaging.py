@@ -2065,6 +2065,7 @@ async def test_installed_server_awaits_pending_sqlite_native_retirement(
         assert prepared.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
     fixture = Path(__file__).with_name("serving_lifecycle_child.py")
     release_read, release_write = os.pipe()
+    observed: list[dict[object, object]] = []
 
     try:
         try:
@@ -2086,15 +2087,19 @@ async def test_installed_server_awaits_pending_sqlite_native_retirement(
         assert child.stderr is not None
         try:
             async with asyncio.timeout(SERVE_TIMEOUT):
-                port, _ = await read_bound_port(child)
+                port, startup = await read_bound_port(child)
                 assert (
                     await child.stdout.readline()
                     == b"native_retirement_incumbent_held\n"
                 )
                 child.send_signal(signal.SIGTERM)
-                await serving_event(child.stderr, "api.serving_draining")
+                await serving_event(
+                    child.stderr, "api.serving_draining", observed=observed
+                )
                 async with asyncio.timeout(DRAIN_RECEIPT_TIMEOUT):
-                    refusal = await serving_event(child.stderr, "api.serving_refused")
+                    refusal = await serving_event(
+                        child.stderr, "api.serving_refused", observed=observed
+                    )
                 assert refusal["reason"] == "drain_unfinished"
                 with pytest.raises(ConnectionRefusedError):
                     await asyncio.open_connection(LOOPBACK, port)
@@ -2115,7 +2120,8 @@ async def test_installed_server_awaits_pending_sqlite_native_retirement(
 
     assert child.returncode == 70
     assert output == b"native_retirement_settled\n"
-    assert b"api.serving_stopped" not in diagnostics
+    assert all(record.get("event") != "api.serving_stopped" for record in observed)
+    assert b"api.serving_stopped" not in startup + diagnostics
 
 
 @pytest.mark.asyncio

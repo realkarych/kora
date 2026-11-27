@@ -367,7 +367,14 @@ def tls_held_shutdown(database: Database, release: int) -> ASGIApp:
     return exercise
 
 
-def hold_retirement(path: Path, reader_fds: set[int], release: int) -> None:
+def native_charges_settled(database: Database) -> bool:
+    lifetime: object = vars(database)["_sqlite_serving"]
+    closed: object = vars(type(lifetime))["_all_native_closed"]
+    return cast("Callable[[object], bool]", closed)(lifetime)
+
+
+def hold_retirement(database: Database, reader_fds: set[int], release: int) -> None:
+    path = database.settings.sqlite_path
     with closing(GuardedConnection()) as incumbent:
         incumbent.open(path, False, 0, lambda descriptor, empty: not empty)
         incumbent.execute("BEGIN IMMEDIATE").close()
@@ -377,6 +384,7 @@ def hold_retirement(path: Path, reader_fds: set[int], release: int) -> None:
         assert os.read(release, 1) == b"c"
         assert held == set(sqlite_descriptors(path))
         assert not NativeRetirement.drain(path, report=False)
+        assert not native_charges_settled(database)
         os.write(1, b"original_reader_retirement_pending\n")
         assert os.read(release, 1) == b"r"
         incumbent.commit()
@@ -402,7 +410,7 @@ def held_retirement_app(
         assert reader_fds
         incumbent = threading.Thread(
             target=hold_retirement,
-            args=(path, reader_fds, release),
+            args=(database, reader_fds, release),
             daemon=True,
         )
         owners.append((database, worker, incumbent))
@@ -696,6 +704,7 @@ def launch() -> int:
         if sys.argv[1:2] == ["hold_retirement"]:
             [(database, worker, incumbent)] = retirement_owners
             assert not owns_sqlite_descriptor(settings.sqlite_path)
+            assert native_charges_settled(database)
             assert not worker.is_alive()
             assert database.lifecycle is Lifecycle.CLOSED
             assert database.units_in_flight() == 0
@@ -726,12 +735,18 @@ def launch() -> int:
 
 
 async def serving_event(
-    stderr: asyncio.StreamReader, event_name: str, *, outcome: str | None = None
+    stderr: asyncio.StreamReader,
+    event_name: str,
+    *,
+    outcome: str | None = None,
+    observed: list[dict[object, object]] | None = None,
 ) -> dict[object, object]:
     while line := await stderr.readline():
         event: object = json.loads(line)
         if isinstance(event, dict):
             fields = cast("dict[object, object]", event)
+            if observed is not None:
+                observed.append(fields)
             if fields.get("event") == event_name and (
                 outcome is None or fields.get("outcome") == outcome
             ):

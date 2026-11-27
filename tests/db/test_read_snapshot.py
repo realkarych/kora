@@ -2,7 +2,7 @@ import asyncio
 import json
 import sqlite3
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, closing
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -125,6 +125,7 @@ async def test_native_retirement_observer_keeps_failure_across_reporting_drain(
     copy_sqlite_template(sqlite_template, path)
     main = native_identity(path)
     missing = path.with_name("missing")
+    other_missing = path.with_name("other-missing")
     slots = threading.BoundedSemaphore(1)
     engaged = asyncio.Event()
     observations = cast(
@@ -139,7 +140,18 @@ async def test_native_retirement_observer_keeps_failure_across_reporting_drain(
     def later_release() -> None:
         NativeRetirement.after(path, missing.unlink)
 
-    with NativeRetirement.observe(path) as original_settlement:
+    async def observe_failure(
+        settle: Callable[[], Awaitable[None]], waiting: asyncio.Event
+    ) -> FileNotFoundError:
+        waiting.set()
+        with pytest.raises(FileNotFoundError) as failure:
+            await settle()
+        return failure.value
+
+    with (
+        NativeRetirement.observe(path) as original_settlement,
+        NativeRetirement.observe(path) as later_settlement,
+    ):
         with closing(GuardedConnection()) as incumbent:
             incumbent.open(path, False, 0, lambda descriptor, empty: not empty)
             assert incumbent.execute("PRAGMA journal_mode=DELETE").fetchone() == (
@@ -155,26 +167,54 @@ async def test_native_retirement_observer_keeps_failure_across_reporting_drain(
             waiter = asyncio.create_task(cancellable_observer())
             try:
                 await asyncio.wait_for(engaged.wait(), CONDITION_DEADLINE_SECONDS)
-                assert len(observations[path]) == 2
+                assert len(observations[path]) == 3
             finally:
                 waiter.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await waiter
-            assert len(observations[path]) == 1
+            assert len(observations[path]) == 2
             assert set(held_main_descriptors(main)) == reserved_fds
             assert not slots.acquire(blocking=False)
             NativeRetirement.after(path, later_release)
-            incumbent.commit()
-            with pytest.raises(FileNotFoundError) as synchronous:
-                await asyncio.to_thread(NativeRetirement.drain, path)
-            with pytest.raises(FileNotFoundError) as observed:
-                await asyncio.wait_for(
-                    original_settlement(), CONDITION_DEADLINE_SECONDS
+            waiting = asyncio.Event()
+            async with (
+                asyncio.timeout(CONDITION_DEADLINE_SECONDS),
+                asyncio.TaskGroup() as owners,
+            ):
+                active = owners.create_task(
+                    observe_failure(original_settlement, waiting)
                 )
-            assert observed.value is synchronous.value
+                await waiting.wait()
+                assert not active.done()
+                incumbent.commit()
+                with pytest.raises(FileNotFoundError) as synchronous:
+                    await asyncio.to_thread(NativeRetirement.drain, path)
+                assert await active is synchronous.value
             assert set(held_main_descriptors(main)) == original_fds
             assert slots.acquire(blocking=False)
             slots.release()
+
+            incumbent.execute("BEGIN IMMEDIATE").close()
+            with closing(open_sqlite_file(path, slots)):
+                assert original_fds < set(held_main_descriptors(main))
+            assert not NativeRetirement.drain(path, report=False)
+            NativeRetirement.after(path, other_missing.unlink)
+            waiting.clear()
+            async with (
+                asyncio.timeout(CONDITION_DEADLINE_SECONDS),
+                asyncio.TaskGroup() as owners,
+            ):
+                pending = owners.create_task(observe_failure(later_settlement, waiting))
+                await waiting.wait()
+                assert not pending.done()
+                incumbent.commit()
+                assert await asyncio.to_thread(
+                    NativeRetirement.drain, path, report=False
+                )
+                assert await pending is synchronous.value
+            with pytest.raises(FileNotFoundError) as newer:
+                NativeRetirement.drain(path)
+            assert newer.value.filename == str(other_missing)
 
     assert path not in observations
     assert not held_main_descriptors(main)
