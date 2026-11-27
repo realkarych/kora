@@ -40,7 +40,7 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 from kora.runner.child_wait import Readiness, native_direct_child_wait
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.native_io import observed
@@ -1148,6 +1148,40 @@ async def test_pi_bridge_holds_activation_until_prompt_data_completes(
     assert failure.value.code == "protocol"
 
 
+async def assert_unadmitted_terminal_refused(gate: PiGate) -> None:
+    async def assert_prompt_refused() -> None:
+        with pytest.raises(BridgeRefused) as failure:
+            await gate.prompt(PROMPT)
+        assert failure.value.code == "prompt"
+
+    probe, watch_child = native_direct_child_wait()
+    if probe is None:
+        await assert_prompt_refused()
+        return
+
+    assert watch_child is not None
+    gate.require_binding()
+    registration = gate.owner.registration
+    assert registration is not None
+    assert probe.read(registration) is Readiness.NOT_READY
+    transport = gate.streams[1].transport
+    assert isinstance(transport, asyncio.Transport)
+    watch = watch_child(registration.process.pid)
+    try:
+        async with asyncio.TaskGroup() as tasks:
+            transport.pause_reading()
+            try:
+                tasks.create_task(assert_prompt_refused())
+                await wait_future(watch.changed, gate.cutoff_ns, gate.clock)
+                assert gate.owner.registration == registration
+                assert probe.read(registration) is Readiness.READY
+                gate.require_binding(allow_exit=True)
+            finally:
+                transport.resume_reading()
+    finally:
+        watch.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("reported_model", "reported_stop"),
@@ -1168,11 +1202,9 @@ async def test_pi_sdk_refuses_unadmitted_terminal(
         await gate.start(peer.origin)
         await gate.key(kora_capture)
 
-        with pytest.raises(BridgeRefused) as failure:
-            await gate.prompt(PROMPT)
+        await assert_unadmitted_terminal_refused(gate)
         result = await gate.release(natural=True)
 
-    assert failure.value.code == "prompt"
     assert result == 1
     assert len(peer.requests) == 1
     gate.assert_reaped()
