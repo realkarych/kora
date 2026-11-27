@@ -19,7 +19,7 @@ from kora.protocols.secret_value import SecretValue
 from kora.protocols.time import Clock
 from kora.runner.channels import ChannelError, DescriptorReadiness, wait_future
 from kora.runner.native_io import observed
-from kora.runner.process_stdio import StdioStreams
+from kora.runner.process_stdio import StdioReader, StdioStreams
 
 MAX_FRAME_BYTES: Final[int] = 65_536
 MAX_PROMPT_BYTES: Final[int] = 32_768
@@ -57,6 +57,10 @@ class BridgeChannel:
         if _NONCE.fullmatch(nonce) is None:
             raise BridgeRefused("protocol")
         self._reader, self._writer = streams
+        self._receive = self._reader if isinstance(self._reader, StdioReader) else None
+        if shell is not None and self._receive is None:
+            raise BridgeRefused("protocol")
+        self._read_bytes: int = 0
         self._endpoint = cast(_Endpoint, self._writer.get_extra_info("socket"))
         self._nonce = nonce
         self._cutoff_ns = cutoff_ns
@@ -242,6 +246,7 @@ class BridgeChannel:
             raise BridgeRefused("protocol")
         self._require_binding(frame.get("kind") in ("failure", "terminal"))
         self._remaining()
+        self._read_bytes += len(record)
         return frame
 
     @staticmethod
@@ -281,16 +286,22 @@ class BridgeChannel:
                     self._reply(frame, "terminal")
                 raise BridgeRefused("protocol")
 
+        receive = self._receive
+        if receive is None:
+            raise BridgeRefused("protocol")
+        pending_position = self._read_bytes
         released: str | None = None
         peer = asyncio.create_task(self._read(lambda: released))
 
         def require_current() -> None:
             self._remaining()
+            if receive.input_closed:
+                raise BridgeRefused("closed")
+            if receive.received != pending_position:
+                raise BridgeRefused("protocol")
             if peer.done():
                 peer.result()
                 raise BridgeRefused("protocol")
-            if self._reader.at_eof():
-                raise BridgeRefused("closed")
             self._require_binding(False)
 
         def current() -> bool:

@@ -71,7 +71,7 @@ from kora.runner.child_wait import Readiness, native_direct_child_wait
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.installed_executable import ExecutablePin, verify_installed_executable
 from kora.runner.native_io import observed
-from kora.runner.process_stdio import StdioStreams
+from kora.runner.process_stdio import GatedStdio, StdioReader, StdioStreams
 from kora.runner.processes import GatedProcess, start_gated
 from tests.plugins.harness.claude.scripted_model import end_stream, sse, tool_stream
 from tests.plugins.harness.codex.selected_gated_stdio import native_environment
@@ -985,8 +985,13 @@ async def prepared_channel(
     socket_end, held = socket.socketpair()
     with socket_end, held:
         socket_end.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
-        streams = await asyncio.open_connection(sock=socket_end)
-        peer = await asyncio.open_connection(sock=held)
+        stdio = GatedStdio(socket_end, MAX_FRAME_BYTES - 1)
+        socket_clock = SystemClock()
+        await stdio.prepare(socket_clock.monotonic_ns() + 5 * SECOND, socket_clock)
+        streams = stdio.borrow()
+        peer_stdio = GatedStdio(held, MAX_FRAME_BYTES - 1)
+        await peer_stdio.prepare(socket_clock.monotonic_ns() + 5 * SECOND, socket_clock)
+        peer = peer_stdio.borrow()
 
         def socket_live(_allow_exit: bool = False) -> None:
             if socket_end.fileno() < 0:
@@ -1004,7 +1009,7 @@ async def prepared_channel(
             recheck_installation or socket_recheck,
             shell,
         )
-        reader, writer = streams
+        reader, _ = streams
         peer_reader, peer_writer = peer
         try:
             async with asyncio.timeout(5):
@@ -1026,8 +1031,11 @@ async def prepared_channel(
             yield channel, reader, peer, key_challenge
         finally:
             channel.revoke()
-            peer_writer.close()
-            await asyncio.gather(writer.wait_closed(), peer_writer.wait_closed())
+            cutoff = socket_clock.monotonic_ns() + 5 * SECOND
+            await asyncio.gather(
+                stdio.settle(cutoff, socket_clock),
+                peer_stdio.settle(cutoff, socket_clock),
+            )
 
 
 async def control_challenge(reader: asyncio.StreamReader, kind: str) -> str:
@@ -2628,3 +2636,171 @@ async def test_pi_bash_native_cutoff_refuses_late_continuation(
         assert (gate.checkout.path / "effects").read_text() == "one"
         assert not witness_.scoped.occupied
         gate.assert_reaped()
+
+
+def write_peer(writer: asyncio.StreamWriter, content: bytes) -> None:
+    endpoint = cast(socket.socket, writer.get_extra_info("socket"))
+    assert os.write(endpoint.fileno(), content) == len(content)
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_refuses_input_delivered_with_the_call(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with (
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+
+        async with prepared_channel(kora_capture, SystemClock(), shell=gate.shell) as (
+            channel,
+            _,
+            socket_peer,
+            _,
+        ):
+            async with asyncio.timeout(5):
+                pending = asyncio.create_task(channel.prompt(PROMPT))
+                challenge = await control_challenge(socket_peer[0], "prompt")
+                write_peer(socket_peer[1], bash_call_frame(challenge) + b"{")
+                with pytest.raises(BridgeRefused) as refused:
+                    await pending
+
+        assert refused.value.code == "protocol"
+        assert witness_.policy.requests == []
+        assert witness_.dispatches == 0
+        assert not (gate.checkout.path / "effects").exists()
+        assert not witness_.scoped.occupied
+        assert peer.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival", ["partial-frame", "eof"])
+async def test_pi_bash_fences_allow_against_delivered_pending_input(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, arrival: str
+) -> None:
+    policy_release = asyncio.Event()
+    async with (
+        bash_witness(
+            installation, tmp_path, kora_capture, policy_release=policy_release
+        ) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+
+        async with prepared_channel(kora_capture, SystemClock(), shell=gate.shell) as (
+            channel,
+            _,
+            socket_peer,
+            _,
+        ):
+            async with asyncio.timeout(5):
+                pending = asyncio.create_task(channel.prompt(PROMPT))
+                challenge = await control_challenge(socket_peer[0], "prompt")
+                write_peer(socket_peer[1], bash_call_frame(challenge))
+                await witness_.policy.entered.wait()
+
+                asyncio.get_running_loop().call_soon(policy_release.set)
+                if arrival == "partial-frame":
+                    write_peer(socket_peer[1], b"{")
+                else:
+                    socket_peer[1].write_eof()
+                with pytest.raises(BridgeRefused) as refused:
+                    await pending
+
+        assert refused.value.code == (
+            "protocol" if arrival == "partial-frame" else "closed"
+        )
+        assert witness_.policy.decisions == [PolicyDecision(True, "allowed")]
+        assert witness_.dispatches == 0
+        assert not (gate.checkout.path / "effects").exists()
+        assert not witness_.scoped.occupied
+        assert peer.requests == []
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_fences_resumed_result_against_delivered_pending_input(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = WriteObservationClock()
+    recheck_entered = asyncio.Event()
+    recheck_release = asyncio.Event()
+
+    async def hold_recheck() -> None:
+        recheck_entered.set()
+        await recheck_release.wait()
+
+    async with (
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        command = python_command(
+            "from pathlib import Path; Path('effects').write_text('one'); "
+            "print('x' * 6000)"
+        )
+
+        async with prepared_channel(
+            kora_capture,
+            clock,
+            recheck_installation=hold_recheck,
+            shell=gate.shell,
+        ) as (channel, _, socket_peer, _):
+            peer_reader, peer_writer = socket_peer
+            assert isinstance(peer_reader, StdioReader)
+            transport = peer_writer.transport
+            assert isinstance(transport, asyncio.Transport)
+            async with asyncio.timeout(5):
+                pending = asyncio.create_task(channel.prompt(PROMPT))
+                challenge = await control_challenge(peer_reader, "prompt")
+                transport.pause_reading()
+                write_peer(peer_writer, bash_call_frame(challenge, command=command))
+                await clock.waiting.wait()
+                transport.resume_reading()
+                prefix = await peer_reader.readexactly(1024)
+                await recheck_entered.wait()
+                physically_written = peer_reader.received
+
+                asyncio.get_running_loop().call_soon(recheck_release.set)
+                write_peer(peer_writer, b"{")
+                with pytest.raises(BridgeRefused) as refused:
+                    await pending
+                remainder = await peer_reader.read()
+
+        assert refused.value.code == "protocol"
+        assert prefix.startswith(b'{"kind":"bash_result"')
+        assert b"\n" not in prefix + remainder
+        assert peer_reader.received == physically_written
+        assert witness_.dispatches == 1
+        assert len(witness_.results) == 1
+        assert (gate.checkout.path / "effects").read_text() == "one"
+        assert not witness_.scoped.occupied
+        assert peer.requests == []
+
+
+@pytest.mark.asyncio
+async def test_pi_gated_stdio_observes_eof_with_unconsumed_input() -> None:
+    endpoint, peer = socket.socketpair()
+    clock = SystemClock()
+    content = b"buffered-input"
+    with endpoint, peer:
+        peer.setblocking(False)
+        owner = GatedStdio(endpoint, MAX_FRAME_BYTES - 1)
+        await owner.prepare(clock.monotonic_ns() + SECOND, clock)
+        reader, _ = owner.borrow()
+        assert isinstance(reader, StdioReader)
+        try:
+            await asyncio.get_running_loop().sock_sendall(peer, content)
+            peer.shutdown(socket.SHUT_WR)
+            await until(lambda: reader.input_closed)
+
+            assert reader.received == len(content)
+            assert not reader.at_eof()
+            assert await reader.readexactly(len(content)) == content
+            assert reader.at_eof()
+        finally:
+            await owner.settle(clock.monotonic_ns() + SECOND, clock)
+    assert owner.closed
