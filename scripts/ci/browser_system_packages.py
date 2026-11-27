@@ -42,7 +42,6 @@ LIFETIME_PROPERTIES = {
     "KillMode": "control-group",
     "Restart": "no",
     "Delegate": "no",
-    "JobRunningTimeoutUSec": "5s",
 }
 INVOCATION = re.compile(r"[0-9a-f]{32}")
 SERVICE_PATH = re.compile(r"/system.slice/kora-browser-packages-[0-9a-f]{32}\.service")
@@ -50,6 +49,25 @@ SERVICE_PATH = re.compile(r"/system.slice/kora-browser-packages-[0-9a-f]{32}\.se
 
 class BrowserPackagesRefused(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class AttemptLimits:
+    start: float
+    work: float
+    stop_phase: float
+    proof: float
+    join: float
+
+    @property
+    def settle(self) -> float:
+        return self.start + self.work + 2 * self.stop_phase
+
+
+PACKAGE_LIMITS = AttemptLimits(
+    START_SECONDS, WORK_SECONDS, STOP_PHASE_SECONDS, PROOF_SECONDS, RETURN_SECONDS
+)
+CLEANUP_LIMITS = AttemptLimits(1.0, 1.0, 0.5, 1.0, 0.75)
 
 
 @dataclass(frozen=True)
@@ -62,21 +80,32 @@ class AttemptWindow:
 
     @classmethod
     def allocate(
-        cls, allowance: float, latest_settlement: float | None = None
+        cls,
+        allowance: float,
+        latest_settlement: float | None = None,
+        *,
+        limits: AttemptLimits = PACKAGE_LIMITS,
     ) -> AttemptWindow:
         now = time.monotonic()
         settled = now + allowance
         if latest_settlement is not None:
             settled = min(settled, latest_settlement)
-        work = min(WORK_SECONDS, settled - (now + START_SECONDS + STOP_SECONDS))
+        work = min(limits.work, settled - (now + limits.start + 2 * limits.stop_phase))
         if work <= 0:
             raise BrowserPackagesRefused("Insufficient time to own a package attempt.")
         return cls(
-            now + START_SECONDS,
+            now + limits.start,
             work,
             settled,
-            settled + PROOF_SECONDS,
-            settled + PROOF_SECONDS + RETURN_SECONDS,
+            settled + limits.proof,
+            settled + limits.proof + limits.join,
+        )
+
+    @classmethod
+    def for_cleanup(cls, deadline: float) -> AttemptWindow:
+        limits = CLEANUP_LIMITS
+        return cls.allocate(
+            limits.settle, deadline - limits.proof - limits.join, limits=limits
         )
 
 
@@ -143,11 +172,12 @@ class Programs:
 class Service:
     name: str
     cgroup: str
+    limits: AttemptLimits = PACKAGE_LIMITS
 
     @classmethod
-    def new(cls) -> Service:
+    def new(cls, limits: AttemptLimits = PACKAGE_LIMITS) -> Service:
         name = f"kora-browser-packages-{uuid.uuid4().hex}.service"
-        return cls(name, f"/system.slice/{name}")
+        return cls(name, f"/system.slice/{name}", limits)
 
     async def show(self, deadline: float) -> dict[str, str]:
         code, output = await self.control(
@@ -210,9 +240,9 @@ class Service:
                 "--property=KillMode=control-group",
                 "--property=Restart=no",
                 "--property=Delegate=no",
-                f"--property=JobRunningTimeoutSec={START_SECONDS:g}s",
-                f"--property=TimeoutStartSec={START_SECONDS:g}s",
-                f"--property=TimeoutStopSec={STOP_PHASE_SECONDS}s",
+                f"--property=JobRunningTimeoutSec={self.limits.start:g}s",
+                f"--property=TimeoutStartSec={self.limits.start:g}s",
+                f"--property=TimeoutStopSec={self.limits.stop_phase:g}s",
                 f"--property=RuntimeMaxSec={window.work:.6f}s",
                 PYTHON,
                 "-I",
@@ -254,7 +284,9 @@ class Service:
                     raise BrowserPackagesRefused(
                         "Package service launch identity did not match."
                     )
-                if any(
+                if status.get(
+                    "JobRunningTimeoutUSec"
+                ) != f"{self.limits.start:g}s" or any(
                     status.get(key) != value
                     for key, value in LIFETIME_PROPERTIES.items()
                 ):
@@ -383,29 +415,23 @@ class OriginalService:
 
     async def remove_stage(self, deadline: float) -> None:
         original = os.fstat(self.directory)
-        async with asyncio.timeout_at(deadline):
-            process = await asyncio.create_subprocess_exec(
-                SUDO,
-                "-n",
-                PYTHON,
-                "-I",
-                str(UBUNTU_APT),
-                "cleanup",
+        window = AttemptWindow.for_cleanup(deadline)
+        removed = await service_attempt(
+            (
+                "stage-cleanup",
                 self.service.name,
                 self.invocation,
                 str(original.st_dev),
                 str(original.st_ino),
-                stdin=asyncio.subprocess.DEVNULL,
-                env=MANAGER_ENV,
+            ),
+            Service.new(CLEANUP_LIMITS),
+            window,
+            stage_cleanup=False,
+        )
+        if not removed:
+            raise BrowserPackagesRefused(
+                "Original Ubuntu package stage did not settle."
             )
-            try:
-                if await process.wait():
-                    raise BrowserPackagesRefused(
-                        "Original Ubuntu package stage did not settle."
-                    )
-            finally:
-                if process.returncode is None:
-                    stop_client(process)
 
 
 async def poll_until(deadline: float) -> None:
@@ -444,18 +470,23 @@ async def package_attempt(
     if not (SYSTEM_CGROUP / "cgroup.controllers").is_file():
         raise BrowserPackagesRefused("Browser packages require cgroup v2 ownership.")
     service = Service.new() if service is None else service
-    stage_cleanup = (
-        window.join
-        if (
-            len(work) == 3
-            and (
-                work[0] in {"install", "refusal-witness"}
-                or work[0] == "witness"
-                and work[2] == "stage-hold"
-            )
-        )
-        else None
+    stage_cleanup = len(work) == 3 and (
+        work[0] in {"install", "refusal-witness"}
+        or (work[0] == "witness" and work[2] == "stage-hold")
     )
+    succeeded = await service_attempt(
+        work, service, window, stage_cleanup=stage_cleanup
+    )
+    return None if succeeded else "original package service failed after settlement"
+
+
+async def service_attempt(
+    work: Sequence[str],
+    service: Service,
+    window: AttemptWindow,
+    *,
+    stage_cleanup: bool,
+) -> bool:
     client = None
     owned = None
     try:
@@ -475,7 +506,8 @@ async def package_attempt(
             try:
                 if owned is not None:
                     await owned.settle(
-                        window.prove, stage_cleanup_deadline=stage_cleanup
+                        window.prove,
+                        stage_cleanup_deadline=window.join if stage_cleanup else None,
                     )
                 async with asyncio.timeout_at(window.join):
                     await client.wait()
@@ -488,7 +520,7 @@ async def package_attempt(
                     os.close(owned.directory)
                 if client.returncode is None:
                     stop_client(client)
-    return None if succeeded else "original package service failed after settlement"
+    return succeeded
 
 
 def accepted(deadline: str) -> bool:
@@ -525,15 +557,25 @@ async def run_child(command: Sequence[str], environment: dict[str, str]) -> int:
 
 
 async def worker(arguments: Sequence[str]) -> int:
-    if len(arguments) != 4 or os.geteuid() != 0:
+    if len(arguments) not in {4, 6} or os.geteuid() != 0:
         return 78
-    deadline, operation, first, second = arguments
+    deadline, operation, *operands = arguments
     invocation = os.environ.get("INVOCATION_ID", "")
     if not INVOCATION.fullmatch(invocation):
         return 78
     service = Path(Path("/proc/self/cgroup").read_text(encoding="ascii").strip()).name
     sys.stdout.buffer.write(f"{invocation}\n".encode("ascii"))
     sys.stdout.buffer.flush()
+    if operation == "stage-cleanup":
+        if len(operands) != 4 or not accepted(deadline):
+            return 78
+        acknowledge_admission()
+        return await run_child(
+            (PYTHON, "-I", str(UBUNTU_APT), "cleanup", *operands), MANAGER_ENV
+        )
+    if len(operands) != 2:
+        return 78
+    first, second = operands
     if operation == "witness":
         witness = ROOT / "tests/architecture/browser_system_packages_witness.py"
         administrative = Path(first)

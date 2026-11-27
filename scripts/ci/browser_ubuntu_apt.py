@@ -8,7 +8,8 @@ import shlex
 import shutil
 import stat
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
@@ -29,6 +30,7 @@ INSTALL = ("install", "-y", "--no-install-recommends")
 CONSOLE_PACKAGES = ("libnss3-tools", "xdg-utils")
 APT_GET = "/usr/bin/apt-get"
 APT_CONFIG = "/usr/bin/apt-config"
+NATIVE_APT_ERROR = 100
 DPKG = "/usr/bin/dpkg"
 PYTHON = "/usr/bin/python3"
 SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
@@ -55,13 +57,17 @@ class AptRefused(RuntimeError):
     pass
 
 
-def protected(status: os.stat_result) -> bool:
-    return status.st_uid == 0 and not status.st_mode & 0o022
+def admitted_owner(status: os.stat_result, *, hash_only: bool) -> bool:
+    return status.st_uid == 0 and (hash_only or not status.st_mode & 0o022)
 
 
-def check_directory(status: os.stat_result) -> None:
-    if not stat.S_ISDIR(status.st_mode) or not protected(status):
-        raise AptRefused("Ubuntu package input directory is outside root custody.")
+def check_directory(
+    status: os.stat_result, subject: str, *, hash_only: bool = False
+) -> None:
+    if not stat.S_ISDIR(status.st_mode) or not admitted_owner(
+        status, hash_only=hash_only
+    ):
+        raise AptRefused(f"{subject} directory is outside its required custody.")
 
 
 def file_identity(status: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -74,35 +80,56 @@ def file_identity(status: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
-def read_protected(path: Path, limit: int) -> bytes:
+@contextmanager
+def input_descriptor(
+    path: Path, subject: str, *, hash_only: bool
+) -> Generator[tuple[int, tuple[tuple[int, int], ...]]]:
     if sys.platform != "linux" or not path.is_absolute():
-        raise AptRefused("Ubuntu package input path is unsupported.")
+        raise AptRefused(f"{subject} path is unsupported.")
     descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
+        chain: list[tuple[int, int]] = []
         for part in path.parts[1:]:
-            check_directory(os.fstat(descriptor))
+            status = os.fstat(descriptor)
+            check_directory(status, subject, hash_only=hash_only)
+            chain.append((status.st_dev, status.st_ino))
             child = os.open(
                 part, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=descriptor
             )
             os.close(descriptor)
             descriptor = child
+        yield descriptor, tuple(chain)
+    finally:
+        os.close(descriptor)
+
+
+def read_input(
+    path: Path, limit: int, subject: str, *, hash_only: bool = False
+) -> bytes:
+    with input_descriptor(path, subject, hash_only=hash_only) as (descriptor, chain):
         status = os.fstat(descriptor)
         if (
             not stat.S_ISREG(status.st_mode)
-            or not protected(status)
+            or not admitted_owner(status, hash_only=hash_only)
             or not 0 < status.st_size <= limit
         ):
-            raise AptRefused("Ubuntu package input file is outside root custody.")
+            raise AptRefused(f"{subject} file is outside its required custody.")
         with Path(f"/proc/self/fd/{descriptor}").open("rb") as stream:
             contents = stream.read(limit + 1)
             if (
                 file_identity(os.fstat(stream.fileno())) != file_identity(status)
                 or len(contents) != status.st_size
             ):
-                raise AptRefused("Ubuntu package input changed during capture.")
-        return contents
-    finally:
-        os.close(descriptor)
+                raise AptRefused(f"{subject} changed during capture.")
+        with input_descriptor(path, subject, hash_only=hash_only) as (
+            current,
+            observed,
+        ):
+            if observed != chain or file_identity(os.fstat(current)) != file_identity(
+                status
+            ):
+                raise AptRefused(f"{subject} pathname changed during capture.")
+    return contents
 
 
 def admit_signer(contents: bytes) -> None:
@@ -111,6 +138,12 @@ def admit_signer(contents: bytes) -> None:
         or hashlib.sha256(contents).hexdigest() != SIGNER_DIGEST
     ):
         raise AptRefused("Ubuntu archive signer does not match the approved pin.")
+
+
+def read_signer() -> bytes:
+    contents = read_input(SIGNER, SIGNER_SIZE, "Noble signer input", hash_only=True)
+    admit_signer(contents)
+    return contents
 
 
 def rewrite_sources(contents: bytes, signer: Path, mirrors: Path) -> bytes:
@@ -266,6 +299,10 @@ class Stage(NamedTuple):
         return self.path / "refused"
 
     @property
+    def native_failure(self) -> Path:
+        return self.path / "native-failure"
+
+    @property
     def selectors(self) -> dict[str, str]:
         return apt_selectors(
             self.path / SOURCE.name,
@@ -284,9 +321,8 @@ class Stage(NamedTuple):
         return invocation.encode("ascii") + b"\n"
 
     def require_invocation(self, invocation: str) -> None:
-        if read_protected(self.path / "invocation", 33) != self.invocation_record(
-            invocation
-        ):
+        record = read_input(self.path / "invocation", 33, "Package stage invocation")
+        if record != self.invocation_record(invocation):
             raise AptRefused("Ubuntu package stage belongs to a different invocation.")
 
     def require_process(self) -> None:
@@ -302,22 +338,21 @@ class Stage(NamedTuple):
 
     def cgroup_identity(self) -> bytes:
         status = self.cgroup.stat(follow_symlinks=False)
-        check_directory(status)
+        check_directory(status, "Original native package cgroup")
         return f"{status.st_dev} {status.st_ino}\n".encode("ascii")
 
     def prepare(self, invocation: str) -> None:
         payload = self.invocation_record(invocation)
-        check_directory(RUNTIME.parent.stat(follow_symlinks=False))
+        check_directory(RUNTIME.parent.stat(follow_symlinks=False), "Package runtime")
         RUNTIME.mkdir(mode=0o755, exist_ok=True)
-        check_directory(RUNTIME.stat(follow_symlinks=False))
+        check_directory(RUNTIME.stat(follow_symlinks=False), "Package stage root")
         self.path.mkdir(mode=0o755)
         (self.path / "invocation").write_bytes(payload)
         (self.path / "cgroup").write_bytes(self.cgroup_identity())
-        signer = read_protected(SIGNER, SIGNER_SIZE)
-        admit_signer(signer)
+        signer = read_signer()
         mirrors = self.path / MIRRORS.name
         source = rewrite_sources(
-            read_protected(SOURCE, SOURCE_LIMIT), self.signer, mirrors
+            read_input(SOURCE, SOURCE_LIMIT, "Noble source input"), self.signer, mirrors
         )
         self.signer.write_bytes(signer)
         mirrors.write_bytes(MIRROR)
@@ -335,9 +370,9 @@ class Stage(NamedTuple):
             status = self.path.stat(follow_symlinks=False)
         except FileNotFoundError:
             return
-        check_directory(status)
+        check_directory(status, "Package stage")
         self.require_invocation(invocation)
-        if read_protected(self.path / "cgroup", 64) != cgroup:
+        if read_input(self.path / "cgroup", 64, "Package stage cgroup") != cgroup:
             raise AptRefused("Ubuntu package stage lacks the original cgroup proof.")
         try:
             original = self.cgroup_identity()
@@ -392,6 +427,7 @@ async def guarded_apt(stage: Stage, arguments: Sequence[str]) -> int:
         ]
         if (
             stage.refusal.exists()
+            or stage.native_failure.exists()
             or receipt(stage, operation).exists()
             or (predecessor is not None and not receipt(stage, predecessor).is_file())
         ):
@@ -401,10 +437,20 @@ async def guarded_apt(stage: Stage, arguments: Sequence[str]) -> int:
         result = await execute((APT_GET, *stage.options, *arguments), APT_ENV)
         if result == 0:
             receipt(stage, operation).touch(exist_ok=False)
+        elif result == NATIVE_APT_ERROR:
+            stage.native_failure.touch(exist_ok=False)
+        else:
+            raise AptRefused("Native APT returned an unexpected status.")
         return result
     except (AptRefused, OSError, UnicodeError):
         stage.refusal.touch()
         raise
+
+
+def playwright_outcome(status: int, *, native_failure: bool, refusal: bool) -> int:
+    if not refusal and (status, native_failure) in {(0, False), (1, True)}:
+        return status
+    return 78
 
 
 async def install(
@@ -430,11 +476,15 @@ async def install(
     stage.require_invocation(invocation)
     if refusal_witness and (dependencies != 1 or not stage.refusal.is_file()):
         return 1
-    if stage.refusal.exists():
+    outcome = playwright_outcome(
+        dependencies,
+        native_failure=stage.native_failure.is_file(),
+        refusal=stage.refusal.exists(),
+    )
+    if outcome == 78:
         sys.stderr.write("The package adapter refused Playwright acquisition.\n")
-        return 78
-    if dependencies:
-        return dependencies
+    if outcome:
+        return outcome
     if not receipt(stage, "install").is_file():
         raise AptRefused("Playwright did not complete both guarded APT commands.")
     return await execute(

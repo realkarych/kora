@@ -217,6 +217,7 @@ async def check_controller_loss(administrative: Path) -> None:
     from scripts.ci.browser_system_packages import (
         PROOF_SECONDS,
         RETURN_SECONDS,
+        BrowserPackagesRefused,
         OriginalService,
         Service,
     )
@@ -241,6 +242,14 @@ async def check_controller_loss(administrative: Path) -> None:
         try:
             signer = held_signer(administrative, stage)
             await check_dpkg(administrative, "database-lock-held")
+            try:
+                await owned.remove_stage(time.monotonic() + RETURN_SECONDS)
+            except BrowserPackagesRefused as refusal:
+                outcome = str(refusal)
+            else:
+                raise AssertionError("Cleanup removed an original stage still in use.")
+            assert outcome == "The package helper refused admission."
+            assert held_signer(administrative, stage) == signer
             controller.kill()
             async with asyncio.timeout_at(deadline):
                 assert await controller.wait() == -signal.SIGKILL

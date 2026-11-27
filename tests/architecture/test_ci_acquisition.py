@@ -37,6 +37,7 @@ from scripts.ci.acquire import (
     run_bounded,
 )
 from scripts.ci.browser_system_packages import (
+    CLEANUP_LIMITS,
     PROOF_SECONDS,
     RETURN_SECONDS,
     START_SECONDS,
@@ -47,7 +48,12 @@ from scripts.ci.browser_system_packages import (
     BrowserPackagesRefused,
     package_attempt,
 )
-from scripts.ci.browser_ubuntu_apt import AptRefused, admit_signer, apt_operation
+from scripts.ci.browser_ubuntu_apt import (
+    AptRefused,
+    admit_signer,
+    apt_operation,
+    playwright_outcome,
+)
 from scripts.ci.pi_sdk_manifest import write_manifest
 from tests.support.https_fixture import (
     Authority,
@@ -971,6 +977,43 @@ def test_browser_apt_signer_rejects_other_bytes_of_the_pinned_size() -> None:
 
     with pytest.raises(AptRefused, match="does not match the approved pin"):
         admit_signer(same_size_bytes)
+
+
+@pytest.mark.parametrize(
+    ("status", "native_failure", "refusal", "expected"),
+    [
+        (0, False, False, 0),
+        (1, True, False, 1),
+        (1, False, False, 78),
+        (1, True, True, 78),
+        (0, True, False, 78),
+        (0, False, True, 78),
+        (100, True, False, 78),
+    ],
+)
+def test_playwright_retry_requires_a_proven_native_apt_failure(
+    status: int, native_failure: bool, refusal: bool, expected: int
+) -> None:
+    observed = playwright_outcome(
+        status, native_failure=native_failure, refusal=refusal
+    )
+
+    assert observed == expected
+
+
+def test_browser_stage_cleanup_fits_original_return_reserve() -> None:
+    limits = CLEANUP_LIMITS
+    assert limits.settle + limits.proof + limits.join <= RETURN_SECONDS
+    deadline = time.monotonic() + RETURN_SECONDS
+
+    window = AttemptWindow.for_cleanup(deadline)
+
+    assert window.work == pytest.approx(limits.work, rel=0, abs=1e-6)
+    assert window.join <= deadline
+    assert window.prove == window.settled + limits.proof
+    assert window.join == window.prove + limits.join
+    with pytest.raises(BrowserPackagesRefused, match="Insufficient time"):
+        AttemptWindow.for_cleanup(time.monotonic())
 
 
 def test_browser_package_attempt_shortens_work_and_reserves_proof() -> None:
