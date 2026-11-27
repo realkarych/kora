@@ -194,7 +194,7 @@ async def model_peer(
             await asyncio.gather(*peer.tasks)
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def stage_path() -> Path:
     return Path(os.environ["KORA_PI_SDK_STAGE"])
 
@@ -207,7 +207,7 @@ def kora_capture() -> Generator[Capture]:
         yield capture
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def installation(stage_path: Path) -> PiInstallation:
     clock = SystemClock()
     return verify_pi_installation(stage_path, clock.monotonic_ns() + 15 * SECOND, clock)
