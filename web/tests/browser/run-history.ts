@@ -23,6 +23,7 @@ type PaginationStep = 'start' | 'focus-reload' | 'tab-sign-out' | 'tab-earlier'
   | 'restored-focus' | 'complete'
   | `${PageSelection}-${'enter' | 'response' | 'headers' | 'selector' | 'dom'}`
 
+const browserTimeoutMs = 10000
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 const lines = input[Symbol.asyncIterator]()
 
@@ -201,7 +202,7 @@ const requestAborts = new Set<string>()
 const expectedRequests = new WeakMap<Request, string>()
 const abortedRequests = new WeakSet<Request>()
 const responseStatuses = new WeakMap<Request, number>()
-const pendingReads = new WeakMap<Page, Set<Request>>()
+const pendingReads = new WeakMap<Page, Map<Request, EventTarget>>()
 const validatedReads = new WeakSet<Request>()
 type DiagnosticContext = { phase: string; route: RouteClass | 'other'; status: number }
 const postResponseAborts = new Map<Request, DiagnosticContext>()
@@ -229,11 +230,16 @@ function routeClass(url: string): RouteClass | undefined {
 }
 
 function watchSafeDiagnostics(page: Page): void {
-  const pending = new Set<Request>()
+  const pending = new Map<Request, EventTarget>()
   pendingReads.set(page, pending)
+  const settle = (request: Request): void => {
+    const terminal = pending.get(request)
+    pending.delete(request)
+    terminal?.dispatchEvent(new Event('settled'))
+  }
   page.on('request', request => {
     if (!isPageRead(request, eventPath)) return
-    if (pending.size < 128) pending.add(request)
+    if (pending.size < 128) pending.set(request, new EventTarget())
     else rejectDiagnostic('request-overflow', 'event')
   })
   page.on('pageerror', () => {
@@ -267,13 +273,13 @@ function watchSafeDiagnostics(page: Page): void {
     else if (status !== expected || route === 'canonical') rejectDiagnostic('http-status', route, status)
   })
   page.on('requestfinished', request => {
-    pending.delete(request)
+    settle(request)
     if (evidence.stage === 'native-sign-in' && routeClass(request.url()) === 'event') {
       evidence.nativeSignIn.eventFinished = true
     }
   })
   page.on('requestfailed', request => {
-    pending.delete(request)
+    settle(request)
     const route = routeClass(request.url())
     if (evidence.stage === 'native-sign-in' && route === 'event') evidence.nativeSignIn.eventFailed = true
     const receipt = expectedRequests.get(request)
@@ -316,21 +322,26 @@ function waitEventPage(page: Page, path = eventPath): Promise<Response> {
 async function checkPageRead(
   page: Page, exercise: (response: Promise<Response>, began: number) => Promise<Response>,
 ): Promise<void> {
-  assert.equal(pendingReads.get(page)?.size, 0)
-  let started: Request | undefined
-  let repeated = false
+  const pending = pendingReads.get(page)
+  assert(pending !== undefined && pending.size === 0)
+  const starts: { request: Request | null; repeated: boolean } = { request: null, repeated: false }
   const record = (request: Request) => {
     if (!isPageRead(request, eventPath)) return
-    if (started === undefined) started = request
-    else repeated = true
+    if (starts.request === null) starts.request = request
+    else starts.repeated = true
   }
   page.on('request', record)
   try {
-    const observed = page.waitForResponse(response => response.request() === started)
+    const observed = page.waitForResponse(response => response.request() === starts.request)
     void observed.catch(() => undefined)
     const response = await exercise(observed, Date.now())
-    assert(!repeated && response.request() === started)
-    validatedReads.add(response.request())
+    const request = response.request()
+    const terminal = pending.get(request)
+    if (terminal !== undefined) {
+      await once(terminal, 'settled', { signal: AbortSignal.timeout(browserTimeoutMs) })
+    }
+    assert(!starts.repeated && request === starts.request)
+    validatedReads.add(request)
   } finally {
     page.off('request', record)
   }
@@ -651,8 +662,8 @@ async function trustedJourney(): Promise<void> {
   try {
     const browser = await owner.startBrowser()
     const context = await browser.newContext({ serviceWorkers: 'block' })
-    context.setDefaultTimeout(10000)
-    context.setDefaultNavigationTimeout(10000)
+    context.setDefaultTimeout(browserTimeoutMs)
+    context.setDefaultNavigationTimeout(browserTimeoutMs)
     try {
       const outside = await context.newPage()
       await checkSecondAuthority(outside, owner)
