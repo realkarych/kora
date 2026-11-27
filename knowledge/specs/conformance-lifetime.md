@@ -1,61 +1,138 @@
 # Local conformance lifetime ABI
 
-Accepted by the project owner on 2026-10-23 under [issue #231](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968). The generic local library is implemented under #247 and installed command composition under [#215](https://github.com/realkarych/kora/issues/215), with [command evidence and qualification limits](../research/configured-command-2026-10-27.md). Real runtime/testing-runner implementation and evidence remain with their work items. [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md) governs this contract; [protocols section 13](protocols.md#local-conformance-command) defines the surrounding installed-provider command.
-
-Recovered-settlement amendment approved by the project owner on 2026-10-30 under [#440](https://github.com/realkarych/kora/issues/440#issuecomment-6508816138). The generic local lifetime library implements its [observation and wait design](../research/recovered-settlement-observation-2026-10-30.md) under #369, with [implementation evidence](../research/recovered-settlement-implementation-2026-10-30.md). Production-consumer activation and its aggregate-concurrency qualification remain pending.
+[ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md) governs this ABI for the [installed-provider command](protocols.md#local-conformance-command).
+The generic local lifetime library and [installed command](https://github.com/realkarych/kora/issues/215) use this ABI.
+Local-runtime and testing-runner activation and evidence stay with work items 14 and 7, respectively.
+Production-consumer activation and aggregate-concurrency qualification remain pending.
+See the [accepted lifetime decision](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968), [recovery amendment](https://github.com/realkarych/kora/issues/440#issuecomment-6508816138), [observation design](../research/recovered-settlement-observation-2026-10-30.md), [implementation evidence](../research/recovered-settlement-implementation-2026-10-30.md) and [command qualification](../research/configured-command-2026-10-27.md).
 
 ## Impact
 
-Installed-provider conformance has an explicit local resource owner that survives fixture and pytest failure. A command can report successful cleanup only after its acquisition operations and owned resources have actually settled; uncertain cleanup remains a failure with retained local recovery information.
+The command parent retains lifetime authority across fixture and pytest failures.
+Successful cleanup requires actual settlement of acquisition operations and owned resources.
+Uncertain cleanup fails and retains private local recovery evidence.
 
 ## Scope and ownership
 
-Issue #231 specifies the ABI and acceptance cases only. #215 implements the bridge, parent command and installed-distribution evidence. Local-runtime and testing-runner implementations remain with work item 14/#123 and work item 7; their activation consumes this seam rather than duplicating runtime state machines. #236 continues owning policy/harness models and direct-injection policy cases. #215 defines installed typed bundles for every suite active at its implementation head, consuming those existing models/cases before command activation. Current common/secrets cases, forbidden references, list-names and StreamMasker remain mandatory.
+The installed bridge and parent command own installed-distribution evidence and use each activated suite's existing models and cases.
+Those suites supply explicit typed bundles before installed activation.
+Common and secrets checks, including forbidden references, list-names and `StreamMasker`, remain mandatory.
+Policy and harness models and direct-injection policy cases retain their existing owners.
+On activation, local runtime and the testing runner use this seam and retain authority over their runtime state machines.
 
-The command parent creates a private invocation root, process identity, admission gate and control channel before importing any external fixture. The pytest child is an owned invocation resource. Its process-local allocations, tasks, threads, connections, descriptors and pipe endpoints belong to that process's lifetime; surviving filesystem state and independently running processes require separate parent records. The adapter receives the lifetime client before prepare and retains it in bound dependencies and drivers for acquisitions in construction and exercises too. Returning from prepare, cleanup or pytest never transfers ownership back to nobody.
+The parent establishes a private invocation root, process identity, admission gate and control channel before any external fixture import.
+The pytest child is an owned invocation resource.
+The process lifetime owns its allocations, tasks, threads, connections, descriptors and pipe endpoints.
+Surviving filesystem state and independently live processes require separate parent records.
+Preparation receives the lifetime client and retains it in dependencies and drivers for acquisition during construction and exercises.
+Return from prepare, cleanup or pytest preserves the original owner until settlement.
 
-Local conformance code is trusted cooperative code. This interface does not isolate hostile same-user code, arbitrary daemonization or remote/cloud effects. Metadata/adapter fixture import remains resource-free. No hook, dynamic-import exception, automatic installation, provider factory replacement or new entry-point group is added.
+This is trusted cooperative local conformance, without containment of hostile same-user code, arbitrary daemonization or remote/cloud effects.
+Metadata and adapter fixture imports are resource-free.
+This ABI adds no hook, dynamic-import exception or entry-point group.
+Automatic installation and provider factory replacement are refused.
 
 ## Public operations and closed shapes
 
-Shared launch-facing types live in `kora.protocols.lifetime`; `kora.conformance` re-exports the conformance client and records. Providers never import a composition root. No runtime/harness/domain model is copied from #236 or work item 14. The implementation PR must preserve ADR-0026's existing table or explicitly approve a necessary new package row before edits.
+Launch-facing types live in `kora.protocols.lifetime`.
+`kora.conformance` re-exports the client and records.
+Providers use lower-layer contracts under [ADR-0026](../../docs/decisions/0026-package-layers.md) and never import a composition root.
+Use the existing runtime, harness and domain models and the approved layer table.
+A necessary new row requires approval before edits.
 
-Every identity is core-generated. The public pure helper `new_operation_id()` returns a fresh `OperationId` before a request is sent; clients retain it for replay, and implementation tests inject the identity source. Only the parent creates invocation/resource identities and reservation tokens. `InvocationId`, `ResourceId` and `OperationId` are non-reused 128-bit values represented by 32 lowercase hex characters. `ReservationToken` additionally binds invocation, resource, owner process and generation (positive uint64); it is private control authority and never output. Reserve/acquire replay keys are the pair (verb, operation ID), scoped to the invocation. A lost reply retries the same key and exact request. Conflicting reuse is refused, never a second acquisition. Acknowledge names acquisition_operation_id and is idempotent for that acquisition/revision; it is not reuse of the acquire request key. Close is the one monotonic operation per resource subtree, with repeated calls joining its recorded report.
+`InvocationId`, `ResourceId` and `OperationId` are core-generated, non-reused 128-bit values in 32 lowercase hex characters.
+Only the parent creates invocation and resource IDs and reservation tokens.
+The pure `new_operation_id()` helper provides a fresh `OperationId` before dispatch, with an injectable identity source in implementation tests.
+Clients retain the ID for replay.
 
-| Type | Closed fields / meaning |
+Reserve and acquire each key replay by verb and operation ID within the invocation.
+A lost reply retries the exact key and request.
+Conflicting reuse refuses without another acquisition.
+Acknowledgement names the acquisition operation ID and repeats its recorded result for the same acquisition and revision without reusing the acquisition key.
+Close is monotonic per subtree and repeated calls join its recorded report.
+
+| Type | Closed fields and authority |
 | --- | --- |
-| `LifetimeLimits` | positive finite acquisition, cooperative, TERM, KILL/observation and drain deadlines; maximum resource records, outstanding operations, control bytes and retained evidence bytes. Concrete default values are below. Deadlines use one parent's monotonic clock; child timestamps grant no authority. |
+| `LifetimeLimits` | Positive finite acquisition, cooperative, TERM, KILL/observation and drain deadlines. Bounds on records, outstanding operations, control bytes and retained evidence. The defaults are in [bounded settlement](#state-transitions-and-bounded-settlement). The parent monotonic clock governs deadlines. |
 | `ResourceKind` | `process_domain`, `local_runtime_domain`, `temporary_tree`, `borrowed_service`. |
-| `ReservationRequest` | `operation_id`, `kind`, optional `parent_resource_id`; parent must be an owned still-open resource of this invocation; runtime_binding: LocalRuntimeBinding or None is required exactly for local_runtime_domain. |
+| `ReservationToken` | Binds invocation ID, resource ID, owner `ProcessIdentity` and positive uint64 generation. The token is private control authority and stays out of reports and diagnostics. |
+| `ReservationRequest` | `operation_id`, `kind`, optional `parent_resource_id`, and `runtime_binding: LocalRuntimeBinding \| None` required exactly for a runtime domain. A parent resource must be an owned still-open resource of this invocation. |
 | `Reservation` | `token`, immutable `kind`, `revision`, `state`. |
-| `ProcessLaunch` | bounded executable/argv/environment snapshot, a parent-owned working-directory ResourceId, `stdin` fixed to null, and `stdout`/`stderr` each captured or null; capture pipes are parent-created subordinate resources, never user output or lifetime-control descriptors, and `domain` (`invocation` or `detached`). These are private execution inputs, never diagnostics/recovery evidence. No cleanup command is accepted. |
-| `LocalRuntimeBinding` | execution_domain_id, state_root_resource_id, attempt_id, launch_nonce, request_digest, using the current runtime identifier/digest definitions. The state root is already parent-owned. This immutable binding precedes starting-entry, workspace and launch effects. |
-| `LocalRuntimeLaunch` | exact LocalRuntimeBinding plus ProcessLaunch for the existing production/testing runner command. |
-| `TemporaryTreeRequest` | parent temporary-tree resource or invocation root; no caller-supplied absolute deletion path. Parent chooses a fresh basename, creates the directory exclusively, and anchors its identity. |
-| `BorrowedServiceRequest` | owner-generated opaque service reference and `pre_existing=True`; client connections are owned by the invocation process, but the service itself is neither stopped nor deleted. This declaration is cooperative, not proof against dishonest code. |
-| `Acquisition` | token, operation ID, resource revision, `ProcessRegistration`, `LocalRuntimeRegistration`, `TemporaryTreeRegistration` or `BorrowedServiceRegistration`; no arbitrary dictionary. |
-| `ProcessRegistration` | `process: ProcessIdentity`, `acquisition_operation_id: OperationId`, `process_group_id: Pid`, `session_id: Pid`; the final group/session identity is captured before provider execution and cannot subsequently change. No PID alone is authority. |
-| `LocalRuntimeRegistration` | exact LocalRuntimeBinding, runner ProcessRegistration, fixed controller kind local_runtime; shared retirement/fallback code operates on the anchored registry independently of the fixture. |
-| `TemporaryTreeRegistration` | `resource_id: ResourceId`, `parent_resource_id: ResourceId`, `name: str` (core-generated 32 lowercase hex), `device: uint64`, `inode: uint64`, `owner_uid: uint32`; these immutable identity fields contain no caller path. Descriptors stay private. |
-| `BorrowedServiceRegistration` | opaque service reference, owning connection scope and no stop/delete authority. |
-| `ActivationAcknowledgement` | token, acquisition operation ID, revision and parent-issued activation result (`active` or `closing`); it is not closure evidence. |
-| `ResourceObservation` | token-free resource ID/kind/revision, state, pending acquisition count, live owned-process count, remaining pipe/tree count and a closed reason code. Private controller data retains exact identities. |
-| `ClosureReport` | invocation/resource IDs, revision, `closed` or `unknown`, original outcome separately from cleanup outcome, total unresolved count and capped content-free resource samples, plus opaque `CleanupReference` when unknown. |
-| `CleanupReference` | InvocationId alone, which names its one journal under the private conformance state directory; never an arbitrary path or a second mapping key. |
+| `ProcessLaunch` | Bounded executable/argv/environment, parent-owned working-directory `ResourceId`, null `stdin`, captured or null `stdout` and `stderr`, and `domain` of `invocation` or `detached`. The parent owns subordinate capture pipes, separate from public output and lifetime control. Private execution inputs stay out of diagnostics and recovery evidence. No caller cleanup command is accepted. |
+| `LocalRuntimeBinding` | `execution_domain_id`, `state_root_resource_id`, `attempt_id`, `launch_nonce`, `request_digest` with the existing runtime types. The parent already owns the state root. This immutable binding precedes starting-entry, workspace and launch effects. |
+| `LocalRuntimeLaunch` | Exact `LocalRuntimeBinding` and `ProcessLaunch` for the existing production/testing runner. |
+| `TemporaryTreeRequest` | Owned parent tree or invocation root. The parent chooses a fresh basename, creates it exclusively and anchors identity, without a caller deletion path. |
+| `BorrowedServiceRequest` | Owner-generated opaque service reference and `pre_existing=True`. The invocation owns client connections and has no stop/delete authority on the service. The declaration relies on cooperative code. |
+| `Acquisition` | Token, operation ID, resource revision and exactly one of `ProcessRegistration`, `LocalRuntimeRegistration`, `TemporaryTreeRegistration` or `BorrowedServiceRegistration`. |
+| `ProcessRegistration` | `process: ProcessIdentity`, `acquisition_operation_id: OperationId`, `process_group_id: Pid`, `session_id: Pid`. Capture final group and session identity before provider execution and hold it immutable. PID alone confers no authority. |
+| `LocalRuntimeRegistration` | Exact `LocalRuntimeBinding`, runner `ProcessRegistration`, fixed controller kind `local_runtime`. Shared retirement and fallback code acts on the anchored registry independently of the fixture. |
+| `TemporaryTreeRegistration` | `resource_id: ResourceId`, `parent_resource_id: ResourceId`, `name: str` as core-generated 32 lowercase hex, `device: uint64`, `inode: uint64` and `owner_uid: uint32`. These fields are immutable and contain no caller path. Descriptors remain private. |
+| `BorrowedServiceRegistration` | Opaque service reference and owning connection scope without stop/delete authority. |
+| `ActivationAcknowledgement` | Token, acquisition operation ID, revision and parent-issued `active` or `closing`. Closure requires its own evidence. |
+| `ResourceObservation` | Token-free resource ID, kind, revision, state, pending acquisition and live owned-process counts, remaining pipe/tree counts and closed reason. Exact identities remain with the private controller. |
+| `ClosureReport` | Invocation and resource IDs, revision, `closed` or `unknown`, original outcome and separate cleanup outcome, unresolved total, capped content-free samples and opaque `CleanupReference` when unknown. |
+| `CleanupReference` | One `InvocationId` naming its journal under the private state directory, with no caller path or second mapping key. |
 
-`ConformanceLifetime` has these async methods:
+The asynchronous `ConformanceLifetime` interface defines these operations.
 
-- `reserve(request: ReservationRequest) -> Reservation` records an ownership slot before acquisition. Reservation itself creates no requested resource.
-- `acquire(token: ReservationToken, operation_id: OperationId, request: ProcessLaunch | LocalRuntimeLaunch | TemporaryTreeRequest | BorrowedServiceRequest) -> Acquisition` asks the parent to perform the matching operation. The parent records the effect in progress before dispatch, owns its task independent of the caller waiter and validates kind/parent/generation. Fixture code cannot perform a detached spawn then register it retrospectively.
-- `acknowledge(token: ReservationToken, acquisition_operation_id: OperationId, revision: int) -> ActivationAcknowledgement` asks the parent to release the acquisition's pre-live gate. The parent atomically checks admission, records activation and releases the gate. Failure/cancellation/lost response never removes the record. A duplicate returns the recorded result without releasing a second gate.
-- `close(resource_id: ResourceId | None) -> ClosureReport` irreversibly closes admission for that resource and descendants (None means the invocation), initiates shared bounded cleanup and waits for a report. Cancelling a waiter does not cancel the cleanup owner.
-- `observe(resource_id: ResourceId | None) -> tuple[ResourceObservation, ...]` reads parent-authoritative state for at most the 256 retained records, never external fixture assertions.
+- `reserve(request: ReservationRequest) -> Reservation` records ownership before acquisition and creates no requested resource.
+- `acquire(token: ReservationToken, operation_id: OperationId, request: ProcessLaunch | LocalRuntimeLaunch | TemporaryTreeRequest | BorrowedServiceRequest) -> Acquisition` asks the parent to record the effect before dispatch and perform the operation under the verified kind, parent and generation.
+  The parent owns the task independently of its waiter.
+  Retrospective registration of a fixture-spawned detached process is refused.
+- `acknowledge(token: ReservationToken, acquisition_operation_id: OperationId, revision: int) -> ActivationAcknowledgement` asks the parent to atomically check admission, record activation and release the pre-live gate.
+  Failure, cancellation and lost replies retain ownership.
+  A duplicate does not release another gate.
+- `close(resource_id: ResourceId | None) -> ClosureReport` irreversibly fences the resource and descendants, or the invocation for `None`, and joins bounded cleanup.
+  Cancelling the waiter leaves its cleanup owner running.
+- `observe(resource_id: ResourceId | None) -> tuple[ResourceObservation, ...]` reads parent-authoritative state for at most 256 retained records.
+  Fixture assertions grant no evidence.
 
-The core-only controller exposes `resume_close(reference: CleanupReference, limits: LifetimeLimits) -> ClosureReport`. It loads only the fixed built-in local cleanup recipes and anchored identities, refuses a live original owner, cannot reacquire/reactivate, and never imports provider/fixture code. A failed invocation retains its private journal/root until this operation or an operator actually closes the resources. Parent and resumers hold an exclusive process-lifetime invocation lock. The journal binds current owner ProcessIdentity and a monotonic recovery generation; a competing resumer fails boundedly before effects. A crashed resumer is replaced only after confirmed identity exit and lock acquisition. A stop/escalation path never waits for this lock. Journal replacement is atomic and synced before acquisition/activation acknowledgement; write failure refuses the transition without losing prior ownership. Durable records retain device/inode, owner, relative name and ancestor identities sufficient to reopen filesystem roots safely; mismatches remain unknown. Private descriptors and wait anchors are not portable recovery handles. Each core helper that can publish a journal or registry mutation holds an inherited duplicate of the same exclusive invocation lock claim until its write/rename/sync and exit settle; only those fixed core helpers inherit this descriptor, never pytest/providers or launched workloads. The OS-held claim therefore survives parent exit while a stale writer could still publish. A resumer cannot change owner/generation or mutate state until it acquires that claim and verifies all earlier writer/effect records settled; it fails boundedly owner_busy/unknown otherwise. Old helpers never publish into a newer generation. Within one owner/generation, at most one mutation publisher per journal is outstanding; bounded queued snapshots publish in increasing revision order, so an older snapshot cannot replace a newer one. Runtime-registry mutation still follows its existing short locked read/compare/write transitions; the shared invocation claim does not replace those locks. Signals and parent exit do not wait for the claim; an unkillable old writer preserves unresolved ownership rather than permitting takeover. The implementation plan for #215 must expose this operation through an explicit local cleanup entry point; the entry point is `kora conformance cleanup <invocation-id>`. It is a local recovery operation, not a background resource manager.
+Transport records are closed immutable values.
+Process-held pidfds, wait handles, socket/pipe endpoints, directory descriptors and task handles stay in parent records indexed by `ResourceId`.
+Public kind, state and reason values are closed enums.
+The wire checks bounded `ProcessIdentity`, positive uint64 revisions and generations, bounded nonnegative counts and exact ID encodings before effects.
+Unknown process identity fields refuse activation.
+The launch snapshot is private and limited to one MiB in aggregate.
+Use bounded chunks and reserve aggregate capacity before accepting input.
+Malformed, incomplete or excessive input never dispatches.
 
-All transport records are closed immutable values. Process-held pidfds, wait handles, socket/pipe endpoints, directory descriptors and async task references exist only in parent controller records indexed by ResourceId; none is an Acquisition field. Public state/reason/kind fields are closed enums. The wire validates the existing bounded ProcessIdentity, positive uint64 revisions/generations, nonnegative bounded counts and exact ID formats before effects; unknown ProcessIdentity fields refuse activation. ProcessLaunch argv/environment/working-directory are private bounded execution inputs, at most one MiB in aggregate, carried over bounded chunks with an aggregate admission reservation; malformed, incomplete or excess requests never dispatch. Fixed reasons are complete, cancelled, acquisition_failed, identity_unknown, identity_mismatch, effect_unsettled, resource_live, cleanup_failed, capacity_exceeded, owner_busy and journal_unavailable.
+Fixed reasons are `complete`, `cancelled`, `acquisition_failed`, `identity_unknown`, `identity_mismatch`, `effect_unsettled`, `resource_live`, `cleanup_failed`, `capacity_exceeded`, `owner_busy` and `journal_unavailable`.
 
-Recovery may discard an abandoned fixed `next` staging file only after acquiring the verified exclusive claim, validating the authoritative journal and its directory bindings, confirming earlier owner/helper settlement, and refusing pending effects or exhausted generations/revisions. The entry must be an anchored, no-follow, current-owner regular file with mode 0600 and one link; unsafe or substituted entries remain retained. Its bytes, including an interrupted partial write, are never parsed or promoted into authority. Unlink and directory sync complete before recovery changes owner/generation or publishes; failure leaves the authoritative journal unchanged and does not grant takeover. Ordinary publication keeps exclusive staging-file creation.
+The core-only `resume_close(reference: CleanupReference, limits: LifetimeLimits) -> ClosureReport` powers `kora conformance cleanup <invocation-id>`.
+It uses fixed local cleanup recipes and anchored identities.
+It refuses a live original owner and never reacquires, reactivates or imports provider or fixture code.
+A failed invocation retains its private journal and root until closure is verified.
+This is an explicit local operation for recovery.
+
+The parent and resumers hold one exclusive process-lifetime invocation claim.
+The journal binds the current owner `ProcessIdentity` and a monotonically increasing recovery generation.
+Competing resumers fail within the bound before effects.
+Replacing a crashed resumer requires confirmed identity exit and acquisition of the claim.
+Signals, escalation and parent exit proceed independently of this claim.
+
+Journal replacement is atomic and synced before acknowledgement of acquisition or activation.
+Write failure refuses the transition and preserves prior ownership.
+Durable filesystem records retain relative name, device/inode, owner and ancestor identities for safe reopening.
+Mismatches remain unknown.
+Private descriptors and wait anchors are local to the owning process.
+
+Only fixed journal or registry mutation helpers inherit a duplicate of the claim.
+Each holds it through write, rename, sync and observed exit.
+This maintains the exclusive OS claim while an old writer can still publish after parent exit.
+Before changing owner or generation or making another mutation, a resumer must acquire the claim and verify all previous writer/effect records settled.
+Otherwise it returns bounded `owner_busy` or unknown.
+Old helpers cannot publish into a later generation.
+Allow at most one outstanding publisher per journal in a generation, with bounded queued snapshots in increasing revision order.
+Runtime registry transitions retain their own short locked compare-and-write.
+An unkillable old writer keeps ownership unresolved.
+
+Recovery may discard the fixed abandoned `next` file only under the verified claim, after authoritative journal and directory validation, earlier owner/helper settlement and refusal of pending effects or exhausted generations/revisions.
+Accept only an anchored, no-follow, current-owner regular file with mode 0600 and one link.
+Retain unsafe or substituted entries.
+Recovery never parses or promotes staging bytes, including after an interrupted partial write.
+Unlink and sync the directory before changing owner/generation or publishing.
+Failure preserves the authoritative journal and confers no takeover.
+Ordinary publication keeps exclusive staging creation.
 
 ## Resource establishment and ownership transfer
 
