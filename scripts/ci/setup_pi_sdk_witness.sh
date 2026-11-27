@@ -55,7 +55,7 @@ for name in package.json pnpm-lock.yaml tsconfig.json bridge.ts; do
   cp -- "$source/$name" "$build/bridge/"
 done
 
-install=("$build/pnpm" install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
+install=(RAYON_NUM_THREADS=1 "$build/pnpm" install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
   --ignore-workspace
   --registry=https://registry.npmjs.org/ --store-dir="$build/store"
   --config.manage-package-manager-versions=false --config.package-import-method=copy

@@ -511,13 +511,16 @@ def test_pi_sdk_bridge_compiles_without_emitting_failed_source() -> None:
     assert bridge["files"] == ["bridge.ts"]
 
 
-def test_pi_sdk_installs_ignore_parent_pnpm_workspaces() -> None:
+def test_pi_sdk_installs_share_private_pnpm_arguments() -> None:
     setup = (ROOT / PI_SDK_SETUP).read_text()
 
     install = re.search(r"(?ms)^install=\((.*?)\)\n", setup)
 
     assert install is not None
-    assert "--ignore-workspace" in install.group(1).split()
+    arguments = install.group(1).split()
+    assert arguments[:2] == ["RAYON_NUM_THREADS=1", '"$build/pnpm"']
+    assert "--ignore-workspace" in arguments
+    assert setup.count("RAYON_NUM_THREADS=") == 1
     assert setup.count('"${install[@]}"') == 2
 
 
@@ -537,6 +540,23 @@ def test_pi_sdk_manifest_records_exact_installed_file_bytes(tmp_path: Path) -> N
             "sha256": hashlib.sha256(CONTENT).hexdigest(),
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("mode", "entry_mode"), [(0o770, "0o40770"), (0o707, "0o40707")]
+)
+def test_pi_sdk_manifest_refuses_externally_writable_entries(
+    tmp_path: Path, mode: int, entry_mode: str
+) -> None:
+    folder = tmp_path / "installed/private-entry"
+    folder.mkdir(parents=True)
+    folder.chmod(mode)
+
+    message = re.escape(f"Pi SDK installation entry refused ({entry_mode})")
+    with pytest.raises(ValueError, match=rf"\A{message}\Z"):
+        write_manifest(tmp_path)
+
+    assert not (tmp_path / "manifest.json").exists()
 
 
 @pytest.mark.parametrize("hardlink", [False, True])

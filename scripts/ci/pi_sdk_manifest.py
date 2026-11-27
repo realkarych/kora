@@ -67,7 +67,7 @@ def admit(path: Path, root: Path, record_count: int) -> tuple[str, os.stat_resul
         or metadata.st_uid != os.getuid()
         or metadata.st_mode & 0o022
     ):
-        raise ValueError("Pi SDK installation entry is outside its admission bounds")
+        raise ValueError(f"Pi SDK installation entry refused ({metadata.st_mode:#o})")
     return name, metadata
 
 
