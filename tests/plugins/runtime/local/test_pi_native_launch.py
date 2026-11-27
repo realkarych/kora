@@ -270,7 +270,7 @@ class PiGate:
         self._installation_scan: asyncio.Task[None] | None = None
         self._release_task: asyncio.Task[int] | None = None
         self.identities = NativeIdentityReader(clock=self.clock)
-        self._child_probe, _ = native_direct_child_wait()
+        self._child_probe, self._watch_child = native_direct_child_wait()
         self.cutoff_ns: int = self.clock.monotonic_ns() + 10 * SECOND
         self.nonce: str = new_operation_id()
         self.stopped: bool = False
@@ -367,6 +367,34 @@ class PiGate:
         ):
             return
         raise BridgeRefused("stopped")
+
+    async def wait_for_terminal_exit(self) -> None:
+        probe = self._child_probe
+        if probe is None:
+            await self.owner.wait_exit(self.cutoff_ns)
+            return
+
+        watch_child = self._watch_child
+        assert watch_child is not None
+        self.require_binding()
+        registration = self.owner.registration
+        assert registration is not None
+        assert probe.read(registration) is Readiness.NOT_READY
+        await self.owner.wait_exit(self.cutoff_ns)
+        while self.clock.monotonic_ns() < self.cutoff_ns:
+            watch = watch_child(registration.process.pid)
+            try:
+                assert self.owner.registration == registration
+                readiness = probe.read(registration)
+                assert readiness is not Readiness.MISMATCH
+                if readiness is Readiness.READY:
+                    break
+                await wait_future(watch.changed, self.cutoff_ns, self.clock)
+            finally:
+                watch.close()
+        else:
+            raise ChannelError(ChannelFailure.DEADLINE)
+        self.require_binding(allow_exit=True)
 
     async def recheck_installation(self) -> None:
         if self.stopped or self._release_task is not None:
@@ -505,13 +533,14 @@ async def test_pi_sdk_uses_closed_session_and_reaps(
         transport = gate.streams[1].transport
         assert isinstance(transport, asyncio.Transport)
 
-        transport.pause_reading()
-        pending = asyncio.create_task(gate.prompt(PROMPT))
-        try:
-            await gate.owner.wait_exit(gate.cutoff_ns)
-        finally:
-            transport.resume_reading()
-        text = await pending
+        async with asyncio.TaskGroup() as tasks:
+            transport.pause_reading()
+            try:
+                pending = tasks.create_task(gate.prompt(PROMPT))
+                await gate.wait_for_terminal_exit()
+            finally:
+                transport.resume_reading()
+        text = pending.result()
         result = await gate.release(natural=True)
 
         assert (text, result) == ("done", 0)
@@ -1154,37 +1183,17 @@ async def assert_unadmitted_terminal_refused(gate: PiGate) -> None:
             await gate.prompt(PROMPT)
         assert failure.value.code == "prompt"
 
-    probe, watch_child = native_direct_child_wait()
-    if probe is None:
+    if sys.platform != "darwin":
         await assert_prompt_refused()
         return
 
-    assert watch_child is not None
-    gate.require_binding()
-    registration = gate.owner.registration
-    assert registration is not None
-    assert probe.read(registration) is Readiness.NOT_READY
     transport = gate.streams[1].transport
     assert isinstance(transport, asyncio.Transport)
     async with asyncio.TaskGroup() as tasks:
         transport.pause_reading()
         try:
             tasks.create_task(assert_prompt_refused())
-            await gate.owner.wait_exit(gate.cutoff_ns)
-            while gate.clock.monotonic_ns() < gate.cutoff_ns:
-                watch = watch_child(registration.process.pid)
-                try:
-                    assert gate.owner.registration == registration
-                    readiness = probe.read(registration)
-                    assert readiness is not Readiness.MISMATCH
-                    if readiness is Readiness.READY:
-                        break
-                    await wait_future(watch.changed, gate.cutoff_ns, gate.clock)
-                finally:
-                    watch.close()
-            else:
-                raise ChannelError(ChannelFailure.DEADLINE)
-            gate.require_binding(allow_exit=True)
+            await gate.wait_for_terminal_exit()
         finally:
             transport.resume_reading()
 
