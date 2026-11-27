@@ -5,15 +5,25 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Final, Literal, Protocol, cast
 
+from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import decode_strict_json
+from kora.plugins.harness.pi.shell_call import (
+    BashRequest,
+    PiShellCall,
+    ShellCallRefused,
+)
 from kora.protocols.lifetime import new_operation_id
 from kora.protocols.secret_value import SecretValue
 from kora.protocols.time import Clock
 from kora.runner.channels import ChannelError, DescriptorReadiness, wait_future
+from kora.runner.native_io import observed
 from kora.runner.process_stdio import StdioStreams
 
 MAX_FRAME_BYTES: Final[int] = 65_536
 MAX_PROMPT_BYTES: Final[int] = 32_768
+MAX_COMMAND_BYTES: Final[int] = 32_768
+MAX_RESULT_BYTES: Final[int] = 8_192
+_CALL_ID: Final[re.Pattern[str]] = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _NONCE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{32}")
 _FAILURES: Final = ("protocol", "startup", "credential", "prompt", "stopped")
 Command = Literal["init", "credential", "prompt"]
@@ -39,6 +49,8 @@ class BridgeChannel:
         clock: Clock,
         require_binding: Callable[[bool], None],
         recheck_installation: Callable[[], Awaitable[None]],
+        shell: PiShellCall | None = None,
+        on_revoked: Callable[[], None] | None = None,
     ) -> None:
         if _NONCE.fullmatch(nonce) is None:
             raise BridgeRefused("protocol")
@@ -49,15 +61,20 @@ class BridgeChannel:
         self._clock = clock
         self._require_binding = require_binding
         self._recheck_installation = recheck_installation
+        self._shell = shell
+        self._on_revoked = on_revoked
         self._phase: Command | None = "init"
         self._revoked: bool = False
         self._waiting: tuple[int, DescriptorReadiness] | None = None
 
     async def initialize(self, origin: str, model: str) -> None:
-        await self._exchange("init", "ready", "credential", origin=origin, model=model)
+        profile = {} if self._shell is None else {"profile": "bash"}
+        await self._exchange(
+            "init", "ready", "credential", origin=origin, model=model, **profile
+        )
 
     async def credential(self, key: SecretValue) -> None:
-        await self._exchange("credential", "credential_ready", "prompt", secret=key)
+        await self._exchange("credential", "credential_ready", "prompt", key)
 
     async def prompt(self, text: str) -> str:
         if len(text) > MAX_PROMPT_BYTES or len(text.encode()) > MAX_PROMPT_BYTES:
@@ -65,17 +82,21 @@ class BridgeChannel:
         return await self._exchange("prompt", "terminal", None, text=text)
 
     def revoke(self) -> None:
+        if self._revoked:
+            return
         self._revoked = True
         self._release_waiter()
         self._writer.transport.abort()
+        if self._on_revoked is not None:
+            self._on_revoked()
 
     async def _exchange(
         self,
         kind: Command,
         reply: Reply,
         following: Command | None,
-        *,
         secret: SecretValue | None = None,
+        /,
         **fields: str,
     ) -> str:
         self._remaining()
@@ -90,7 +111,11 @@ class BridgeChannel:
                 fields["key"] = secret.reveal()
             await self._send(kind, **fields)
             await self._send("activate", challenge=challenge)
-            response = await self._receive(reply, challenge)
+            response = (
+                await self._prompt_reply(challenge, self._shell)
+                if kind == "prompt" and self._shell is not None
+                else self._reply(await self._read(challenge), reply)
+            )
             self._phase, complete = following, True
             return response
         finally:
@@ -126,7 +151,13 @@ class BridgeChannel:
         finally:
             self._release_waiter()
 
-    async def _send(self, kind: str, **fields: str) -> None:
+    async def _send(
+        self,
+        kind: str,
+        require_current: Callable[[], None] | None = None,
+        /,
+        **fields: str,
+    ) -> None:
         record = (
             json.dumps(
                 {"kind": kind, "nonce": self._nonce, **fields},
@@ -140,6 +171,8 @@ class BridgeChannel:
         try:
             remaining = memoryview(record)
             while remaining:
+                if require_current is not None:
+                    require_current()
                 self._require_binding(False)
                 self._remaining()
                 descriptor = self._endpoint.fileno()
@@ -149,6 +182,8 @@ class BridgeChannel:
                     await self._wait_writable(descriptor)
                     self._remaining()
                     self._require_binding(False)
+                    if require_current is not None:
+                        require_current()
                     await self._recheck_installation()
                     continue
                 if written <= 0:
@@ -159,10 +194,22 @@ class BridgeChannel:
         except OSError:
             raise BridgeRefused("closed") from None
 
-    async def _receive(self, expected: Reply, challenge: str) -> str:
+    async def _read(
+        self, challenge: str, permit_input: Callable[[], bool] | None = None
+    ) -> JsonObject:
         try:
             async with asyncio.timeout(self._remaining()):
-                record = await self._reader.readuntil(b"\n")
+                prefix = b""
+                if permit_input is not None:
+                    prefix = await self._reader.readexactly(1)
+                    self._remaining()
+                    if not permit_input():
+                        raise BridgeRefused("protocol")
+                record = (
+                    prefix
+                    if prefix == b"\n"
+                    else prefix + await self._reader.readuntil(b"\n")
+                )
         except TimeoutError:
             raise BridgeRefused("closed" if self._revoked else "deadline") from None
         except (OSError, EOFError, asyncio.LimitOverrunError) as error:
@@ -180,6 +227,10 @@ class BridgeChannel:
             raise BridgeRefused("protocol")
         self._require_binding(frame.get("kind") in ("failure", "terminal"))
         self._remaining()
+        return frame
+
+    @staticmethod
+    def _reply(frame: JsonObject, expected: Reply) -> str:
         match frame:
             case {"kind": "failure", "code": str(code)} if (
                 len(frame) == 2 and code in _FAILURES
@@ -193,3 +244,79 @@ class BridgeChannel:
                 return ""
             case _:
                 raise BridgeRefused("protocol")
+
+    async def _prompt_reply(self, challenge: str, shell: PiShellCall) -> str:
+        frame = await self._read(challenge)
+        match frame:
+            case {
+                "kind": "bash_call",
+                "id": str(id_),
+                "call": str(operation),
+                "command": str(command),
+            } if (
+                len(frame) == 4
+                and _CALL_ID.fullmatch(id_) is not None
+                and _NONCE.fullmatch(operation) is not None
+                and operation not in (challenge, self._nonce)
+                and 0 < len(command.encode()) <= MAX_COMMAND_BYTES
+            ):
+                call = BashRequest(id_, operation, command)
+            case _:
+                if frame.get("kind") == "failure":
+                    self._reply(frame, "terminal")
+                raise BridgeRefused("protocol")
+
+        released = False
+        peer = asyncio.create_task(self._read(challenge, lambda: released))
+
+        def require_current() -> None:
+            self._remaining()
+            if peer.done():
+                peer.result()
+                raise BridgeRefused("protocol")
+            if self._reader.at_eof():
+                raise BridgeRefused("closed")
+            self._require_binding(False)
+
+        def current() -> bool:
+            try:
+                require_current()
+            except BridgeRefused:
+                return False
+            return True
+
+        async def deliver(result: str) -> None:
+            nonlocal released
+            if len(result.encode()) > MAX_RESULT_BYTES:
+                raise BridgeRefused("protocol")
+            await self._send(
+                "bash_result",
+                require_current,
+                challenge=challenge,
+                call=operation,
+                id=id_,
+                result=result,
+            )
+            await self._send("activate", require_current, challenge=operation)
+            released = True
+
+        work = asyncio.create_task(shell.run(call, self._cutoff_ns, current))
+        operation_task: asyncio.Task[str] | asyncio.Task[None] = work
+        try:
+            await asyncio.wait((peer, work), return_when=asyncio.FIRST_COMPLETED)
+            require_current()
+            delivery = asyncio.create_task(deliver(work.result()))
+            operation_task = delivery
+            await asyncio.wait((peer, delivery), return_when=asyncio.FIRST_COMPLETED)
+            if not delivery.done():
+                require_current()
+            delivery.result()
+            return self._reply(await peer, "terminal")
+        except ShellCallRefused:
+            raise BridgeRefused("prompt") from None
+        finally:
+            if not released or not peer.done():
+                self.revoke()
+            for pending in (operation_task, peer):
+                pending.cancel()
+                await observed(cast(asyncio.Future[object], pending))

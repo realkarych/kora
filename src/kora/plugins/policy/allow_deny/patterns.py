@@ -65,6 +65,7 @@ FAMILY_NAMES: Final[tuple[str, ...]] = ("Edit", "Write")
 FILE_EDIT_TOOLS: Final[dict[str, tuple[str, ...]]] = {
     "claude": ("Edit", "MultiEdit", "NotebookEdit", "Write"),
     "codex": ("apply_patch",),
+    "pi": ("Edit", "Write"),
 }
 LayerName = Literal["namespace", "node"]
 

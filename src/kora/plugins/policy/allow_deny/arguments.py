@@ -33,6 +33,7 @@ ARGUMENT_KEYS: Final[dict[tuple[str, str], str]] = {
     ("claude", "NotebookEdit"): "notebook_path",
     ("codex", "Bash"): "command",
     ("codex", "apply_patch"): "command",
+    ("pi", "Bash"): "command",
 }
 PATCH_TOOLS: Final[frozenset[tuple[str, str]]] = frozenset({("codex", "apply_patch")})
 BEGIN_PATCH: Final[str] = "*** Begin Patch"
