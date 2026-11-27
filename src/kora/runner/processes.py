@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import AbstractContextManager, ExitStack, nullcontext
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Protocol, cast
@@ -647,6 +647,14 @@ class RecoveredProcess:
         self.members.dispose()
 
 
+class DirectWaitOwner(Protocol):
+    def protect_spawn(self) -> AbstractContextManager[None]: ...
+
+    def register(self, pid: int) -> None: ...
+
+    def release(self, pid: int) -> None: ...
+
+
 class GatedProcess:
     def __init__(
         self,
@@ -661,6 +669,8 @@ class GatedProcess:
         child_probe: DirectChildProbe | None = None,
         child_watch: Callable[[int], ChildWatch] | None = None,
         stdio_limit: int | None = None,
+        stdout_sink: Callable[[bytes], None] | None = None,
+        wait_owner: DirectWaitOwner | None = None,
     ) -> None:
         self._launch = launch
         self._operation_id = operation_id
@@ -683,12 +693,14 @@ class GatedProcess:
         self._registration: ProcessRegistration | None = None
         self._start_failed = False
         self._prepared = False
+        self._activation_attempted = False
         self._activated = False
         self._closing = False
         self._released = False
         self._gate_close_failed = False
         self._unstarted_capture_close_failed = False
-        self._start(cwd_descriptor, stdio_limit)
+        self._wait_owner = wait_owner
+        self._start(cwd_descriptor, stdio_limit, stdout_sink)
 
     @property
     def registration(self) -> ProcessRegistration | None:
@@ -724,12 +736,17 @@ class GatedProcess:
             if not capture.closed and not capture.readiness.done()
         )
 
-    def _output_descriptor(self, mode: ProcessOutput | None, owned: ExitStack) -> int:
+    def _output_descriptor(
+        self,
+        mode: ProcessOutput | None,
+        owned: ExitStack,
+        sink: Callable[[bytes], None] | None = None,
+    ) -> int:
         if mode is ProcessOutput.CAPTURE:
             reading, writing = os.pipe()
             owned.callback(os.close, writing)
             try:
-                capture = CaptureDrain(reading)
+                capture = CaptureDrain(reading, sink)
             except OSError:
                 os.close(reading)
                 raise
@@ -739,7 +756,12 @@ class GatedProcess:
         owned.callback(os.close, descriptor)
         return descriptor
 
-    def _start(self, cwd_descriptor: int, stdio_limit: int | None) -> None:
+    def _start(
+        self,
+        cwd_descriptor: int,
+        stdio_limit: int | None,
+        stdout_sink: Callable[[bytes], None] | None,
+    ) -> None:
         asyncio.get_running_loop()
         gate_deadline = time.monotonic_ns() + max(
             0, self._deadline - self._clock.monotonic_ns()
@@ -763,31 +785,37 @@ class GatedProcess:
                 output = (
                     input_descriptor
                     if self._stdio is not None
-                    else self._output_descriptor(self._launch.stdout, child_descriptors)
+                    else self._output_descriptor(
+                        self._launch.stdout, child_descriptors, stdout_sink
+                    )
                 )
                 errors = self._output_descriptor(self._launch.stderr, child_descriptors)
-                self._process = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-I",
-                        "-m",
-                        "kora.runner.gate",
-                    ],
-                    stdin=input_descriptor,
-                    shell=False,
-                    stdout=output,
-                    stderr=errors,
-                    env={
-                        "KORA_GATE_CONTROL_FD": str(child.fileno()),
-                        "KORA_GATE_CWD_FD": str(directory),
-                    },
-                    close_fds=True,
-                    pass_fds=(child.fileno(), directory),
-                    process_group=(
-                        0 if self._launch.domain is ProcessDomain.INVOCATION else None
-                    ),
-                    start_new_session=self._launch.domain is ProcessDomain.DETACHED,
-                )
+                with (
+                    self._wait_owner.protect_spawn()
+                    if self._wait_owner is not None
+                    else nullcontext()
+                ):
+                    self._process = subprocess.Popen(
+                        [sys.executable, "-I", "-m", "kora.runner.gate"],
+                        stdin=input_descriptor,
+                        shell=False,
+                        stdout=output,
+                        stderr=errors,
+                        env={
+                            "KORA_GATE_CONTROL_FD": str(child.fileno()),
+                            "KORA_GATE_CWD_FD": str(directory),
+                        },
+                        close_fds=True,
+                        pass_fds=(child.fileno(), directory),
+                        process_group=(
+                            0
+                            if self._launch.domain is ProcessDomain.INVOCATION
+                            else None
+                        ),
+                        start_new_session=self._launch.domain is ProcessDomain.DETACHED,
+                    )
+                    if self._wait_owner is not None:
+                        self._wait_owner.register(self._process.pid)
                 if stdio_child is not None:
                     stdio_child.close()
                 self._anchor = ExitAnchor(self._process.pid)
@@ -898,6 +926,7 @@ class GatedProcess:
         observation = self.observe(self._deadline)
         if observation.condition is not ProcessCondition.LIVE:
             raise ProcessError(observation.condition)
+        self._activation_attempted = True
         await channel.write_frame(b"activate", self._deadline)
         self._activated = True
         channel.close()
@@ -1101,6 +1130,31 @@ class GatedProcess:
         if self._stdio is not None:
             await self._stdio.settle(deadline_ns, self._clock)
 
+    async def release_unactivated(self, deadline_ns: int) -> int | None:
+        if self._activation_attempted or self._wait_owner is None:
+            raise ProcessError(ProcessCondition.UNKNOWN)
+        self.close_gate()
+        if self._released:
+            return self.returncode
+        if self.returncode is not None:
+            return self._release_child()
+        await self.wait_exit(deadline_ns)
+        if self._stdio is not None:
+            await self._stdio.settle(deadline_ns, self._clock)
+        await self.drain(deadline_ns)
+        if self._child_watch is None:
+            return self._release_child()
+        try:
+            while not self._deadline_reached(deadline_ns):
+                self._arm_leader_watch()
+                result = self._try_release_child()
+                if result is not None:
+                    return result
+                await self._wait_for_reap_hint(deadline_ns)
+        finally:
+            self._close_leader_watch()
+        raise ChannelError(ChannelFailure.DEADLINE)
+
     async def _settle_domain(self, deadline_ns: int) -> None:
         while True:
             observation = self.observe(deadline_ns)
@@ -1293,19 +1347,35 @@ class GatedProcess:
             if self.returncode is None:
                 raise ProcessError(ProcessCondition.START_FAILED)
             return self.returncode
+        if self.returncode is not None:
+            return self._release_child()
         if self._stdio is not None and not self._stdio.closed:
             raise ProcessError(ProcessCondition.UNKNOWN)
         observation = self.observe(deadline_ns)
         if not observation.settled or not observation.capture_eof:
             raise ProcessError(observation.condition)
+        return self._release_child()
+
+    def _release_child(self) -> int:
+        result = self._try_release_child()
+        if result is None:
+            raise ProcessError(ProcessCondition.UNKNOWN)
+        return result
+
+    def _try_release_child(self) -> int | None:
         process = self._process
         anchor = self._anchor
         if process is None or anchor is None:
             raise ProcessError(ProcessCondition.UNKNOWN)
-        pid, status = os.waitpid(process.pid, os.WNOHANG)
-        if pid != process.pid:
-            raise ProcessError(ProcessCondition.UNKNOWN)
-        process.returncode = os.waitstatus_to_exitcode(status)
+        if process.returncode is None:
+            pid, status = os.waitpid(process.pid, os.WNOHANG)
+            if pid == 0:
+                return None
+            if pid != process.pid:
+                raise ProcessError(ProcessCondition.UNKNOWN)
+            process.returncode = os.waitstatus_to_exitcode(status)
+            if self._wait_owner is not None:
+                self._wait_owner.release(pid)
         anchor.close()
         self._watches.dispose()
         self.close_gate()
@@ -1330,6 +1400,8 @@ def start_gated(
     child_watch: Callable[[int], ChildWatch] | None = None,
     native_reap_wait: bool = True,
     stdio_limit: int | None = None,
+    stdout_sink: Callable[[bytes], None] | None = None,
+    wait_owner: DirectWaitOwner | None = None,
 ) -> GatedProcess:
     validated_operation = TypeAdapter(OperationId).validate_python(operation_id)
     if (
@@ -1341,6 +1413,8 @@ def start_gated(
     if stdio_limit is not None and (
         type(stdio_limit) is not int or stdio_limit < 1 or launch.stdout is not None
     ):
+        raise ProcessError(ProcessCondition.START_FAILED)
+    if stdout_sink is not None and launch.stdout is not ProcessOutput.CAPTURE:
         raise ProcessError(ProcessCondition.START_FAILED)
     if native_reap_wait and child_probe is None and child_watch is None:
         child_probe, child_watch = native_direct_child_wait()
@@ -1355,5 +1429,7 @@ def start_gated(
         child_probe=child_probe,
         child_watch=child_watch,
         stdio_limit=stdio_limit,
+        stdout_sink=stdout_sink,
+        wait_owner=wait_owner,
     )
     return owner

@@ -429,9 +429,12 @@ class BoundedChannel:
 
 
 class CaptureDrain:
-    def __init__(self, descriptor: int) -> None:
+    def __init__(
+        self, descriptor: int, sink: Callable[[bytes], None] | None = None
+    ) -> None:
         os.set_blocking(descriptor, False)
         self._descriptor = descriptor
+        self._sink = sink
         self._loop = asyncio.get_running_loop()
         self._eof: asyncio.Future[None] = self._loop.create_future()
         self._closed = False
@@ -456,12 +459,14 @@ class CaptureDrain:
             chunk = os.read(self._descriptor, MAX_FRAME_BYTES)
         except BlockingIOError:
             return
-        if chunk:
-            self.bytes_discarded = min(2**63 - 1, self.bytes_discarded + len(chunk))
-        else:
+        if self._sink is not None:
+            self._sink(chunk)
+        if not chunk:
             self._loop.remove_reader(self._descriptor)
             self._saw_eof = True
             self._eof.set_result(None)
+        elif self._sink is None:
+            self.bytes_discarded = min(2**63 - 1, self.bytes_discarded + len(chunk))
 
     async def drain(self, deadline_ns: int, clock: Clock) -> None:
         if self._closed and not self._saw_eof:

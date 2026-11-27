@@ -3,7 +3,8 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from typing import Final
 
 from kora.runner.identity import PROCESS_SCAN_ENTRIES
@@ -58,6 +59,11 @@ class AdoptedReaper:
         with self._lock:
             self._holders.append(holder)
 
+    @contextmanager
+    def protect_spawn(self) -> Generator[None, None, None]:
+        with self._lock:
+            yield
+
     def register(self, pid: int) -> None:
         with self._lock:
             self._waited[pid] = self._waited.get(pid, 0) + 1
@@ -106,20 +112,21 @@ class AdoptedReaper:
             excluded = self._excluded()
             seen = {pid: seen.get(pid, now) for pid in listed if pid not in excluded}
             for pid, first in tuple(seen.items()):
-                if now - first < self._grace_ns or self._waits_on(pid):
+                if now - first < self._grace_ns:
                     continue
-                try:
-                    reaped, _status = os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    seen.pop(pid, None)
-                    continue
-                if reaped == pid:
+                if self._wait_adopted(pid):
                     seen.pop(pid, None)
             self._scanned()
 
-    def _waits_on(self, pid: int) -> bool:
+    def _wait_adopted(self, pid: int) -> bool:
         with self._lock:
-            return pid in self._waited
+            if pid in self._waited:
+                return False
+            try:
+                reaped, _status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                return True
+            return reaped == pid
 
     def _scanned(self) -> None:
         with self._lock:

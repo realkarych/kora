@@ -49,6 +49,7 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Handle, instant_wire
 from kora.protocols.identity_records import ProcessIdentity
+from kora.protocols.lifetime_records import ProcessRegistration
 from kora.protocols.runtime import RawEvent, TransferItem, Workload
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
@@ -1436,6 +1437,97 @@ class CommandSignalProbe(CommandDomainStop):
         return self._signal_member(
             identity, signal.SIGTERM, self.clock.monotonic_ns() + SCAN_NS
         )
+
+
+@pytest.mark.asyncio
+async def test_command_stop_protects_an_independent_registered_child() -> None:
+    clock = SystemClock()
+    baseline: dict[int, int] = {}
+    NativeIdentityReader(clock=clock).command_prelaunch(
+        baseline, clock.monotonic_ns() + SCAN_NS
+    )
+    own_group = "\n".join(
+        (
+            "import os, signal, sys",
+            "child = os.fork()",
+            "if child == 0:",
+            "    os.read(0, 1)",
+            "    sys.exit(0)",
+            "def stop(signum, frame):",
+            "    _, status = os.waitpid(child, 0)",
+            "    result = os.waitstatus_to_exitcode(status)",
+            "    sys.exit(0 if result == -signal.SIGTERM else 1)",
+            "signal.signal(signal.SIGTERM, stop)",
+            "os.write(1, f'{child}\\n'.encode())",
+            "os.read(0, 1)",
+            "os.waitpid(child, 0)",
+        )
+    )
+    exchange = "import os; os.write(1, b'r'); os.write(1, os.read(0, 1))"
+    env = {"KORA_ATTEMPT_TOKEN": ATTEMPT_TOKEN}
+    with ExitStack() as children:
+        owner, peer = (
+            children.enter_context(
+                subprocess.Popen(
+                    [sys.executable, "-I", "-c", script],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    env=env,
+                    start_new_session=True,
+                )
+            )
+            for script in (own_group, exchange)
+        )
+        assert owner.stdout is not None
+        assert peer.stdout is not None
+        assert select.select([owner.stdout], [], [], 5)[0]
+        member = identity_of(int(owner.stdout.readline()))
+        assert select.select([peer.stdout], [], [], 5)[0]
+        assert peer.stdout.read(1) == b"r"
+        leader = identity_of(owner.pid)
+        sibling = ProcessRegistration(
+            process=identity_of(peer.pid),
+            acquisition_operation_id="1" * 32,
+            process_group_id=peer.pid,
+            session_id=peer.pid,
+        )
+
+        def siblings() -> tuple[ProcessRegistration, ...]:
+            return (sibling,)
+
+        conflict = CommandSignalProbe(
+            owner.pid,
+            b"KORA_ATTEMPT_TOKEN=" + ATTEMPT_TOKEN.encode("ascii"),
+            clock,
+            lambda: None,
+            baseline,
+            leader=leader,
+            siblings=siblings,
+        )
+        assert not conflict.send(sibling.process)
+        assert conflict.ambiguous_group
+
+        stop = CommandDomainStop(
+            owner.pid,
+            b"KORA_CALL_SCOPE=only-this-call",
+            clock,
+            lambda: None,
+            baseline,
+            leader=leader,
+            siblings=siblings,
+        )
+        async with asyncio.TaskGroup() as tasks:
+            outcome = tasks.create_task(
+                asyncio.to_thread(stop.stop, clock.monotonic_ns())
+            )
+            assert await asyncio.to_thread(owner.wait, 7) == 0
+        assert outcome.result() is StopOutcome.CONFIRMED
+        observed = NativeIdentityReader(clock=clock).read(member.pid)
+        assert observed.state is IdentityState.ABSENT or (
+            observed.process is not None and observed.process.identity != member
+        )
+        assert peer.communicate(b"x", timeout=5)[0] == b"x"
+        assert peer.returncode == 0
 
 
 def test_command_stop_refuses_stale_identity_for_live_process() -> None:
