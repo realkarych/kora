@@ -56,7 +56,9 @@ static int koraTryClose(KoraFd **link) {
   if (owner->state != KORA_FD_RETIRED) return 0;
   *link = owner->next;
   if (owner->main) koraReleaseFd(owner->main);
+  if (owner->lastUser) koraReleaseFd(owner->lastUser);
   owner->main = NULL;
+  owner->lastUser = NULL;
   koraReleaseFd(owner);
   return 1;
 }
@@ -95,9 +97,7 @@ static int koraRetireOwned(KoraFd *main, int closed) {
   int done = 1;
   for (KoraFd **link = &koraFiles; *link;) {
     KoraFd *owner = *link;
-    int shared = owner->role == KORA_SHM && main->sidecarInode &&
-      owner->device == main->sidecarDevice && owner->inode == main->sidecarInode;
-    if ((closed && (owner == main || shared)) ||
+    if ((closed && (owner == main || owner->lastUser == main)) ||
         (owner->main == main && (closed || owner->state != KORA_FD_LIVE))) {
       if (koraTryClose(link)) continue;
       done = 0;
@@ -117,6 +117,7 @@ static int koraSettleFd(KoraFd *main) {
 
 static void koraCloseSidecar(KoraFd *owner, KoraFd *main) {
   if (owner->state == KORA_FD_LIVE && owner->role == KORA_SHM) {
+    owner->lastUser = koraRetainFd(main);
     main->sidecarDevice = owner->device;
     main->sidecarInode = owner->inode;
   }

@@ -22,6 +22,7 @@ struct KoraFd {
   atomic_int lockPin;
   KoraFd *next;
   KoraFd *main;
+  KoraFd *lastUser;
   int descriptor;
   int role;
   dev_t device;
