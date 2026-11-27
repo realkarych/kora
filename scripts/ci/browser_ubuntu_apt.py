@@ -28,6 +28,8 @@ INVOCATION = re.compile(r"[0-9a-f]{32}")
 PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]{0,63}")
 INSTALL = ("install", "-y", "--no-install-recommends")
 CONSOLE_PACKAGES = ("libnss3-tools", "xdg-utils")
+PLAYWRIGHT_WITNESSES = frozenset(("refusal-witness", "unavailable-adapter-witness"))
+PLAYWRIGHT_WORK = PLAYWRIGHT_WITNESSES | {"install"}
 APT_GET = "/usr/bin/apt-get"
 APT_CONFIG = "/usr/bin/apt-config"
 NATIVE_APT_ERROR = 100
@@ -359,6 +361,7 @@ class Stage(NamedTuple):
         (self.path / SOURCE.name).write_bytes(source)
         for directory_name in ("sourceparts", "lists", "archives", "bin"):
             (self.path / directory_name).mkdir(mode=0o755)
+        self.adapter.with_name("sh").symlink_to("/bin/sh")
         command = shlex.join(
             (PYTHON, "-I", str(Path(__file__).resolve()), "apt", self.service)
         )
@@ -454,13 +457,15 @@ def playwright_outcome(status: int, *, native_failure: bool, refusal: bool) -> i
 
 
 async def install(
-    stage: Stage, invocation: str, node: str, cli: str, *, refusal_witness: bool
+    stage: Stage, invocation: str, node: str, cli: str, operation: str
 ) -> int:
     stage.require_process()
     stage.prepare(invocation)
     await require_profile(stage.selectors, APT_ENV)
-    if refusal_witness:
+    if operation == "refusal-witness":
         receipt(stage, "update").touch(exist_ok=False)
+    elif operation == "unavailable-adapter-witness":
+        stage.adapter.chmod(0o644)
     else:
         recovery = await execute((DPKG, "--configure", "-a"), MANAGER_ENV)
         if recovery:
@@ -468,13 +473,17 @@ async def install(
     playwright_env = {
         **MANAGER_ENV,
         "INVOCATION_ID": invocation,
-        "PATH": f"{stage.adapter.parent}:{SYSTEM_PATH}",
+        "PATH": str(stage.adapter.parent),
     }
     dependencies = await execute(
         (node, cli, "install-deps", "chromium-headless-shell"), playwright_env
     )
     stage.require_invocation(invocation)
-    if refusal_witness and (dependencies != 1 or not stage.refusal.is_file()):
+    if operation != "install" and (
+        dependencies != 1
+        or stage.refusal.is_file() != (operation == "refusal-witness")
+        or stage.native_failure.is_file()
+    ):
         return 1
     outcome = playwright_outcome(
         dependencies,
@@ -500,14 +509,8 @@ async def main(arguments: Sequence[str]) -> int:
     try:
         if operation == "apt":
             return await guarded_apt(stage, values)
-        if operation in {"install", "refusal-witness"} and len(values) == 3:
-            return await install(
-                stage,
-                values[0],
-                values[1],
-                values[2],
-                refusal_witness=operation == "refusal-witness",
-            )
+        if operation in PLAYWRIGHT_WORK and len(values) == 3:
+            return await install(stage, values[0], values[1], values[2], operation)
         if operation == "prepare" and len(values) == 1:
             stage.require_process()
             stage.prepare(values[0])
@@ -521,10 +524,10 @@ async def main(arguments: Sequence[str]) -> int:
         return 78
     except AptRefused as refusal:
         sys.stderr.write(f"{refusal}\n")
-        return 1 if operation == "refusal-witness" else 78
+        return 1 if operation in PLAYWRIGHT_WITNESSES else 78
     except (OSError, UnicodeError):
         sys.stderr.write("Console Noble APT ownership or input access failed.\n")
-        return 1 if operation == "refusal-witness" else 78
+        return 1 if operation in PLAYWRIGHT_WITNESSES else 78
 
 
 if __name__ == "__main__":

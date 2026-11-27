@@ -456,20 +456,19 @@ async def check_playwright_adapter_refusal() -> None:
     from scripts.ci.browser_ubuntu_apt import Stage
 
     programs = Programs.workflow()
-    service = Service.new()
-    stage = Stage(service.name).path
-    work = ("refusal-witness", str(programs.tool_cache), str(programs.pnpm_bin))
-
-    try:
-        await package_attempt(work, WITNESS_ALLOWANCE, service=service)
-    except BrowserPackagesRefused as error:
-        refusal = str(error)
-    else:
-        raise AssertionError("The normalized Playwright failure could retry.")
-
-    assert refusal == "The package helper refused admission."
-    assert not stage.exists()
-    sys.stdout.write("Playwright's normalized refusal remained terminal.\n")
+    for operation in ("refusal-witness", "unavailable-adapter-witness"):
+        service = Service.new()
+        stage = Stage(service.name).path
+        work = (operation, str(programs.tool_cache), str(programs.pnpm_bin))
+        try:
+            await package_attempt(work, WITNESS_ALLOWANCE, service=service)
+        except BrowserPackagesRefused as error:
+            refusal = str(error)
+        else:
+            raise AssertionError("The normalized Playwright failure could retry.")
+        assert refusal == "The package helper refused admission."
+        assert not stage.exists()
+    sys.stdout.write("Playwright refused with or without an executable adapter.\n")
 
 
 async def native_command(

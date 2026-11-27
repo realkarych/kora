@@ -19,6 +19,9 @@ SYSTEMD_RUN = "/usr/bin/systemd-run"
 PYTHON = "/usr/bin/python3"
 UBUNTU_APT = ROOT / "scripts/ci/browser_ubuntu_apt.py"
 BROWSER_APT_RUNTIME = Path("/run/kora-browser-apt")
+PLAYWRIGHT_WORK = frozenset(
+    ("install", "refusal-witness", "unavailable-adapter-witness")
+)
 SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 MANAGER_ENV = {"PATH": SYSTEM_PATH, "LANG": "C.UTF-8", "SYSTEMD_COLORS": "0"}
 START_SECONDS = 5.0
@@ -471,8 +474,7 @@ async def package_attempt(
         raise BrowserPackagesRefused("Browser packages require cgroup v2 ownership.")
     service = Service.new() if service is None else service
     stage_cleanup = len(work) == 3 and (
-        work[0] in {"install", "refusal-witness"}
-        or (work[0] == "witness" and work[2] == "stage-hold")
+        work[0] in PLAYWRIGHT_WORK or (work[0] == "witness" and work[2] == "stage-hold")
     )
     succeeded = await service_attempt(
         work, service, window, stage_cleanup=stage_cleanup
@@ -606,7 +608,7 @@ async def worker(arguments: Sequence[str]) -> int:
                 MANAGER_ENV,
             )
         return await run_child((PYTHON, "-I", str(witness), first, second), MANAGER_ENV)
-    if operation not in {"install", "refusal-witness"}:
+    if operation not in PLAYWRIGHT_WORK:
         return 78
     try:
         node, cli = Programs(Path(first), Path(second)).playwright()
