@@ -2,15 +2,22 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 import pytest
 from sqlalchemy import Connection, event, text
 from sqlalchemy.engine.interfaces import ExceptionContext
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.util import await_
 
 from kora.conformance.capture import captured
-from kora.db.connection import Database, DatabaseWriterRejected, Dialect
+from kora.db.connection import (
+    Database,
+    DatabaseWriterFailure,
+    DatabaseWriterRejected,
+    Dialect,
+)
 from kora.db.transactions import WriterTransactionError
 from kora.engine.locks import (
     LockError,
@@ -41,6 +48,60 @@ LATER = Scope(ScopeKind.GRAPH, ("timed-later-scope",))
 class Backend:
     pid: int
     started: datetime
+
+
+ContenderPhase = Literal["writer_entry", "probe_insert", "native_timeout", "backend"]
+
+
+def contender_outcome(task: asyncio.Task[None]) -> str:
+    if not task.done():
+        return "pending"
+    if task.cancelled():
+        return "cancelled"
+    error = task.exception()
+    if isinstance(error, DatabaseWriterRejected):
+        if error.reason is DatabaseWriterFailure.DEADLINE:
+            return "writer_deadline"
+        return "writer_unavailable"
+    if isinstance(error, IntegrityError):
+        return "integrity_error"
+    if isinstance(error, SQLAlchemyError):
+        return "native_error"
+    if isinstance(error, AssertionError):
+        return "fixture_assertion"
+    return "returned" if error is None else "raised"
+
+
+class ContenderReadiness:
+    def __init__(self) -> None:
+        self.phase: ContenderPhase = "writer_entry"
+        self.ready: asyncio.Future[Backend] = asyncio.get_running_loop().create_future()
+
+    def diagnostic(self, task: asyncio.Task[None]) -> str:
+        return (
+            f"contender readiness phase={self.phase} outcome={contender_outcome(task)}"
+        )
+
+    def contender_finished(self, task: asyncio.Task[None]) -> None:
+        if not self.ready.done():
+            self.ready.set_exception(AssertionError(self.diagnostic(task)))
+
+    async def wait(self, task: asyncio.Task[None]) -> Backend:
+        task.add_done_callback(self.contender_finished)
+        try:
+            return await asyncio.wait_for(self.ready, CONDITION_DEADLINE_SECONDS)
+        except TimeoutError as error:
+            error.add_note(self.diagnostic(task))
+            raise
+
+
+async def settle_scope_contender(task: asyncio.Task[None]) -> None:
+    if not task.done():
+        task.cancel()
+    await asyncio.wait_for(
+        asyncio.shield(asyncio.gather(task, return_exceptions=True)),
+        CONDITION_DEADLINE_SECONDS,
+    )
 
 
 async def backend(connection: AsyncConnection) -> Backend:
@@ -247,7 +308,7 @@ async def wait_on_later_scope(
     database: Database,
     deadline: float,
     mode: str,
-    ready: asyncio.Future[Backend],
+    readiness: ContenderReadiness,
     observed: list[tuple[str, tuple[object, ...]]],
 ) -> None:
     arms = 0
@@ -269,10 +330,13 @@ async def wait_on_later_scope(
                 await_(cross_clock_boundary(0.04))
 
     async with database.transaction(admission_deadline=deadline) as writer:
+        readiness.phase = "probe_insert"
         await writer.exec_driver_sql(INSERT_PROBE)
         if mode == "native":
+            readiness.phase = "native_timeout"
             await writer.exec_driver_sql("SET LOCAL statement_timeout TO '600'")
-        ready.set_result(await backend(writer))
+        readiness.phase = "backend"
+        readiness.ready.set_result(await backend(writer))
         locks = TransitionLocks(writer)
         engine_connection = writer.sync_connection
         if mode == "deadline":
@@ -355,7 +419,7 @@ async def test_timed_scope_contention_releases_partial_owned_set(
     ledger = ConnectionLedger(candidate)
     observed: list[tuple[str, tuple[object, ...]]] = []
     statement_timeouts: list[object] = []
-    ready: asyncio.Future[Backend] = loop.create_future()
+    readiness = ContenderReadiness()
     task: asyncio.Task[None] | None = None
     commits = 0
 
@@ -387,9 +451,9 @@ async def test_timed_scope_contention_releases_partial_owned_set(
                 1.5 if mode == "deadline" else CONDITION_DEADLINE_SECONDS
             )
             task = asyncio.create_task(
-                wait_on_later_scope(candidate, cutoff, mode, ready, observed)
+                wait_on_later_scope(candidate, cutoff, mode, readiness, observed)
             )
-            original = await asyncio.wait_for(ready, CONDITION_DEADLINE_SECONDS)
+            original = await readiness.wait(task)
             if mode != "native":
                 await observe_postgresql_wait(database, original, blocker)
             if mode == "cancel":
@@ -429,12 +493,7 @@ async def test_timed_scope_contention_releases_partial_owned_set(
     finally:
         try:
             if task is not None:
-                if not task.done():
-                    task.cancel()
-                await asyncio.wait_for(
-                    asyncio.shield(asyncio.gather(task, return_exceptions=True)),
-                    CONDITION_DEADLINE_SECONDS,
-                )
+                await settle_scope_contender(task)
         finally:
             if mode == "native":
                 event.remove(engine, "handle_error", record_statement_timeout)
@@ -458,6 +517,42 @@ async def test_timed_scope_contention_releases_partial_owned_set(
     assert committed == [17]
     assert ledger.opened == ledger.closed
     assert ledger.outstanding == 0
+
+
+@pytest.mark.asyncio
+async def test_scope_contender_reports_early_native_refusal(database: Database) -> None:
+    async with database.transaction() as writer:
+        await writer.exec_driver_sql(CREATE_PROBE)
+        await writer.exec_driver_sql(INSERT_PROBE)
+    candidate = Database(narrow_settings(database.settings, pool_size=1))
+    ledger = ConnectionLedger(candidate)
+    readiness = ContenderReadiness()
+    deadline = asyncio.get_running_loop().time() + CONDITION_DEADLINE_SECONDS
+
+    task = asyncio.create_task(
+        wait_on_later_scope(candidate, deadline, "cancel", readiness, [])
+    )
+    try:
+        with pytest.raises(
+            AssertionError,
+            match=r"^contender readiness phase=probe_insert outcome=integrity_error$",
+        ):
+            await readiness.wait(task)
+        settled_when_reported = task.done()
+    finally:
+        try:
+            await settle_scope_contender(task)
+        finally:
+            await candidate.close()
+    async with database.read_transaction() as reader:
+        values = (await reader.exec_driver_sql(READ_PROBE)).scalars().all()
+
+    assert settled_when_reported
+    assert isinstance(task.exception(), IntegrityError)
+    assert candidate.units_in_flight() == ledger.outstanding == 0
+    assert ledger.checkouts > 0
+    assert ledger.opened == ledger.closed > 0
+    assert values == [17]
 
 
 @pytest.mark.asyncio
