@@ -2118,19 +2118,23 @@ async def assert_stopped_shell(
 
             if lose_sdk:
                 gate.owner.signal(signal.SIGKILL, gate.cutoff_ns)
+                assert not gate.stopped
             else:
                 gate.stop()
-            with pytest.raises(BridgeRefused):
+            with pytest.raises(BridgeRefused) as refused:
                 await pending
-            await gate.release(natural=False)
-            assert await witness_.scoped.settle(
-                gate.clock.monotonic_ns() + PROCESS_CLEANUP_NS
-            )
+            assert not witness_.scoped.occupied
+            exit_status = await gate.release(natural=False)
         finally:
             if not pending.done():
                 pending.cancel()
                 await observed(pending)
 
+        assert refused.value.code == "closed"
+        if lose_sdk:
+            assert exit_status == -signal.SIGKILL
+        else:
+            assert exit_status in (1, -signal.SIGTERM, -signal.SIGKILL)
         assert gate.owner.registration == registration
         assert_gone(leader)
         assert_gone(descendant)
@@ -2174,6 +2178,8 @@ except OSError:
 else:
     raise RuntimeError('unexpected inherited descriptor')
 assert not any('ANTHROPIC' in key or 'PI_' in key for key in os.environ)
+fixture_key = 'pi-sdk-scripted-' + 'credential-9f71'
+assert not any(fixture_key in value for value in os.environ.values())
 assert Path(os.environ['HOME']).name == 'shell-home'
 assert Path(os.environ['TMPDIR']).name == 'shell-temp'
 assert os.environ['PWD'] == os.getcwd()
