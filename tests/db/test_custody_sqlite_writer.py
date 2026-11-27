@@ -1677,8 +1677,9 @@ async def test_custody_dispatch_cancellation_joins_original_commit(
 
 
 @pytest.mark.asyncio
-async def test_custody_abort_settles_after_retained_dispatch_journal_closes(
-    writer_owners: WriterOwners, sqlite_template: Path, tmp_path: Path
+@pytest.mark.parametrize("cut", [WriterCut.MUTATION, WriterCut.FRONTIER_ADVANCED])
+async def test_custody_abort_settles_after_retained_journal_closes(
+    writer_owners: WriterOwners, sqlite_template: Path, tmp_path: Path, cut: WriterCut
 ) -> None:
     owners = writer_owners
     root = owners.root
@@ -1693,7 +1694,7 @@ async def test_custody_abort_settles_after_retained_dispatch_journal_closes(
     before = read_metadata(metadata)
     with (
         sqlite_contender(incumbent_path) as incumbent,
-        observe_writer(WriterCut.FRONTIER_ADVANCED) as native,
+        observe_writer(cut) as native,
         observe_pool() as pool,
     ):
         incumbent.execute("BEGIN IMMEDIATE").close()
@@ -1706,20 +1707,26 @@ async def test_custody_abort_settles_after_retained_dispatch_journal_closes(
             native.release.set()
             with pytest.raises(CustodyUnavailable):
                 await task
-            assert pool.checked_in == pool.checked_out
-            assert_native_commands(native, (*ORIGINAL_COMMIT[:5], "ROLLBACK"))
+            assert not pool.checked_in
+            completed = 3 if cut is WriterCut.MUTATION else 5
+            assert_native_commands(native, ORIGINAL_COMMIT[:completed])
             assert database.units_in_flight() == 1
-            assert_commit_lock_owned(root)
+            assert_open_ownership(root, metadata)
             with pytest.raises(BlockingIOError), root.acquire("journal-order.lock"):
                 pytest.fail("exact J released before the retained native receipt")
             assert len(held_main_descriptors(identity)) == 2
             sidecar.unlink()
             saved = read_pending(root)
-            assert saved is not None
-            assert saved[:2] == ("prepared", FIRST_ALLOCATION)
+            if cut is WriterCut.MUTATION:
+                assert saved is None
+            else:
+                assert saved is not None
+                assert saved[:2] == ("prepared", FIRST_ALLOCATION)
             incumbent.commit()
             await asyncio.to_thread(incumbent.close)
             await until(lambda: database.units_in_flight() == 0)
+            assert pool.checked_in == pool.checked_out
+            assert_native_commands(native, (*ORIGINAL_COMMIT[:completed], "ROLLBACK"))
             assert not held_main_descriptors(identity)
             assert read_metadata(metadata) == before
             assert read_pending(root) is None

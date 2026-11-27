@@ -919,7 +919,7 @@ class CustodyJournalLease:
     _prepared: CustodyPendingCommit | None
     _sqlite_checkout: object | None
     _deferred_close: Callable[[], None] | None
-    _deferred_settlement: Callable[[], None] | None
+    _deferred_checkout: Callable[[], None] | None
 
     def __init__(
         self, root: CustodyNativeDirectory, ownership: CustodyDescriptor
@@ -939,7 +939,7 @@ class CustodyJournalLease:
         self._prepared = None
         self._sqlite_checkout = None
         self._deferred_close = None
-        self._deferred_settlement = None
+        self._deferred_checkout = None
         ACTIVE_LEASES.add(self)
 
     @property
@@ -1000,7 +1000,12 @@ class CustodyJournalLease:
         return False
 
     async def _verify_no_preparation(self) -> None:
-        if await self.run(lambda journal: journal.read(PENDING)) is not None:
+        if (
+            await self._run_transaction(
+                lambda journal: journal.read(PENDING), allow_closing=True
+            )
+            is not None
+        ):
             raise CustodyUnavailable
         self._original = None
 
@@ -1153,17 +1158,17 @@ class CustodyJournalLease:
             if not self._phase.released:
                 self._phase.after_release(self.resume_close)
 
-    def defer_sqlite_settlement(self, resume: Callable[[], None]) -> bool:
+    def defer_sqlite_checkout(self, resume: Callable[[], None]) -> bool:
         if self._phase.released:
             return False
-        self._deferred_settlement = resume
+        self._deferred_checkout = resume
         self._phase.after_release(self.resume_close)
         return True
 
     def resume_close(self) -> None:
         if not self._phase.released:
             return
-        settle, self._deferred_settlement = self._deferred_settlement, None
+        settle, self._deferred_checkout = self._deferred_checkout, None
         if settle is not None:
             settle()
         elif self._sqlite_checkout is None:

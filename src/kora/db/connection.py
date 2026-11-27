@@ -1388,6 +1388,8 @@ class Database:
             return
 
         async def close_and_settle() -> None:
+            if journal.defer_sqlite_checkout(schedule_checkout):
+                return
             physical = scope.physical
             await self._close_local_sqlite_checkout(checkout, physical)
             if not physical.released:
@@ -1395,22 +1397,24 @@ class Database:
                 if driver is not None:
                     driver.after_retirement(schedule_retirement)
                 raise CustodyUnavailable
-            await settle_when_released()
+            await settle()
 
-        async def settle_when_released() -> None:
-            if not journal.defer_sqlite_settlement(schedule_retirement):
-                await self._confirm_local_sqlite_release(checkout, journal)
+        async def settle() -> None:
+            await self._confirm_local_sqlite_release(checkout, journal)
 
-        def schedule_retirement() -> None:
-            asyncio.create_task(resume_retirement())
-
-        async def resume_retirement() -> None:
+        async def resume(work: Callable[[], Awaitable[None]]) -> None:
             try:
-                await settle_when_released()
+                await work()
             except (CustodyUnavailable, *WRITER_ENTRY_NATIVE_ERRORS):
                 custody_log(CUSTODY_UNFINISHED, "ordinary_admission")
             finally:
                 journal.resume_close()
+
+        def schedule_checkout() -> None:
+            asyncio.create_task(resume(close_and_settle))
+
+        def schedule_retirement() -> None:
+            asyncio.create_task(resume(settle))
 
         await complete(close_and_settle())
 
