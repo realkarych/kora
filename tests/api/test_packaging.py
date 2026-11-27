@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlencode
 
 import httpx
@@ -55,7 +56,7 @@ from tests.engine.graph_output_cases import child as ir_child
 from tests.engine.start_cases import start_rows
 from tests.mcp.test_stdio_deploy import StdioSession
 from tests.plugins.authentication.support import seed_case
-from tests.support.databases import copy_sqlite_template
+from tests.support.databases import copy_sqlite_template, marker_only_sqlite
 from tests.support.observability import ProcessResult
 from tests.support.provider_tooling import (
     copy_core_wheel,
@@ -1980,6 +1981,83 @@ def test_installed_api_refuses_unprepared_sqlite_before_bind(
     assert PRIVATE_MARKER.encode() not in result.stderr
     if case == "missing-file":
         assert not database_file.exists()
+
+
+@pytest.mark.parametrize("marker", [b"KMT1", b"KJT1"])
+def test_installed_api_and_upgrade_refuse_a_marker_only_main(
+    serving_installation: Path, tmp_path: Path, marker: bytes
+) -> None:
+    main = tmp_path / "marker.sqlite"
+    image = marker_only_sqlite(main, marker)
+    url = f"sqlite+aiosqlite:///{main}"
+    provider_probe = """
+import asyncio
+import sys
+from pathlib import Path
+
+from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
+from kora.protocols.errors import KoraProtocolError
+from kora.protocols.storage_models import StorageLimits
+
+root, marker = map(Path, sys.argv[1:])
+configuration = LocalStorageConfiguration(
+    root=str(root), limits=StorageLimits(version=1)
+)
+provider = LocalArtifactStorage(configuration)
+asyncio.run(provider.aclose())
+main = root / "control.sqlite"
+image = marker.read_bytes()
+main.write_bytes(image)
+sidecar = root / "control.sqlite-wal"
+sidecar.write_bytes(b"owned sidecar witness")
+try:
+    LocalArtifactStorage(configuration)
+except KoraProtocolError as error:
+    assert error.code == "storage_io"
+else:
+    raise AssertionError("the installed provider accepted the isolated marker")
+assert main.read_bytes() == image
+assert sidecar.read_bytes() == b"owned sidecar witness"
+assert not (root / "control.sqlite-shm").exists()
+assert not (root / "control.sqlite-journal").exists()
+"""
+
+    api = api_startup_result(serving_installation, tmp_path, url, 0)
+    upgrade = subprocess.run(
+        [str(serving_installation.with_name("kora")), "db", "upgrade"],
+        cwd=tmp_path,
+        env=api_environment(url),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=SERVE_TIMEOUT,
+    )
+    with TemporaryDirectory(prefix="kora-installed-sqlite-", dir="/tmp") as directory:
+        root = Path(directory).resolve() / "storage"
+        provider = subprocess.run(
+            [
+                str(serving_installation),
+                "-I",
+                "-c",
+                provider_probe,
+                str(root),
+                str(main),
+            ],
+            cwd=tmp_path,
+            env={"PATH": os.defpath},
+            capture_output=True,
+            check=False,
+            timeout=SERVE_TIMEOUT,
+        )
+
+    assert api.returncode == 78
+    assert api.stdout == b""
+    assert refusal_reason(api) == "sqlite_unprepared"
+    assert upgrade.returncode != 0
+    assert upgrade.stdout == b""
+    assert provider.returncode == 0, provider.stderr
+    assert main.read_bytes() == image
+    assert set(tmp_path.iterdir()) == {main}
 
 
 @pytest.mark.asyncio

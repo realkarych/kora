@@ -21,8 +21,9 @@ from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     ConnectionLedger,
     sqlite_companions,
+    sqlite_contender,
 )
-from tests.support.databases import sqlite_settings
+from tests.support.databases import copy_sqlite_template
 
 
 def sqlite_driver(candidate: object) -> SQLiteDriverConnection:
@@ -38,8 +39,9 @@ async def writer_driver(connection: AsyncConnection) -> SQLiteDriverConnection:
 @pytest.mark.asyncio
 async def test_ordinary_writer_closes_retained_cursor_when_native_begin_is_busy(
     tmp_path: Path,
+    sqlite_template: Path,
 ) -> None:
-    database = Database(sqlite_settings(tmp_path / "metadata.db"))
+    database = Database(copy_sqlite_template(sqlite_template, tmp_path / "metadata.db"))
     ledger = ConnectionLedger(database)
     body_ran = False
     try:
@@ -56,11 +58,7 @@ async def test_ordinary_writer_closes_retained_cursor_when_native_begin_is_busy(
                 assert await cursor.fetchone() == (0,)
 
         try:
-            with closing(
-                sqlite3.connect(
-                    database.settings.sqlite_path, timeout=0, isolation_level=None
-                )
-            ) as blocker:
+            with sqlite_contender(database.settings.sqlite_path) as blocker:
                 with closing(blocker.execute("BEGIN IMMEDIATE")):
                     pass
 
@@ -124,13 +122,15 @@ async def test_ordinary_writer_closes_retained_cursor_when_native_begin_is_busy(
 @pytest.mark.asyncio
 async def test_durable_writer_entry_refuses_native_drift_and_rolls_back(
     tmp_path: Path,
+    sqlite_template: Path,
     mode_change: str | None,
     mode_query: str,
     value: str | int,
     migration: bool,
 ) -> None:
     database = Database(
-        sqlite_settings(tmp_path / "metadata.db"), require_sqlite_full_sync=True
+        copy_sqlite_template(sqlite_template, tmp_path / "metadata.db"),
+        require_sqlite_full_sync=True,
     )
     ledger = ConnectionLedger(database)
     observed: list[tuple[str, bool]] = []
@@ -230,9 +230,12 @@ async def test_durable_writer_entry_refuses_native_drift_and_rolls_back(
 
 
 @pytest.mark.asyncio
-async def test_verified_native_transaction_keeps_wal_and_full(tmp_path: Path) -> None:
+async def test_verified_native_transaction_keeps_wal_and_full(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
     database = Database(
-        sqlite_settings(tmp_path / "metadata.db"), require_sqlite_full_sync=True
+        copy_sqlite_template(sqlite_template, tmp_path / "metadata.db"),
+        require_sqlite_full_sync=True,
     )
 
     try:
@@ -260,9 +263,11 @@ async def test_verified_native_transaction_keeps_wal_and_full(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_cancelled_durable_writer_entry_releases_verified_native_transaction(
     tmp_path: Path,
+    sqlite_template: Path,
 ) -> None:
     database = Database(
-        sqlite_settings(tmp_path / "metadata.db"), require_sqlite_full_sync=True
+        copy_sqlite_template(sqlite_template, tmp_path / "metadata.db"),
+        require_sqlite_full_sync=True,
     )
     ledger = ConnectionLedger(database)
     native_begun = asyncio.Event()
@@ -332,10 +337,11 @@ async def test_cancelled_durable_writer_entry_releases_verified_native_transacti
 @pytest.mark.parametrize("drift", ["before-entry", "before-commit", "readback-error"])
 @pytest.mark.asyncio
 async def test_durable_fullfsync_guards_the_live_macos_writer(
-    tmp_path: Path, drift: str
+    tmp_path: Path, sqlite_template: Path, drift: str
 ) -> None:
     database = Database(
-        sqlite_settings(tmp_path / "metadata.db"), require_sqlite_full_sync=True
+        copy_sqlite_template(sqlite_template, tmp_path / "metadata.db"),
+        require_sqlite_full_sync=True,
     )
     ledger = ConnectionLedger(database)
     observed: list[tuple[bool, bool]] = []

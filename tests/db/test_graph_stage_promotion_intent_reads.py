@@ -26,10 +26,12 @@ from kora.db.graph_stage_promotion_snapshot import (
 from kora.db.migrations import upgrade_database
 from kora.db.tables import graph_deployment_stage_promotion_intent as intent
 from kora.observability import Level, LoggingSettings
+from kora.sqlite.driver import Connection as GuardedConnection
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     REFUSAL_DEADLINE_SECONDS,
     ConnectionLedger,
+    sqlite_contender,
     until,
 )
 from tests.db.test_graph_stage_promotion_snapshot import (
@@ -352,9 +354,9 @@ async def test_sqlite_metadata_cursor_keeps_ownership_until_native_release(
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, CONDITION_DEADLINE_SECONDS)
         await trace_driver.set_trace_callback(None)
-        with closing(sqlite3.connect(settings.sqlite_path, timeout=0)) as native:
-            checkpoint = native.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            assert checkpoint == (0, 0, 0)
+        with sqlite_contender(settings.sqlite_path) as native:
+            with closing(native.execute("PRAGMA wal_checkpoint(TRUNCATE)")) as cursor:
+                assert cursor.fetchone() == (0, 0, 0)
         assert await sqlite_worker(database) is driver
         recovered = await read(database, binding)
     finally:
@@ -378,11 +380,18 @@ async def test_native_intent_failure_keeps_driver_debug_private(
     padding = b"x" * (70 - len(marker))
     async with damage_writer(database) as writer:
         if database.dialect is Dialect.SQLITE:
+            damaged = marker + padding + b"\xff"
             await writer.exec_driver_sql(
                 "UPDATE graph_deployment_stage_promotion_intent "
                 "SET request_digest = CAST(? AS TEXT) WHERE stage_id = ?",
-                (marker + padding + b"\xff", stage_ids[0]),
+                (damaged, stage_ids[0]),
             )
+            stored = await writer.exec_driver_sql(
+                "SELECT CAST(request_digest AS BLOB) "
+                "FROM graph_deployment_stage_promotion_intent WHERE stage_id = ?",
+                (stage_ids[0],),
+            )
+            assert stored.scalar_one() == damaged
         else:
             await writer.execute(
                 intent.update()
@@ -398,7 +407,11 @@ async def test_native_intent_failure_keeps_driver_debug_private(
 
     def observe_fault(context: ExceptionContext) -> None:
         error = context.original_exception
-        if isinstance(error, UnicodeDecodeError):
+        if database.dialect is Dialect.SQLITE:
+            assert isinstance(error, sqlite3.OperationalError)
+            assert error.sqlite_errorcode == sqlite3.SQLITE_ERROR
+            faults.append(str(error) == "Could not decode SQLite text as UTF-8")
+        elif isinstance(error, UnicodeDecodeError):
             faults.append(marker in error.object)
         else:
             faults.append(PRIVATE_MARKER in str(error))
@@ -442,7 +455,7 @@ async def test_raw_sqlite_metadata_failure_refuses_privately_and_reuses_worker(
     database = Database(settings)
     selected = threading.Event()
     interrupted = threading.Event()
-    native: sqlite3.Connection | None = None
+    native: GuardedConnection | None = None
 
     def trace(statement: str) -> None:
         if SQLITE_METADATA_QUERY in statement:
@@ -455,7 +468,7 @@ async def test_raw_sqlite_metadata_failure_refuses_privately_and_reuses_worker(
         binding, stage_ids = await seed_documents(database)
         driver = await sqlite_worker(database)
         native_handle = physical_handle(database, driver)
-        assert isinstance(native_handle, sqlite3.Connection)
+        assert isinstance(native_handle, GuardedConnection)
         native = native_handle
         trace_driver = cast(SQLiteTraceDriver, driver)
         await trace_driver.set_trace_callback(trace)

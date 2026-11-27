@@ -57,6 +57,7 @@ from kora.protocols.storage_models import (
     StorageScanCursor,
     StorageScanKind,
 )
+from kora.sqlite.driver import NativeRetirement, driver_version
 
 Result = TypeVar("Result")
 COMPONENT: Final[str] = CATALOG.register_component("storage.local")
@@ -119,6 +120,7 @@ class LocalArtifactStorage:
         *,
         new_identity: Callable[[], str] = random_identity,
     ) -> None:
+        driver_version()
         self._root = RootAnchor.open(
             Path(configuration.root), configuration.limits, new_identity
         )
@@ -752,6 +754,10 @@ class LocalArtifactStorage:
                             ):
                                 refuse("storage_io")
                             self._root.close()
+                            if not NativeRetirement.drain(
+                                self._root.path / "control.sqlite"
+                            ):
+                                refuse("storage_io")
 
             self._close_task = asyncio.create_task(close())
         await asyncio.shield(self._close_task)

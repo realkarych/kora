@@ -28,11 +28,13 @@ from kora.db.connection import (
 )
 from kora.db.transactions import writer_transaction
 from kora.observability import Level, LoggingSettings
+from kora.sqlite.driver import Connection as GuardedConnection
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     ConnectionLedger,
     WriterCutoffLoop,
     narrow_settings,
+    sqlite_contender,
     until,
 )
 from tests.db.test_postgres_writer_settings import (
@@ -41,7 +43,7 @@ from tests.db.test_postgres_writer_settings import (
 )
 from tests.db.test_read_snapshot import assert_native_closed, physical_handle
 from tests.db.test_sqlite_writer_entry import sqlite_driver, writer_driver
-from tests.support.databases import sqlite_settings
+from tests.support.databases import copy_sqlite_template
 
 ENTRY_SECONDS: float = 0.5
 CREATE_PROBE: str = "CREATE TABLE writer_entry_probe (id INTEGER)"
@@ -279,10 +281,11 @@ async def test_started_timed_writer_retains_native_phase_until_release(
 @pytest.mark.parametrize("interruption", ["deadline", "cancel", "close"])
 @pytest.mark.parametrize("durable", [False, True])
 async def test_timed_sqlite_stops_before_native_begin_after_early_driver_phase(
-    tmp_path: Path, interruption: str, durable: bool
+    tmp_path: Path, sqlite_template: Path, interruption: str, durable: bool
 ) -> None:
     database = Database(
-        sqlite_settings(tmp_path / "metadata.db"), require_sqlite_full_sync=durable
+        copy_sqlite_template(sqlite_template, tmp_path / "metadata.db"),
+        require_sqlite_full_sync=durable,
     )
     engine = database.writer_engine.sync_engine
     loop = asyncio.get_running_loop()
@@ -367,9 +370,9 @@ async def test_timed_sqlite_stops_before_native_begin_after_early_driver_phase(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("durable", [False, True])
 async def test_timed_sqlite_writer_uses_zero_native_busy_mode_then_restores_prior_value(
-    tmp_path: Path, durable: bool
+    tmp_path: Path, sqlite_template: Path, durable: bool
 ) -> None:
-    settings = sqlite_settings(tmp_path / "metadata.db")
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "metadata.db")
     database = Database(settings, require_sqlite_full_sync=durable)
     native_calls: list[tuple[str | None, str | None]] = []
     deadline = asyncio.get_running_loop().time() + CONDITION_DEADLINE_SECONDS
@@ -393,7 +396,7 @@ async def test_timed_sqlite_writer_uses_zero_native_busy_mode_then_restores_prio
             await writer.exec_driver_sql("PRAGMA busy_timeout=2301")
             driver = await writer_driver(writer)
             await driver.set_authorizer(observe)
-        with closing(sqlite3.connect(settings.sqlite_path)) as competing:
+        with sqlite_contender(settings.sqlite_path) as competing:
             with closing(competing.execute("BEGIN IMMEDIATE")):
                 with pytest.raises(DatabaseWriterRejected) as refused:
                     await enter(database, deadline)
@@ -430,10 +433,11 @@ async def test_timed_sqlite_writer_uses_zero_native_busy_mode_then_restores_prio
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fail_begin", [False, True])
 async def test_unverified_sqlite_restoration_discards_original_native_handle(
-    tmp_path: Path, fail_begin: bool
+    tmp_path: Path, sqlite_template: Path, fail_begin: bool
 ) -> None:
     database = Database(
-        sqlite_settings(tmp_path / "metadata.db"), require_sqlite_full_sync=True
+        copy_sqlite_template(sqlite_template, tmp_path / "metadata.db"),
+        require_sqlite_full_sync=True,
     )
     denied: list[tuple[str, bool]] = []
     deadline = asyncio.get_running_loop().time() + CONDITION_DEADLINE_SECONDS
@@ -461,7 +465,7 @@ async def test_unverified_sqlite_restoration_discards_original_native_handle(
             driver = await writer_driver(writer)
             await driver.set_authorizer(deny)
         native: object = vars(driver)["_connection"]
-        assert isinstance(native, sqlite3.Connection)
+        assert isinstance(native, GuardedConnection)
 
         with pytest.raises(DatabaseWriterRejected) as refused:
             await enter(database, deadline)
@@ -489,9 +493,9 @@ async def test_unverified_sqlite_restoration_discards_original_native_handle(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["checkout", "begin"])
 async def test_sqlite_cancel_survives_native_rollback_refusal(
-    tmp_path: Path, phase: str
+    tmp_path: Path, sqlite_template: Path, phase: str
 ) -> None:
-    database = Database(sqlite_settings(tmp_path / "metadata.db"))
+    database = Database(copy_sqlite_template(sqlite_template, tmp_path / "metadata.db"))
     engine = database.writer_engine.sync_engine
     ledger = ConnectionLedger(database)
     loop = asyncio.get_running_loop()
@@ -571,7 +575,7 @@ async def test_timed_writer_cold_driver_failure_stays_private(
         replace(database_settings, url=database_settings.url.set(database=target))
     )
     if sqlite:
-        database.settings.sqlite_path.unlink()
+        assert not database.settings.sqlite_path.exists()
         database.settings.sqlite_path.mkdir()
     deadline = asyncio.get_running_loop().time() + CONDITION_DEADLINE_SECONDS
     logging = LoggingSettings(

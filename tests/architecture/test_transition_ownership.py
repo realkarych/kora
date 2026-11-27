@@ -52,6 +52,17 @@ DATABASE_DRIVERS: frozenset[str] = frozenset(
     {"sqlite3", "asyncpg", "aiosqlite", "psycopg", "psycopg2"}
 )
 PRIVATE_SQLITE_OWNER: str = "kora.plugins.storage.state"
+PRIVATE_SQLITE_ADAPTER: str = "kora.sqlite.driver"
+STOCK_SQLITE_TYPES_AND_CODES: frozenset[str] = frozenset(
+    {
+        "Error",
+        "NotSupportedError",
+        "OperationalError",
+        "ProgrammingError",
+        "SQLITE_BUSY",
+        "SQLITE_LOCKED",
+    }
+)
 TABLE_HANDLES: frozenset[str] = GUARDED_TABLES | {"tables", "metadata"}
 SQL_COMMENT: re.Pattern[str] = re.compile(r"/\*.*?\*/|--[^\n]*", re.DOTALL)
 RAW_WRITE: re.Pattern[str] = re.compile(
@@ -200,7 +211,12 @@ def guarded_import_reasons(node: ast.AST, module: SourceModule) -> Iterator[str]
         return
     source = import_source(module, node)
     if guarded_driver(source, module):
-        yield f"imports the database driver {source}"
+        if not (
+            module.name == PRIVATE_SQLITE_ADAPTER
+            and source == "sqlite3"
+            and all(alias.name in STOCK_SQLITE_TYPES_AND_CODES for alias in node.names)
+        ):
+            yield f"imports the database driver {source}"
     elif is_within(source, TABLES_MODULE):
         yield "imports from kora.db.tables"
     elif under_confining_package(source):
@@ -359,6 +375,29 @@ def test_private_control_sqlite_does_not_grant_metadata_authority(
         "kora/plugins/storage/state.py:6: writes an execution table in raw SQL",
         "kora/plugins/storage/state.py:7: writes an execution table in raw SQL",
         "kora/plugins/storage/state_helper.py:1: imports the database driver sqlite3",
+    ]
+
+
+def test_private_sqlite_adapter_imports_only_stock_error_types(tmp_path: Path) -> None:
+    write_module(
+        tmp_path,
+        "kora.sqlite.driver",
+        "from sqlite3 import Error, OperationalError, SQLITE_BUSY\n"
+        "from sqlite3 import connect\n"
+        "from sqlite3 import *\n"
+        "import sqlite3\n"
+        "import asyncpg\n"
+        "from kora.db.tables import run\n"
+        'connection.execute("UPDATE run SET status=1")\n',
+    )
+
+    assert find_violations(tmp_path) == [
+        "kora/sqlite/driver.py:2: imports the database driver sqlite3",
+        "kora/sqlite/driver.py:3: imports the database driver sqlite3",
+        "kora/sqlite/driver.py:4: imports the database driver sqlite3",
+        "kora/sqlite/driver.py:5: imports the database driver asyncpg",
+        "kora/sqlite/driver.py:6: imports from kora.db.tables",
+        "kora/sqlite/driver.py:7: writes an execution table in raw SQL",
     ]
 
 

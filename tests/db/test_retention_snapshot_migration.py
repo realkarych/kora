@@ -12,6 +12,7 @@ from kora.db.migrations.environment import alembic_config
 from kora.db.reads import retention_snapshot_by_run_id, run_by_id
 from kora.db.retention import UnversionedRetention
 from kora.db.types import JsonValue
+from tests.db.closing import legacy_preparation
 from tests.db.seed import PredecessorHistory, predecessor_snapshot, seed_predecessor
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 
@@ -69,7 +70,7 @@ def seed_retention_rows(
 
 
 async def seed_retention_predecessor(database: Database) -> RetentionPredecessor:
-    async with database.transaction() as connection:
+    async with legacy_preparation(database) as connection:
         original = await connection.run_sync(seed_predecessor)
     async with database.migration_connection() as connection:
         await connection.run_sync(

@@ -40,6 +40,7 @@ from tests.observability.conftest import (
     configured_with_reader,
     finished_output,
 )
+from tests.support.databases import encoded_sqlite_settings
 
 DB_DEBUG: LoggingSettings = LoggingSettings(
     level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
@@ -79,6 +80,8 @@ def db_events(pipe: Pipe) -> list[str]:
 async def test_a_refused_commit_records_failure_and_never_finished(
     configure: Configure, pipe: Pipe, empty_database_settings: DatabaseSettings
 ) -> None:
+    if empty_database_settings.dialect is Dialect.SQLITE:
+        encoded_sqlite_settings(empty_database_settings.sqlite_path, "UTF-8")
     diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
     probe = Database(empty_database_settings)
     event.listen(probe.writer_engine.sync_engine, "commit", refuse_commit)
@@ -517,7 +520,7 @@ async def test_cancelled_pricing_upgrade_keeps_diagnostics_content_free(
     else:
         initial = Database(empty_database_settings)
         try:
-            async with initial.transaction() as connection:
+            async with initial.migration_connection() as connection:
                 await connection.run_sync(seed_predecessor)
         finally:
             await initial.close()

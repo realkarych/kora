@@ -4,6 +4,7 @@ import sys
 import threading
 from contextlib import AsyncExitStack, closing
 from pathlib import Path
+from typing import cast
 
 import pytest
 from aiosqlite import Connection as SQLiteDriverConnection
@@ -20,13 +21,22 @@ from kora.db.connection import (
     Dialect,
     SQLiteSynchronizationError,
 )
+from kora.sqlite.driver import Connection as GuardedConnection
+from tests.api.guarded_sqlite_prebind_child import (
+    held_main_descriptors,
+    native_identity,
+)
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     ConnectionLedger,
     sqlite_companions,
+    sqlite_contender,
     until,
 )
-from tests.support.databases import sqlite_settings
+from tests.db.native_read_support import SqliteTraceControl
+from tests.db.test_read_snapshot import assert_native_closed, physical_handle
+from tests.db.test_sqlite_writer_entry import writer_driver
+from tests.support.databases import copy_sqlite_template
 
 EXPECTED_DURABLE_FULLFSYNC: int = int(sys.platform == "darwin")
 
@@ -88,9 +98,12 @@ async def test_ordinary_database_writer_keeps_its_existing_mode(
 @pytest.mark.asyncio
 async def test_sqlite_full_sync_initializes_first_and_replacement_writer(
     tmp_path: Path,
+    sqlite_template: Path,
 ) -> None:
     path = tmp_path / "metadata.db"
-    database = Database(sqlite_settings(path), require_sqlite_full_sync=True)
+    database = Database(
+        copy_sqlite_template(sqlite_template, path), require_sqlite_full_sync=True
+    )
     ledger = ConnectionLedger(database)
 
     event.listen(
@@ -125,10 +138,12 @@ async def test_sqlite_full_sync_initializes_first_and_replacement_writer(
 @pytest.mark.parametrize("cancel", [False, True], ids=["refused", "cancelled"])
 @pytest.mark.asyncio
 async def test_sqlite_wal_refusal_releases_driver_and_writer(
-    tmp_path: Path, cancel: bool
+    tmp_path: Path, sqlite_template: Path, cancel: bool
 ) -> None:
     path = tmp_path / "metadata.db"
-    database = Database(sqlite_settings(path), require_sqlite_full_sync=True)
+    database = Database(
+        copy_sqlite_template(sqlite_template, path), require_sqlite_full_sync=True
+    )
     entered = asyncio.Event()
     release = asyncio.Event()
     unit_ran = asyncio.Event()
@@ -165,10 +180,15 @@ async def test_sqlite_wal_refusal_releases_driver_and_writer(
     task: asyncio.Task[None] | None = None
 
     try:
-        with closing(sqlite3.connect(path, isolation_level=None, timeout=0)) as holder:
-            holder.execute("CREATE TABLE probe (id INTEGER)")
-            holder.execute("BEGIN")
-            holder.execute("SELECT COUNT(*) FROM probe").fetchone()
+        with sqlite_contender(path) as holder:
+            with closing(holder.execute("PRAGMA main.journal_mode=DELETE")) as mode:
+                assert mode.fetchone() == ("delete",)
+            with closing(holder.execute("CREATE TABLE probe (id INTEGER)")):
+                pass
+            with closing(holder.execute("BEGIN")):
+                pass
+            with closing(holder.execute("SELECT COUNT(*) FROM probe")) as cursor:
+                assert cursor.fetchone() == (0,)
             task = asyncio.create_task(run_writer())
             await asyncio.wait_for(entered.wait(), CONDITION_DEADLINE_SECONDS)
             if cancel:
@@ -225,8 +245,14 @@ async def all_reader_settings(
 
 
 @pytest.mark.asyncio
-async def test_ordinary_sqlite_reader_can_open_before_writer(tmp_path: Path) -> None:
-    database = Database(sqlite_settings(tmp_path / "metadata.db"))
+async def test_ordinary_sqlite_reader_can_open_before_writer(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "metadata.db")
+    with sqlite_contender(settings.sqlite_path) as setup:
+        with closing(setup.execute("PRAGMA main.journal_mode=DELETE")) as mode:
+            assert mode.fetchone() == ("delete",)
+    database = Database(settings)
     event.listen(
         database.reader_engine.sync_engine,
         "connect",
@@ -248,10 +274,13 @@ async def test_ordinary_sqlite_reader_can_open_before_writer(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_checkpoint_reader_reinitializes_and_can_truncate_wal(
     tmp_path: Path,
+    sqlite_template: Path,
 ) -> None:
     path = tmp_path / "metadata.db"
     wal = path.with_name(f"{path.name}-wal")
-    database = Database(sqlite_settings(path), require_sqlite_full_sync=True)
+    database = Database(
+        copy_sqlite_template(sqlite_template, path), require_sqlite_full_sync=True
+    )
     ledger = ConnectionLedger(database)
 
     event.listen(
@@ -295,12 +324,72 @@ async def test_checkpoint_reader_reinitializes_and_can_truncate_wal(
 
 
 @pytest.mark.asyncio
+async def test_replacement_writer_reuses_charged_wal_main_until_reader_releases(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    path = tmp_path / "metadata.db"
+    database = Database(
+        copy_sqlite_template(sqlite_template, path), require_sqlite_full_sync=True
+    )
+    identity = native_identity(path)
+    workers: set[threading.Thread] = set()
+
+    def observe_worker(statement: str) -> None:
+        workers.add(threading.current_thread())
+
+    try:
+        async with database.transaction() as writer:
+            driver = await writer_driver(writer)
+            await cast(SqliteTraceControl, driver).set_trace_callback(observe_worker)
+            await writer.exec_driver_sql("CREATE TABLE probe (id INTEGER)")
+            await writer.exec_driver_sql("INSERT INTO probe VALUES (7)")
+            original = physical_handle(database, driver)
+        assert isinstance(original, GuardedConnection)
+        assert not original.reused_main()
+        (original_worker,) = workers
+        async with database.read_snapshot() as reader:
+            assert await reader.scalar(text("SELECT COUNT(*) FROM probe")) == 1
+            descriptors = held_main_descriptors(identity)
+            assert len(descriptors) == 2
+            await database.writer_engine.dispose()
+            assert_native_closed(original)
+            assert not original_worker.is_alive()
+            assert held_main_descriptors(identity) == descriptors
+            async with database.transaction() as replacement:
+                driver = await writer_driver(replacement)
+                await cast(SqliteTraceControl, driver).set_trace_callback(
+                    observe_worker
+                )
+                native = physical_handle(database, driver)
+                assert isinstance(native, GuardedConnection)
+                assert native is not original
+                assert native.reused_main()
+                assert held_main_descriptors(identity) == descriptors
+                await replacement.exec_driver_sql("INSERT INTO probe VALUES (9)")
+            assert await reader.scalar(text("SELECT COUNT(*) FROM probe")) == 1
+        async with database.read_transaction() as reader:
+            assert await reader.scalar(text("SELECT COUNT(*) FROM probe")) == 2
+        assert database.units_in_flight() == 0
+    finally:
+        await database.close()
+
+    assert native.settled()
+    assert original.settled()
+    assert len(workers) == 2
+    assert not any(worker.is_alive() for worker in workers)
+    assert held_main_descriptors(identity) == ()
+
+
+@pytest.mark.asyncio
 async def test_pre_wal_reader_refusal_releases_driver_and_all_pool_slots(
     tmp_path: Path,
+    sqlite_template: Path,
 ) -> None:
-    database = Database(
-        sqlite_settings(tmp_path / "metadata.db"), require_sqlite_full_sync=True
-    )
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "metadata.db")
+    with sqlite_contender(settings.sqlite_path) as setup:
+        with closing(setup.execute("PRAGMA main.journal_mode=DELETE")) as mode:
+            assert mode.fetchone() == ("delete",)
+    database = Database(settings, require_sqlite_full_sync=True)
     drivers: list[SQLiteDriverConnection] = []
     workers: list[threading.Thread] = []
 

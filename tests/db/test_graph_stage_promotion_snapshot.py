@@ -1,5 +1,4 @@
 import asyncio
-import sqlite3
 from collections.abc import Generator
 from contextlib import AsyncExitStack, closing, contextmanager
 from dataclasses import replace
@@ -36,6 +35,7 @@ from tests.db.closing import (
     REFUSAL_DEADLINE_SECONDS,
     ConnectionLedger,
     narrow_database,
+    sqlite_contender,
     until,
 )
 from tests.db.seed import Seeder
@@ -296,19 +296,27 @@ async def test_promotion_snapshot_refuses_actual_corrupt_storage(
 
 async def insert_orphan_settlement(database: Database, stage_id: str) -> None:
     if database.dialect is Dialect.SQLITE:
-        with closing(sqlite3.connect(database.settings.sqlite_path)) as connection:
-            connection.execute("PRAGMA foreign_keys=OFF")
-            connection.execute(
-                "DELETE FROM graph_deployment_stage_promotion_intent "
-                "WHERE stage_id = ?",
-                (stage_id,),
-            )
-            connection.execute(
-                "INSERT INTO graph_deployment_stage_promotion_settlement "
-                "(stage_id, observation_bytes) VALUES (?, ?)",
-                (stage_id, SETTLED),
-            )
-            connection.commit()
+        with sqlite_contender(database.settings.sqlite_path, timeout_ms=5000) as native:
+            with (
+                closing(native.execute("PRAGMA foreign_keys=OFF")),
+                closing(native.execute("BEGIN")),
+                closing(
+                    native.execute(
+                        "DELETE FROM graph_deployment_stage_promotion_intent "
+                        "WHERE stage_id = ?",
+                        (stage_id,),
+                    )
+                ),
+                closing(
+                    native.execute(
+                        "INSERT INTO graph_deployment_stage_promotion_settlement "
+                        "(stage_id, observation_bytes) VALUES (?, ?)",
+                        (stage_id, SETTLED),
+                    )
+                ),
+            ):
+                pass
+            native.commit()
         return
     async with database.transaction() as connection:
         await connection.exec_driver_sql(
@@ -390,7 +398,7 @@ async def test_promotion_snapshot_refuses_a_failed_native_checkout_privately(
             )
         unavailable = Database(settings)
         if database.dialect is Dialect.SQLITE:
-            settings.sqlite_path.unlink()
+            assert not settings.sqlite_path.exists()
             settings.sqlite_path.mkdir()
         ledger = ConnectionLedger(unavailable)
 

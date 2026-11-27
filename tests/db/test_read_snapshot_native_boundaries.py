@@ -1,6 +1,5 @@
 import asyncio
 import json
-import sqlite3
 from datetime import UTC, datetime
 from traceback import format_exception, walk_tb
 from typing import cast
@@ -19,6 +18,7 @@ from kora.db.connection import (
     Dialect,
 )
 from kora.observability import Level, LoggingSettings
+from kora.sqlite.driver import Connection as GuardedConnection
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     ConnectionLedger,
@@ -128,7 +128,7 @@ def test_snapshot_does_not_relabel_native_failure_after_late_cleanup(
 def close_native(database: Database, connection: Connection) -> None:
     driver = connection.connection.driver_connection
     native = physical_handle(database, driver)
-    if isinstance(native, sqlite3.Connection):
+    if isinstance(native, GuardedConnection):
         native.close()
     else:
         cast(PostgresNativeConnection, native).terminate()

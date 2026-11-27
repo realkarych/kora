@@ -66,7 +66,8 @@ LAYERS: dict[str, frozenset[str]] = {
     "client": BASE | {"models", "protocols"},
     "executor": BASE | {"protocols"},
     "runner": BASE | {"executor", "protocols"},
-    "db": BASE,
+    "sqlite": frozenset(),
+    "db": BASE | {"sqlite"},
     "cel_eval": BASE | {"cel"},
     "engine": BASE | {"db", "cel_eval", "protocols"},
     "api": BASE | {"engine", "db", "models", "cel_eval", "cel", "protocols"},
@@ -84,7 +85,7 @@ LAYERS: dict[str, frozenset[str]] = {
     "plugins.authentication": ROW_READING_PROVIDER_IMPORTS,
     "plugins.approval": ROW_READING_PROVIDER_IMPORTS,
     "plugins.sensor": PLAIN_PROVIDER_IMPORTS,
-    "plugins.storage": PLAIN_PROVIDER_IMPORTS,
+    "plugins.storage": PLAIN_PROVIDER_IMPORTS | {"sqlite"},
     "plugins.artifact_type": PLAIN_PROVIDER_IMPORTS,
     "plugins.exporter": PLAIN_PROVIDER_IMPORTS,
 }

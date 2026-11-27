@@ -1,9 +1,11 @@
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import AbstractAsyncContextManager, closing, contextmanager
 from dataclasses import replace
 from pathlib import Path
 
 from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import (
     Database,
@@ -13,6 +15,7 @@ from kora.db.connection import (
     Lifecycle,
 )
 from kora.db.tables import namespace
+from kora.sqlite.driver import Connection as NativeSqliteConnection
 from tests.db.seed import Seeder
 
 NARROW_POOL_SIZE: int = 2
@@ -48,6 +51,14 @@ def narrow_settings(
 
 def narrow_database(database: Database, pool_size: int = NARROW_POOL_SIZE) -> Database:
     return Database(narrow_settings(database.settings, pool_size))
+
+
+def legacy_preparation(
+    database: Database,
+) -> AbstractAsyncContextManager[AsyncConnection]:
+    if database.dialect is Dialect.SQLITE:
+        return database.migration_connection()
+    return database.transaction()
 
 
 class ConnectionLedger:
@@ -105,6 +116,15 @@ def sqlite_companions(database: Database) -> list[str]:
     path = database.settings.sqlite_path
     candidates = [Path(f"{path}{suffix}") for suffix in SQLITE_COMPANION_SUFFIXES]
     return [candidate.name for candidate in candidates if candidate.exists()]
+
+
+@contextmanager
+def sqlite_contender(
+    path: Path, *, timeout_ms: int = 0
+) -> Generator[NativeSqliteConnection]:
+    with closing(NativeSqliteConnection()) as connection:
+        connection.open(path, False, timeout_ms, lambda descriptor, empty: not empty)
+        yield connection
 
 
 async def hold_writer(

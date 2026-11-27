@@ -17,13 +17,13 @@ from tests.db.cancel_cause_support import (
     capture_cause_predecessor,
     migration_lock_count,
 )
-from tests.db.closing import ConnectionLedger
+from tests.db.closing import ConnectionLedger, legacy_preparation
 from tests.db.seed import predecessor_snapshot, seed_predecessor
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 
 
 async def encoding_predecessor(database: Database) -> CausePredecessor:
-    async with database.transaction() as connection:
+    async with legacy_preparation(database) as connection:
         await connection.run_sync(seed_predecessor)
     async with database.migration_connection() as connection:
         await connection.run_sync(

@@ -246,7 +246,8 @@ def consume_binding(
 
 def held_main_descriptors(main: FileIdentity) -> tuple[int, ...]:
     matches: list[int] = []
-    for name in os.listdir("/proc/self/fd"):
+    directory = "/dev/fd" if sys.platform == "darwin" else "/proc/self/fd"
+    for name in os.listdir(directory):
         descriptor = int(name)
         try:
             info = os.fstat(descriptor)

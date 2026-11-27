@@ -14,6 +14,7 @@ from ssl import PROTOCOL_TLS_SERVER, SSLContext
 from types import FrameType
 from typing import Protocol
 
+from sqlalchemy.exc import DBAPIError
 from starlette.types import ASGIApp
 from uvicorn import Config, Server
 from uvicorn.lifespan.on import LifespanOn
@@ -25,6 +26,7 @@ from kora.cel_eval.binding import BindingUnavailable
 from kora.db.connection import (
     DEFAULT_CLOSE_DEADLINE_SECONDS,
     Database,
+    DatabaseConfigurationError,
     DatabaseSettings,
 )
 from kora.db.migrations import database_is_at_head
@@ -706,12 +708,19 @@ async def serve_on_loop(
     make_scheduler: Callable[[Database], ServingScheduler] | None = None,
     tls_context: SSLContext | None = None,
 ) -> int:
-    database = Database(settings, observe_sqlite_serving=True)
+    try:
+        database = Database(settings, observe_sqlite_serving=True)
+    except DatabaseConfigurationError:
+        return refuse(log, ServingRefusal.SQLITE_UNPREPARED, 78)
     domain: AsyncExitStack | None = None
     server: ApiServer | None = None
     failure: ServingRefusal | None = None
     try:
-        if not await sqlite_schema_ready_for_serving(database):
+        try:
+            ready = await sqlite_schema_ready_for_serving(database)
+        except DBAPIError:
+            ready = False
+        if not ready:
             failure = ServingRefusal.SQLITE_UNPREPARED
         elif signals.received is None:
             if preparer is not None:

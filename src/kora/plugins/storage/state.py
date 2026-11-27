@@ -1,13 +1,15 @@
 import os
-import sqlite3
+import stat
 from collections.abc import Generator, Iterator
-from contextlib import contextmanager
+from concurrent.futures import Future
+from contextlib import ExitStack, contextmanager
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 from kora.plugins.storage.errors import refuse, require_deadline
-from kora.plugins.storage.files import FileLease, RootAnchor, RootManifest
+from kora.plugins.storage.files import FileLease, RootAnchor, RootManifest, private_file
 from kora.plugins.storage.payload import PayloadFiles, PrivateFile
 from kora.protocols.common import ProtocolContext
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import MAX_COUNT
 from kora.protocols.storage_models import (
     MAX_PAYLOAD_BYTES,
@@ -25,6 +27,8 @@ from kora.protocols.storage_models import (
     StorageMutationSet,
     StorageOperationRef,
 )
+from kora.sqlite import driver as sqlite3
+from kora.sqlite.driver import Admission, NativeRetirement
 
 StorageConnection: TypeAlias = sqlite3.Connection
 StageObservations: TypeAlias = tuple[
@@ -121,8 +125,17 @@ class LocalState:
         self.connections = 0
         self.initial_epoch: Final[int] = self.initialize()
 
-    def validate_files(self, creating: bool) -> None:
+    def validate_files(self, descriptor: int, empty: int, creating: bool) -> bool:
         self.root.validate_anchor()
+        info = private_file(descriptor, self.root.manifest.device)
+        current = os.stat("control.sqlite", dir_fd=self.root.fd, follow_symlinks=False)
+        expected = self.root.manifest.control_inode
+        if (
+            (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)
+            or (expected is not None and expected != info.st_ino)
+            or (empty and (not creating or info.st_size != 0))
+        ):
+            refuse("storage_identity")
         for name in ("control.sqlite-wal", "control.sqlite-shm"):
             try:
                 os.stat(name, dir_fd=self.root.fd, follow_symlinks=False)
@@ -130,30 +143,53 @@ class LocalState:
                 pass
             else:
                 refuse("storage_identity")
-        flags = os.O_RDWR | (os.O_CREAT if creating else 0)
-        descriptor = self.root.open_file(("control.sqlite",), flags)
         try:
-            if (
-                self.root.manifest.control_inode is not None
-                and os.fstat(descriptor).st_ino != self.root.manifest.control_inode
-            ):
-                refuse("storage_identity")
-        finally:
-            os.close(descriptor)
-        try:
-            os.stat(
+            journal = os.stat(
                 "control.sqlite-journal", dir_fd=self.root.fd, follow_symlinks=False
             )
         except FileNotFoundError:
-            return
-        os.close(self.root.open_file(("control.sqlite-journal",), os.O_RDWR))
+            return False
+        if empty:
+            refuse("storage_identity")
+        if not stat.S_ISREG(journal.st_mode) or stat.S_IMODE(journal.st_mode) != 0o600:
+            refuse("storage_path")
+        return True
 
-    def connect(self, creating: bool) -> sqlite3.Connection:
+    def admit_journal(self, descriptor: int) -> bool:
+        self.root.validate_anchor()
+        try:
+            actual = private_file(descriptor, self.root.manifest.device)
+            anchored = os.stat(
+                "control.sqlite-journal", dir_fd=self.root.fd, follow_symlinks=False
+            )
+        except OSError:
+            refuse("storage_path")
+        if (actual.st_dev, actual.st_ino) != (anchored.st_dev, anchored.st_ino):
+            refuse("storage_identity")
+        return True
+
+    def connect(
+        self, connection: sqlite3.Connection, creating: bool, admit: Admission
+    ) -> None:
+        self.root.validate_anchor()
         self.root.refresh_manifest()
         creating = creating and not self.root.manifest.control_initialized
-        self.validate_files(creating)
-        connection = sqlite3.connect(
-            str(self.root.path / "control.sqlite"), timeout=0, isolation_level=None
+        if creating:
+            try:
+                os.stat("control.sqlite", dir_fd=self.root.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                os.close(
+                    self.root.open_file(
+                        ("control.sqlite",), os.O_RDWR | os.O_CREAT | os.O_EXCL
+                    )
+                )
+        connection.open(
+            self.root.path / "control.sqlite",
+            False,
+            0,
+            admit,
+            journal=self.admit_journal,
+            directory=self.root.fd,
         )
         try:
             connection.execute("PRAGMA busy_timeout=0")
@@ -173,35 +209,57 @@ class LocalState:
             connection.close()
             raise
         self.connections += 1
-        return connection
 
     @contextmanager
     def transaction(
         self, write: bool = False, creating: bool = False, synchronize: bool = True
     ) -> Generator[sqlite3.Connection]:
+        path = self.root.path / "control.sqlite"
+        if not NativeRetirement.drain(path):
+            refuse("storage_busy")
         gate = self.root.try_lock("root")
         if gate is None:
             refuse("storage_busy")
-        with gate:
+        with ExitStack() as root_lock:
+            root_lock.callback(gate.close)
             connection: sqlite3.Connection | None = None
             recovery = False
-            try:
+            completed = False
+            settlement: Future[None] = Future()
+
+            def admit(descriptor: int, empty: int) -> bool:
+                nonlocal recovery
+                can_create = creating and not self.root.manifest.control_initialized
+                recovery = self.validate_files(descriptor, empty, can_create)
+                return True
+
+            def release() -> None:
                 try:
-                    os.stat(
-                        "control.sqlite-journal",
-                        dir_fd=self.root.fd,
-                        follow_symlinks=False,
-                    )
-                except FileNotFoundError:
-                    recovery = False
+                    with gate:
+                        if recovery:
+                            self.root.synchronize_directory(self.root.fd)
+                except (KoraProtocolError, OSError) as error:
+                    settlement.set_exception(error)
                 else:
-                    recovery = True
-                connection = self.connect(creating)
+                    settlement.set_result(None)
+
+            try:
+                owned = sqlite3.Connection(
+                    lambda native: NativeRetirement.retain(path, native, release)
+                )
+                root_lock.pop_all()
+                try:
+                    self.connect(owned, creating, admit)
+                except BaseException:
+                    owned.close()
+                    raise
+                connection = owned
                 connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
                 yield connection
                 connection.commit()
                 if (write or synchronize) and not recovery:
                     self.root.synchronize_directory(self.root.fd)
+                completed = True
             except ValueError:
                 refuse("storage_integrity")
             except sqlite3.Error as error:
@@ -214,13 +272,13 @@ class LocalState:
                     refuse("storage_busy")
                 refuse("storage_io")
             finally:
-                try:
-                    if connection is not None:
-                        connection.close()
-                        self.connections -= 1
-                finally:
-                    if recovery:
-                        self.root.synchronize_directory(self.root.fd)
+                if connection is not None:
+                    connection.close()
+                    self.connections -= 1
+                if settlement.done():
+                    settlement.result()
+                elif completed:
+                    refuse("storage_io")
 
     def initialize(self) -> int:
         creating = not self.root.manifest.control_initialized

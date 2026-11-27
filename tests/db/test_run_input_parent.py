@@ -22,6 +22,7 @@ from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     ConnectionLedger,
     narrow_settings,
+    sqlite_contender,
 )
 from tests.db.seed import Seeder
 from tests.db.test_graph_read_admission import executed_queries, sqlite_instructions
@@ -156,11 +157,13 @@ async def test_run_input_parent_refuses_native_lock_timeout(
                 await writer.exec_driver_sql("LOCK TABLE run IN ACCESS EXCLUSIVE MODE")
                 refused = await read_parent(probe, binding)
         else:
-            with closing(sqlite3.connect(settings.sqlite_path)) as writer:
-                writer.execute("PRAGMA journal_mode=DELETE")
+            with sqlite_contender(settings.sqlite_path, timeout_ms=5000) as writer:
+                with closing(writer.execute("PRAGMA journal_mode=DELETE")) as mode:
+                    assert mode.fetchone() == ("delete",)
                 async with probe.read_transaction() as reader:
                     await reader.exec_driver_sql("PRAGMA busy_timeout=100")
-                writer.execute("BEGIN EXCLUSIVE")
+                with closing(writer.execute("BEGIN EXCLUSIVE")):
+                    pass
                 try:
                     refused = await read_parent(probe, binding)
                 finally:
