@@ -531,7 +531,7 @@ async def test_pi_sdk_uses_closed_session_and_reaps(
         assert FIXTURE_KEY not in repr(gate.recipe)
         assert FIXTURE_KEY not in repr(kora_capture.finish())
         assert arguments == tuple(os.fsencode(value) for value in gate.recipe.argv)
-        if environment is not None:
+        if sys.platform == "linux":
             assert environment == frozenset(
                 os.fsencode(f"{item.name}={item.value}")
                 for item in gate.recipe.environment
