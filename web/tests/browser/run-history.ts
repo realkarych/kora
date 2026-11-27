@@ -18,6 +18,10 @@ type SignInStep = 'start' | 'open-page' | 'navigate' | 'redemption' | 'redirect-
   | 'event-response' | 'event-headers' | 'event-body' | 'event-parity' | 'latest-dom'
   | 'clean-page' | 'open-replay' | 'replay-navigation' | 'replay-response' | 'close-replay'
   | 'canonical-cookie' | 'complete'
+type PageSelection = 'earlier' | 'latest'
+type PaginationStep = 'start' | 'focus-reload' | 'tab-sign-out' | 'tab-earlier'
+  | 'earlier-selector' | 'restored-focus' | 'complete'
+  | `${PageSelection}-${'enter' | 'response' | 'headers' | 'body' | 'parity' | 'dom'}`
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 const lines = input[Symbol.asyncIterator]()
@@ -78,6 +82,12 @@ const evidence = {
     eventFinished: false,
     eventFailed: false,
   },
+  pagination: {
+    step: 'start' as PaginationStep,
+    failedStep: null as PaginationStep | null,
+    contextSettled: false,
+    ownerSettled: false,
+  },
   routes: {} as Partial<Record<RouteClass, number[]>>,
 }
 const cancellation = new AbortController()
@@ -94,6 +104,10 @@ function stage(next: string): void {
 
 function signInStep(step: SignInStep): void {
   if (evidence.stage === 'native-sign-in') evidence.nativeSignIn.step = step
+}
+
+function paginationStep(step: PaginationStep): void {
+  if (evidence.stage === 'pagination') evidence.pagination.step = step
 }
 
 async function profile(name: string, trust: boolean): Promise<Ownership> {
@@ -286,11 +300,13 @@ const refresh = (page: Page) => page.getByRole('button', { name: 'Reload latest'
 const earlier = (page: Page) => page.getByRole('button', { name: 'Earlier events' })
 const signOut = (page: Page) => page.getByRole('button', { name: 'Sign out' })
 
-async function checkedResponse(response: Response): Promise<Document> {
+async function checkedResponse(response: Response, selection?: PageSelection): Promise<Document> {
   signInStep('event-headers')
+  if (selection !== undefined) paginationStep(`${selection}-headers`)
   assert.equal(response.status(), 200)
   assert.match(string(await response.headerValue('cache-control')), /no-store/iu)
   signInStep('event-body')
+  if (selection !== undefined) paginationStep(`${selection}-body`)
   const content: unknown = await response.json()
   return object(content)
 }
@@ -321,8 +337,9 @@ async function assertPageRows(page: Page, expected: Document[]): Promise<void> {
 }
 
 async function latest(page: Page, response: Response, began: number): Promise<void> {
-  const body = await checkedResponse(response)
+  const body = await checkedResponse(response, 'latest')
   signInStep('event-parity')
+  paginationStep('latest-parity')
   const query = new URL(response.url()).searchParams
   assert.equal(query.get('limit'), '20')
   assert(!query.has('cursor'))
@@ -331,6 +348,7 @@ async function latest(page: Page, response: Response, began: number): Promise<vo
   const observed = Date.parse(string(body.observed_at))
   assert(began <= observed && observed <= Date.now())
   signInStep('latest-dom')
+  paginationStep('latest-dom')
   const observation = page.locator('time').filter({ hasText: string(body.observed_at) })
   await observation.waitFor({ state: 'visible' })
   assert.equal(await observation.getAttribute('datetime'), body.observed_at)
@@ -420,31 +438,43 @@ async function appearance(page: Page): Promise<void> {
 }
 
 async function paginate(page: Page): Promise<void> {
+  paginationStep('focus-reload')
   await refresh(page).focus()
   const signOutButton = signOut(page)
+  paginationStep('tab-sign-out')
   await page.keyboard.press('Tab')
   assert(await signOutButton.evaluate(element => element === document.activeElement))
+  paginationStep('tab-earlier')
   await page.keyboard.press('Tab')
   assert(await earlier(page).evaluate(element => element === document.activeElement))
+  paginationStep('earlier-enter')
   const first = waitEventPage(page)
   await page.keyboard.press('Enter')
+  paginationStep('earlier-response')
   const response = await first
+  paginationStep('earlier-selector')
   const query = new URL(response.url()).searchParams
   assert.equal(query.get('cursor'), canonical.next_cursor)
-  const older = await checkedResponse(response)
+  const older = await checkedResponse(response, 'earlier')
+  paginationStep('earlier-parity')
   assert(Array.isArray(older.items))
   const items = (older.items as unknown[]).map(object)
   assert.equal(items.length, 1)
   assert.equal(items[0]?.id, earliest)
   assert.equal(older.next_cursor, null)
+  paginationStep('earlier-dom')
   await assertPageRows(page, items)
   assert.equal(await earlier(page).count(), 0)
   validatedReads.add(response.request())
+  paginationStep('restored-focus')
   assert(await refresh(page).evaluate(element => element === document.activeElement))
+  paginationStep('latest-enter')
   const latestPage = waitEventPage(page)
   const began = Date.now()
   await page.keyboard.press('Enter')
+  paginationStep('latest-response')
   await latest(page, await latestPage, began)
+  paginationStep('complete')
 }
 
 async function withHeldRead(
@@ -690,12 +720,15 @@ async function trustedJourney(): Promise<void> {
       send({ type: 'finish' })
     } catch (error) {
       if (evidence.stage === 'native-sign-in') evidence.nativeSignIn.failedStep = evidence.nativeSignIn.step
+      if (evidence.stage === 'pagination') evidence.pagination.failedStep = evidence.pagination.step
       throw error
     } finally {
       await context.close()
+      evidence.pagination.contextSettled = true
     }
   } finally {
     checkCleanup(await owner.close())
+    evidence.pagination.ownerSettled = true
   }
 }
 
