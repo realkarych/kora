@@ -23,6 +23,7 @@ from kora.runner.filesystem import (
 )
 
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+MAX_PWD_BYTES = 4096
 MAX_PATH_BYTES = 1024
 MAX_PATH_PARTS = 16
 MAX_VISIT_NAMES = 4096
@@ -85,7 +86,7 @@ def _bounded(value: str, limit: int) -> bool:
 
 
 def _pwd_parts(pwd: str) -> list[str]:
-    if not pwd.startswith("/") or not _bounded(pwd, 4096):
+    if not pwd.startswith("/") or not _bounded(pwd, MAX_PWD_BYTES):
         raise WorkspaceTargetError(TargetRefusal.ROOT)
     parts = pwd[1:].split("/")
     if len(parts) > 32 or any(
@@ -105,17 +106,19 @@ def _relative(path: str, pwd: str) -> str:
     return path[len(prefix) :]
 
 
+def _forbidden_chars(path: str) -> bool:
+    return any(
+        (char.isspace() and char != " ") or char == "\ufeff" or category(char) == "Cc"
+        for char in path
+    )
+
+
 def _path_parts(path: str, *, link: bool = False) -> list[str]:
     if (
         not _bounded(path, MAX_PATH_BYTES)
         or path != path.strip()
         or (not link and path.startswith(("@", "~")))
-        or any(
-            (char.isspace() and char != " ")
-            or char == "\ufeff"
-            or category(char) == "Cc"
-            for char in path
-        )
+        or _forbidden_chars(path)
     ):
         raise WorkspaceTargetError(TargetRefusal.PATH)
     parts = path.split("/")
@@ -243,13 +246,18 @@ class WorkspaceTarget:
 
     def _open(self, path: str) -> _OpenedTarget:
         self._check()
+        if path.startswith("/") and (
+            not _bounded(path, MAX_PWD_BYTES + 1 + MAX_PATH_BYTES)
+            or _forbidden_chars(path)
+        ):
+            raise WorkspaceTargetError(TargetRefusal.PATH)
+        lexical = _relative(path, self._pwd)
+        pending = _path_parts(lexical)
         anchor = self._checkout.anchor
         try:
             anchor.verify()
         except (OSError, FilesystemError):
             raise WorkspaceTargetError(TargetRefusal.ROOT) from None
-        lexical = _relative(path, self._pwd)
-        pending = _path_parts(lexical)
         names: list[str] = []
         directories = [anchor.descriptor]
         links = 0

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel, Field, StrictStr
 
 from kora.plugins.runtime.local.bound_checkout import BoundCheckout
 from kora.plugins.runtime.local.workspace_target import (
@@ -25,7 +26,7 @@ from kora.plugins.runtime.local.workspace_target import (
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.filesystem import filesystem_kind
 from tests.plugins.runtime.local.frames_support import StepClock
-from tests.plugins.storage.pressure_images import DiskImage, DiskImages
+from tests.plugins.storage.pressure_images import DiskEntity
 from tests.support.local_runtime import open_descriptors
 
 
@@ -258,6 +259,25 @@ def test_workspace_target_refuses_unadmitted_spellings(
     assert refused.value.reason is TargetRefusal.PATH
 
 
+@pytest.mark.parametrize("character", ["\t", "\u0085", "\u00a0", "\ufeff"])
+def test_workspace_target_checks_the_entire_authored_absolute_spelling(
+    tmp_path: Path, character: str
+) -> None:
+    root = checkout_path(tmp_path.resolve() / f"first{character}second")
+    path = root / "file"
+    path.touch()
+    expected = native_file_key(path)
+
+    with owned_target(root) as owner, pytest.raises(WorkspaceTargetError) as refused:
+        owner.prepare(str(path))
+    with owned_target(root) as owner:
+        relative = owner.prepare(path.name)
+        actual = native_key(os.fstat(owner.revalidate()))
+
+    assert refused.value.reason is TargetRefusal.PATH
+    assert relative.key == actual == expected
+
+
 def test_workspace_target_rejects_physical_escape_and_nonregular_objects(
     tmp_path: Path,
 ) -> None:
@@ -479,9 +499,22 @@ def hdiutil(*args: str) -> bytes:
     return result.stdout
 
 
-def attached_image(image: Path) -> DiskImage | None:
+class ApfsEntity(DiskEntity):
+    content_hint: StrictStr | None = Field(default=None, alias="content-hint")
+
+
+class ApfsImage(BaseModel):
+    path: StrictStr | None = Field(default=None, alias="image-path")
+    entities: tuple[ApfsEntity, ...] = Field(default=(), alias="system-entities")
+
+
+class ApfsImages(BaseModel):
+    images: tuple[ApfsImage, ...] = ()
+
+
+def attached_image(image: Path) -> ApfsImage | None:
     payload: object = plistlib.loads(hdiutil("info", "-plist"))
-    inventory = DiskImages.model_validate(payload)
+    inventory = ApfsImages.model_validate(payload)
     matches = tuple(
         item
         for item in inventory.images
@@ -491,14 +524,30 @@ def attached_image(image: Path) -> DiskImage | None:
     return matches[0] if matches else None
 
 
-def image_mount_device(attachment: DiskImage, mount: Path) -> str:
-    (volume,) = (
+def whole_image_device(attachment: ApfsImage) -> str:
+    (device,) = (
+        entity.device
+        for entity in attachment.entities
+        if entity.content_hint == "GUID_partition_scheme"
+    )
+    assert device is not None
+    assert re.fullmatch(r"/dev/disk[0-9]{1,8}", device)
+    assert stat.S_ISBLK(os.stat(device).st_mode)
+    return device
+
+
+def image_mount_device(attachment: ApfsImage, mount: Path) -> str:
+    volumes = tuple(
         entity for entity in attachment.entities if entity.mount_point is not None
     )
+    assert len(volumes) == 1, "expected a single APFS mount"
+    (volume,) = volumes
     device = volume.device
     assert device is not None
     assert re.fullmatch(r"/dev/disk[0-9]{1,8}s[0-9]{1,4}", device)
-    assert volume.mount_point == str(mount)
+    assert volume.mount_point == str(mount), (
+        "APFS mount is outside its expected location"
+    )
     native = os.stat(device)
     assert stat.S_ISBLK(native.st_mode)
     assert native.st_rdev == mount.stat().st_dev
@@ -524,64 +573,98 @@ def apfs_aliases(directory: Path) -> bool:
         spelling.unlink()
 
 
+def attach_apfs_volume(image: Path, mount: Path) -> None:
+    hdiutil(
+        "attach", "-nobrowse", "-owners", "on", "-mountpoint", str(mount), str(image)
+    )
+
+
 @contextmanager
-def owned_apfs_volume(parent: Path) -> Generator[Path]:
+def owned_apfs_image(parent: Path) -> Generator[tuple[Path, Path]]:
     image = parent / "target.dmg"
     mount = parent / "mount"
     mount.mkdir()
-    hdiutil(
-        "create",
-        "-size",
-        "96m",
-        "-layout",
-        "GPTSPUD",
-        "-fs",
-        "APFS",
-        "-type",
-        "UDIF",
-        str(image),
-    )
-    device: str | None = None
     try:
         hdiutil(
-            "attach",
-            "-nobrowse",
-            "-owners",
-            "on",
-            "-mountpoint",
-            str(mount),
+            "create",
+            "-size",
+            "96m",
+            "-layout",
+            "GPTSPUD",
+            "-fs",
+            "APFS",
+            "-type",
+            "UDIF",
             str(image),
         )
-        live = attached_image(image)
-        assert live is not None
-        device = image_mount_device(live, mount)
-        assert os.path.ismount(mount)
-        assert apfs_aliases(mount)
-        yield mount.resolve()
+        yield image, mount
     finally:
         live = attached_image(image)
         if live is not None:
-            observed = image_mount_device(live, mount)
-            assert device is None or observed == device
-            hdiutil("detach", observed)
+            hdiutil("detach", whole_image_device(live))
+            for entity in live.entities:
+                if entity.mount_point is not None:
+                    assert not os.path.ismount(entity.mount_point)
         assert attached_image(image) is None
         assert not os.path.ismount(mount)
-        image.unlink()
+        image.unlink(missing_ok=True)
 
 
 @contextmanager
-def native_spelling_workspace(parent: Path) -> Generator[Path]:
-    if sys.platform != "darwin" or apfs_aliases(parent):
-        yield checkout_path(parent)
-    else:
+def owned_apfs_volume(parent: Path) -> Generator[Path]:
+    with owned_apfs_image(parent) as (image, mount):
+        attach_apfs_volume(image, mount)
+        live = attached_image(image)
+        assert live is not None
+        image_mount_device(live, mount)
+        assert os.path.ismount(mount)
+        assert apfs_aliases(mount)
+        yield mount.resolve()
+
+
+@contextmanager
+def native_spelling_workspace(parent: Path, disposable: bool) -> Generator[Path]:
+    if disposable or (sys.platform == "darwin" and not apfs_aliases(parent)):
         with owned_apfs_volume(parent) as mount:
             yield checkout_path(mount)
+    else:
+        yield checkout_path(parent)
 
 
+if sys.platform == "darwin":
+
+    @pytest.mark.parametrize("mounted", [False, True])
+    def test_workspace_target_releases_whole_apfs_image_after_mount_refusal(
+        tmp_path: Path,
+        mounted: bool,
+    ) -> None:
+        parent = tmp_path.resolve()
+        failure = "APFS mount is outside" if mounted else "expected a single APFS mount"
+
+        with owned_apfs_image(parent) as (image, mount):
+            if mounted:
+                attach_apfs_volume(image, mount)
+            else:
+                hdiutil("attach", "-nomount", "-plist", str(image))
+            live = attached_image(image)
+            assert live is not None
+            assert os.path.ismount(mount) == mounted
+            with pytest.raises(AssertionError, match=failure):
+                image_mount_device(live, parent / "unaccepted-mount")
+
+        assert attached_image(image) is None
+        assert not os.path.ismount(mount)
+        assert not image.exists()
+
+
+@pytest.mark.parametrize(
+    "disposable", [False, True] if sys.platform == "darwin" else [False]
+)
 def test_workspace_target_checks_actual_case_and_unicode_spelling(
     tmp_path: Path,
+    disposable: bool,
 ) -> None:
-    with native_spelling_workspace(tmp_path.resolve()) as root:
+    with native_spelling_workspace(tmp_path.resolve(), disposable) as root:
         old = root / "target"
         renamed = root / "Target"
         old.touch()
