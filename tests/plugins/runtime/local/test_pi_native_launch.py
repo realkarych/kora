@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from time import sleep
 from typing import Final, cast
 
 import pytest
@@ -1055,30 +1054,42 @@ async def test_pi_bridge_preserves_stop_cause_for_buffered_reply(
     assert stopped.value.code == stop
 
 
-@pytest.mark.asyncio
+class ReadTimerLoop(asyncio.SelectorEventLoop):
+    def __init__(self) -> None:
+        super().__init__()
+        self.offset: float = 0.0
+
+    def time(self) -> float:
+        return super().time() + self.offset
+
+
 @pytest.mark.parametrize("revoked", [False, True], ids=["deadline", "revoked"])
-async def test_pi_bridge_read_timer_preserves_latched_stop(
+def test_pi_bridge_read_timer_preserves_latched_stop(
     kora_capture: Capture,
     revoked: bool,
 ) -> None:
-    clock = StepClock()
-    read_window_ns = SECOND // 50
-    async with prepared_channel(kora_capture, clock) as (channel, _, peer, _):
-        clock.advance(5 * SECOND - read_window_ns)
+    loop = ReadTimerLoop()
 
-        def revoke_before_timer_runs() -> None:
-            channel.revoke()
-            sleep(2 * read_window_ns / SECOND)
+    async def exercise() -> str:
+        async with prepared_channel(kora_capture, StepClock()) as (channel, _, peer, _):
 
-        pending = asyncio.create_task(channel.prompt(PROMPT))
-        if revoked:
-            asyncio.get_running_loop().call_soon(revoke_before_timer_runs)
-        with pytest.raises(BridgeRefused) as stopped:
-            await pending
-        async with asyncio.timeout(5):
-            await control_challenge(peer[0], "prompt")
+            def expire_read_timer() -> None:
+                if revoked:
+                    channel.revoke()
+                loop.offset = 6.0
 
-    assert stopped.value.code == ("closed" if revoked else "deadline")
+            pending = loop.create_task(channel.prompt(PROMPT))
+            loop.call_soon(expire_read_timer)
+            with pytest.raises(BridgeRefused) as stopped:
+                await pending
+            async with asyncio.timeout(5):
+                await control_challenge(peer[0], "prompt")
+            return stopped.value.code
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        cause = runner.run(exercise())
+
+    assert cause == ("closed" if revoked else "deadline")
 
 
 @pytest.mark.asyncio
