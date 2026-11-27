@@ -17,7 +17,7 @@ import uvicorn
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from starlette.types import ASGIApp
 
 from kora.client import KoraClient
@@ -200,6 +200,7 @@ def write_tls_material(
     )
     beginning = datetime(2020, 1, 1, tzinfo=UTC)
     expiry = datetime(2099, 1, 1, tzinfo=UTC)
+    ca_subject_key = x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key())
     ca = (
         x509.CertificateBuilder()
         .issuer_name(ca_name)
@@ -209,6 +210,21 @@ def write_tls_material(
         .not_valid_before(beginning)
         .not_valid_after(expiry)
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(ca_subject_key, critical=False)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
         .sign(ca_key, hashes.SHA256())
     )
     names: list[x509.GeneralName] = [x509.IPAddress(ipaddress.IPv4Address(address))]
@@ -222,8 +238,18 @@ def write_tls_material(
         .serial_number(2)
         .not_valid_before(beginning)
         .not_valid_after(expiry)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.SubjectAlternativeName(names),
+            critical=False,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+                ca_subject_key
+            ),
             critical=False,
         )
         .sign(ca_key, hashes.SHA256())

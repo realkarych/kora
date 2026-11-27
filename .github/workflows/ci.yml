@@ -1046,7 +1046,7 @@ jobs:
         run: |
           pnpm --dir web run test:browser
           dpkg-query -W libnss3-tools xdg-utils
-          uv run --no-sync python -m tests.api.console_browser_fixture
+          uv run --no-sync pytest -q -s tests/api/console_browser_fixture.py::test_installed_console_browser
         if: ${{ needs.change-scope.outputs.full != 'false' }}
         id: verification
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f

@@ -65,7 +65,6 @@ from tests.db.seed import START, Seeder
 from tests.db.test_run_event_reads import SYSTEM, EventScope, seed_event, seed_run
 from tests.plugins.authentication.support import seed_case
 from tests.support.databases import copy_sqlite_template, prepare_sqlite_template
-from tests.support.provider_tooling import build_core_wheel, core_wheel_workspace
 
 PAGE_SIZE = 20
 PRIVATE_PAYLOAD = "private-installed-browser-event-payload"
@@ -745,7 +744,7 @@ async def run(
         await release_adopted()
 
 
-def main() -> int:
+def test_installed_console_browser(core_wheel: Path) -> None:
     output_root = Path(
         os.environ.get("KORA_BROWSER_OUTPUT", WEB_ROOT.parent / "measurements/browser")
     ).resolve()
@@ -757,10 +756,7 @@ def main() -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="kora-installed-browser-") as private:
             root = Path(private)
-            with core_wheel_workspace() as build:
-                python = installed_core(
-                    build_core_wheel(build), root, serve=True, mcp=True
-                )
+            python = installed_core(core_wheel, root, serve=True, mcp=True)
             settings = copy_sqlite_template(
                 prepare_sqlite_template(root), root / "browser.sqlite"
             )
@@ -775,9 +771,9 @@ def main() -> int:
         httpx.HTTPError,
         asyncio.CancelledError,
     ):
-        status, exit_code = "failed", 1
+        status = "failed"
     else:
-        status, exit_code = "passed", 0
+        status = "passed"
     report = json.dumps(
         {
             "event": "installed-browser",
@@ -788,8 +784,4 @@ def main() -> int:
     )
     (output / "fixture-report.json").write_text(report + "\n", encoding="ascii")
     sys.stdout.write(report + "\n")
-    return exit_code
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    assert status == "passed"
