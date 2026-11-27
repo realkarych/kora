@@ -31,6 +31,7 @@ from kora.db.connection import (
 )
 from kora.db.tables import namespace
 from kora.observability import Level, LoggingSettings
+from kora.sqlite.driver import Connection as GuardedConnection
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     REFUSAL_DEADLINE_SECONDS,
@@ -50,13 +51,13 @@ class PostgresNativeConnection(Protocol):
 def physical_handle(database: Database, driver: object) -> object:
     if database.dialect is Dialect.SQLITE:
         handle: object = vars(sqlite_driver(driver))["_connection"]
-        assert isinstance(handle, sqlite3.Connection)
+        assert isinstance(handle, GuardedConnection)
         return handle
     return driver
 
 
 def assert_native_closed(handle: object) -> None:
-    if isinstance(handle, sqlite3.Connection):
+    if isinstance(handle, GuardedConnection):
         with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
             handle.execute("SELECT 1")
     else:
@@ -781,7 +782,7 @@ async def test_snapshot_keeps_cancellation_after_native_connection_loss(
             await asyncio.wait_for(entered.wait(), CONDITION_DEADLINE_SECONDS)
             driver = drivers[0]
             handle = physical_handle(database, driver)
-            if isinstance(handle, sqlite3.Connection):
+            if isinstance(handle, GuardedConnection):
                 handle.close()
             else:
                 cast(PostgresNativeConnection, driver).terminate()

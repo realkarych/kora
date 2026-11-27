@@ -1,0 +1,91 @@
+--- a/sqlite3.c
++++ b/sqlite3.c
+@@ -40899,0 +40900,2 @@
++#include "_ownership.h"
++
+@@ -40900,0 +40903 @@
++  KoraFd *koraOwner;
+@@ -42106,0 +42110,5 @@
++static void koraFreeUnused(UnixUnusedFd *unused){
++  if( unused && unused->koraOwner ) koraReleaseFd(unused->koraOwner);
++  sqlite3_free(unused);
++}
++
+@@ -42107,0 +42116,5 @@
++  if( pFile && pFile->h==h && pFile->pPreallocatedUnused
++      && pFile->pPreallocatedUnused->koraOwner ){
++    koraParkFd(pFile->pPreallocatedUnused->koraOwner);
++    return;
++  }
+@@ -42132,2 +42145,6 @@
+-    robust_close(pFile, p->fd, __LINE__);
+-    sqlite3_free(p);
++    if( p->koraOwner ){
++      koraParkFd(p->koraOwner);
++    }else{
++      robust_close(pFile, p->fd, __LINE__);
++    }
++    koraFreeUnused(p);
+@@ -42758,0 +42776 @@
++  if( p->koraOwner ) p->koraOwner->state = KORA_FD_CACHED;
+@@ -42987 +43005 @@
+-  sqlite3_free(pFile->pPreallocatedUnused);
++  koraFreeUnused(pFile->pPreallocatedUnused);
+@@ -45210,0 +45229,3 @@
++  dev_t koraDevice;
++  ino_t koraInode;
++  int koraIdentityKnown;
+@@ -45487 +45508,8 @@
+-      robust_close(pFd, p->hShm, __LINE__);
++      if( pFd->pPreallocatedUnused && pFd->pPreallocatedUnused->koraOwner ){
++        if( osClose(p->hShm)!=0 ){
++          pFd->pPreallocatedUnused->koraOwner->unresolvedSidecar = 1;
++          koraUnresolvedIdentity = 1;
++        }
++      }else{
++        robust_close(pFd, p->hShm, __LINE__);
++      }
+@@ -45703,0 +45732,6 @@
++      struct stat identity;
++      if( osFstat(pShmNode->hShm, &identity)==0 ){
++        pShmNode->koraDevice = identity.st_dev;
++        pShmNode->koraInode = identity.st_ino;
++        pShmNode->koraIdentityKnown = 1;
++      }
+@@ -47179,0 +47214,2 @@
++#include "_guard_unix.h"
++
+@@ -47272,0 +47309 @@
++    if( !koraOpen || koraUnresolvedIdentity ) return SQLITE_CANTOPEN;
+@@ -47280,0 +47318 @@
++      pUnused->koraOwner = 0;
+@@ -47338 +47376,2 @@
+-    fd = robust_open(zName, openFlags, openMode);
++    fd = eType==SQLITE_OPEN_MAIN_DB ? koraOpenMain(zName, openFlags)
++                                    : robust_open(zName, openFlags, openMode);
+@@ -47354 +47393 @@
+-        pReadonly = findReusableFd(zName, flags);
++        if( eType==SQLITE_OPEN_MAIN_DB ) pReadonly = findReusableFd(zName, flags);
+@@ -47357 +47396,2 @@
+-          sqlite3_free(pReadonly);
++          koraFreeUnused(p->pPreallocatedUnused);
++          p->pPreallocatedUnused = pReadonly;
+@@ -47359 +47399,2 @@
+-          fd = robust_open(zName, openFlags, openMode);
++          fd = eType==SQLITE_OPEN_MAIN_DB ? koraOpenMain(zName, openFlags)
++                                          : robust_open(zName, openFlags, openMode);
+@@ -47385,0 +47427,7 @@
++  if( eType==SQLITE_OPEN_MAIN_DB ){
++    rc = koraSelectMain(p, fd);
++    if( rc!=SQLITE_OK ){
++      robust_close(p, fd, __LINE__);
++      goto open_finished;
++    }
++  }
+@@ -47419 +47467,2 @@
+-    return SQLITE_IOERR_ACCESS;
++    rc = SQLITE_IOERR_ACCESS;
++    goto open_finished;
+@@ -47480 +47529 @@
+-    sqlite3_free(p->pPreallocatedUnused);
++    koraFreeUnused(p->pPreallocatedUnused);

@@ -200,7 +200,8 @@ Reference table for [ADR-0026](../../docs/decisions/0026-package-layers.md), whi
 | `client` | the shared `httpx` API client | `models`, `protocols`, `ir`, `observability` |
 | `executor` | VCS plan executor | `protocols`, `ir`, `observability` |
 | `runner` | `kora-runner` supervisor, including its registry, control channel and journal | `executor`, `protocols`, `ir`, `observability` |
-| `db` | SQLAlchemy tables, read functions, token-row revocation primitives and migrations; writes of the execution tables, `approval_request` and `artifact_version` are `engine` functions | `ir`, `observability` |
+| `sqlite` | Private installed SQLite engine, actual-main admission and bounded DB-API binding | None |
+| `db` | SQLAlchemy tables, read functions, token-row revocation primitives and migrations; writes of the execution tables, `approval_request` and `artifact_version` are `engine` functions | `ir`, `observability`, `sqlite` |
 | `cel_eval` | evaluation of checked expressions through the binding | `cel`, `ir`, `observability` |
 | `engine` | shared transition functions, immutable execution records, manual-start replay, transaction-local start-capacity checks and manual-start acceptance | `db`, `cel_eval`, `protocols`, `ir`, `observability` |
 | `api` | FastAPI application | `engine`, `db`, `models`, `cel_eval`, `cel`, `protocols`, `ir`, `observability` |
@@ -215,7 +216,8 @@ Reference table for [ADR-0026](../../docs/decisions/0026-package-layers.md), whi
 | `plugins.vcs` | VCS providers | `executor`, `protocols`, `ir`, `observability` |
 | `plugins.policy`, `plugins.secrets` | policy and secrets providers; `plugins.policy.allow_deny` is the `allow_deny` policy (issue #233), and `plugins.secrets.env` is the `env` provider (issue #192), and `plugins.secrets.file` is the `file` provider (issue #1713) | `protocols`, `ir`, `observability` |
 | `plugins.authentication`, `plugins.approval` | providers that read their own rows: `static_token` reads `api_token`, the `cli` channel polls its request row | `db`, `protocols`, `ir`, `observability` |
-| `plugins.sensor`, `plugins.storage`, `plugins.artifact_type`, `plugins.exporter` | control-plane providers without metadata database access; storage may keep provider-private bookkeeping, with no metadata authority or `kora.db` import | `protocols`, `ir`, `observability` |
+| `plugins.sensor`, `plugins.artifact_type`, `plugins.exporter` | control-plane providers without metadata database access | `protocols`, `ir`, `observability` |
+| `plugins.storage` | artifact storage providers; built-in local storage uses the private SQLite engine for provider-owned bookkeeping, with no metadata authority or `kora.db` import | `protocols`, `ir`, `observability`, `sqlite` |
 
 ## Stack per component
 

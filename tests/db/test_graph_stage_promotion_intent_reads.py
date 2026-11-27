@@ -26,6 +26,7 @@ from kora.db.graph_stage_promotion_snapshot import (
 from kora.db.migrations import upgrade_database
 from kora.db.tables import graph_deployment_stage_promotion_intent as intent
 from kora.observability import Level, LoggingSettings
+from kora.sqlite.driver import Connection as GuardedConnection
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     REFUSAL_DEADLINE_SECONDS,
@@ -442,7 +443,7 @@ async def test_raw_sqlite_metadata_failure_refuses_privately_and_reuses_worker(
     database = Database(settings)
     selected = threading.Event()
     interrupted = threading.Event()
-    native: sqlite3.Connection | None = None
+    native: GuardedConnection | None = None
 
     def trace(statement: str) -> None:
         if SQLITE_METADATA_QUERY in statement:
@@ -455,7 +456,7 @@ async def test_raw_sqlite_metadata_failure_refuses_privately_and_reuses_worker(
         binding, stage_ids = await seed_documents(database)
         driver = await sqlite_worker(database)
         native_handle = physical_handle(database, driver)
-        assert isinstance(native_handle, sqlite3.Connection)
+        assert isinstance(native_handle, GuardedConnection)
         native = native_handle
         trace_driver = cast(SQLiteTraceDriver, driver)
         await trace_driver.set_trace_callback(trace)

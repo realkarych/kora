@@ -44,6 +44,16 @@ DATABASE_NAME_PATTERN: re.Pattern[str] = re.compile(r"[a-z][a-z0-9_]{0,62}")
 SQLITE_TEMPLATE_NAME: str = "template.db"
 
 
+def marker_only_sqlite(path: Path, marker: bytes) -> bytes:
+    path.touch(mode=0o600, exist_ok=False)
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute(f"PRAGMA application_id={int.from_bytes(marker, 'big')}").close()
+        writer.commit()
+    image = path.read_bytes()
+    assert image[68:72] == marker
+    return image
+
+
 class DatabaseKind(enum.StrEnum):
     SQLITE = "sqlite"
     POSTGRESQL = "postgresql"

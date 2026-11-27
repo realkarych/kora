@@ -14,6 +14,7 @@ from collections.abc import (
     Mapping,
 )
 from contextlib import AsyncExitStack, asynccontextmanager, closing, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -22,6 +23,7 @@ from weakref import ReferenceType, ref
 
 import aiosqlite
 from sqlalchemy import URL, Connection, event, make_url, text
+from sqlalchemy.dialects.sqlite.aiosqlite import AsyncAdapt_aiosqlite_dbapi
 from sqlalchemy.engine.interfaces import (
     DBAPIConnection,
     DBAPICursor,
@@ -57,6 +59,8 @@ from kora.db.transactions import (
 )
 from kora.db.types import POSTGRESQL, SQLITE
 from kora.observability import ComponentLogger, current_diagnostics
+from kora.sqlite.driver import Connection as NativeConnection
+from kora.sqlite.driver import NativeRetirement, driver_version
 
 DATABASE_URL_VARIABLE: str = "KORA_DATABASE_URL"
 SQLITE_DRIVER: str = "sqlite+aiosqlite"
@@ -68,6 +72,9 @@ ACCEPTED_FORMS: str = (
 MEMORY_DATABASE: str = ":memory:"
 PRIVATE_FILE_MODE: int = 0o600
 SQLITE_BUSY_TIMEOUT_SECONDS: float = 5.0
+SQLITE_PREPARATION: ContextVar[Path | None] = ContextVar(
+    "sqlite_preparation", default=None
+)
 SQLITE_SYNCHRONOUS_FULL: int = 2
 SQLITE_READERS: int = 4
 AIOSQLITE_ITER_CHUNK_SIZE: int = 64
@@ -389,8 +396,10 @@ def keep_connection_on_cancellation(context: ExceptionContext) -> None:
 
 
 class SqliteDriverConnection(aiosqlite.Connection):
-    def __init__(self, opened: sqlite3.Connection) -> None:
-        super().__init__(lambda: opened, AIOSQLITE_ITER_CHUNK_SIZE)
+    def __init__(self, opened: NativeConnection) -> None:
+        super().__init__(
+            lambda: cast(sqlite3.Connection, opened), AIOSQLITE_ITER_CHUNK_SIZE
+        )
         self._thread.daemon = True
 
 
@@ -457,19 +466,29 @@ class _SqliteServingLifetime:
             self._native_closed.clear()
 
 
-class _ServingSqliteConnection(sqlite3.Connection):
-    _lifetime: _SqliteServingLifetime | None = None
+def sqlite_empty_admitted(path: Path, descriptor: int) -> bool:
+    if SQLITE_PREPARATION.get() != path:
+        return False
+    main = path.lstat()
+    opened = os.fstat(descriptor)
+    if (main.st_dev, main.st_ino, main.st_size) != (opened.st_dev, opened.st_ino, 0):
+        return False
+    for ending in ("-wal", "-shm", "-journal"):
+        try:
+            path.with_name(path.name + ending).lstat()
+        except FileNotFoundError:
+            continue
+        return False
+    return True
 
-    def track(self, lifetime: _SqliteServingLifetime) -> None:
-        self._lifetime = lifetime
-        lifetime.opened()
 
-    def close(self) -> None:
-        lifetime = self._lifetime
-        self._lifetime = None
-        super().close()
-        if lifetime is not None:
-            lifetime.closed()
+def sqlite_driver_module() -> AsyncAdapt_aiosqlite_dbapi:
+    native = AsyncAdapt_aiosqlite_dbapi(aiosqlite, sqlite3)
+    version = driver_version()
+    vars(native).update(
+        sqlite_version=version, sqlite_version_info=tuple(map(int, version.split(".")))
+    )
+    return native
 
 
 def open_sqlite_file(
@@ -477,21 +496,39 @@ def open_sqlite_file(
     lifetime: _SqliteServingLifetime | None = None,
     *,
     guarded_reader: _GuardedSqliteReader | None = None,
-) -> sqlite3.Connection:
-    target: str | Path = path
+) -> NativeConnection:
+    driver_version()
     if guarded_reader is not None:
         guarded_reader.require_live()
-        target = guarded_reader.path.as_uri() + "?mode=ro"
-    connection = sqlite3.connect(
-        target,
-        timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
-        isolation_level=None,
-        check_same_thread=False,
-        uri=guarded_reader is not None,
-        factory=sqlite3.Connection if lifetime is None else _ServingSqliteConnection,
+    if not NativeRetirement.drain(path):
+        raise sqlite3.OperationalError("SQLite native retirement is pending.")
+    if SQLITE_PREPARATION.get() == path:
+        create_private_file(path)
+
+    def release() -> None:
+        if lifetime is not None:
+            lifetime.closed()
+
+    def admit(descriptor: int, empty: int) -> bool:
+        if guarded_reader is not None:
+            guarded_reader.require_live()
+        return not empty or sqlite_empty_admitted(path, descriptor)
+
+    connection = NativeConnection(
+        lambda owned: NativeRetirement.retain(path, owned, release)
     )
-    if lifetime is not None and isinstance(connection, _ServingSqliteConnection):
-        connection.track(lifetime)
+    if lifetime is not None:
+        lifetime.opened()
+    try:
+        connection.open(
+            path,
+            guarded_reader is not None,
+            int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000),
+            admit,
+        )
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
@@ -501,34 +538,25 @@ def sqlite_connector(
     *,
     guarded_reader: _GuardedSqliteReader | None = None,
 ) -> Callable[[], Awaitable[aiosqlite.Connection]]:
-    if guarded_reader is not None:
-
-        async def connect() -> aiosqlite.Connection:
-            async def acquire() -> _GuardedSqliteDriverConnection:
-                opened = await asyncio.to_thread(
-                    open_sqlite_file, path, lifetime, guarded_reader=guarded_reader
-                )
-                driver = _GuardedSqliteDriverConnection(opened)
-                try:
-                    await driver
-                    guarded_reader.require_live()
-                except BaseException:
-                    try:
-                        await driver.close()
-                    finally:
-                        await asyncio.to_thread(opened.close)
-                    raise
-                return driver
-
-            return await finish_releasing(
-                acquire(), _GuardedSqliteDriverConnection.close
-            )
-
-        return connect
-
     async def connect() -> aiosqlite.Connection:
-        opened = await asyncio.to_thread(open_sqlite_file, path, lifetime)
-        return await SqliteDriverConnection(opened)
+        async def acquire() -> _GuardedSqliteDriverConnection:
+            opened = await asyncio.to_thread(
+                open_sqlite_file, path, lifetime, guarded_reader=guarded_reader
+            )
+            driver = _GuardedSqliteDriverConnection(opened)
+            try:
+                await driver
+                if guarded_reader is not None:
+                    guarded_reader.require_live()
+            except BaseException:
+                try:
+                    await driver.close()
+                finally:
+                    await asyncio.to_thread(opened.close)
+                raise
+            return driver
+
+        return await finish_releasing(acquire(), _GuardedSqliteDriverConnection.close)
 
     return connect
 
@@ -550,9 +578,10 @@ def sqlite_engine(
     connector = sqlite_connector(
         settings.sqlite_path.absolute(), serving_lifetime, guarded_reader=guarded_reader
     )
+    module = sqlite_driver_module()
     if writer:
         engine = create_async_engine(
-            settings.url, poolclass=StaticPool, async_creator=connector
+            settings.url, poolclass=StaticPool, async_creator=connector, module=module
         )
     else:
         engine = create_async_engine(
@@ -562,6 +591,7 @@ def sqlite_engine(
             max_overflow=0,
             pool_timeout=settings.pool_timeout_seconds,
             async_creator=connector,
+            module=module,
         )
     if require_full_sync:
         configure = configure_full_sync_writer if writer else configure_full_sync_reader
@@ -925,7 +955,6 @@ class Database:
             )
             reader_capacity = 1
         elif settings.dialect is Dialect.SQLITE:
-            create_private_file(settings.sqlite_path)
             self._writer = sqlite_engine(
                 settings,
                 writer=True,
@@ -1070,8 +1099,12 @@ class Database:
     @asynccontextmanager
     async def migration_connection(self) -> AsyncGenerator[AsyncConnection, None]:
         if self.dialect is Dialect.SQLITE:
-            async with self.transaction() as connection:
-                yield connection
+            preparation = SQLITE_PREPARATION.set(self.settings.sqlite_path.absolute())
+            try:
+                async with self.transaction() as connection:
+                    yield connection
+            finally:
+                SQLITE_PREPARATION.reset(preparation)
             return
         async with self._lease(transactional=False) as connection:
             previous_timeout = str(await connection.scalar(text("SHOW lock_timeout")))
@@ -1705,6 +1738,8 @@ class Database:
         try:
             await self.close(deadline_seconds)
         finally:
+            if not NativeRetirement.drain(self.settings.sqlite_path.absolute()):
+                raise sqlite3.OperationalError("SQLite native retirement is pending.")
             await self._sqlite_serving.wait_settled()
 
     def _mark_closed(self, closing: asyncio.Future[None]) -> None:

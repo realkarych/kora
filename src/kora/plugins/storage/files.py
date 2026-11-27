@@ -16,6 +16,7 @@ from kora.plugins.storage.errors import refuse
 from kora.plugins.storage.native import filesystem, synchronize_file, validate_acl
 from kora.protocols.identity import Count
 from kora.protocols.storage_models import StorageIdentity, StorageLimits, StorageModel
+from kora.sqlite.driver import NativeRetirement
 
 DIRECTORY_FLAGS: Final[int] = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS: Final[int] = os.O_NOFOLLOW | os.O_NONBLOCK
@@ -220,6 +221,12 @@ class RootAnchor:
     def initialize_layout(self) -> None:
         creating = not self.manifest.files_initialized
         if creating:
+            try:
+                os.stat("control.sqlite", dir_fd=self.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                refuse("storage_identity")
             self.ensure_directory(("locks",))
             for name in ("root", "lifetime"):
                 os.close(self.open_file(("locks", name), os.O_RDWR | os.O_CREAT))
@@ -435,6 +442,9 @@ class RootAnchor:
             self._lifetime = None
 
     def close(self) -> None:
+        NativeRetirement.after(self.path / "control.sqlite", self.close_descriptors)
+
+    def close_descriptors(self) -> None:
         if not self.closed:
             self.closed = True
             self.manifest_bytes = None

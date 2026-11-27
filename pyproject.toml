@@ -90,6 +90,7 @@ serve = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/kora"]
 artifacts = ["src/kora/api/static/**"]
+exclude = ["/src/kora/sqlite/_vendor", "/src/kora/sqlite/_*.h", "/src/kora/sqlite/_native.c"]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"

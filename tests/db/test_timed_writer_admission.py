@@ -28,6 +28,7 @@ from kora.db.connection import (
 )
 from kora.db.transactions import writer_transaction
 from kora.observability import Level, LoggingSettings
+from kora.sqlite.driver import Connection as GuardedConnection
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     ConnectionLedger,
@@ -461,7 +462,7 @@ async def test_unverified_sqlite_restoration_discards_original_native_handle(
             driver = await writer_driver(writer)
             await driver.set_authorizer(deny)
         native: object = vars(driver)["_connection"]
-        assert isinstance(native, sqlite3.Connection)
+        assert isinstance(native, GuardedConnection)
 
         with pytest.raises(DatabaseWriterRejected) as refused:
             await enter(database, deadline)

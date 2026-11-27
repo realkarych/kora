@@ -11,6 +11,10 @@ build/
 web/node_modules/
 web/.vite/
 src/kora/api/static/
+src/kora/sqlite/_native.abi3.so
+src/kora/sqlite/_native-build.json
+src/kora/sqlite/_native-build.lock
+src/kora/sqlite/_native-tmp-*/
 .superpowers/
 /measurements/
 *.db
