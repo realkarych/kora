@@ -39,6 +39,8 @@ Use stable keyset order, never OFFSET. A versioned structural continuation carri
 
 The ceiling is not a commit-order watermark. ULIDs sort creation, not commit; targets can bind to an older run later. Membership/status/currentness is live per page. An entity that begins matching behind the last key may be absent from that traversal; one ahead may appear. `next_cursor:null` means exhausted under that page's observation. Refresh restarts the traversal. Immutable selected manifest bytes and dispatcher grant identities have their immutable order; changing closure/availability fields remain observations. Clients must not use a completed traversal as a frozen mutation precondition.
 
+The [durable run-event follow position](run-event-follow.md#position-and-writer) and [scoped resume](run-event-follow.md#initial-history-and-continuation) have their own activation gates. Finite event pages retain this section's identifier ceiling.
+
 Orders: run/artifact/event IDs descending; approvals by the existing `(created_at,id)` descending; node-instance IDs ascending; attempt number ascending within a node, attempt ID ascending in a run-wide query; dispatcher lease epoch ascending; lineage edges by their full existing primary key `(artifact_version_id,input_name,consumed_artifact_version_id)` ascending, including scheduler-produced outputs with nullable attempt identity; target keys in case-sensitive UTF-8 byte order ascending, identical on PostgreSQL and SQLite. Public filters are closed, validated fields; none executes client SQL, paths or arbitrary predicates.
 
 ## 3. Content descriptors and selected reads
