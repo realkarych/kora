@@ -17,8 +17,8 @@ SUDO = "/usr/bin/sudo"
 SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 PYTHON = "/usr/bin/python3"
-DPKG = "/usr/bin/dpkg"
-APT_GET = "/usr/bin/apt-get"
+UBUNTU_APT = ROOT / "scripts/ci/browser_ubuntu_apt.py"
+BROWSER_APT_RUNTIME = Path("/run/kora-browser-apt")
 SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 MANAGER_ENV = {"PATH": SYSTEM_PATH, "LANG": "C.UTF-8", "SYSTEMD_COLORS": "0"}
 START_SECONDS = 5.0
@@ -106,6 +106,17 @@ class Programs:
                 "The selected Node or pnpm executable is unavailable."
             )
         return node, pnpm
+
+    def playwright(self) -> tuple[Path, Path]:
+        node, _ = self.paths()
+        modules = ROOT / "web/node_modules"
+        cli = modules / "playwright/cli.js"
+        if (
+            not cli.resolve(strict=True).is_relative_to(modules / ".pnpm")
+            or not cli.is_file()
+        ):
+            raise BrowserPackagesRefused("The locked Playwright CLI is unavailable.")
+        return node, cli
 
     @classmethod
     def workflow(cls) -> Programs:
@@ -335,7 +346,9 @@ class OriginalService:
         ):
             raise BrowserPackagesRefused("Original package service identity was lost.")
 
-    async def settle(self, deadline: float) -> None:
+    async def settle(
+        self, deadline: float, *, stage_cleanup_deadline: float | None = None
+    ) -> None:
         status = await self.service.show(deadline)
         self.require_identity(status)
         if status.get("ActiveState") not in {"failed", "inactive"}:
@@ -355,6 +368,8 @@ class OriginalService:
                 )
             if status.get("Job") == "" and self.empty():
                 if inactive:
+                    if stage_cleanup_deadline is not None:
+                        await self.remove_stage(stage_cleanup_deadline)
                     return
                 if status.get("ActiveState") == "failed":
                     code, _ = await self.service.control(
@@ -365,6 +380,32 @@ class OriginalService:
                             "Original package service did not settle."
                         )
             await poll_until(deadline)
+
+    async def remove_stage(self, deadline: float) -> None:
+        original = os.fstat(self.directory)
+        async with asyncio.timeout_at(deadline):
+            process = await asyncio.create_subprocess_exec(
+                SUDO,
+                "-n",
+                PYTHON,
+                "-I",
+                str(UBUNTU_APT),
+                "cleanup",
+                self.service.name,
+                self.invocation,
+                str(original.st_dev),
+                str(original.st_ino),
+                stdin=asyncio.subprocess.DEVNULL,
+                env=MANAGER_ENV,
+            )
+            try:
+                if await process.wait():
+                    raise BrowserPackagesRefused(
+                        "Original Ubuntu package stage did not settle."
+                    )
+            finally:
+                if process.returncode is None:
+                    stop_client(process)
 
 
 async def poll_until(deadline: float) -> None:
@@ -403,6 +444,18 @@ async def package_attempt(
     if not (SYSTEM_CGROUP / "cgroup.controllers").is_file():
         raise BrowserPackagesRefused("Browser packages require cgroup v2 ownership.")
     service = Service.new() if service is None else service
+    stage_cleanup = (
+        window.join
+        if (
+            len(work) == 3
+            and (
+                work[0] in {"install", "refusal-witness"}
+                or work[0] == "witness"
+                and work[2] == "stage-hold"
+            )
+        )
+        else None
+    )
     client = None
     owned = None
     try:
@@ -421,7 +474,9 @@ async def package_attempt(
                 client.stdin.close()
             try:
                 if owned is not None:
-                    await owned.settle(window.prove)
+                    await owned.settle(
+                        window.prove, stage_cleanup_deadline=stage_cleanup
+                    )
                 async with asyncio.timeout_at(window.join):
                     await client.wait()
             except (OSError, TimeoutError):
@@ -476,6 +531,7 @@ async def worker(arguments: Sequence[str]) -> int:
     invocation = os.environ.get("INVOCATION_ID", "")
     if not INVOCATION.fullmatch(invocation):
         return 78
+    service = Path(Path("/proc/self/cgroup").read_text(encoding="ascii").strip()).name
     sys.stdout.buffer.write(f"{invocation}\n".encode("ascii"))
     sys.stdout.buffer.flush()
     if operation == "witness":
@@ -485,48 +541,50 @@ async def worker(arguments: Sequence[str]) -> int:
             not administrative.is_absolute()
             or not re.fullmatch(r"kora-browser-dpkg-[a-z0-9_]{8}", administrative.name)
             or not accepted(deadline)
-            or second not in {"hold", "configure"}
+            or second not in {"hold", "configure", "stage-hold"}
         ):
             return 78
         acknowledge_admission()
+        if second == "stage-hold":
+            prepared = await run_child(
+                (PYTHON, "-I", str(UBUNTU_APT), "prepare", service, invocation),
+                MANAGER_ENV,
+            )
+            if prepared:
+                return prepared
+            return await run_child(
+                (
+                    PYTHON,
+                    "-I",
+                    str(witness),
+                    first,
+                    "hold",
+                    str(BROWSER_APT_RUNTIME / service),
+                ),
+                MANAGER_ENV,
+            )
         return await run_child((PYTHON, "-I", str(witness), first, second), MANAGER_ENV)
-    if operation != "install":
+    if operation not in {"install", "refusal-witness"}:
         return 78
     try:
-        node, pnpm = Programs(Path(first), Path(second)).paths()
+        node, cli = Programs(Path(first), Path(second)).playwright()
     except (BrowserPackagesRefused, OSError):
         return 78
-    environment = {"PATH": f"{pnpm.parent}:{node.parent}:{SYSTEM_PATH}"}
     if not accepted(deadline):
         return 78
     acknowledge_admission()
-    recovery = await run_child((DPKG, "--configure", "-a"), MANAGER_ENV)
-    if recovery:
-        return recovery
-    dependency_result = await run_child(
-        (
-            str(pnpm),
-            "--dir",
-            "web",
-            "exec",
-            "playwright",
-            "install-deps",
-            "chromium-headless-shell",
-        ),
-        environment,
-    )
-    if dependency_result:
-        return dependency_result
     return await run_child(
         (
-            APT_GET,
-            "-y",
-            "--no-install-recommends",
-            "install",
-            "libnss3-tools",
-            "xdg-utils",
+            PYTHON,
+            "-I",
+            str(UBUNTU_APT),
+            operation,
+            service,
+            invocation,
+            str(node),
+            str(cli),
         ),
-        {**MANAGER_ENV, "DEBIAN_FRONTEND": "noninteractive"},
+        MANAGER_ENV,
     )
 
 

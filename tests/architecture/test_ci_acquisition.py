@@ -47,6 +47,7 @@ from scripts.ci.browser_system_packages import (
     BrowserPackagesRefused,
     package_attempt,
 )
+from scripts.ci.browser_ubuntu_apt import AptRefused, admit_signer, apt_operation
 from scripts.ci.pi_sdk_manifest import write_manifest
 from tests.support.https_fixture import (
     Authority,
@@ -894,6 +895,7 @@ def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
     ]
     browser_steps = step_list(job_of(workflows, "ci.yml", "browser"))
     witness = step_running(browser_steps, BROWSER_OWNERSHIP_WITNESS)
+    tools = step_running(browser_steps, "pnpm --dir web install --frozen-lockfile")
     system_packages = step_running(browser_steps, BROWSER_SYSTEM_PACKAGES)
     browser = step_running(browser_steps, "playwright install --only-shell chromium")
     build = [step.get("name") for step in browser_steps].index(
@@ -902,12 +904,14 @@ def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
 
     for command, limit in commands:
         assert_root_command_is_bounded(command, limit)
-    assert witness < system_packages < browser < build
+    assert tools < witness < system_packages < browser < build
+    assert "/etc/apt" not in str(browser_steps[tools]["run"])
     assert browser_steps[witness]["if"] == browser_steps[system_packages]["if"]
     assert browser_steps[system_packages]["if"] == browser_steps[browser]["if"]
-    assert table(browser_steps[system_packages]["env"])["KORA_BROWSER_PNPM_BIN"] == (
-        "${{ steps.browser_pnpm.outputs.bin_dest }}"
-    )
+    for index in (witness, system_packages):
+        assert table(browser_steps[index]["env"])["KORA_BROWSER_PNPM_BIN"] == (
+            "${{ steps.browser_pnpm.outputs.bin_dest }}"
+        )
     selected_pnpm = next(
         step for step in browser_steps if step.get("id") == "browser_pnpm"
     )
@@ -925,6 +929,48 @@ def test_root_package_installation_is_bounded_inside_each_attempt() -> None:
     assert STOP_PHASE_SECONDS == 5
     assert START_SECONDS + WORK_SECONDS + STOP_SECONDS == MAX_COMMAND_SECONDS
     assert PROOF_SECONDS + RETURN_SECONDS == COMMAND_RESERVE_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (("update",), "update"),
+        (("install", "-y", "--no-install-recommends", "libgbm1"), "install"),
+        (
+            ("install", "-y", "--no-install-recommends", "libnss3-tools", "xdg-utils"),
+            "console",
+        ),
+    ],
+)
+def test_browser_apt_command_admission(
+    arguments: tuple[str, ...], expected: str
+) -> None:
+    operation = apt_operation(arguments)
+
+    assert operation == expected
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("update", "-q"),
+        ("install", "-y", "--no-install-recommends"),
+        ("install", "-y", "--no-install-recommends", "libgbm1:amd64"),
+        ("install", "-y", "--no-install-recommends", "./sample.deb"),
+    ],
+)
+def test_browser_apt_command_refuses_unowned_arguments(
+    arguments: tuple[str, ...],
+) -> None:
+    with pytest.raises(AptRefused, match="refused the APT command"):
+        apt_operation(arguments)
+
+
+def test_browser_apt_signer_rejects_other_bytes_of_the_pinned_size() -> None:
+    same_size_bytes = bytes(3_607)
+
+    with pytest.raises(AptRefused, match="does not match the approved pin"):
+        admit_signer(same_size_bytes)
 
 
 def test_browser_package_attempt_shortens_work_and_reserves_proof() -> None:
