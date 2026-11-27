@@ -91,8 +91,7 @@ class BridgeChannel:
             await self._send(kind, **fields)
             await self._send("activate", challenge=challenge)
             response = await self._receive(reply, challenge)
-            self._phase = following
-            complete = True
+            self._phase, complete = following, True
             return response
         finally:
             if not complete:
@@ -170,6 +169,7 @@ class BridgeChannel:
             raise BridgeRefused("closed") from None
         except asyncio.LimitOverrunError:
             raise BridgeRefused("protocol") from None
+        self._remaining()
         frame = decode_strict_json(record, MAX_FRAME_BYTES, 1)
         if (
             b"\r" in record

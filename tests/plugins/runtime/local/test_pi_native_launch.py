@@ -51,6 +51,7 @@ from tests.plugins.harness.codex.selected_gated_stdio import native_environment
 from tests.plugins.runtime.local.frames_support import StepClock
 
 SECOND: Final[int] = 1_000_000_000
+PROCESS_CLEANUP_NS: Final[int] = 6 * SECOND
 MODEL: Final[str] = "claude-sonnet-4-5-20250929"
 FIXTURE_KEY: Final[str] = "pi-sdk-scripted-credential-9f71"
 PROMPT: Final[str] = "Produce the fixed witness value."
@@ -427,7 +428,7 @@ class PiGate:
         return release.result()
 
     async def _settle_release(self, *, natural: bool) -> int:
-        cutoff_ns = self.clock.monotonic_ns() + 6 * SECOND
+        cutoff_ns = self.clock.monotonic_ns() + PROCESS_CLEANUP_NS
         try:
             if natural:
                 self.owner.close_gate()
@@ -448,7 +449,7 @@ class PiGate:
             if self._installation_scan is not None:
                 await observed(self._installation_scan)
                 self._installation_scan = None
-        return self.owner.release(cutoff_ns)
+        return self.owner.release(self.clock.monotonic_ns() + PROCESS_CLEANUP_NS)
 
     def assert_reaped(self) -> None:
         assert self.owner.closed
@@ -478,9 +479,12 @@ async def witness(
         try:
             yield owner
         finally:
-            if not owner.owner.closed:
-                await owner.release(natural=False)
-        shutil.rmtree(home)
+            try:
+                if not owner.owner.closed:
+                    await owner.release(natural=False)
+            finally:
+                if owner.owner.closed:
+                    shutil.rmtree(home)
     finally:
         checkout.close()
 
@@ -1008,10 +1012,13 @@ async def test_pi_bridge_refuses_resumed_write_after_checkout_replacement(
 
 
 @pytest.mark.asyncio
-async def test_pi_bridge_stop_invalidates_buffered_terminal(
+@pytest.mark.parametrize("stop", ["closed", "deadline"])
+async def test_pi_bridge_preserves_stop_cause_for_buffered_reply(
     kora_capture: Capture,
+    stop: str,
 ) -> None:
-    async with prepared_channel(kora_capture, StepClock()) as (
+    clock = StepClock()
+    async with prepared_channel(kora_capture, clock) as (
         channel,
         reader,
         peer,
@@ -1019,17 +1026,20 @@ async def test_pi_bridge_stop_invalidates_buffered_terminal(
     ):
         pending = asyncio.create_task(channel.prompt(PROMPT))
         async with asyncio.timeout(5):
-            challenge = await control_challenge(peer[0], "prompt")
+            await control_challenge(peer[0], "prompt")
         with pytest.raises(BridgeRefused) as duplicate:
             await channel.prompt(PROMPT)
 
-        reader.feed_data(bridge_reply("terminal", challenge))
-        channel.revoke()
+        reader.feed_data(b"{\n")
+        if stop == "closed":
+            channel.revoke()
+        else:
+            clock.advance(5 * SECOND)
         with pytest.raises(BridgeRefused) as stopped:
             await pending
 
     assert duplicate.value.code == "protocol"
-    assert stopped.value.code == "closed"
+    assert stopped.value.code == stop
 
 
 @pytest.mark.asyncio
@@ -1172,7 +1182,7 @@ class HeldInstallationClock(SystemClock):
             self._samples_until_walk -= 1
             if self._samples_until_walk == 0:
                 self._loop.call_soon_threadsafe(self.entered.set)
-                assert self.resume.wait(5)
+                assert self.resume.wait(12)
         return super().monotonic_ns()
 
 
@@ -1182,29 +1192,36 @@ async def test_pi_sdk_cancellation_joins_entered_installation_scan(
 ) -> None:
     scan_clock = HeldInstallationClock()
     role = tmp_path / "role"
-    async with (
-        model_peer() as peer,
-        witness(installation, tmp_path, scan_clock=scan_clock) as gate,
-    ):
-        await gate.start(peer.origin)
-        scan_clock.hold_next_scan()
+    acquired: asyncio.Future[PiGate] = asyncio.get_running_loop().create_future()
+    async with model_peer() as peer:
+
+        async def run_witness() -> None:
+            async with witness(installation, tmp_path, scan_clock=scan_clock) as gate:
+                await gate.start(peer.origin)
+                acquired.set_result(gate)
+                scan_clock.hold_next_scan()
+                await gate.key(kora_capture)
 
         async with asyncio.TaskGroup() as tasks:
-            pending = tasks.create_task(gate.key(kora_capture))
+            pending = tasks.create_task(run_witness())
             try:
                 async with asyncio.timeout(5):
+                    gate = await acquired
                     await scan_clock.entered.wait()
-                pending.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await pending
-                await gate.owner.wait_exit(gate.clock.monotonic_ns() + 4 * SECOND)
 
+                pending.cancel()
+                await gate.owner.wait_exit(gate.clock.monotonic_ns() + 4 * SECOND)
+                await gate.clock.sleep_until(
+                    gate.clock.monotonic_ns() + PROCESS_CLEANUP_NS
+                )
                 assert gate.stopped
                 assert not gate.owner.closed
                 assert role.is_dir()
+                assert not pending.done()
             finally:
                 scan_clock.resume.set()
-        await gate.release(natural=False)
+            with pytest.raises(asyncio.CancelledError):
+                await pending
 
     assert kora_capture.scope.registered_count() == 0
     assert peer.requests == []
