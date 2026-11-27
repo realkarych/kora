@@ -1166,20 +1166,27 @@ async def assert_unadmitted_terminal_refused(gate: PiGate) -> None:
     assert probe.read(registration) is Readiness.NOT_READY
     transport = gate.streams[1].transport
     assert isinstance(transport, asyncio.Transport)
-    watch = watch_child(registration.process.pid)
-    try:
-        async with asyncio.TaskGroup() as tasks:
-            transport.pause_reading()
-            try:
-                tasks.create_task(assert_prompt_refused())
-                await wait_future(watch.changed, gate.cutoff_ns, gate.clock)
-                assert gate.owner.registration == registration
-                assert probe.read(registration) is Readiness.READY
-                gate.require_binding(allow_exit=True)
-            finally:
-                transport.resume_reading()
-    finally:
-        watch.close()
+    async with asyncio.TaskGroup() as tasks:
+        transport.pause_reading()
+        try:
+            tasks.create_task(assert_prompt_refused())
+            await gate.owner.wait_exit(gate.cutoff_ns)
+            while gate.clock.monotonic_ns() < gate.cutoff_ns:
+                watch = watch_child(registration.process.pid)
+                try:
+                    assert gate.owner.registration == registration
+                    readiness = probe.read(registration)
+                    assert readiness is not Readiness.MISMATCH
+                    if readiness is Readiness.READY:
+                        break
+                    await wait_future(watch.changed, gate.cutoff_ns, gate.clock)
+                finally:
+                    watch.close()
+            else:
+                raise ChannelError(ChannelFailure.DEADLINE)
+            gate.require_binding(allow_exit=True)
+        finally:
+            transport.resume_reading()
 
 
 @pytest.mark.asyncio
