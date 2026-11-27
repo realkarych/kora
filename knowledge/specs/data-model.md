@@ -1637,6 +1637,8 @@ The pass itself runs these steps:
 - **No source reads.** Seal replay and delivery read no sources.
 - **New attempts.** A new attempt of the node starts with its own counters.
 
+The [ordinary v2 command request](execution-request.md#input-bearing-command) binds the complete preparation result for one whole required accepted VcsRef. Its first seal checks this original preparation's grant, generation and ready owner independently of the file's byte identity. The [v2 owner transitions](execution-request.md#descriptor-envelope-and-owner-transitions) govern eligibility for a fresh pass and preserve authorized read-only lookup.
+
 **Refusals.** The reasons below are `API002` with `retryable: false` and content-free details ([api-and-agent-surface.md](api-and-agent-surface.md#2-resources-and-operations)). Busy, pending and capacity refusals keep their retryable forms. Unavailable sources keep `execution_inputs_unavailable`, reported by the worker as `config_error`.
 
 | Condition | `details.reason` and fields | Worker reports |
@@ -2179,7 +2181,7 @@ The output lookup uses the native unique `(attempt_id, output_name)` owner key i
 
 The publication alternatives use [the Worker evidence rules](api-and-agent-surface.md#worker-route-bodies-issue-139):
 
-- `not_applicable` binds the checked sealed no-publication request (version-1 `publication: null`), the saved no-`VcsRef` output contract and the absence of a conflicting operation.
+- `not_applicable` binds the checked sealed no-publication request (version-1 `publication: null`), the saved no-`VcsRef` output contract and the absence of a conflicting operation. The [ordinary v2 command mapping](execution-request.md#command-terminal-publication-evidence) uses these same references and checks.
 - `not_dispatched` requires authoritative evidence of no dispatch for the original scope and no recorded publication operation.
 - `completed` or `failed` binds the original operation, its revision/destination and the authenticated typed supervisor summary identity. For `completed`, match the full saved runtime-result digest and `VcsRef` contract identity.
 - `unknown` is admissible only for `cancelled` and `lost`. Preserve the original scoped obligation. When the original operation is identified, authenticated read-only reconciliation must resolve that operation and its exact revision/destination under the existing dispatch closure conditions. Without an operation identity, a later operation for the same attempt supplies no proof. Closure remains unresolved until qualified evidence for the original scope or applicable existing operator attestation. The recovery owner commits new authoritative evidence and the scheduling marker under the original run lock. The binding is immutable.
