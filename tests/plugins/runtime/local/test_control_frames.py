@@ -5,6 +5,8 @@ import json
 import os
 import socket
 import struct
+from collections.abc import Generator
+from contextlib import contextmanager
 
 import pytest
 
@@ -151,6 +153,189 @@ async def test_typed_frame_is_read_within_its_reservation() -> None:
 
         assert (kind, len(payload)) == (FrameType.JSON, PRE_ATTACH_BYTES)
         assert not pair.receiver.closed
+
+
+async def test_typed_frame_observes_first_header_byte_before_frame_completion() -> None:
+    clock = StepClock()
+    first_byte = asyncio.Event()
+    calls: list[str] = []
+
+    def received() -> None:
+        calls.append("first byte")
+        first_byte.set()
+
+    payload = b"fixed frame"
+    wire = frame(FrameType.JSON, payload)
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        reader = asyncio.create_task(
+            pair.receiver.read_typed_frame(
+                cutoff, {FrameType.JSON: len(payload)}, received=received
+            )
+        )
+        await send_raw(pair.raw, wire[:1])
+        await first_byte.wait()
+        assert not reader.done()
+        with pytest.raises(ChannelError) as busy:
+            await pair.receiver.read_typed_frame(cutoff, {FrameType.JSON: len(payload)})
+        await send_raw(pair.raw, wire[1:])
+        result = await reader
+        pair.raw.shutdown(socket.SHUT_WR)
+        await pair.receiver.expect_eof(cutoff)
+
+    assert calls == ["first byte"]
+    assert result == (FrameType.JSON, payload)
+    assert busy.value.reason is ChannelFailure.BUSY
+    assert pair.receiver.closed
+
+
+@pytest.mark.parametrize(
+    ("prefix", "reason"),
+    [
+        (b"", ChannelFailure.CLOSED),
+        (b"\x00", ChannelFailure.CLOSED),
+        (struct.pack("!IB", 2, FrameType.JSON), ChannelFailure.CAPACITY),
+    ],
+    ids=["empty-eof", "partial-eof", "oversized-declaration"],
+)
+async def test_typed_frame_observes_bytes_of_refused_frames_only_when_consumed(
+    prefix: bytes, reason: ChannelFailure
+) -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    observed: list[bytes] = []
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        await send_raw(pair.raw, prefix)
+        if reason is ChannelFailure.CLOSED:
+            pair.raw.shutdown(socket.SHUT_WR)
+        with pytest.raises(ChannelError) as refused:
+            await pair.receiver.read_typed_frame(
+                cutoff, {FrameType.JSON: 1}, received=lambda: observed.append(prefix)
+            )
+        assert pair.receiver.closed
+
+    assert observed == ([prefix] if prefix else [])
+    assert refused.value.reason is reason
+
+
+@pytest.mark.parametrize("revoke", [False, True], ids=["complete", "revoke"])
+async def test_typed_frame_reports_only_the_final_guarded_send(revoke: bool) -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    payload = b"x" * MAX_TYPED_FRAME_BYTES
+    wire = frame(FrameType.JSON, payload)
+    allowed = True
+    guarding = False
+    notification: list[bool] = []
+
+    @contextmanager
+    def guard() -> Generator[bool]:
+        nonlocal guarding
+        guarding = True
+        try:
+            yield allowed
+        finally:
+            guarding = False
+
+    def sent() -> None:
+        notification.append(guarding)
+
+    writer_end, raw_peer = socket.socketpair()
+    with writer_end, raw_peer:
+        writer_end.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        raw_peer.setblocking(False)
+        channel = BoundedChannel(writer_end, clock)
+        loop = asyncio.get_running_loop()
+        async with asyncio.timeout(5):
+            writer = asyncio.create_task(
+                channel.write_typed_frame(
+                    FrameType.JSON, payload, cutoff, guard=guard, sent=sent
+                )
+            )
+            await clock.waiting.wait()
+            delivered = bytearray()
+            while len(delivered) < 6:
+                part = await loop.sock_recv(raw_peer, 6 - len(delivered))
+                assert part
+                delivered.extend(part)
+            assert delivered == wire[:6]
+            assert not writer.done()
+            assert notification == []
+            with pytest.raises(ChannelError) as busy:
+                await channel.write_typed_frame(FrameType.JSON, b"", cutoff)
+            allowed = not revoke
+            if revoke:
+                while part := await loop.sock_recv(raw_peer, 65536):
+                    delivered.extend(part)
+                with pytest.raises(ChannelError) as refused:
+                    await writer
+                assert refused.value.reason is ChannelFailure.CLOSED
+                assert len(delivered) < len(wire)
+                assert wire.startswith(delivered)
+                assert notification == []
+            else:
+                while len(delivered) < len(wire):
+                    part = await loop.sock_recv(raw_peer, 65536)
+                    assert part
+                    delivered.extend(part)
+                await writer
+                assert delivered == wire
+                assert notification == [True]
+            channel.close()
+            assert await loop.sock_recv(raw_peer, 1) == b""
+
+    assert busy.value.reason is ChannelFailure.BUSY
+
+
+async def test_typed_empty_frame_completes_inside_its_final_send_guard() -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    steps: list[str] = []
+
+    @contextmanager
+    def guard() -> Generator[bool]:
+        steps.append("guard enters")
+        yield True
+        steps.append("guard leaves")
+
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        await pair.receiver.write_typed_frame(
+            FrameType.JSON, b"", cutoff, guard=guard, sent=lambda: steps.append("sent")
+        )
+        steps.append("returned")
+        peer = BoundedChannel(pair.raw, clock)
+        empty = await peer.read_typed_frame(cutoff, {FrameType.JSON: 0})
+        pair.receiver.close()
+        await peer.expect_eof(cutoff)
+
+    assert empty == (FrameType.JSON, b"")
+    assert steps == ["guard enters", "sent", "guard leaves", "returned"]
+
+
+async def test_typed_frame_rechecks_the_cutoff_inside_the_send_guard() -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + 1
+    notified: list[bool] = []
+
+    @contextmanager
+    def guard() -> Generator[bool]:
+        clock.advance(1)
+        yield True
+
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        with pytest.raises(ChannelError) as refused:
+            await pair.receiver.write_typed_frame(
+                FrameType.JSON,
+                b"",
+                cutoff,
+                guard=guard,
+                sent=lambda: notified.append(True),
+            )
+        eof = await asyncio.get_running_loop().sock_recv(pair.raw, 1)
+
+    assert refused.value.reason is ChannelFailure.DEADLINE
+    assert notified == []
+    assert eof == b""
 
 
 @pytest.mark.parametrize(
