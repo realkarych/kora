@@ -70,7 +70,6 @@ ACCEPTED_FORMS: str = (
     "postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>"
 )
 MEMORY_DATABASE: str = ":memory:"
-PRIVATE_FILE_MODE: int = 0o600
 SQLITE_BUSY_TIMEOUT_SECONDS: float = 5.0
 SQLITE_PREPARATION: ContextVar[Path | None] = ContextVar(
     "sqlite_preparation", default=None
@@ -229,14 +228,6 @@ def read_database_settings(environ: Mapping[str, str]) -> DatabaseSettings:
     if text is None or not text.strip():
         raise DatabaseConfigurationError("the variable is required")
     return parse_database_url(text.strip())
-
-
-def create_private_file(path: Path) -> None:
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, PRIVATE_FILE_MODE)
-    os.close(descriptor)
 
 
 def apply_pragmas(
@@ -488,7 +479,12 @@ def sqlite_empty_admitted(path: Path, descriptor: int) -> bool:
 
 def sqlite_driver_module() -> AsyncAdapt_aiosqlite_dbapi:
     native = AsyncAdapt_aiosqlite_dbapi(aiosqlite, sqlite3)
-    version = driver_version()
+    try:
+        version = driver_version()
+    except sqlite3.OperationalError as error:
+        raise DatabaseConfigurationError(
+            "the installed SQLite driver is unavailable"
+        ) from error
     vars(native).update(
         sqlite_version=version, sqlite_version_info=tuple(map(int, version.split(".")))
     )
@@ -506,37 +502,50 @@ def open_sqlite_file(
     if guarded_reader is not None:
         guarded_reader.require_live()
     NativeRetirement.drain(path)
+    reserved = slots.acquire(blocking=False)
 
     def release() -> None:
         slots.release()
         if lifetime is not None:
             lifetime.closed()
 
+    def retire(owned: NativeConnection) -> None:
+        if reserved and not owned.reused_main():
+            NativeRetirement.retain(path, owned, release)
+        else:
+            if reserved:
+                release()
+            NativeRetirement.drain(path, report=False)
+
     def admit(descriptor: int, empty: int) -> bool:
         if guarded_reader is not None:
             guarded_reader.require_live()
         return not empty or sqlite_empty_admitted(path, descriptor)
 
-    if not slots.acquire(blocking=False):
-        raise sqlite3.OperationalError("SQLite native admission is full.")
     try:
-        connection = NativeConnection(
-            lambda owned: NativeRetirement.retain(path, owned, release)
-        )
+        connection = NativeConnection(retire)
     except BaseException:
-        slots.release()
+        if reserved:
+            slots.release()
         raise
-    if lifetime is not None:
+    if reserved and lifetime is not None:
         lifetime.opened()
     try:
-        if SQLITE_PREPARATION.get() == path:
-            create_private_file(path)
+        prepare = reserved and SQLITE_PREPARATION.get() == path
+        if prepare:
+            path.parent.mkdir(parents=True, exist_ok=True)
         connection.open(
             path,
             guarded_reader is not None,
             int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000),
             admit,
+            prepare=prepare,
+            pool=id(slots) if guarded_reader is None else 0,
+            reuse_only=not reserved,
         )
+        if reserved and connection.reused_main():
+            reserved = False
+            release()
     except BaseException:
         connection.close()
         raise

@@ -109,9 +109,10 @@ static int approveMain(void *context, int descriptor, int empty) {
 static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   PyObject *capsule, *admit, *journal;
   const char *path;
-  int readOnly, timeout, directory;
-  if (!PyArg_ParseTuple(args, "OspiOOi", &capsule, &path, &readOnly, &timeout,
-                        &admit, &journal, &directory)) {
+  int readOnly, timeout, directory, prepare, reuseOnly;
+  unsigned long long pool;
+  if (!PyArg_ParseTuple(args, "OspiOOipKp", &capsule, &path, &readOnly, &timeout,
+                        &admit, &journal, &directory, &prepare, &pool, &reuseOnly)) {
     return NULL;
   }
   NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
@@ -125,19 +126,32 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
               SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_EXRESCODE;
   if (journal != Py_None) flags |= SQLITE_OPEN_NOFOLLOW;
   db->open = (KoraOpen){&db->main, approveMain, admit,
-                       journal == Py_None ? NULL : Py_NewRef(journal), directory};
+                       journal == Py_None ? NULL : Py_NewRef(journal), directory,
+                       prepare ? path : NULL, pool, reuseOnly, 0};
   int result;
   Py_BEGIN_ALLOW_THREADS
   koraOpen = &db->open;
   result = sqlite3_open_v2(path, &db->connection, flags, NULL);
   koraOpen = NULL;
+  db->open.preparePath = NULL;
   if (result == SQLITE_OK) result = sqlite3_busy_timeout(db->connection, timeout);
+  if (result == SQLITE_OK) {
+    unixEnterMutex();
+    db->main->pool = pool;
+    unixLeaveMutex();
+  }
   Py_END_ALLOW_THREADS
   if (result != SQLITE_OK) {
     closeDatabase(db);
-    return dbError(result, sqlite3_errstr(result));
+    return dbError(result, reuseOnly && !db->open.reused && result == SQLITE_BUSY
+      ? "SQLite native admission is full." : sqlite3_errstr(result));
   }
   Py_RETURN_NONE;
+}
+
+static PyObject *reusedMain(PyObject *module, PyObject *capsule) {
+  NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
+  return db ? PyBool_FromLong(db->open.reused) : NULL;
 }
 
 static PyObject *closeDatabaseOwner(PyObject *module, PyObject *capsule) {
@@ -292,8 +306,14 @@ static PyObject *columnValue(sqlite3_stmt *statement, int index) {
     case SQLITE_FLOAT: return PyFloat_FromDouble(sqlite3_column_double(statement, index));
     case SQLITE_TEXT: {
       const unsigned char *text = sqlite3_column_text(statement, index);
-      return text ? PyUnicode_DecodeUTF8((const char *)text,
-        sqlite3_column_bytes(statement, index), "strict") : PyErr_NoMemory();
+      if (!text) return PyErr_NoMemory();
+      PyObject *value = PyUnicode_DecodeUTF8((const char *)text,
+        sqlite3_column_bytes(statement, index), "strict");
+      if (!value && PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)) {
+        PyErr_Clear();
+        return dbError(SQLITE_ERROR, "Could not decode SQLite text as UTF-8");
+      }
+      return value;
     }
     case SQLITE_BLOB: {
       const void *data = sqlite3_column_blob(statement, index);
@@ -548,6 +568,7 @@ static PyObject *closeBlob(PyObject *module, PyObject *capsule) {
 static PyMethodDef methods[] = {
   {"allocate", allocateDatabase, METH_NOARGS, NULL},
   {"open", openDatabaseOwner, METH_VARARGS, NULL},
+  {"reused_main", reusedMain, METH_O, NULL},
   {"close", closeDatabaseOwner, METH_O, NULL},
   {"settled", databaseSettled, METH_O, NULL},
   {"related", relatedRetirement, METH_VARARGS, NULL},

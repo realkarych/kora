@@ -20,6 +20,11 @@ from kora.db.connection import (
     Dialect,
     SQLiteSynchronizationError,
 )
+from kora.sqlite.driver import Connection as GuardedConnection
+from tests.api.guarded_sqlite_prebind_child import (
+    held_main_descriptors,
+    native_identity,
+)
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     ConnectionLedger,
@@ -27,6 +32,8 @@ from tests.db.closing import (
     sqlite_contender,
     until,
 )
+from tests.db.test_read_snapshot import assert_native_closed, physical_handle
+from tests.db.test_sqlite_writer_entry import writer_driver
 from tests.support.databases import copy_sqlite_template
 
 EXPECTED_DURABLE_FULLFSYNC: int = int(sys.platform == "darwin")
@@ -312,6 +319,48 @@ async def test_checkpoint_reader_reinitializes_and_can_truncate_wal(
     assert ledger.outstanding == 0
     assert ledger.closed_while_checked_out == 0
     assert sqlite_companions(database) == []
+
+
+@pytest.mark.asyncio
+async def test_replacement_writer_reuses_charged_wal_main_until_reader_releases(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    path = tmp_path / "metadata.db"
+    database = Database(
+        copy_sqlite_template(sqlite_template, path), require_sqlite_full_sync=True
+    )
+    identity = native_identity(path)
+    try:
+        async with database.transaction() as writer:
+            await writer.exec_driver_sql("CREATE TABLE probe (id INTEGER)")
+            await writer.exec_driver_sql("INSERT INTO probe VALUES (7)")
+            original = physical_handle(database, await writer_driver(writer))
+        assert isinstance(original, GuardedConnection)
+        assert not original.reused_main()
+        async with database.read_snapshot() as reader:
+            assert await reader.scalar(text("SELECT COUNT(*) FROM probe")) == 1
+            descriptors = held_main_descriptors(identity)
+            assert len(descriptors) == 2
+            await database.writer_engine.dispose()
+            assert_native_closed(original)
+            assert held_main_descriptors(identity) == descriptors
+            async with database.transaction() as replacement:
+                native = physical_handle(database, await writer_driver(replacement))
+                assert isinstance(native, GuardedConnection)
+                assert native is not original
+                assert native.reused_main()
+                assert held_main_descriptors(identity) == descriptors
+                await replacement.exec_driver_sql("INSERT INTO probe VALUES (9)")
+            assert await reader.scalar(text("SELECT COUNT(*) FROM probe")) == 1
+        async with database.read_transaction() as reader:
+            assert await reader.scalar(text("SELECT COUNT(*) FROM probe")) == 2
+        assert database.units_in_flight() == 0
+    finally:
+        await database.close()
+
+    assert native.settled()
+    assert original.settled()
+    assert held_main_descriptors(identity) == ()
 
 
 @pytest.mark.asyncio

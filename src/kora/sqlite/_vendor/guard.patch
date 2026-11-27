@@ -90,15 +90,25 @@
 +      }
 @@ -45705,0 +45758 @@
 +      pShmNode->koraOwner->lockPin = 1;
-@@ -47221,0 +47275,3 @@
+@@ -47045 +47098,6 @@
+-      for(pp=&pInode->pUnused; *pp && (*pp)->flags!=flags; pp=&((*pp)->pNext));
++      for(pp=&pInode->pUnused; *pp; pp=&((*pp)->pNext)){
++        KoraFd *owner = (*pp)->koraOwner;
++        if( koraOpen && koraOpen->pool && owner && owner->pool==koraOpen->pool
++            && owner->state==KORA_FD_CACHED && !owner->lockPin
++            && !pInode->koraUnlockUnknown && (*pp)->flags==flags ) break;
++      }
+@@ -47221,0 +47280,3 @@
 +  KoraFd *koraMain = 0;
 +  KoraOpen *koraAuthority = 0;
 +  int koraSidecar = eType==SQLITE_OPEN_WAL || eType==SQLITE_OPEN_MAIN_JOURNAL;
-@@ -47272,0 +47329 @@
+@@ -47272,0 +47334 @@
 +    if( !koraOpen || koraUnresolvedIdentity || koraBlockedPath(zName) ) return SQLITE_CANTOPEN;
-@@ -47280,0 +47338 @@
+@@ -47276,0 +47339 @@
++      if( koraOpen->reuseOnly ) return SQLITE_BUSY;
+@@ -47280,0 +47344 @@
 +      pUnused->koraOwner = 0;
-@@ -47288,0 +47347,16 @@
+@@ -47288,0 +47353,16 @@
 +  }else if( koraSidecar ){
 +    unixFile *mainFile = (unixFile*)sqlite3_database_file_object(zName);
 +    if( !mainFile->pPreallocatedUnused || !mainFile->koraAuthority ) return SQLITE_CANTOPEN;
@@ -115,33 +125,35 @@
 +      rc = SQLITE_NOMEM_BKPT;
 +      goto open_finished;
 +    }
-@@ -47334,3 +47408 @@
+@@ -47334,3 +47414 @@
 -      assert( !p->pPreallocatedUnused );
 -      assert( eType==SQLITE_OPEN_WAL || eType==SQLITE_OPEN_MAIN_JOURNAL );
 -      return rc;
 +      goto open_finished;
-@@ -47338 +47410,8 @@
+@@ -47338 +47416,10 @@
 -    fd = robust_open(zName, openFlags, openMode);
 +    int created = 0;
 +    int providerJournal = eType==SQLITE_OPEN_MAIN_JOURNAL && koraAuthority->journal;
 +    if( providerJournal ){
 +      fd = koraOpenJournal(zName, openFlags, openMode, &created);
++    }else if( eType==SQLITE_OPEN_MAIN_DB ){
++      fd = koraOpenMain(zName, openFlags, openMode);
 +    }else{
-+      fd = eType==SQLITE_OPEN_MAIN_DB || koraSidecar
-+         ? koraOpenFile(zName, openFlags, openMode) : robust_open(zName, openFlags, openMode);
++      fd = koraSidecar ? koraOpenFile(zName, openFlags, openMode)
++                       : robust_open(zName, openFlags, openMode);
 +    }
-@@ -47354 +47433 @@
+@@ -47354 +47441 @@
 -        pReadonly = findReusableFd(zName, flags);
 +        if( eType==SQLITE_OPEN_MAIN_DB ) pReadonly = findReusableFd(zName, flags);
-@@ -47357 +47436,2 @@
+@@ -47357 +47444,2 @@
 -          sqlite3_free(pReadonly);
 +          koraFreeUnused(p->pPreallocatedUnused);
 +          p->pPreallocatedUnused = pReadonly;
-@@ -47359 +47439,2 @@
+@@ -47359 +47447,2 @@
 -          fd = robust_open(zName, openFlags, openMode);
 +          fd = eType==SQLITE_OPEN_MAIN_DB || koraSidecar
 +             ? koraOpenFile(zName, openFlags, openMode) : robust_open(zName, openFlags, openMode);
-@@ -47366,0 +47448,14 @@
+@@ -47366,0 +47456,14 @@
 +    }
 +
 +    if( koraSidecar ){
@@ -156,18 +168,18 @@
 +        rc = SQLITE_CANTOPEN;
 +        goto open_finished;
 +      }
-@@ -47385,0 +47481,7 @@
+@@ -47385,0 +47489,7 @@
 +  if( eType==SQLITE_OPEN_MAIN_DB ){
-+    rc = koraSelectMain(p, fd);
++    rc = koraSelectMain(p, fd, zName);
 +    if( rc!=SQLITE_OK ){
 +      robust_close(p, fd, __LINE__);
 +      goto open_finished;
 +    }
 +  }
-@@ -47419 +47521,2 @@
+@@ -47419 +47529,2 @@
 -    return SQLITE_IOERR_ACCESS;
 +    rc = SQLITE_IOERR_ACCESS;
 +    goto open_finished;
-@@ -47480 +47583 @@
+@@ -47480 +47591 @@
 -    sqlite3_free(p->pPreallocatedUnused);
 +    koraFreeUnused(p->pPreallocatedUnused);

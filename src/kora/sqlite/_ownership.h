@@ -25,6 +25,7 @@ struct KoraFd {
   KoraFd *lastUser;
   int descriptor;
   int role;
+  unsigned long long pool;
   dev_t device;
   ino_t inode;
   dev_t sidecarDevice;
@@ -37,6 +38,10 @@ typedef struct {
   void *context;
   PyObject *journal;
   int directory;
+  const char *preparePath;
+  unsigned long long pool;
+  int reuseOnly;
+  int reused;
 } KoraOpen;
 
 static _Thread_local KoraOpen *koraOpen;

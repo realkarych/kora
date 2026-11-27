@@ -4,7 +4,6 @@ import logging
 import os
 import signal
 import socket
-import sqlite3
 from collections.abc import Awaitable, Callable, Generator, Mapping
 from contextlib import AsyncExitStack, ExitStack, contextmanager, nullcontext
 from csv import Error as CsvError
@@ -27,6 +26,7 @@ from kora.cel_eval.binding import BindingUnavailable
 from kora.db.connection import (
     DEFAULT_CLOSE_DEADLINE_SECONDS,
     Database,
+    DatabaseConfigurationError,
     DatabaseSettings,
 )
 from kora.db.migrations import database_is_at_head
@@ -710,7 +710,7 @@ async def serve_on_loop(
 ) -> int:
     try:
         database = Database(settings, observe_sqlite_serving=True)
-    except sqlite3.Error:
+    except DatabaseConfigurationError:
         return refuse(log, ServingRefusal.SQLITE_UNPREPARED, 78)
     domain: AsyncExitStack | None = None
     server: ApiServer | None = None

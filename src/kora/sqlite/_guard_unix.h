@@ -11,6 +11,15 @@ static int koraOpenFile(const char *path, int flags, mode_t mode) {
   return fd;
 }
 
+static int koraOpenMain(const char *path, int flags, mode_t mode) {
+  int fd = koraOpenFile(path, flags, mode);
+  if (fd < 0 && errno == ENOENT && koraOpen->preparePath && (flags & O_RDWR)) {
+    fd = koraOpenFile(koraOpen->preparePath, flags | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 && errno == EEXIST) fd = koraOpenFile(path, flags, mode);
+  }
+  return fd;
+}
+
 static int koraOpenJournal(const char *path, int flags, mode_t mode, int *created) {
   if (!(flags & O_CREAT)) return koraOpenFile(path, flags, mode);
   int fd = koraOpenFile(path, flags | O_EXCL, mode);
@@ -217,12 +226,13 @@ static int koraInspectJournal(KoraOpen *scope, int empty) {
   return result;
 }
 
-static int koraSelectMain(unixFile *file, int fd) {
+static int koraSelectMain(unixFile *file, int fd, const char *path) {
   UnixUnusedFd *slot = file->pPreallocatedUnused;
   KoraFd **receipt = koraOpen->owner;
   if (slot->koraOwner) {
     koraReleaseFd(*receipt);
     *receipt = koraRetainFd(slot->koraOwner);
+    koraOpen->reused = 1;
   } else {
     slot->koraOwner = koraRetainFd(*receipt);
   }
@@ -231,12 +241,18 @@ static int koraSelectMain(unixFile *file, int fd) {
   file->h = fd;
   file->koraAuthority = koraOpen;
   unixEnterMutex();
+  owner->pool = 0;
   int result = koraCapture(owner, fd, SQLITE_OPEN_MAIN_DB, NULL, &info);
   if (result == SQLITE_OK && !koraSidecarReady(owner)) result = SQLITE_CANTOPEN;
   if (result != SQLITE_OK) koraParkFd(owner);
   unixLeaveMutex();
   if (result != SQLITE_OK) return result;
   KoraMainKind kind = koraMainHeader(fd, &info);
+  if (kind == KORA_MAIN_EMPTY && koraOpen->preparePath) {
+    struct stat named;
+    if (osStat(path, &named) || named.st_dev != info.st_dev || named.st_ino != info.st_ino)
+      kind = KORA_MAIN_UNCERTAIN;
+  }
   result = SQLITE_NOTADB;
   if (kind == KORA_MAIN_EMPTY || kind == KORA_MAIN_ORDINARY) {
     int accepted = koraOpen->admit(koraOpen->context, fd, kind == KORA_MAIN_EMPTY);

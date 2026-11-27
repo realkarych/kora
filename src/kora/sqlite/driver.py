@@ -1,4 +1,3 @@
-import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import cache
 from itertools import islice
@@ -6,6 +5,7 @@ from pathlib import Path
 from sqlite3 import SQLITE_BUSY as SQLITE_BUSY
 from sqlite3 import SQLITE_LOCKED as SQLITE_LOCKED
 from sqlite3 import Error as Error
+from sqlite3 import NotSupportedError, OperationalError, ProgrammingError
 from threading import Lock
 from typing import TypeAlias
 from weakref import WeakSet
@@ -24,9 +24,7 @@ def driver_version() -> str:
     try:
         from kora.sqlite import _native
     except ImportError as error:
-        raise sqlite3.OperationalError(
-            "The installed SQLite driver is unavailable."
-        ) from error
+        raise OperationalError("The installed SQLite driver is unavailable.") from error
     return _native.sqlite_version
 
 
@@ -51,6 +49,9 @@ class Connection:
         *,
         journal: Callable[[int], bool] | None = None,
         directory: int = -1,
+        prepare: bool = False,
+        pool: int = 0,
+        reuse_only: bool = False,
     ) -> None:
         self.native.open(
             self.handle,
@@ -60,8 +61,14 @@ class Connection:
             admit,
             journal,
             directory,
+            prepare,
+            pool,
+            reuse_only,
         )
         self._opened = True
+
+    def reused_main(self) -> bool:
+        return self.native.reused_main(self.handle)
 
     def close(self) -> None:
         for cursor in tuple(self.cursors):
@@ -132,7 +139,7 @@ class Connection:
         self, table: str, column: str, row: int, *, readonly: bool, name: str
     ) -> "Blob":
         if not readonly or name != "main":
-            raise sqlite3.NotSupportedError(
+            raise NotSupportedError(
                 "Only readonly blobs in the main database are supported."
             )
         return Blob(self, self.native.open_blob(self.handle, table, column, row))
@@ -267,7 +274,7 @@ class Cursor:
 
     def execute(self, query: str, parameters: Parameters = ()) -> "Cursor":
         if self._closed:
-            raise sqlite3.ProgrammingError("Cannot operate on a closed cursor.")
+            raise ProgrammingError("Cannot operate on a closed cursor.")
         self._clear()
         native = self.connection.native
         operation = query.split(None, 1)[0].upper() if query.strip() else ""
@@ -301,7 +308,7 @@ class Cursor:
         for item in parameters:
             self.execute(query, item)
             if self.description is not None:
-                raise sqlite3.ProgrammingError(
+                raise ProgrammingError(
                     "SQLite executemany requires a statement without rows."
                 )
             total += self.rowcount
@@ -310,7 +317,7 @@ class Cursor:
 
     def fetchone(self) -> object:
         if self._closed:
-            raise sqlite3.ProgrammingError("Cannot operate on a closed cursor.")
+            raise ProgrammingError("Cannot operate on a closed cursor.")
         row = self._row
         if row is None or self._statement is None:
             return None
