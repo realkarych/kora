@@ -66,7 +66,7 @@ static int koraConflict(KoraFd *owner, int precheck) {
   for (KoraFd **link = &koraFiles; *link;) {
     KoraFd *other = *link;
     if (other != owner && koraSameFile(owner, other)) {
-      if (koraTryClose(link)) continue;
+      if (!other->main && koraTryClose(link)) continue;
       if (other->state == KORA_FD_RETAINED || other->state == KORA_FD_UNRESOLVED) return 1;
       if (!precheck && (other->lockPin || owner->role == KORA_SHM ||
           owner->role != other->role ||
@@ -95,8 +95,10 @@ static int koraRetireOwned(KoraFd *main, int closed) {
   int done = 1;
   for (KoraFd **link = &koraFiles; *link;) {
     KoraFd *owner = *link;
-    if ((closed && owner == main) ||
-        (owner->main == main && owner->state != KORA_FD_LIVE)) {
+    int shared = owner->role == KORA_SHM && main->sidecarInode &&
+      owner->device == main->sidecarDevice && owner->inode == main->sidecarInode;
+    if ((closed && (owner == main || shared)) ||
+        (owner->main == main && (closed || owner->state != KORA_FD_LIVE))) {
       if (koraTryClose(link)) continue;
       done = 0;
     }
@@ -184,20 +186,20 @@ static int koraSelectSidecar(KoraFd *owner, KoraFd *main, int fd, int role, mode
 }
 
 static int koraInspectJournal(KoraOpen *scope, int empty) {
-  int directory = scope->directory;
+  if (!scope->journal) return SQLITE_OK;
   struct stat hint;
-  if (!scope->journal || (fstatat(directory, "control.sqlite-journal", &hint,
-      AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT)) return SQLITE_OK;
+  if (fstatat(scope->directory, "control.sqlite-journal", &hint, AT_SYMLINK_NOFOLLOW))
+    return errno == ENOENT ? SQLITE_OK : SQLITE_CANTOPEN;
   unixEnterMutex();
-  int blocked = !fstatat(directory, "control.sqlite-journal", &hint, AT_SYMLINK_NOFOLLOW)
-    && koraBlockedIdentity(&hint);
+  int blocked = empty || koraBlockedIdentity(&hint);
   unixLeaveMutex();
   if (blocked) return SQLITE_CANTOPEN;
   KoraFd *main = *scope->owner, *probe = koraNewFd();
   if (!probe) return SQLITE_NOMEM;
   int fd;
   do {
-    fd = openat(directory, "control.sqlite-journal", O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    fd = openat(scope->directory, "control.sqlite-journal",
+                O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
   } while (fd < 0 && errno == EINTR);
   int result = SQLITE_CANTOPEN;
   if (fd >= 0) {

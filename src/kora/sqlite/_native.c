@@ -109,9 +109,9 @@ static int approveMain(void *context, int descriptor, int empty) {
 static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   PyObject *capsule, *admit, *journal;
   const char *path;
-  int readOnly, timeout, noFollow, directory;
-  if (!PyArg_ParseTuple(args, "OspipOOi", &capsule, &path, &readOnly, &timeout,
-                        &noFollow, &admit, &journal, &directory)) {
+  int readOnly, timeout, directory;
+  if (!PyArg_ParseTuple(args, "OspiOOi", &capsule, &path, &readOnly, &timeout,
+                        &admit, &journal, &directory)) {
     return NULL;
   }
   NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
@@ -123,7 +123,7 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   }
   int flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) |
               SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_EXRESCODE;
-  if (noFollow) flags |= SQLITE_OPEN_NOFOLLOW;
+  if (journal != Py_None) flags |= SQLITE_OPEN_NOFOLLOW;
   db->open = (KoraOpen){&db->main, approveMain, admit,
                        journal == Py_None ? NULL : Py_NewRef(journal), directory};
   int result;
@@ -164,7 +164,11 @@ static PyObject *relatedRetirement(PyObject *module, PyObject *args) {
   NativeDb *released = PyCapsule_GetPointer(source, dbCapsuleName);
   NativeDb *waiting = PyCapsule_GetPointer(target, dbCapsuleName);
   if (!released || !waiting) return NULL;
-  return PyBool_FromLong(koraRelated(released->main, waiting->main));
+  int related;
+  Py_BEGIN_ALLOW_THREADS
+  related = koraRelated(released->main, waiting->main);
+  Py_END_ALLOW_THREADS
+  return PyBool_FromLong(related);
 }
 
 static const char *statementCapsuleName = "kora.sqlite.statement";

@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from contextlib import closing
 from pathlib import Path
 
@@ -86,7 +87,9 @@ def test_local_storage_settles_a_refused_journal_on_the_original_writer(
     copy_sqlite_template(sqlite_template, metadata)
     metadata.chmod(0o600)
     identity = native_identity(metadata)
-    journal = Path(configuration.root) / "control.sqlite-journal"
+    root = Path(configuration.root)
+    root_gate = native_identity(root / "locks" / "root")
+    journal = root / "control.sqlite-journal"
     journal.hardlink_to(metadata)
 
     with closing(Connection()) as original:
@@ -100,19 +103,27 @@ def test_local_storage_settles_a_refused_journal_on_the_original_writer(
         with pytest.raises(KoraProtocolError) as refusal:
             LocalArtifactStorage(configuration)
         retained = held_main_descriptors(identity)
+        retained_gate = held_main_descriptors(root_gate)
         original.commit()
         saved = original.execute("SELECT value FROM original_writer").fetchone()
+        with closing(Connection()) as competing:
+            with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+                competing.open(metadata, False, 0, lambda descriptor, empty: not empty)
+        original.close()
+        descriptors_after_close = held_main_descriptors(identity)
+        gate_after_close = held_main_descriptors(root_gate)
         journal.unlink()
         retry = LocalArtifactStorage(configuration)
-        after_retry = held_main_descriptors(identity)
         asyncio.run(retry.aclose())
 
     assert refusal.value.code == "storage_io"
     assert len(before) == 1
     assert len(retained) == 2
     assert set(before) < set(retained)
+    assert len(retained_gate) == 1
     assert saved == (52,)
-    assert after_retry == before
+    assert not descriptors_after_close
+    assert not gate_after_close
     assert not held_main_descriptors(identity)
 
 

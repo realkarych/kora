@@ -49,7 +49,6 @@ class Connection:
         timeout_ms: int,
         admit: Admission,
         *,
-        nofollow: bool = False,
         journal: Callable[[int], bool] | None = None,
         directory: int = -1,
     ) -> None:
@@ -58,7 +57,6 @@ class Connection:
             str(path),
             readonly,
             timeout_ms,
-            nofollow,
             admit,
             journal,
             directory,

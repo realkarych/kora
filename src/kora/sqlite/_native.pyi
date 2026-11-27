@@ -8,7 +8,6 @@ def open(
     path: str,
     readonly: bool,
     timeout_ms: int,
-    nofollow: bool,
     admit: Callable[[int, int], bool],
     journal: Callable[[int], bool] | None,
     directory: int,

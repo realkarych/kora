@@ -125,12 +125,7 @@ class LocalState:
         self.connections = 0
         self.initial_epoch: Final[int] = self.initialize()
 
-    def validate_files(
-        self,
-        descriptor: int,
-        empty: int,
-        creating: bool,
-    ) -> bool:
+    def validate_files(self, descriptor: int, empty: int, creating: bool) -> bool:
         self.root.validate_anchor()
         info = private_file(descriptor, self.root.manifest.device)
         current = os.stat("control.sqlite", dir_fd=self.root.fd, follow_symlinks=False)
@@ -193,7 +188,6 @@ class LocalState:
             False,
             0,
             admit,
-            nofollow=True,
             journal=self.admit_journal,
             directory=self.root.fd,
         )
