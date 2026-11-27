@@ -11,7 +11,7 @@ export class LocalProxy {
 
   async listen(origin: string): Promise<string> {
     const allowed = new URL(origin)
-    assert(allowed.protocol === 'http:' && allowed.port !== '' && allowed.hostname === '127.0.0.1' && allowed.username === '' && allowed.password === '' && allowed.href === `${origin}/`)
+    assert((allowed.protocol === 'http:' || allowed.protocol === 'https:') && allowed.port !== '' && allowed.hostname === '127.0.0.1' && allowed.username === '' && allowed.password === '' && allowed.href === `${origin}/`)
     const permitted = (raw: string | undefined): URL | undefined => {
       if (raw === undefined) return undefined
       try {
@@ -37,7 +37,9 @@ export class LocalProxy {
       })
       this.track(upstream)
       upstream.on('error', () => { socket.destroy() })
+      upstream.on('close', () => { socket.destroy() })
       socket.on('error', () => { upstream.destroy() })
+      socket.on('close', () => { upstream.destroy() })
     })
     this.server.on('request', (incoming, outgoing) => {
       const target = permitted(incoming.url)

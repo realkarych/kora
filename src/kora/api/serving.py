@@ -83,6 +83,7 @@ REFUSED: EventSpec = CATALOG.register(
 class ServingRefusal(StrEnum):
     DATABASE_CONFIGURATION = "database_configuration"
     TLS_CONFIGURATION = "tls_configuration"
+    CONSOLE_CONFIGURATION = "console_configuration"
     DOMAIN_CONFIGURATION = "domain_configuration"
     WORKER_CONFIGURATION = "worker_configuration"
     SCHEDULER_CONFIGURATION = "scheduler_configuration"

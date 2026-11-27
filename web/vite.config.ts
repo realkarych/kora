@@ -6,6 +6,7 @@ export default defineConfig({
   build: {
     outDir: '../src/kora/api/static',
     emptyOutDir: true,
+    manifest: 'console-manifest.json',
     license: { fileName: 'THIRD_PARTY_LICENSES.md' },
   },
 })

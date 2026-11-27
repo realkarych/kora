@@ -45,6 +45,12 @@ from kora.ir.json import (
     JsonShapeError,
     parse_json_object,
 )
+from kora.models.console import (
+    CODE_PATTERN,
+    LOGIN_LINK_PATH,
+    REDEEM_PATH,
+    LoginSelection,
+)
 from kora.models.errors import HTTP_STATUSES, ApiErrorCode, require_api_error_fields
 from kora.models.graphs import DeployRequest, DeployResponse
 from kora.models.run_events import PAGE_BYTES, RunEventPage
@@ -418,6 +424,30 @@ class KoraClient:
             registered_worker,
             response_limit=16 * 1024,
             body=body,
+        )
+
+    async def issue_console_login_link(self, selection: LoginSelection) -> str:
+        if self._origin.scheme != "https" or self._origin.host != "127.0.0.1":
+            raise ClientError(Failure.DESTINATION_POLICY, Outcome.NOT_SENT)
+        prefix = str(self._origin.copy_with(path=REDEEM_PATH.format(code="")))
+
+        def read(value: JsonObject) -> str:
+            url = value.get("url")
+            if (
+                not isinstance(url, str)
+                or not url.startswith(prefix)
+                or re.fullmatch(CODE_PATTERN, url[len(prefix) :]) is None
+            ):
+                raise ValueError("The login link is invalid.")
+            return url
+
+        return await self._request_json(
+            "POST",
+            LOGIN_LINK_PATH,
+            read,
+            response_limit=1024,
+            body=selection.model_dump(mode="json"),
+            success=frozenset({201}),
         )
 
     async def list_run_events(

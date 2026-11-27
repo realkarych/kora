@@ -4,6 +4,7 @@ import { detachRunEventsBody, RunEventsFailure } from './runEventsBody'
 
 const deadlineMs = 15_000
 const originPattern = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})$/u
+const browserOriginPattern = /^https:\/\/127\.0\.0\.1(?::[1-9][0-9]{0,4})?$/u
 const namespacePattern = /^[a-z][a-z0-9_]{0,63}$/u
 const ulidPattern = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/u
 const cursorPattern = /^[A-Za-z0-9_-]{1,8192}$/u
@@ -24,6 +25,10 @@ type RunEventsRequest = {
   signal?: AbortSignal
   fetch: typeof fetch
 }
+
+type BrowserSelection = Omit<RunEventsRequest, 'origin' | 'authorization' | 'fetch'>
+type BrowserRequest = Omit<RunEventsRequest, 'authorization'> & { authorization?: never }
+type RequestInput = RunEventsRequest | BrowserRequest
 
 type ErrorEnvelope = {
   error: Pick<ApiError, 'message' | 'retryable' | 'request_id'> & {
@@ -49,8 +54,7 @@ type RunEventsResult =
   | { kind: 'client-error'; code: FailureCode; reason: FailureReason; requestId: string | null }
   | { kind: 'cancelled'; requestId: string | null }
 
-type Destination = { url: URL; token: string }
-
+type Destination = { url: URL; token: string | undefined }
 type ErrorPolicy = { status: number; message?: string; mayRetry?: boolean }
 
 const knownErrors: Partial<Record<string, ErrorPolicy>> = {
@@ -164,8 +168,9 @@ function eventPage(value: unknown, run: string, limit: number): value is ListRun
   return true
 }
 
-function safeCorrelation(value: string | null, token: string): string | null {
-  return value !== null && !value.includes(token) && exactMatch(requestIdPattern, value) ? value : null
+function safeCorrelation(value: string | null, token: string | undefined): string | null {
+  return value !== null && (token === undefined || !value.includes(token))
+    && exactMatch(requestIdPattern, value) ? value : null
 }
 
 function errorEnvelope(value: unknown, status: number): value is ErrorEnvelope {
@@ -201,14 +206,17 @@ function bearerToken(authorization: string): string | null {
   return index === authorization.length ? authorization.slice(start) : null
 }
 
-function destination(input: RunEventsRequest): Destination {
-  const origin = originPattern.exec(input.origin)
-  const token = bearerToken(input.authorization)
+export function validRunEventsScope(namespace: string, run: string): boolean {
+  return exactMatch(namespacePattern, namespace) && prefixedId(run, 'run_')
+}
+
+function destination(input: RequestInput, browser: boolean): Destination {
+  const origin = (browser ? browserOriginPattern : originPattern).exec(input.origin)
+  const token = browser ? undefined : bearerToken(input.authorization ?? '') ?? undefined
   const { namespace, run, limit, cursor: position } = input
   const port = origin?.[1]
-  if (origin?.[0] !== input.origin || port === undefined || Number(port) > 65_535
-    || token === null
-    || !exactMatch(namespacePattern, namespace) || !prefixedId(run, 'run_')
+  if (origin?.[0] !== input.origin || (!browser && (port === undefined || Number(port) > 65_535 || token === undefined))
+    || !validRunEventsScope(namespace, run)
     || (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100))
     || (position != null && !cursor(position))) throw new RunEventsFailure('destination_policy')
 
@@ -241,7 +249,7 @@ function runBudget(caller: AbortSignal | undefined) {
   return { signal, check, release: () => { globalThis.clearTimeout(timer) } }
 }
 
-export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsResult> {
+async function readPage(input: RequestInput, browser: boolean): Promise<RunEventsResult> {
   const budget = runBudget(input.signal)
   const exchange: { requestId: string | null; errorText: string | null } = {
     requestId: null,
@@ -249,16 +257,21 @@ export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsR
   }
   try {
     budget.check()
-    const { url, token } = destination(input)
+    const { url, token } = destination(input, browser)
+    const credentials = browser ? 'same-origin' : 'omit'
+    const authorization = input.authorization ?? null
     const fetchPage: typeof fetch = async (request, init) => {
       if (!(request instanceof Request) || init !== undefined || request.url !== url.href
         || request.method !== 'GET' || request.body !== null || request.redirect !== 'error'
-        || request.credentials !== 'omit' || request.headers.get('authorization') !== input.authorization) {
+        || request.credentials !== credentials || request.headers.get('authorization') !== authorization) {
         throw new RunEventsFailure('destination_policy')
       }
       budget.check()
       const requestFetch = input.fetch
-      const response = await requestFetch(request).catch(() => { throw new RunEventsFailure('connection') })
+      const wire = browser
+        ? new Request(new URL(`/console${url.pathname}${url.search}`, url), request)
+        : request
+      const response = await requestFetch(wire).catch(() => { throw new RunEventsFailure('connection') })
       exchange.requestId = safeCorrelation(response.headers.get('x-request-id'), token)
       const detached = await detachRunEventsBody(response, budget.check)
       exchange.errorText = detached.errorText
@@ -268,10 +281,11 @@ export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsR
       baseUrl: input.origin,
       path: { ns: input.namespace, run: input.run },
       query: { limit: input.limit, cursor: input.cursor },
-      headers: { Accept: 'application/json', Authorization: input.authorization },
+      headers: { Accept: 'application/json', Authorization: authorization },
       signal: budget.signal,
       redirect: 'error',
-      credentials: 'omit',
+      credentials,
+      mode: browser ? 'same-origin' : 'cors',
       cache: 'no-store',
       fetch: fetchPage,
       parseAs: 'json',
@@ -306,4 +320,12 @@ export async function readRunEvents(input: RunEventsRequest): Promise<RunEventsR
   } finally {
     budget.release()
   }
+}
+
+export function readRunEvents(input: RunEventsRequest): Promise<RunEventsResult> {
+  return readPage(input, false)
+}
+
+export function readBrowserRunEvents(input: BrowserSelection): Promise<RunEventsResult> {
+  return readPage({ ...input, authorization: undefined, origin: window.location.origin, fetch: request => window.fetch(request) }, true)
 }

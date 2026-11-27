@@ -12,6 +12,8 @@ Status: design detail behind [docs/console.md](../../../docs/console.md), writte
 
 IBM Plex is published under the SIL Open Font License; the three families were designed together and share their metrics, so a serif block inside a sans page keeps the baseline grid. Numerals in the sans are set tabular (`font-variant-numeric: tabular-nums`) wherever tokens, USD amounts and durations align in a column.
 
+The installed known-run profile bundles the complete Regular and Bold WOFF2 faces from [IBM Plex Sans 1.3.6](https://github.com/IBM/plex/releases/tag/%40ibm/plex-sans%401.3.6) and Regular from [IBM Plex Mono 2.5.0](https://github.com/IBM/plex/releases/tag/%40ibm/plex-mono%402.5.0), with their shared unmodified SIL Open Font License. The build uses only the bundled files. There is no model-authored content in this profile.
+
 ## Type scale
 
 | property | size / line height (px) | used for |

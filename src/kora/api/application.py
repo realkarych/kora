@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from kora.api.authentication import authenticate_route
+from kora.api.console_routes import BROWSER_HEADERS, ConsoleRoutes, console_error
 from kora.api.errors import RequestRejection, definitive_error, request_rejection
 from kora.api.exchange import ApiExchange, current_exchange, method_of
 from kora.api.graph_deployment_route import deployment_handler
@@ -22,6 +23,7 @@ from kora.api.responses import (
     validation_error,
 )
 from kora.api.routes import (
+    CONSOLE_ROUTES,
     PROTECTED_ROUTES,
     RECOGNIZED_METHODS,
     ActiveCatalog,
@@ -87,6 +89,7 @@ class ApiDispatch:
         clock: Clock,
         worker_history: WorkerHistoryRoute | None = None,
         claim_slot: ClaimWorkSlot | None = None,
+        console: ConsoleRoutes | None = None,
     ) -> None:
         self.application = app
         self.catalog = catalog
@@ -94,6 +97,7 @@ class ApiDispatch:
         self.clock = clock
         self.worker_history = worker_history
         self.claim_slot = claim_slot
+        self.console = console
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -101,6 +105,19 @@ class ApiDispatch:
             return
         exchange = current_exchange()
         matched = self.catalog.match(scope)
+        if matched is not None and matched.name in CONSOLE_ROUTES:
+            console = self.console
+            if console is None:
+                raise RuntimeError("The console is not configured.")
+            request = Request(scope)
+            exchange.response_policy = BROWSER_HEADERS
+            if not console.admit(scope, matched.name):
+                matched = None
+            elif not console.correct_host(request):
+                exchange.route = matched.name.value
+                rejected = console_error(request, ApiErrorCode.FORBIDDEN)
+                await rejected(scope, receive, send)
+                return
         if matched is not None:
             exchange.route = matched.name.value
         method = method_of(scope)
@@ -120,7 +137,11 @@ class ApiDispatch:
                 )
                 else "user",
                 current_authority=matched.name
-                in (RouteName.WORKER_CLAIMS, RouteName.RUN_EVENTS),
+                in (
+                    RouteName.WORKER_CLAIMS,
+                    RouteName.RUN_EVENTS,
+                    RouteName.LOGIN_LINKS,
+                ),
             )
             if isinstance(authority, ApiErrorEnvelope):
                 await error_response(authority, method=method)(scope, receive, send)
@@ -203,6 +224,7 @@ def create_application(
     worker_heartbeat: WorkerHeartbeatRoute | None = None,
     admission_initialization: AdmissionInitialization | None = None,
     single_claim: bool = False,
+    console: ConsoleRoutes | None = None,
 ) -> ApiExchange:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncGenerator[None]:
@@ -210,7 +232,11 @@ def create_application(
             await admission_initialization.initialize(diagnostics)
         if worker_claims is not None:
             await worker_claims.recover_expiry(diagnostics)
-        yield
+        try:
+            yield
+        finally:
+            if console is not None:
+                console.sessions.close()
 
     framework = FastAPI(
         lifespan=lifespan,
@@ -395,6 +421,8 @@ def create_application(
             operation_id="heartbeat_attempt",
             response_model=HeartbeatResponse,
         )
+    if console is not None:
+        console.register(framework)
     framework.add_exception_handler(HTTPException, framework_error)
     framework.add_exception_handler(RequestValidationError, validation_error)
     framework.add_exception_handler(Exception, unexpected_error)
@@ -405,5 +433,6 @@ def create_application(
         clock=clock,
         worker_history=worker_history,
         claim_slot=ClaimWorkSlot() if single_claim else None,
+        console=console,
     )
     return ApiExchange(framework, diagnostics, request_id)
