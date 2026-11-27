@@ -44,6 +44,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0026](0026-package-layers.md) | Package layers: packages by role under `src/kora`, server-free packages never statically reach server packages, a standard-library test enforces it, one base installation | accepted, wording pending review |
 | [ADR-0029](0029-installed-api-serving-stack.md) | Optional installed API server, ordinary SQLite ownership, and a separate PostgreSQL startup boundary | implementation plan accepted 2026-11-22, wording reviewed and accepted by the project owner on 2026-11-22 |
 | [ADR-0030](0030-pi-sdk-candidate-process.md) | Run the Pi SDK in a managed candidate process | design and implementation plan accepted 2026-11-27; wording pending owner review |
+| [ADR-0031](0031-run-event-position-maintenance.md) | One maintenance window to prepare run-event positions in an existing ordinary installation | design and implementation plan accepted 2026-11-27, wording pending owner review |
 
 ## Writing a new record
 
