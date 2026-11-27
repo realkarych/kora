@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import sleep
 from typing import Final, cast
 
 import pytest
@@ -1052,6 +1053,32 @@ async def test_pi_bridge_preserves_stop_cause_for_buffered_reply(
 
     assert duplicate.value.code == "protocol"
     assert stopped.value.code == stop
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked", [False, True], ids=["deadline", "revoked"])
+async def test_pi_bridge_read_timer_preserves_latched_stop(
+    kora_capture: Capture,
+    revoked: bool,
+) -> None:
+    clock = StepClock()
+    read_window_ns = SECOND // 50
+    async with prepared_channel(kora_capture, clock) as (channel, _, peer, _):
+        clock.advance(5 * SECOND - read_window_ns)
+
+        def revoke_before_timer_runs() -> None:
+            channel.revoke()
+            sleep(2 * read_window_ns / SECOND)
+
+        pending = asyncio.create_task(channel.prompt(PROMPT))
+        if revoked:
+            asyncio.get_running_loop().call_soon(revoke_before_timer_runs)
+        with pytest.raises(BridgeRefused) as stopped:
+            await pending
+        async with asyncio.timeout(5):
+            await control_challenge(peer[0], "prompt")
+
+    assert stopped.value.code == ("closed" if revoked else "deadline")
 
 
 @pytest.mark.asyncio

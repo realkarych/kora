@@ -164,7 +164,7 @@ class BridgeChannel:
             async with asyncio.timeout(self._remaining()):
                 record = await self._reader.readuntil(b"\n")
         except TimeoutError:
-            raise BridgeRefused("deadline") from None
+            raise BridgeRefused("closed" if self._revoked else "deadline") from None
         except (OSError, EOFError, asyncio.LimitOverrunError) as error:
             self._remaining()
             oversized = isinstance(error, asyncio.LimitOverrunError)
