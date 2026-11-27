@@ -25,14 +25,13 @@ static int koraTryClose(KoraFd **link) {
   KoraFd *owner = *link;
   if (owner->state != KORA_FD_RETAINED) return 0;
   for (KoraFd *other = koraFiles; other; other = other->next) {
-    if (other->role == KORA_SHM && other->state == KORA_FD_LIVE &&
-        koraSameFile(owner, other)) return 0;
+    if (other != owner && other->lockPin && koraSameFile(owner, other)) return 0;
   }
   unixInodeInfo *main = inodeList;
   while (main && (main->fileId.dev != owner->device ||
                   main->fileId.ino != (u64)owner->inode)) main = main->pNext;
   if (main) sqlite3_mutex_enter(main->pLockMutex);
-  if (!main || (!main->nLock && !main->koraUnlockUnknown)) {
+  if (!main || (!main->nLock && (!main->koraUnlockUnknown || owner->lockPin))) {
     owner->state = osClose(owner->descriptor) == 0
       ? KORA_FD_RETIRED : KORA_FD_UNRESOLVED;
   }
@@ -84,12 +83,32 @@ static int koraConflict(KoraFd *owner) {
     if (other != owner && koraSameFile(owner, other)) {
       if (koraTryClose(link)) continue;
       if (other->state == KORA_FD_RETAINED || other->state == KORA_FD_UNRESOLVED ||
-          owner->role == KORA_SHM || owner->role != other->role ||
+          other->lockPin || owner->role == KORA_SHM || owner->role != other->role ||
           (owner->main && !koraSameFile(owner->main, other->main))) return 1;
     }
     link = &other->next;
   }
   return 0;
+}
+
+static int koraKnownIdentity(int fd, struct stat *info) {
+  if (osFstat(fd, info) != 0) return 0;
+#if defined(__APPLE__)
+  if (info->st_size == 0 && S_ISREG(info->st_mode)) {
+    struct statfs mount;
+    return fstatfs(fd, &mount) == 0 &&
+      strncmp(mount.f_fstypename, "msdos", 5) &&
+      strncmp(mount.f_fstypename, "exfat", 5);
+  }
+#endif
+  return 1;
+}
+
+static void koraPinUnlock(unixFile *file, int failed) {
+  file->pInode->koraUnlockUnknown = failed;
+  if (file->pPreallocatedUnused && file->pPreallocatedUnused->koraOwner) {
+    file->pPreallocatedUnused->koraOwner->lockPin = failed;
+  }
 }
 
 static int koraCapture(KoraFd *owner, int fd, int role, KoraFd *main,
@@ -101,14 +120,14 @@ static int koraCapture(KoraFd *owner, int fd, int role, KoraFd *main,
     owner->role = role;
     koraSetParent(owner, main);
   }
-  if (osFstat(fd, info) != 0) {
+  if (!koraKnownIdentity(fd, info)) {
     owner->state = KORA_FD_UNRESOLVED;
     koraUnresolvedIdentity = 1;
     return SQLITE_CANTOPEN;
   }
   owner->device = info->st_dev;
   owner->inode = info->st_ino;
-  if (!S_ISREG(info->st_mode) || koraConflict(owner)) {
+  if (!S_ISREG(info->st_mode) || owner->lockPin || koraConflict(owner)) {
     owner->state = KORA_FD_RETAINED;
     return SQLITE_CANTOPEN;
   }
@@ -140,21 +159,10 @@ static int koraSelectMain(unixFile *file, int fd) {
   KoraFd *owner = *receipt;
   struct stat info;
   file->h = fd;
+  file->koraAuthority = koraOpen;
   unixEnterMutex();
   int result = koraCapture(owner, fd, SQLITE_OPEN_MAIN_DB, NULL, &info);
   if (result == SQLITE_OK && !koraSidecarReady(owner)) result = SQLITE_CANTOPEN;
-#if defined(__APPLE__)
-  if (result == SQLITE_OK && info.st_size == 0) {
-    struct statfs mount;
-    if (fstatfs(fd, &mount) != 0 ||
-        !strncmp(mount.f_fstypename, "msdos", 5) ||
-        !strncmp(mount.f_fstypename, "exfat", 5)) {
-      owner->state = KORA_FD_UNRESOLVED;
-      koraUnresolvedIdentity = 1;
-      result = SQLITE_CANTOPEN;
-    }
-  }
-#endif
   if (result != SQLITE_OK) koraParkFd(owner);
   unixLeaveMutex();
   if (result != SQLITE_OK) return result;

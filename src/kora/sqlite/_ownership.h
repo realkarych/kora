@@ -19,6 +19,7 @@ typedef struct KoraFd KoraFd;
 struct KoraFd {
   _Atomic KoraFdState state;
   atomic_uint references;
+  atomic_int lockPin;
   KoraFd *next;
   KoraFd *main;
   int descriptor;
@@ -31,6 +32,7 @@ typedef struct {
   KoraFd **owner;
   int (*admit)(void *, int, int);
   void *context;
+  void *journal;
 } KoraOpen;
 
 static _Thread_local KoraOpen *koraOpen;
@@ -41,6 +43,7 @@ static KoraFd *koraNewFd(void) {
   if (owner) {
     atomic_init(&owner->references, 1);
     atomic_init(&owner->state, KORA_FD_ABSENT);
+    atomic_init(&owner->lockPin, 0);
   }
   return owner;
 }

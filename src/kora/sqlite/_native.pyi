@@ -10,6 +10,7 @@ def open(
     timeout_ms: int,
     nofollow: bool,
     admit: Callable[[int, int], bool],
+    journal: Callable[[int], bool] | None,
     /,
 ) -> None: ...
 def close(handle: object, /) -> None: ...

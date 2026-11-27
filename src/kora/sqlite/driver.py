@@ -48,8 +48,11 @@ class Connection:
         admit: Admission,
         *,
         nofollow: bool = False,
+        journal: Callable[[int], bool] | None = None,
     ) -> None:
-        self.native.open(self.handle, str(path), readonly, timeout_ms, nofollow, admit)
+        self.native.open(
+            self.handle, str(path), readonly, timeout_ms, nofollow, admit, journal
+        )
 
     def close(self) -> None:
         for cursor in tuple(self.cursors):

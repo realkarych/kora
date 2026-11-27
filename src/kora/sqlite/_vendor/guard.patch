@@ -5,9 +5,11 @@
 +
 @@ -40900,0 +40903 @@
 +  KoraFd *koraOwner;
-@@ -41978,0 +41982 @@
+@@ -40920,0 +40924 @@
++  KoraOpen *koraAuthority;
+@@ -41978,0 +41983 @@
 +  int koraUnlockUnknown;
-@@ -42106,0 +42111,7 @@
+@@ -42106,0 +42112,7 @@
 +#include "_guard_unix.h"
 +
 +static void koraFreeUnused(UnixUnusedFd *unused){
@@ -15,7 +17,7 @@
 +  sqlite3_free(unused);
 +}
 +
-@@ -42107,0 +42119,12 @@
+@@ -42107,0 +42120,12 @@
 +  if( pFile && pFile->h==h && pFile->pPreallocatedUnused
 +      && pFile->pPreallocatedUnused->koraOwner ){
 +    KoraFd *owner = pFile->pPreallocatedUnused->koraOwner;
@@ -28,7 +30,7 @@
 +    }
 +    return;
 +  }
-@@ -42132,2 +42155,6 @@
+@@ -42132,2 +42156,6 @@
 -    robust_close(pFile, p->fd, __LINE__);
 -    sqlite3_free(p);
 +    if( p->koraOwner ){
@@ -37,29 +39,31 @@
 +      robust_close(pFile, p->fd, __LINE__);
 +    }
 +    koraFreeUnused(p);
-@@ -42668 +42695,3 @@
+@@ -42668 +42696,3 @@
 -    if( unixFileLock(pFile, &lock) && rc==SQLITE_OK ){
 +    int unlockFailed = unixFileLock(pFile, &lock);
-+    if( unlockFailed ) pInode->koraUnlockUnknown = 1;
++    if( unlockFailed ) koraPinUnlock(pFile, 1);
 +    if( unlockFailed && rc==SQLITE_OK ){
-@@ -42758,0 +42788 @@
+@@ -42758,0 +42789 @@
 +  if( p->koraOwner ) p->koraOwner->state = KORA_FD_CACHED;
-@@ -42905,0 +42936 @@
-+        pInode->koraUnlockUnknown = 0;
-@@ -42906,0 +42938 @@
-+        pInode->koraUnlockUnknown = 1;
-@@ -42987 +43019 @@
+@@ -42888,0 +42920 @@
++      koraPinUnlock(pFile, 1);
+@@ -42905,0 +42938 @@
++        koraPinUnlock(pFile, 0);
+@@ -42906,0 +42940 @@
++        koraPinUnlock(pFile, 1);
+@@ -42987 +43021 @@
 -  sqlite3_free(pFile->pPreallocatedUnused);
 +  koraFreeUnused(pFile->pPreallocatedUnused);
-@@ -45210,0 +45243 @@
+@@ -45210,0 +45245 @@
 +  KoraFd *koraOwner;
-@@ -45487,2 +45520 @@
+@@ -45487,2 +45522 @@
 -      robust_close(pFd, p->hShm, __LINE__);
 -      p->hShm = -1;
 +      koraCloseSidecar(p->koraOwner, pFd->pPreallocatedUnused->koraOwner);
-@@ -45489,0 +45522 @@
+@@ -45489,0 +45524 @@
 +    if( p->koraOwner ) koraReleaseFd(p->koraOwner);
-@@ -45685,0 +45719,10 @@
+@@ -45685,0 +45721,10 @@
 +      KoraFd *main = pDbFd->pPreallocatedUnused->koraOwner;
 +      if( !koraSidecarReady(main) ){
 +        rc = SQLITE_CANTOPEN;
@@ -70,31 +74,35 @@
 +        rc = SQLITE_NOMEM_BKPT;
 +        goto shm_open_err;
 +      }
-@@ -45687 +45730 @@
+@@ -45687 +45732 @@
 -        pShmNode->hShm = robust_open(zShm, O_RDWR|O_CREAT|O_NOFOLLOW,
 +        pShmNode->hShm = koraOpenFile(zShm, O_RDWR|O_CREAT|O_NOFOLLOW,
-@@ -45691 +45734 @@
+@@ -45691 +45736 @@
 -        pShmNode->hShm = robust_open(zShm, O_RDONLY|O_NOFOLLOW,
 +        pShmNode->hShm = koraOpenFile(zShm, O_RDONLY|O_NOFOLLOW,
-@@ -45703,0 +45747,6 @@
+@@ -45703,0 +45749,6 @@
 +      rc = koraSelectSidecar(pShmNode->koraOwner, main, pShmNode->hShm,
 +                             KORA_SHM, sStat.st_mode&0777);
 +      if( rc!=SQLITE_OK ){
 +        pShmNode->hShm = -1;
 +        goto shm_open_err;
 +      }
-@@ -47221,0 +47271,2 @@
+@@ -45705,0 +45757 @@
++      pShmNode->koraOwner->lockPin = 1;
+@@ -47221,0 +47274,3 @@
 +  KoraFd *koraMain = 0;
++  KoraOpen *koraAuthority = 0;
 +  int koraSidecar = eType==SQLITE_OPEN_WAL || eType==SQLITE_OPEN_MAIN_JOURNAL;
-@@ -47272,0 +47324 @@
+@@ -47272,0 +47328 @@
 +    if( !koraOpen || koraUnresolvedIdentity ) return SQLITE_CANTOPEN;
-@@ -47280,0 +47333 @@
+@@ -47280,0 +47337 @@
 +      pUnused->koraOwner = 0;
-@@ -47288,0 +47342,15 @@
+@@ -47288,0 +47346,16 @@
 +  }else if( koraSidecar ){
 +    unixFile *mainFile = (unixFile*)sqlite3_database_file_object(zName);
-+    if( !mainFile->pPreallocatedUnused ) return SQLITE_CANTOPEN;
++    if( !mainFile->pPreallocatedUnused || !mainFile->koraAuthority ) return SQLITE_CANTOPEN;
 +    koraMain = mainFile->pPreallocatedUnused->koraOwner;
++    koraAuthority = mainFile->koraAuthority;
 +    unixEnterMutex();
 +    int ready = koraSidecarReady(koraMain);
 +    unixLeaveMutex();
@@ -106,27 +114,27 @@
 +      rc = SQLITE_NOMEM_BKPT;
 +      goto open_finished;
 +    }
-@@ -47334,3 +47402 @@
+@@ -47334,3 +47407 @@
 -      assert( !p->pPreallocatedUnused );
 -      assert( eType==SQLITE_OPEN_WAL || eType==SQLITE_OPEN_MAIN_JOURNAL );
 -      return rc;
 +      goto open_finished;
-@@ -47338 +47404,2 @@
+@@ -47338 +47409,2 @@
 -    fd = robust_open(zName, openFlags, openMode);
 +    fd = eType==SQLITE_OPEN_MAIN_DB || koraSidecar
 +       ? koraOpenFile(zName, openFlags, openMode) : robust_open(zName, openFlags, openMode);
-@@ -47354 +47421 @@
+@@ -47354 +47426 @@
 -        pReadonly = findReusableFd(zName, flags);
 +        if( eType==SQLITE_OPEN_MAIN_DB ) pReadonly = findReusableFd(zName, flags);
-@@ -47357 +47424,2 @@
+@@ -47357 +47429,2 @@
 -          sqlite3_free(pReadonly);
 +          koraFreeUnused(p->pPreallocatedUnused);
 +          p->pPreallocatedUnused = pReadonly;
-@@ -47359 +47427,2 @@
+@@ -47359 +47432,2 @@
 -          fd = robust_open(zName, openFlags, openMode);
 +          fd = eType==SQLITE_OPEN_MAIN_DB || koraSidecar
 +             ? koraOpenFile(zName, openFlags, openMode) : robust_open(zName, openFlags, openMode);
-@@ -47368,0 +47438,9 @@
+@@ -47368,0 +47443,15 @@
 +    if( koraSidecar ){
 +      p->h = fd;
 +      unixEnterMutex();
@@ -134,9 +142,15 @@
 +                             fd, eType, openMode);
 +      unixLeaveMutex();
 +      if( rc!=SQLITE_OK ) goto open_finished;
++      if( eType==SQLITE_OPEN_MAIN_JOURNAL && koraAuthority->journal
++          && !koraAuthority->admit(koraAuthority->journal, fd, -1) ){
++        robust_close(p, fd, __LINE__);
++        rc = SQLITE_CANTOPEN;
++        goto open_finished;
++      }
 +    }
 +
-@@ -47385,0 +47464,7 @@
+@@ -47385,0 +47475,7 @@
 +  if( eType==SQLITE_OPEN_MAIN_DB ){
 +    rc = koraSelectMain(p, fd);
 +    if( rc!=SQLITE_OK ){
@@ -144,10 +158,10 @@
 +      goto open_finished;
 +    }
 +  }
-@@ -47419 +47504,2 @@
+@@ -47419 +47515,2 @@
 -    return SQLITE_IOERR_ACCESS;
 +    rc = SQLITE_IOERR_ACCESS;
 +    goto open_finished;
-@@ -47480 +47566 @@
+@@ -47480 +47577 @@
 -    sqlite3_free(p->pPreallocatedUnused);
 +    koraFreeUnused(p->pPreallocatedUnused);

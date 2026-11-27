@@ -1,4 +1,5 @@
 import os
+import stat
 from collections.abc import Generator, Iterator
 from contextlib import ExitStack, contextmanager
 from typing import Final, Literal, TypeAlias, TypeVar, cast
@@ -141,14 +142,28 @@ class LocalState:
             else:
                 refuse("storage_identity")
         try:
-            os.stat(
+            journal = os.stat(
                 "control.sqlite-journal", dir_fd=self.root.fd, follow_symlinks=False
             )
         except FileNotFoundError:
             return False
         if empty:
             refuse("storage_identity")
-        os.close(self.root.open_file(("control.sqlite-journal",), os.O_RDWR))
+        if not stat.S_ISREG(journal.st_mode) or stat.S_IMODE(journal.st_mode) != 0o600:
+            refuse("storage_path")
+        return True
+
+    def admit_journal(self, descriptor: int) -> bool:
+        self.root.validate_anchor()
+        try:
+            actual = private_file(descriptor, self.root.manifest.device)
+            anchored = os.stat(
+                "control.sqlite-journal", dir_fd=self.root.fd, follow_symlinks=False
+            )
+        except OSError:
+            refuse("storage_path")
+        if (actual.st_dev, actual.st_ino) != (anchored.st_dev, anchored.st_ino):
+            refuse("storage_identity")
         return True
 
     def connect(
@@ -167,7 +182,12 @@ class LocalState:
                     )
                 )
         connection.open(
-            self.root.path / "control.sqlite", False, 0, admit, nofollow=True
+            self.root.path / "control.sqlite",
+            False,
+            0,
+            admit,
+            nofollow=True,
+            journal=self.admit_journal,
         )
         try:
             connection.execute("PRAGMA busy_timeout=0")
@@ -247,6 +267,8 @@ class LocalState:
                 if connection is not None:
                     connection.close()
                     self.connections -= 1
+            if connection is not None and not connection.settled():
+                refuse("storage_io")
 
     def initialize(self) -> int:
         creating = not self.root.manifest.control_initialized

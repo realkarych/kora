@@ -10,6 +10,8 @@ typedef struct {
   sqlite3 *connection;
   PyThread_type_lock lifetime;
   KoraFd *main;
+  KoraOpen open;
+  PyObject *journal;
   PyObject *progress;
   PyObject *trace;
   PyObject *authorizer;
@@ -64,6 +66,7 @@ static int closeDatabase(NativeDb *db) {
   koraSettleFd(db->main);
   Py_END_ALLOW_THREADS
   if (result == SQLITE_OK) {
+    Py_CLEAR(db->journal);
     Py_CLEAR(db->progress);
     Py_CLEAR(db->trace);
     Py_CLEAR(db->authorizer);
@@ -100,7 +103,8 @@ static PyObject *allocateDatabase(PyObject *module, PyObject *unused) {
 
 static int approveMain(void *context, int descriptor, int empty) {
   PyGILState_STATE gil = PyGILState_Ensure();
-  PyObject *result = PyObject_CallFunction(context, "ii", descriptor, empty);
+  PyObject *result = PyObject_CallFunction(
+    context, empty < 0 ? "i" : "ii", descriptor, empty);
   int approved = result == Py_True;
   Py_XDECREF(result);
   PyGILState_Release(gil);
@@ -108,25 +112,28 @@ static int approveMain(void *context, int descriptor, int empty) {
 }
 
 static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
-  PyObject *capsule, *admit;
+  PyObject *capsule, *admit, *journal;
   const char *path;
   int readOnly, timeout, noFollow;
-  if (!PyArg_ParseTuple(args, "OspipO", &capsule, &path, &readOnly, &timeout, &noFollow, &admit)) {
+  if (!PyArg_ParseTuple(args, "OspipOO", &capsule, &path, &readOnly, &timeout,
+                        &noFollow, &admit, &journal)) {
     return NULL;
   }
   NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
   if (!db) return NULL;
   if (db->connection || db->main->state != KORA_FD_ABSENT || koraOpen ||
-      path[0] != '/' || !PyCallable_Check(admit)) {
+      path[0] != '/' || !PyCallable_Check(admit) ||
+      (journal != Py_None && !PyCallable_Check(journal))) {
     return dbError(SQLITE_MISUSE, "SQLite main admission is unavailable");
   }
   int flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) |
               SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_EXRESCODE;
   if (noFollow) flags |= SQLITE_OPEN_NOFOLLOW;
-  KoraOpen open = {&db->main, approveMain, admit};
+  if (journal != Py_None) db->journal = Py_NewRef(journal);
+  db->open = (KoraOpen){&db->main, approveMain, admit, db->journal};
   int result;
   Py_BEGIN_ALLOW_THREADS
-  koraOpen = &open;
+  koraOpen = &db->open;
   result = sqlite3_open_v2(path, &db->connection, flags, NULL);
   koraOpen = NULL;
   if (result == SQLITE_OK) result = sqlite3_busy_timeout(db->connection, timeout);
