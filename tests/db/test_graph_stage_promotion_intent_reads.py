@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import threading
 from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import asynccontextmanager, closing, contextmanager
@@ -379,11 +380,18 @@ async def test_native_intent_failure_keeps_driver_debug_private(
     padding = b"x" * (70 - len(marker))
     async with damage_writer(database) as writer:
         if database.dialect is Dialect.SQLITE:
+            damaged = marker + padding + b"\xff"
             await writer.exec_driver_sql(
                 "UPDATE graph_deployment_stage_promotion_intent "
                 "SET request_digest = CAST(? AS TEXT) WHERE stage_id = ?",
-                (marker + padding + b"\xff", stage_ids[0]),
+                (damaged, stage_ids[0]),
             )
+            stored = await writer.exec_driver_sql(
+                "SELECT CAST(request_digest AS BLOB) "
+                "FROM graph_deployment_stage_promotion_intent WHERE stage_id = ?",
+                (stage_ids[0],),
+            )
+            assert stored.scalar_one() == damaged
         else:
             await writer.execute(
                 intent.update()
@@ -399,7 +407,11 @@ async def test_native_intent_failure_keeps_driver_debug_private(
 
     def observe_fault(context: ExceptionContext) -> None:
         error = context.original_exception
-        if isinstance(error, UnicodeDecodeError):
+        if database.dialect is Dialect.SQLITE:
+            assert isinstance(error, sqlite3.OperationalError)
+            assert error.sqlite_errorcode == sqlite3.SQLITE_ERROR
+            faults.append(str(error) == "Could not decode SQLite text as UTF-8")
+        elif isinstance(error, UnicodeDecodeError):
             faults.append(marker in error.object)
         else:
             faults.append(PRIVATE_MARKER in str(error))
