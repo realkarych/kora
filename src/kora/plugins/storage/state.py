@@ -8,6 +8,7 @@ from kora.plugins.storage.errors import refuse, require_deadline
 from kora.plugins.storage.files import FileLease, RootAnchor, RootManifest, private_file
 from kora.plugins.storage.payload import PayloadFiles, PrivateFile
 from kora.protocols.common import ProtocolContext
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import MAX_COUNT
 from kora.protocols.storage_models import (
     MAX_PAYLOAD_BYTES,
@@ -123,7 +124,13 @@ class LocalState:
         self.connections = 0
         self.initial_epoch: Final[int] = self.initialize()
 
-    def validate_files(self, descriptor: int, empty: int, creating: bool) -> bool:
+    def validate_files(
+        self,
+        connection: sqlite3.Connection,
+        descriptor: int,
+        empty: int,
+        creating: bool,
+    ) -> bool:
         self.root.validate_anchor()
         info = private_file(descriptor, self.root.manifest.device)
         current = os.stat("control.sqlite", dir_fd=self.root.fd, follow_symlinks=False)
@@ -151,6 +158,7 @@ class LocalState:
             refuse("storage_identity")
         if not stat.S_ISREG(journal.st_mode) or stat.S_IMODE(journal.st_mode) != 0o600:
             refuse("storage_path")
+        connection.inspect_journal(self.root.fd)
         return True
 
     def admit_journal(self, descriptor: int) -> bool:
@@ -226,15 +234,18 @@ class LocalState:
             def admit(descriptor: int, empty: int) -> bool:
                 nonlocal recovery
                 can_create = creating and not self.root.manifest.control_initialized
-                recovery = self.validate_files(descriptor, empty, can_create)
+                recovery = self.validate_files(owned, descriptor, empty, can_create)
                 return True
 
-            def release() -> None:
+            def release() -> KoraProtocolError | None:
                 try:
                     if recovery:
                         self.root.synchronize_directory(self.root.fd)
+                except KoraProtocolError as error:
+                    return error
                 finally:
                     gate.close()
+                return None
 
             try:
                 owned = sqlite3.Connection(
@@ -267,7 +278,7 @@ class LocalState:
                 if connection is not None:
                     connection.close()
                     self.connections -= 1
-            if connection is not None and not connection.settled():
+            if not NativeRetirement.drain(path):
                 refuse("storage_io")
 
     def initialize(self) -> int:

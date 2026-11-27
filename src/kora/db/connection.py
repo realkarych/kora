@@ -17,7 +17,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, closing, contextmana
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from typing import Protocol, TypeVar, cast
 from weakref import ReferenceType, ref
 
@@ -497,6 +497,7 @@ def sqlite_driver_module() -> AsyncAdapt_aiosqlite_dbapi:
 
 def open_sqlite_file(
     path: Path,
+    slots: BoundedSemaphore,
     lifetime: _SqliteServingLifetime | None = None,
     *,
     guarded_reader: _GuardedSqliteReader | None = None,
@@ -506,10 +507,9 @@ def open_sqlite_file(
         guarded_reader.require_live()
     if not NativeRetirement.drain(path):
         raise sqlite3.OperationalError("SQLite native retirement is pending.")
-    if SQLITE_PREPARATION.get() == path:
-        create_private_file(path)
 
     def release() -> None:
+        slots.release()
         if lifetime is not None:
             lifetime.closed()
 
@@ -521,9 +521,13 @@ def open_sqlite_file(
     connection = NativeConnection(
         lambda owned: NativeRetirement.retain(path, owned, release)
     )
+    if not slots.acquire(blocking=False):
+        raise sqlite3.OperationalError("SQLite native admission is full.")
     if lifetime is not None:
         lifetime.opened()
     try:
+        if SQLITE_PREPARATION.get() == path:
+            create_private_file(path)
         connection.open(
             path,
             guarded_reader is not None,
@@ -538,14 +542,17 @@ def open_sqlite_file(
 
 def sqlite_connector(
     path: Path,
+    capacity: int,
     lifetime: _SqliteServingLifetime | None = None,
     *,
     guarded_reader: _GuardedSqliteReader | None = None,
 ) -> Callable[[], Awaitable[aiosqlite.Connection]]:
+    slots = BoundedSemaphore(capacity)
+
     async def connect() -> aiosqlite.Connection:
         async def acquire() -> _GuardedSqliteDriverConnection:
             opened = await asyncio.to_thread(
-                open_sqlite_file, path, lifetime, guarded_reader=guarded_reader
+                open_sqlite_file, path, slots, lifetime, guarded_reader=guarded_reader
             )
             driver = _GuardedSqliteDriverConnection(opened)
             try:
@@ -579,8 +586,12 @@ def sqlite_engine(
     serving_lifetime: _SqliteServingLifetime | None = None,
     guarded_reader: _GuardedSqliteReader | None = None,
 ) -> AsyncEngine:
+    capacity = 1 if writer or guarded_reader is not None else SQLITE_READERS
     connector = sqlite_connector(
-        settings.sqlite_path.absolute(), serving_lifetime, guarded_reader=guarded_reader
+        settings.sqlite_path.absolute(),
+        capacity,
+        serving_lifetime,
+        guarded_reader=guarded_reader,
     )
     module = sqlite_driver_module()
     if writer:
@@ -591,7 +602,7 @@ def sqlite_engine(
         engine = create_async_engine(
             settings.url,
             poolclass=AsyncAdaptedQueuePool,
-            pool_size=SQLITE_READERS if guarded_reader is None else 1,
+            pool_size=capacity,
             max_overflow=0,
             pool_timeout=settings.pool_timeout_seconds,
             async_creator=connector,

@@ -16,6 +16,7 @@ Admission: TypeAlias = Callable[[int, int], bool]
 Authorizer: TypeAlias = Callable[
     [int, str | None, str | None, str | None, str | None], int
 ]
+RetiredAction: TypeAlias = Callable[[], Exception | None]
 
 
 @cache
@@ -39,6 +40,7 @@ class Connection:
         self.cursors: WeakSet[Cursor] = WeakSet()
         self.isolation_level: str | None = None
         self._retire = retire
+        self._opened = False
 
     def open(
         self,
@@ -53,6 +55,10 @@ class Connection:
         self.native.open(
             self.handle, str(path), readonly, timeout_ms, nofollow, admit, journal
         )
+        self._opened = True
+
+    def inspect_journal(self, directory: int) -> None:
+        self.native.inspect_journal(directory)
 
     def close(self) -> None:
         for cursor in tuple(self.cursors):
@@ -61,8 +67,13 @@ class Connection:
             self.native.close(self.handle)
         finally:
             retire, self._retire = self._retire, None
-            if retire is not None:
-                retire(self)
+            opened, self._opened = self._opened, False
+            try:
+                if retire is not None:
+                    retire(self)
+            finally:
+                if opened:
+                    NativeRetirement.progress()
 
     def settled(self) -> bool:
         return self.native.settled(self.handle)
@@ -144,8 +155,11 @@ class Blob:
 
 class NativeRetirement:
     _lock = Lock()
-    _pending: dict[Path, dict[Connection, Callable[[], None]]] = {}
-    _after: dict[Path, set[Callable[[], None]]] = {}
+    _pending: dict[Path, dict[Connection, RetiredAction]] = {}
+    _after: dict[Path, set[RetiredAction]] = {}
+    _draining: set[Path] = set()
+    _retry: set[Path] = set()
+    _errors: dict[Path, Exception] = {}
 
     @classmethod
     def after(cls, path: Path, release: Callable[[], None]) -> None:
@@ -156,28 +170,73 @@ class NativeRetirement:
         release()
 
     @classmethod
-    def retain(
-        cls, path: Path, connection: Connection, release: Callable[[], None]
-    ) -> None:
+    def retain(cls, path: Path, connection: Connection, release: RetiredAction) -> None:
         with cls._lock:
             cls._pending.setdefault(path, {})[connection] = release
+            if path in cls._draining:
+                cls._retry.add(path)
         cls.drain(path)
 
     @classmethod
-    def drain(cls, path: Path) -> bool:
+    def progress(cls) -> None:
         with cls._lock:
+            paths = tuple(cls._pending)
+        for path in paths:
+            cls.drain(path, report=False)
+
+    @classmethod
+    def _release(cls, path: Path, action: RetiredAction) -> None:
+        try:
+            failure = action()
+        except OSError as error:
+            failure = error
+        if failure is not None:
+            with cls._lock:
+                cls._errors.setdefault(path, failure)
+
+    @classmethod
+    def drain(cls, path: Path, *, report: bool = True) -> bool:
+        with cls._lock:
+            if path in cls._draining:
+                if not report:
+                    cls._retry.add(path)
+                return False
             scope = cls._pending.get(path)
-            if not scope:
-                return True
-            for connection, release in tuple(scope.items()):
-                if connection.settled():
-                    release()
-                    del scope[connection]
-            if not scope:
-                del cls._pending[path]
-                for release in cls._after.pop(path, ()):
-                    release()
-            return not scope
+            if scope is None:
+                return cls._result(path, report)
+            cls._draining.add(path)
+            pending = tuple(scope.items())
+        try:
+            while True:
+                for connection, release in pending:
+                    if connection.settled():
+                        with cls._lock:
+                            del scope[connection]
+                        cls._release(path, release)
+                with cls._lock:
+                    if path in cls._retry:
+                        cls._retry.remove(path)
+                        pending = tuple(scope.items())
+                        continue
+                    if scope:
+                        return False
+                    actions = cls._after.pop(path, ())
+                    if not actions:
+                        del cls._pending[path]
+                        return cls._result(path, report)
+                    pending = ()
+                for action in actions:
+                    cls._release(path, action)
+        finally:
+            with cls._lock:
+                cls._draining.remove(path)
+                cls._retry.discard(path)
+
+    @classmethod
+    def _result(cls, path: Path, report: bool) -> bool:
+        if report and (failure := cls._errors.pop(path, None)) is not None:
+            raise failure
+        return True
 
 
 class Cursor:

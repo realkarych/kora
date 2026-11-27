@@ -114,3 +114,24 @@ def test_local_storage_settles_a_refused_journal_on_the_original_writer(
     assert saved == (52,)
     assert after_retry == before
     assert not held_main_descriptors(identity)
+
+
+def test_local_storage_checks_an_empty_journal_before_sqlite_can_skip_it(
+    tmp_path: Path,
+) -> None:
+    configuration = local_configuration(tmp_path / "store")
+    initial = LocalArtifactStorage(configuration)
+    asyncio.run(initial.aclose())
+    empty = tmp_path / "empty"
+    empty.touch(mode=0o600)
+    journal = Path(configuration.root) / "control.sqlite-journal"
+    journal.hardlink_to(empty)
+    identity = native_identity(empty)
+
+    with pytest.raises(KoraProtocolError) as refusal:
+        LocalArtifactStorage(configuration)
+
+    assert refusal.value.code == "storage_path"
+    assert empty.stat().st_size == 0
+    assert journal.stat().st_nlink == 2
+    assert not held_main_descriptors(identity)

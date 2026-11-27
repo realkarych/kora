@@ -29,6 +29,7 @@ from kora.db.connection import (
     DatabaseSnapshotRejected,
     Dialect,
     Lifecycle,
+    open_sqlite_file,
 )
 from kora.db.tables import namespace
 from kora.observability import Level, LoggingSettings
@@ -104,17 +105,49 @@ def test_declined_native_open_settles_after_the_original_writer(
     assert len(original_descriptors) == 1
     assert len(retained_descriptors) == 2
     assert set(original_descriptors) < set(retained_descriptors)
-    assert len(alias_descriptors) == 3
-    assert set(retained_descriptors) < set(alias_descriptors)
+    assert alias_descriptors == retained_descriptors
     assert not settlement_while_owned
     assert not released_while_owned
-    assert not alias_settled_while_owned
+    assert alias_settled_while_owned
     assert committed_row == retried_row == (41,)
     assert settled
     assert alias_settled
     assert released.is_set()
     assert descriptors_after_unlock == original_descriptors
     assert not held_main_descriptors(main)
+
+
+def test_original_checkout_capacity_waits_for_native_retirement(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    first = tmp_path / "writer.sqlite"
+    second = tmp_path / "independent.sqlite"
+    copy_sqlite_template(sqlite_template, first)
+    copy_sqlite_template(sqlite_template, second)
+    alias = tmp_path / "writer-alias.sqlite"
+    alias.hardlink_to(first)
+    main, independent = native_identity(first), native_identity(second)
+    slots = threading.BoundedSemaphore(1)
+
+    with closing(GuardedConnection()) as owner:
+        owner.open(first, False, 0, lambda descriptor, empty: not empty)
+        owner.execute("PRAGMA journal_mode=DELETE").fetchone()
+        owner.execute("BEGIN EXCLUSIVE").close()
+        with closing(open_sqlite_file(alias, slots)):
+            before = held_main_descriptors(main)
+        retained = held_main_descriptors(main)
+        with pytest.raises(sqlite3.OperationalError, match="admission is full"):
+            open_sqlite_file(second, slots)
+        refused = held_main_descriptors(independent)
+        owner.commit()
+    with closing(open_sqlite_file(second, slots)) as retry:
+        retried = retry.execute("SELECT 1").fetchone()
+
+    assert len(before) == 2
+    assert retained == before
+    assert not refused
+    assert not held_main_descriptors(main)
+    assert retried == (1,)
 
 
 def test_live_shm_refuses_main_and_keeps_the_original_writer(

@@ -145,6 +145,18 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+static PyObject *inspectJournal(PyObject *module, PyObject *args) {
+  int directory;
+  if (!PyArg_ParseTuple(args, "i", &directory)) return NULL;
+  if (!koraOpen || !koraOpen->journal) return dbError(SQLITE_MISUSE, "Missing SQLite journal owner");
+  int result;
+  Py_BEGIN_ALLOW_THREADS
+  result = koraInspectJournal(directory);
+  Py_END_ALLOW_THREADS
+  if (result != SQLITE_OK) return dbError(result, sqlite3_errstr(result));
+  Py_RETURN_NONE;
+}
+
 static PyObject *closeDatabaseOwner(PyObject *module, PyObject *capsule) {
   NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
   if (!db) return NULL;
@@ -539,6 +551,7 @@ static PyObject *closeBlob(PyObject *module, PyObject *capsule) {
 static PyMethodDef methods[] = {
   {"allocate", allocateDatabase, METH_NOARGS, NULL},
   {"open", openDatabaseOwner, METH_VARARGS, NULL},
+  {"inspect_journal", inspectJournal, METH_VARARGS, NULL},
   {"close", closeDatabaseOwner, METH_O, NULL},
   {"settled", databaseSettled, METH_O, NULL},
   {"prepare", prepareStatement, METH_VARARGS, NULL},
