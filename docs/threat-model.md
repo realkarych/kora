@@ -244,6 +244,8 @@ Standalone, shared-service and remote-worker deployments describe placement. The
 
 The diagram separates authorities, not network deployment units. Arrows carry data or a specifically granted action; they do not transfer all of the sender's privileges. The candidate box is a logical domain: **on local, there is no hostile-code isolation boundary around it**. On protected runtimes, the runtime must enforce the separation from supervisor and publisher described above.
 
+For the [live Claude and local Git demo](../knowledge/specs/live-demo-execution-profile.md), the foreground API and Scheduler share the qualified SQLite metadata writer on one verified native host and boot. A trusted launcher independently owns the Worker and gives only that Worker its scoped service credential. For positive execution the API verifies the actual live Worker on the exact private Unix HTTP connection and matches the original installation. LocalRuntime retains its cooperative same-user boundary. The [threat case mapping and activation evidence](../knowledge/specs/live-demo-execution-profile.md#threats-and-diagnostics) describe the future checks. Implementation and activation are pending.
+
 ```mermaid
 flowchart TB
     user["User, CLI, web, authoring MCP"]
