@@ -1,8 +1,11 @@
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from hashlib import sha256
 from typing import cast
 
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.api.application import create_application
 from kora.api.exchange import ApiExchange
@@ -66,6 +69,7 @@ class SchedulerClaimSetup:
     processor: AdmissionProcessor
     registration: WorkerRegistration
     request: WorkerClaimRequest
+    seeder: Callable[[AsyncConnection], Seeder]
 
 
 @dataclass(frozen=True)
@@ -85,10 +89,11 @@ async def service_identity(
     *,
     credential: str = BEARER,
     owner: str = "scheduler-handoff-worker",
+    seeder: Callable[[AsyncConnection], Seeder] = Seeder,
 ) -> AuthenticationCase:
     with_grant = NamespaceGrant(namespace_id=namespace_id, transcripts=False)
     async with database.transaction() as writer:
-        token_id = await Seeder(writer).token(
+        token_id = await seeder(writer).token(
             sha256(credential.encode()).hexdigest(), kind="service", owner=owner
         )
         await writer.execute(
@@ -131,9 +136,12 @@ async def scheduler_claim_setup(
     *,
     with_heartbeat: bool = False,
 ) -> SchedulerClaimSetup:
-    user = await seed_case(database, NAMESPACE)
+    clock = SchedulerClaimClock()
+    identifiers = IdentifierGenerator(clock.now, fixed_randomness(1))
+    seeder = partial(Seeder, clock=clock, generator=identifiers)
+    user = await seed_case(database, NAMESPACE, seeder=seeder)
     namespace_id = user.principal.namespaces[0].namespace_id
-    worker = await service_identity(database, namespace_id)
+    worker = await service_identity(database, namespace_id, seeder=seeder)
     worker_registration = registration(worker)
     request = WorkerClaimRequest(
         runtime=worker_registration.runtime,
@@ -142,8 +150,6 @@ async def scheduler_claim_setup(
         max=1,
         claim_id="scheduler-handoff-claim",
     )
-    clock = SchedulerClaimClock()
-    identifiers = IdentifierGenerator(clock.now, fixed_randomness(37))
     policy = NamespacePolicyConfiguration.prepare(
         namespace_id, 1, {"max_pending_runs": 1000}
     )
@@ -192,7 +198,7 @@ async def scheduler_claim_setup(
         INTERVAL,
     )
     return SchedulerClaimSetup(
-        app, user, clock, processor, worker_registration, request
+        app, user, clock, processor, worker_registration, request, seeder
     )
 
 

@@ -1,7 +1,9 @@
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from hashlib import sha256
 
 from sqlalchemy import insert, update
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.conformance.authentication import (
     AuthenticationCase,
@@ -34,10 +36,12 @@ async def seed_case(
     name: str,
     kind: str = "user",
     expires_at: datetime | None = None,
+    *,
+    seeder: Callable[[AsyncConnection], Seeder] = Seeder,
 ) -> AuthenticationCase:
     credential = "private-authentication-credential-" + name
     async with database.transaction() as connection:
-        seed = Seeder(connection)
+        seed = seeder(connection)
         namespace_id = await seed.namespace(name)
         token_id = seed.new_id()
         source: dict[str, object] = {

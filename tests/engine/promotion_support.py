@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy import insert, select
@@ -105,10 +106,12 @@ async def promotion_case(
     timeout: str | None = "01h",
     retention: JsonObject | None = None,
     root_trigger_rule: str | None = None,
+    *,
+    seeder: Callable[[AsyncConnection], Seeder] = Seeder,
 ) -> PromotionCase:
     clock = FakeClock()
     async with database.transaction() as writer:
-        seed = Seeder(writer)
+        seed = seeder(writer)
         namespace = await seed.namespace()
         graph_id = await seed.graph(namespace)
         scope = GraphResourceScope(namespace, graph_id, seed.new_id())
@@ -139,7 +142,7 @@ async def promotion_case(
         ),
     )
     async with database.transaction() as writer:
-        seed = Seeder(writer)
+        seed = seeder(writer)
         await insert_case(seed, scope, 1, prepared, refs)
         values = seed.run_values(
             scope.namespace_id,
