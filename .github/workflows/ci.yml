@@ -316,7 +316,7 @@ jobs:
           pnpm --dir web run lint
           pnpm --dir web run build
       - name: Select an Xcode whose git meets the Git provider minimum
-        if: ${{ matrix.lane == 'local-runtime' }}
+        if: ${{ matrix.lane == 'local-runtime' || matrix.lane == 'local-runtime-launch' }}
         run: |
           sudo xcode-select --switch /Applications/Xcode_26.3.app
           /usr/bin/git --version

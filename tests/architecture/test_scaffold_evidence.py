@@ -68,6 +68,18 @@ LOCAL_CONTRACT_NODES = (
     "tests/plugins/runtime/local/test_lock.py::test_registry_lock_is_bounded",
     "tests/plugins/runtime/local/test_lock.py::"
     "test_local_runtime_releases_resources[lock_timeout]",
+    "tests/plugins/runtime/local/test_launcher_neighbour.py::test_value",
+)
+LAUNCH_MODULES = (
+    "tests/plugins/runtime/local/test_launcher.py",
+    "tests/plugins/runtime/local/test_bound_native_launch.py",
+    "tests/plugins/runtime/local/test_claude_runtime_launcher.py",
+)
+LAUNCH_NODES = (
+    f"{LAUNCH_MODULES[0]}::Case::test_param[alpha::beta/gamma]",
+    f"{LAUNCH_MODULES[0]}::test_other",
+    f"{LAUNCH_MODULES[1]}::test_value",
+    f"{LAUNCH_MODULES[2]}::test_value",
 )
 LANES = 2
 COUNTS = {environment_key(system, python): LANES for system, python, _ in ENVIRONMENTS}
@@ -99,7 +111,13 @@ def collection_text(nodes: tuple[str, ...]) -> str:
 
 
 def complete_nodes(operating_system: str, *extra: str) -> tuple[str, ...]:
-    return (*GENERAL_NODES, *STORAGE_NODES, *extra, *local_nodes(operating_system))
+    return (
+        *GENERAL_NODES,
+        *STORAGE_NODES,
+        *extra,
+        *local_nodes(operating_system),
+        *LAUNCH_NODES,
+    )
 
 
 def lane_directory(
@@ -108,12 +126,16 @@ def lane_directory(
     return root / f"scaffold-tests-attempt-{attempt}-{operating_system}-{python}-{lane}"
 
 
-def general_files(
-    directory: Path, lane: str, collected: tuple[str, ...], lanes: int = LANES
-) -> None:
+def collection_files(directory: Path, collected: tuple[str, ...]) -> None:
     (directory / "complete.txt").write_text(collection_text(collected))
     (directory / "complete.stderr").write_text("")
     (directory / "complete.exit").write_text("0\n")
+
+
+def general_files(
+    directory: Path, lane: str, collected: tuple[str, ...], lanes: int = LANES
+) -> None:
+    collection_files(directory, collected)
     plan = assign(general_nodes(collected), DURATIONS, lanes)
     children = plan[int(lane.removeprefix("general-")) - 1]
     for name, child in zip(CHILD_NAMES, children, strict=True):
@@ -135,6 +157,9 @@ def lane_files(directory: Path, lane: str, operating_system: str) -> None:
         write_junit(directory / "junit.xml", identities(STORAGE_NODES))
     elif lane == "local-runtime":
         write_junit(directory / "junit.xml", identities(local_nodes(operating_system)))
+    elif lane == "local-runtime-launch":
+        collection_files(directory, (*local_nodes(operating_system), *LAUNCH_NODES))
+        write_junit(directory / "junit.xml", identities(LAUNCH_NODES))
     else:
         general_files(directory, lane, complete_nodes(operating_system))
 
@@ -169,7 +194,7 @@ def rehash(directory: Path, changed: list[str]) -> None:
 
 
 def recollect(root: Path, operating_system: str, python: str, *extra: str) -> None:
-    for lane in environment_lanes(LANES)[2:]:
+    for lane in general_lanes(LANES):
         directory = lane_directory(root, operating_system, python, lane)
         collected = complete_nodes(operating_system, *extra)
         (directory / "complete.txt").write_text(collection_text(collected))
@@ -191,7 +216,9 @@ def pull_request_evidence(root: Path) -> None:
 
 
 def local_total() -> int:
-    return sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
+    return sum(
+        len(local_nodes(system)) + len(LAUNCH_NODES) for system, _, _ in ENVIRONMENTS
+    )
 
 
 def test_scaffold_download_selects_the_current_attempt_when_artifacts_coexist(
@@ -199,8 +226,10 @@ def test_scaffold_download_selects_the_current_attempt_when_artifacts_coexist(
 ) -> None:
     artifacts, downloaded = tmp_path / "artifacts", tmp_path / "downloaded"
     complete_evidence(artifacts)
-    current = lane_directory(artifacts, "macos-15", "3.11.17", "local-runtime")
-    previous = lane_directory(artifacts, "macos-15", "3.11.17", "local-runtime", "1")
+    current = lane_directory(artifacts, "macos-15", "3.11.17", "local-runtime-launch")
+    previous = lane_directory(
+        artifacts, "macos-15", "3.11.17", "local-runtime-launch", "1"
+    )
     shutil.copytree(current, previous)
     receipt = previous / "receipt.json"
     data = parse_json_object(json.loads(receipt.read_text()))
@@ -223,7 +252,7 @@ def test_scaffold_download_selects_the_current_attempt_when_artifacts_coexist(
 
     assert current in selected
     assert previous not in selected
-    assert result.lanes == 12
+    assert result.lanes == 15
 
 
 @pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
@@ -236,7 +265,7 @@ def test_scaffold_receipts_prove_complete_planned_execution(
 
     assert (result.environments, result.lanes, result.tests) == (
         3,
-        12,
+        15,
         30 + local_total(),
     )
 
@@ -252,7 +281,7 @@ def test_platform_event_receipts_prove_the_platform_lanes_of_macos(
 
     assert (result.environments, result.lanes, result.tests) == (
         3,
-        10,
+        13,
         30 - len(GENERAL_NODES) + local_total(),
     )
 
@@ -267,7 +296,7 @@ def test_platform_event_evidence_refuses_a_general_macos_lane(
         verify(tmp_path, event=event)
 
 
-@pytest.mark.parametrize("lane", ["storage", "local-runtime"])
+@pytest.mark.parametrize("lane", ["storage", "local-runtime", "local-runtime-launch"])
 @pytest.mark.parametrize("event", ["pull_request", "push"])
 def test_platform_event_evidence_requires_each_platform_lane_of_macos(
     tmp_path: Path, event: str, lane: str
@@ -316,6 +345,74 @@ def test_platform_event_evidence_refuses_a_repeated_macos_test(
     rehash(storage, ["junit.xml"])
 
     with pytest.raises(EvidenceFailure, match="duplicate tests"):
+        verify(tmp_path, event=event)
+
+
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+@pytest.mark.parametrize("move_test", [False, True])
+def test_macos_local_runtime_requires_the_exact_per_lane_partition(
+    tmp_path: Path, event: str, move_test: bool
+) -> None:
+    pull_request_evidence(tmp_path)
+    launch = lane_directory(tmp_path, "macos-15", "3.11.17", "local-runtime-launch")
+    assigned = LAUNCH_NODES[1:]
+    if move_test:
+        ordinary = lane_directory(tmp_path, "macos-15", "3.11.17", "local-runtime")
+        write_junit(
+            ordinary / "junit.xml",
+            identities((*local_nodes("macos-15"), LAUNCH_NODES[0])),
+        )
+        rehash(ordinary, ["junit.xml"])
+    write_junit(launch / "junit.xml", identities(assigned))
+    rehash(launch, ["junit.xml"])
+
+    with pytest.raises(
+        EvidenceFailure, match="do not match their collection partition"
+    ):
+        verify(tmp_path, event=event)
+
+
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+@pytest.mark.parametrize(
+    ("corruption", "match"),
+    [
+        ("stale run attempt", "mismatched provenance"),
+        ("missing collection file", "unexpected file coverage"),
+        ("failed collection", "execution did not succeed"),
+        ("missing summary", "collection is incomplete"),
+        ("foreign module", "contains a foreign path"),
+        ("missing launcher module", "lacks a launcher module"),
+    ],
+)
+def test_macos_local_runtime_refuses_incomplete_or_mismatched_native_evidence(
+    tmp_path: Path, event: str, corruption: str, match: str
+) -> None:
+    pull_request_evidence(tmp_path)
+    launch = lane_directory(tmp_path, "macos-15", "3.11.17", "local-runtime-launch")
+    complete = launch / "complete.txt"
+    if corruption == "stale run attempt":
+        receipt = launch / "receipt.json"
+        data = parse_json_object(json.loads(receipt.read_text()))
+        data["run_attempt"] = "1"
+        receipt.write_text(json.dumps(data))
+    elif corruption == "missing collection file":
+        complete.unlink()
+    elif corruption == "failed collection":
+        (launch / "complete.exit").write_text("2\n")
+        rehash(launch, ["complete.exit"])
+    else:
+        nodes = (*local_nodes("macos-15"), *LAUNCH_NODES)
+        if corruption == "missing summary":
+            complete.write_text("\n".join(nodes))
+        elif corruption == "foreign module":
+            complete.write_text(collection_text((*nodes, GENERAL_NODES[0])))
+        else:
+            complete.write_text(collection_text(nodes[:-1]))
+            write_junit(launch / "junit.xml", identities(LAUNCH_NODES[:-1]))
+            rehash(launch, ["junit.xml"])
+        rehash(launch, ["complete.txt"])
+
+    with pytest.raises(EvidenceFailure, match=match):
         verify(tmp_path, event=event)
 
 
@@ -730,7 +827,7 @@ def add_executed_node(
     root: Path, operating_system: str, python: str, node: str
 ) -> None:
     if general_nodes((node,)):
-        for lane in environment_lanes(LANES)[2:]:
+        for lane in general_lanes(LANES):
             directory = lane_directory(root, operating_system, python, lane)
             general_files(directory, lane, complete_nodes(operating_system, node))
             reports = [f"{name}.xml" for name in CHILD_NAMES]
@@ -879,11 +976,30 @@ def test_plan_outputs_split_lane_rows_by_platform(tmp_path: Path) -> None:
         "static-checks",
         "storage",
         "local-runtime",
+        "local-runtime-launch",
     ]
     assert [row["lane"] for row in rows["macos_general"]] == ["general-1"]
     assert [row["lane"] for row in rows["linux"]].count("static-checks") == 2
     assert rows["macos"][0]["pytest-arguments"] == ""
     assert rows["macos"][1]["pytest-arguments"] == " ".join(STORAGE_ARGUMENTS)
+    for matrix, environments in (("linux", 2), ("macos", 1)):
+        assert [
+            row["pytest-arguments"]
+            for row in rows[matrix]
+            if row["lane"] == "local-runtime"
+        ] == [
+            " ".join(
+                (
+                    *(f"--ignore={path}" for path in LAUNCH_MODULES),
+                    "tests/plugins/runtime/local",
+                )
+            )
+        ] * environments
+        assert [
+            row["pytest-arguments"]
+            for row in rows[matrix]
+            if row["lane"] == "local-runtime-launch"
+        ] == [" ".join(LAUNCH_MODULES)] * environments
 
 
 @pytest.mark.parametrize(

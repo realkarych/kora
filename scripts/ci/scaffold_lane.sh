@@ -6,8 +6,8 @@ KORA_HEADROOM_WARNING_SECONDS=450
 
 admit_lane() {
   case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
-    ubuntu-24.04:general-[1-9]|ubuntu-24.04:general-1[0-9]|ubuntu-24.04:general-2[0-2]|ubuntu-24.04:storage|ubuntu-24.04:local-runtime) ;;
-    macos-15:general-[1-9]|macos-15:general-1[0-9]|macos-15:general-2[0-2]|macos-15:storage|macos-15:local-runtime) ;;
+    ubuntu-24.04:general-[1-9]|ubuntu-24.04:general-1[0-9]|ubuntu-24.04:general-2[0-2]|ubuntu-24.04:storage|ubuntu-24.04:local-runtime|ubuntu-24.04:local-runtime-launch) ;;
+    macos-15:general-[1-9]|macos-15:general-1[0-9]|macos-15:general-2[0-2]|macos-15:storage|macos-15:local-runtime|macos-15:local-runtime-launch) ;;
     *) exit 1 ;;
   esac
 }
@@ -34,10 +34,10 @@ complete_arguments() {
   KORA_COMPLETE_ARGUMENTS=(-m "not measurement" "${KORA_SCHEDULED_IGNORES[@]}")
 }
 
-collect_complete() {
+collect_tests() {
   local output="$1"
-  complete_arguments
-  if uv run --no-sync pytest --collect-only -q "${KORA_COMPLETE_ARGUMENTS[@]}" > "$output.txt" 2> "$output.stderr"; then
+  shift
+  if "$@" > "$output.txt" 2> "$output.stderr"; then
     printf '0\n' > "$output.exit"
   else
     KORA_EXIT="$?"
@@ -46,6 +46,11 @@ collect_complete() {
     tail -c 65536 "$output.stderr"
     exit "$KORA_EXIT"
   fi
+}
+
+collect_complete() {
+  complete_arguments
+  collect_tests "$1" uv run --no-sync pytest --collect-only -q "${KORA_COMPLETE_ARGUMENTS[@]}"
 }
 
 plan_lanes() {
@@ -69,7 +74,7 @@ plan_lanes() {
 lane_selection() {
   KORA_SCAFFOLD_SELECTION=()
   case "$KORA_SCAFFOLD_OS:$KORA_SCAFFOLD_LANE" in
-    ubuntu-24.04:local-runtime|macos-15:local-runtime) KORA_SCAFFOLD_SELECTION=(-m "not measurement") ;;
+    *:local-runtime|*:local-runtime-launch) KORA_SCAFFOLD_SELECTION=(-m "not measurement") ;;
     macos-15:storage)
       for path in "${KORA_SCHEDULED_MACOS_STORAGE_MODULES[@]}"; do
         KORA_SCAFFOLD_SELECTION+=("--ignore=$path")
@@ -108,8 +113,12 @@ run_general_lane() {
 
 run_special_lane() {
   KORA_TEST_LAUNCH=()
-  if test "$KORA_SCAFFOLD_LANE" = local-runtime; then
-    KORA_TEST_LAUNCH=(bash scripts/ci/run-local-runtime-tests.sh)
+  case "$KORA_SCAFFOLD_LANE" in
+    local-runtime|local-runtime-launch) KORA_TEST_LAUNCH=(bash scripts/ci/run-local-runtime-tests.sh) ;;
+  esac
+  if test "$KORA_SCAFFOLD_LANE" = local-runtime-launch; then
+    collect_tests "$KORA_SCAFFOLD_DIRECTORY/complete" "${KORA_TEST_LAUNCH[@]}" \
+      uv run --no-sync pytest --collect-only -q "${KORA_SCAFFOLD_SELECTION[@]}" tests/plugins/runtime/local
   fi
   if "${KORA_TEST_LAUNCH[@]}" uv run --no-sync pytest -q "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
     KORA_EXIT=0
@@ -138,7 +147,7 @@ run_lane() {
   read -r -a KORA_SCAFFOLD_ARGUMENTS <<< "$KORA_PYTEST_ARGUMENTS"
   lane_selection
   case "$KORA_SCAFFOLD_LANE" in
-    storage|local-runtime) run_special_lane ;;
+    storage|local-runtime|local-runtime-launch) run_special_lane ;;
     *) run_general_lane ;;
   esac
   printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/tests.exit"

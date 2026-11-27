@@ -48,12 +48,22 @@ STORAGE_ARGUMENTS = (
 )
 LOCAL_RUNTIME_PATH = "tests/plugins/runtime/local"
 STATIC_CHECK_LANE = "static-checks"
-LOCAL_RUNTIME_ARGUMENTS = ("-m", "not measurement", LOCAL_RUNTIME_PATH)
+LOCAL_RUNTIME_SELECTION = ("-m", "not measurement")
+LOCAL_RUNTIME_LAUNCH_MODULES = (
+    f"{LOCAL_RUNTIME_PATH}/test_launcher.py",
+    f"{LOCAL_RUNTIME_PATH}/test_bound_native_launch.py",
+    f"{LOCAL_RUNTIME_PATH}/test_claude_runtime_launcher.py",
+)
 SPECIAL_PATHS = (*STORAGE_ARGUMENTS, LOCAL_RUNTIME_PATH)
 SPECIAL_MATRIX_ARGUMENTS = {
-    "storage": " ".join(STORAGE_ARGUMENTS),
-    "local-runtime": LOCAL_RUNTIME_PATH,
+    "storage": STORAGE_ARGUMENTS,
+    "local-runtime": (
+        *(f"--ignore={path}" for path in LOCAL_RUNTIME_LAUNCH_MODULES),
+        LOCAL_RUNTIME_PATH,
+    ),
+    "local-runtime-launch": LOCAL_RUNTIME_LAUNCH_MODULES,
 }
+COLLECTION_FILES = frozenset({"complete.txt", "complete.stderr", "complete.exit"})
 SCHEDULED_LIFETIME_MODULES = (
     "tests/conformance/test_lifetime_cleanup_controls.py",
     "tests/conformance/test_lifetime_direct_inputs.py",
@@ -124,7 +134,7 @@ def general_lanes(count: int) -> tuple[str, ...]:
 
 
 def environment_lanes(count: int) -> tuple[str, ...]:
-    return ("storage", "local-runtime", *general_lanes(count))
+    return (*SPECIAL_LANES, *general_lanes(count))
 
 
 def evidenced_general_lanes(
@@ -139,8 +149,7 @@ def evidenced_general_lanes(
 
 def evidenced_lanes(operating_system: str, count: int, event: str) -> tuple[str, ...]:
     return (
-        "storage",
-        "local-runtime",
+        *SPECIAL_LANES,
         *evidenced_general_lanes(operating_system, count, event),
     )
 
@@ -151,8 +160,8 @@ def lane_arguments(operating_system: str, lane: str) -> tuple[str, ...]:
         return (*ignored, *STORAGE_ARGUMENTS)
     if lane == "storage":
         return STORAGE_ARGUMENTS
-    if lane == "local-runtime":
-        return LOCAL_RUNTIME_ARGUMENTS
+    if lane in {"local-runtime", "local-runtime-launch"}:
+        return (*LOCAL_RUNTIME_SELECTION, *SPECIAL_MATRIX_ARGUMENTS[lane])
     return ()
 
 
@@ -223,7 +232,8 @@ Digest = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 Revision = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{40}$")]
 Identifier = Annotated[StrictStr, Field(pattern=r"^[1-9][0-9]*$")]
 Lane = Annotated[
-    StrictStr, Field(pattern=r"^(?:general-[1-9][0-9]*|storage|local-runtime)$")
+    StrictStr,
+    Field(pattern=r"^(?:general-[1-9][0-9]*|storage|local-runtime(?:-launch)?)$"),
 ]
 
 
@@ -327,6 +337,26 @@ def collection_nodes(path: Path) -> frozenset[str]:
     return identities(validated_collection(path))
 
 
+def local_runtime_partition(path: Path) -> tuple[frozenset[str], frozenset[str]]:
+    ordinary: list[str] = []
+    launch: list[str] = []
+    launch_modules: set[str] = set()
+    for node in validated_collection(path):
+        module = module_of(node)
+        if not module.startswith(f"{LOCAL_RUNTIME_PATH}/") or {"", ".", ".."} & set(
+            module.split("/")
+        ):
+            raise EvidenceFailure("local-runtime collection contains a foreign path")
+        if module in LOCAL_RUNTIME_LAUNCH_MODULES:
+            launch_modules.add(module)
+            launch.append(node)
+        else:
+            ordinary.append(node)
+    if launch_modules != set(LOCAL_RUNTIME_LAUNCH_MODULES):
+        raise EvidenceFailure("local-runtime collection lacks a launcher module")
+    return identities(ordinary), identities(launch)
+
+
 def is_general(node: str) -> bool:
     module = module_of(node)
     return not any(
@@ -349,8 +379,10 @@ def expected_files(lane: str) -> frozenset[str]:
     files = {"tests.stdout", "tests.stderr", "tests.exit"}
     if lane in SPECIAL_LANES:
         files.add("junit.xml")
+        if lane == "local-runtime-launch":
+            files.update(COLLECTION_FILES)
     else:
-        files.update({"complete.txt", "complete.stderr", "complete.exit"})
+        files.update(COLLECTION_FILES)
         files.update(
             f"{name}.{suffix}"
             for name in CHILD_NAMES
@@ -482,7 +514,9 @@ def matrix_rows(counts: Mapping[str, int]) -> dict[str, list[MatrixRow]]:
                     "databases": databases,
                     "lane": lane,
                     "lanes": count,
-                    "pytest-arguments": SPECIAL_MATRIX_ARGUMENTS.get(lane, ""),
+                    "pytest-arguments": " ".join(
+                        SPECIAL_MATRIX_ARGUMENTS.get(lane, ())
+                    ),
                 }
             )
     return rows
@@ -697,6 +731,19 @@ def verify_scaffold(
         combined = frozenset[str]().union(*inventories)
         if sum(len(nodes) for nodes in inventories) != len(combined):
             raise EvidenceFailure("scaffold lanes contain duplicate tests")
+        launch = root / artifact_name(
+            run_attempt, system, python, "local-runtime-launch"
+        )
+        expected_ordinary, expected_launch = local_runtime_partition(
+            launch / "complete.txt"
+        )
+        if (
+            reports["local-runtime"]["junit"] != expected_ordinary
+            or reports["local-runtime-launch"]["junit"] != expected_launch
+        ):
+            raise EvidenceFailure(
+                "local-runtime lanes do not match their collection partition"
+            )
         if evidenced_general_lanes(system, count, event):
             complete = verify_general_lanes(
                 root, run_attempt, system, python, count, table, reports

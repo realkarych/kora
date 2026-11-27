@@ -1865,6 +1865,39 @@ def test_scaffold_artifact_names_and_download_use_the_same_attempt() -> None:
     assert table(download["with"])["pattern"] == attempt_prefix + "*"
 
 
+@pytest.mark.parametrize("job", ["scaffold-tests", "scaffold-tests-macos"])
+def test_native_launch_has_no_host_fixtures_or_offline_distribution_job(
+    job: str,
+) -> None:
+    workflows = repository_workflows()
+    steps = step_list(job_of(workflows, "ci.yml", job))
+
+    conditions = {
+        step.get("id"): step.get("if")
+        for step in steps
+        if step.get("id")
+        in {"unit_collisions", "preparation", "teardown", "distributions"}
+    }
+
+    fixture_only = "${{ matrix.lane == 'local-runtime' }}"
+    expected = {
+        "preparation": fixture_only,
+        "teardown": "${{ always() && matrix.lane == 'local-runtime' }}",
+        "distributions": fixture_only,
+    }
+    if job == "scaffold-tests":
+        expected["unit_collisions"] = (
+            "${{ matrix.lane == 'local-runtime' && runner.os == 'Linux' }}"
+        )
+    else:
+        xcode = next(step for step in steps if "xcode-select" in str(step.get("run")))
+        assert xcode["if"] == (
+            "${{ matrix.lane == 'local-runtime' "
+            "|| matrix.lane == 'local-runtime-launch' }}"
+        )
+    assert conditions == expected
+
+
 def stop_requiring_lanes(workflows: Workflows, job: str, result: str) -> None:
     evidence = job_of(workflows, "ci.yml", "scaffold-evidence")
     evidence["needs"] = [need for need in needs_of(evidence) if need != job]

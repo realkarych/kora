@@ -987,6 +987,26 @@ def test_every_ci_tool_setup_follows_its_verified_cached_acquisition() -> None:
     assert violations == []
 
 
+@pytest.mark.parametrize("job", ["scaffold-tests", "scaffold-tests-macos"])
+def test_local_runtime_lane_rows_share_verified_tool_setup_and_use_own_uv_cache(
+    job: str,
+) -> None:
+    workflows = repository_workflows()
+
+    setup = lane_step(
+        workflows, job, lambda step: action_of(step) == "astral-sh/setup-uv"
+    )
+    cache = lane_step(workflows, job, lambda step: action_of(step) == "actions/cache")
+
+    assert "if" not in setup
+    assert "if" not in cache
+    assert table(setup["with"])["cache-dependency-glob"] == "uv.lock"
+    assert table(setup["with"])["cache-suffix"] == (
+        "scaffold-${{ matrix.python }}-${{ startsWith(matrix.lane, 'general-') "
+        "&& 'general' || matrix.lane }}"
+    )
+
+
 def test_only_linux_scaffold_uses_the_verified_pnpm_before_cache_and_build() -> None:
     workflows = repository_workflows()
     steps = step_list(job_of(workflows, "ci.yml", "scaffold-tests"))
