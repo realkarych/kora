@@ -1,4 +1,14 @@
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+import asyncio
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import contextmanager
 from functools import cache
 from itertools import islice
 from pathlib import Path
@@ -163,6 +173,24 @@ class Blob:
         self.close()
 
 
+class _RetirementObservation:
+    def __init__(self) -> None:
+        self.ready: asyncio.Event = asyncio.Event()
+        self.failure: Exception | None = None
+        self._loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+        self._dispatch: Lock = Lock()
+        self._active: bool = True
+
+    def wake(self) -> None:
+        with self._dispatch:
+            if self._active:
+                self._loop.call_soon_threadsafe(self.ready.set)
+
+    def disarm(self) -> None:
+        with self._dispatch:
+            self._active = False
+
+
 class NativeRetirement:
     _lock = Lock()
     _pending: dict[Path, dict[Connection, RetiredAction]] = {}
@@ -170,6 +198,33 @@ class NativeRetirement:
     _draining: set[Path] = set()
     _retry: set[Path] = set()
     _errors: dict[Path, Exception] = {}
+    _observations: dict[Path, set[_RetirementObservation]] = {}
+
+    @classmethod
+    @contextmanager
+    def observe(cls, path: Path) -> Generator[Callable[[], Awaitable[None]]]:
+        observation = _RetirementObservation()
+
+        async def settled() -> None:
+            while True:
+                observation.ready.clear()
+                with cls._lock:
+                    if path not in cls._pending:
+                        cls._result(path, True, observation.failure)
+                        return
+                await observation.ready.wait()
+
+        with cls._lock:
+            observers = cls._observations.setdefault(path, set())
+            observers.add(observation)
+        try:
+            yield settled
+        finally:
+            observation.disarm()
+            with cls._lock:
+                observers.remove(observation)
+                if not observers:
+                    del cls._observations[path]
 
     @classmethod
     def after(cls, path: Path, release: Callable[[], None]) -> None:
@@ -223,6 +278,7 @@ class NativeRetirement:
             cls._draining.add(path)
             pending = tuple(scope.items())
         owns_drain = True
+        observers: tuple[_RetirementObservation, ...] = ()
         try:
             while True:
                 for connection, release in pending:
@@ -242,6 +298,11 @@ class NativeRetirement:
                         if scope:
                             return False
                         del cls._pending[path]
+                        observers = tuple(cls._observations.get(path, ()))
+                        failure = cls._errors.get(path)
+                        for observation in observers:
+                            if observation.failure is None:
+                                observation.failure = failure
                         return cls._result(path, report)
                     pending = ()
                 for action in actions:
@@ -250,10 +311,17 @@ class NativeRetirement:
             if owns_drain:
                 with cls._lock:
                     cls._draining.remove(path)
+            for observation in observers:
+                observation.wake()
 
     @classmethod
-    def _result(cls, path: Path, report: bool) -> bool:
-        if report and (failure := cls._errors.pop(path, None)) is not None:
+    def _result(
+        cls, path: Path, report: bool, observed: Exception | None = None
+    ) -> bool:
+        failure = cls._errors.pop(path, None) if report else None
+        if observed is not None:
+            raise observed
+        if failure is not None:
             raise failure
         return True
 

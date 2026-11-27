@@ -37,6 +37,7 @@ from kora.models.errors import ApiErrorEnvelope
 from kora.models.graphs import DeployResponse
 from kora.models.run_events import RunEvent, RunEventPage
 from kora.models.runs import AcceptedRun
+from kora.sqlite.driver import Connection as GuardedConnection
 from tests.api.deployment_cases import GRAPH, NAMESPACE, skeleton_ir
 from tests.api.run_events_codegen import verify_run_events_codegen
 from tests.api.serving_lifecycle_child import SLOW_RESPONSE_BYTES, serving_event
@@ -2050,6 +2051,70 @@ async def test_serving_keeps_the_original_process_until_held_native_work_settles
         b"native_sqlite_returned\nnative_sqlite_result_closed\nrequest_settled\n"
         b"native_sqlite_file_closed\n"
     )
+    assert b"api.serving_stopped" not in diagnostics
+
+
+@pytest.mark.asyncio
+async def test_installed_server_awaits_pending_sqlite_native_retirement(
+    serving_installation: Path, tmp_path: Path, sqlite_template: Path
+) -> None:
+    path = tmp_path / "prepared.sqlite"
+    settings = copy_sqlite_template(sqlite_template, path)
+    with closing(GuardedConnection()) as prepared:
+        prepared.open(path, False, 0, lambda descriptor, empty: not empty)
+        assert prepared.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+    fixture = Path(__file__).with_name("serving_lifecycle_child.py")
+    release_read, release_write = os.pipe()
+
+    try:
+        try:
+            child = await asyncio.create_subprocess_exec(
+                str(serving_installation),
+                "-I",
+                str(fixture),
+                "hold_retirement",
+                str(release_read),
+                pass_fds=(release_read,),
+                cwd=tmp_path,
+                env=api_environment(str(settings.url)),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        finally:
+            os.close(release_read)
+        assert child.stdout is not None
+        assert child.stderr is not None
+        try:
+            async with asyncio.timeout(SERVE_TIMEOUT):
+                port, _ = await read_bound_port(child)
+                assert (
+                    await child.stdout.readline()
+                    == b"native_retirement_incumbent_held\n"
+                )
+                child.send_signal(signal.SIGTERM)
+                await serving_event(child.stderr, "api.serving_draining")
+                async with asyncio.timeout(DRAIN_RECEIPT_TIMEOUT):
+                    refusal = await serving_event(child.stderr, "api.serving_refused")
+                assert refusal["reason"] == "drain_unfinished"
+                with pytest.raises(ConnectionRefusedError):
+                    await asyncio.open_connection(LOOPBACK, port)
+                os.write(release_write, b"c")
+                assert (
+                    await child.stdout.readline()
+                    == b"original_reader_retirement_pending\n"
+                )
+                assert child.returncode is None
+                os.write(release_write, b"r")
+                output, diagnostics = await child.communicate()
+        finally:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+    finally:
+        os.close(release_write)
+
+    assert child.returncode == 70
+    assert output == b"native_retirement_settled\n"
     assert b"api.serving_stopped" not in diagnostics
 
 
