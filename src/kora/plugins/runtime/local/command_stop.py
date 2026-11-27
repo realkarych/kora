@@ -8,12 +8,14 @@ from enum import StrEnum
 from typing import Final, Protocol
 
 from kora.protocols.identity_records import ProcessIdentity
+from kora.protocols.lifetime_records import ProcessRegistration
 from kora.protocols.time import Clock
 from kora.runner.identity import (
     PROCESS_SCAN_ENTRIES,
     SCAN_NS,
     CensusCondition,
     CommandRead,
+    CommandScope,
     IdentityState,
     NativeIdentityReader,
 )
@@ -59,20 +61,37 @@ class CommandDomainStop:
         clock: Clock,
         wake_reaper: Callable[[], None],
         prelaunch: dict[int, int] | None = None,
+        *,
+        leader: ProcessIdentity | None = None,
+        siblings: Callable[[], tuple[ProcessRegistration, ...]] | None = None,
     ) -> None:
+        if leader is not None and (leader.pid != group or not leader.leads_group):
+            raise ValueError("scoped leader must own the process group")
         self.group = group
         self.marker = marker
         self.clock = clock
         self.wake_reaper = wake_reaper
         self.reader = NativeIdentityReader(clock=clock)
         self.prelaunch = prelaunch
-        self.members: set[ProcessIdentity] = set()
+        self._leader = leader
+        self._siblings = siblings
+        self._owned: set[ProcessIdentity] = set()
+        self.members: set[ProcessIdentity] = set() if leader is None else {leader}
         self.ambiguous_group = False
         self.next_reap_wake = 0
         self.observed: set[CensusCondition] = set()
         self.last_census_complete: bool | None = None
         self.member_capacity = False
         self.stop_cutoff = False
+
+    def _scope(self) -> CommandScope | None:
+        if self._leader is None:
+            return None
+        return CommandScope(
+            self._leader,
+            self._owned,
+            () if self._siblings is None else self._siblings(),
+        )
 
     def diagnostic_snapshot(self) -> tuple[tuple[str, bool], ...]:
         return (
@@ -96,7 +115,14 @@ class CommandDomainStop:
             return StopOutcome.CONFIRMED
         return StopOutcome.UNRESOLVED
 
-    def _phase(self, requested: signal.Signals, cutoff: int) -> bool:
+    def confirm(self, cutoff_ns: int) -> StopOutcome:
+        return (
+            StopOutcome.CONFIRMED
+            if self._phase(None, cutoff_ns)
+            else StopOutcome.UNRESOLVED
+        )
+
+    def _phase(self, requested: signal.Signals | None, cutoff: int) -> bool:
         signalled: set[ProcessIdentity] = set()
         next_census = self.clock.monotonic_ns()
         if requested is signal.SIGKILL:
@@ -121,6 +147,7 @@ class CommandDomainStop:
                         if self.prelaunch
                         else frozenset()
                     ),
+                    scope=self._scope(),
                 )
                 self.ambiguous_group = self.ambiguous_group or census.ambiguous_group
                 self.observed.update(census.observed)
@@ -131,6 +158,12 @@ class CommandDomainStop:
                     self._signal_members(requested, cutoff, signalled)
                     return False
                 self.members.update(members)
+                if self._leader is not None:
+                    self._owned.update(
+                        member.process.identity
+                        for member in census.members
+                        if member.owned
+                    )
                 if census.complete and not self.members and not self.ambiguous_group:
                     in_time = self.clock.monotonic_ns() < cutoff
                     self.stop_cutoff = self.stop_cutoff or not in_time
@@ -154,10 +187,11 @@ class CommandDomainStop:
                 current is not None and current.identity != identity
             ):
                 self.members.remove(identity)
+                self._owned.discard(identity)
             elif current is not None and current.dead:
                 if sys.platform == "linux" and current.parent_pid == os.getpid():
                     needs_reap = True
-                else:
+                elif self._leader is None:
                     self.members.remove(identity)
         now = self.clock.monotonic_ns()
         if needs_reap and self.next_reap_wake <= now < cutoff:
@@ -165,8 +199,13 @@ class CommandDomainStop:
             self.next_reap_wake = now + CENSUS_RETRY_NS
 
     def _signal_members(
-        self, requested: signal.Signals, cutoff: int, signalled: set[ProcessIdentity]
+        self,
+        requested: signal.Signals | None,
+        cutoff: int,
+        signalled: set[ProcessIdentity],
     ) -> None:
+        if requested is None:
+            return
         delivered = False
         for identity in self.members - signalled:
             if self.clock.monotonic_ns() >= cutoff:
@@ -204,9 +243,12 @@ class CommandDomainStop:
             return False
 
     def _may_signal(self, identity: ProcessIdentity, cutoff: int) -> bool:
+        scope = self._scope()
         member, observation = self.reader.command_member(
-            identity.pid, self.group, self.marker
+            identity.pid, self.group, self.marker, scope=scope
         )
+        if member is not None and member.overlap:
+            self.ambiguous_group = True
         return (
             observation is CommandRead.VERIFIED
             and member is not None

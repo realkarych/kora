@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import BinaryIO, Final, Literal, Protocol, cast
 
 from kora.protocols.identity_records import ProcessIdentity
+from kora.protocols.lifetime_records import ProcessRegistration
 from kora.protocols.time import Clock, SystemClock
 
 STATUS_CAPACITY_BYTES: Final[int] = 4096
@@ -69,6 +70,21 @@ class GroupObservation:
 class CommandMember:
     process: ProcessSnapshot
     owned: bool
+    overlap: bool = False
+
+
+@dataclass(frozen=True)
+class CommandScope:
+    leader: ProcessIdentity
+    tracked: Set[ProcessIdentity]
+    siblings: tuple[ProcessRegistration, ...]
+
+    def overlaps_group(self) -> bool:
+        return any(
+            self.leader == sibling.process
+            or self.leader.pid in (sibling.process_group_id, sibling.session_id)
+            for sibling in self.siblings
+        )
 
 
 class CommandRead(StrEnum):
@@ -640,6 +656,7 @@ class NativeIdentityReader:
         *,
         prelaunch: Mapping[int, int] | None = None,
         known_pids: Set[int] = frozenset(),
+        scope: CommandScope | None = None,
     ) -> CommandCensus:
         scan_deadline = min(deadline_ns, self._clock.monotonic_ns() + SCAN_NS)
         if os.getpid() != self._owner or None in (
@@ -661,7 +678,7 @@ class NativeIdentityReader:
         observed: set[CensusCondition] = set()
         if not complete:
             observed.add(CensusCondition.INVENTORY_INCOMPLETE)
-        ambiguous_group = False
+        ambiguous_group = scope is not None and scope.overlaps_group()
         pending_group = set(original)
         opaque: dict[int, int] = {}
         for pid in (*original, *(census.listed - original)):
@@ -677,7 +694,7 @@ class NativeIdentityReader:
             if pid == self._owner:
                 continue
             member, observation = self.command_member(
-                pid, group, marker, listed_in_group=pid in original
+                pid, group, marker, listed_in_group=pid in original, scope=scope
             )
             if observation is CommandRead.OPAQUE:
                 observed.add(CensusCondition.OPAQUE)
@@ -686,6 +703,7 @@ class NativeIdentityReader:
             verified = observation is CommandRead.VERIFIED
             if member is not None:
                 members.append(member)
+                ambiguous_group = ambiguous_group or member.overlap
             elif pid in original and not verified:
                 ambiguous_group = (
                     ambiguous_group
@@ -748,7 +766,13 @@ class NativeIdentityReader:
             return None
 
     def command_member(
-        self, pid: int, group: int, marker: bytes, *, listed_in_group: bool = False
+        self,
+        pid: int,
+        group: int,
+        marker: bytes,
+        *,
+        listed_in_group: bool = False,
+        scope: CommandScope | None = None,
     ) -> tuple[CommandMember | None, CommandRead]:
         first = self.read(pid)
         if first.state is IdentityState.ABSENT:
@@ -756,6 +780,10 @@ class NativeIdentityReader:
         current = first.process
         if current is None or not complete_identity(current.identity):
             return None, CommandRead.OPAQUE
+        if scope is not None:
+            return self._scoped_command_member(
+                current, group, marker, scope, listed_in_group
+            )
         adopted = sys.platform == "linux" and current.parent_pid == self._owner
         if current.dead:
             return None, CommandRead.UNSTABLE if adopted else CommandRead.VERIFIED
@@ -779,6 +807,58 @@ class NativeIdentityReader:
             return member, CommandRead.UNSTABLE
         observation = CommandRead.OPAQUE if owned is None else CommandRead.VERIFIED
         return member, observation
+
+    def _scoped_command_member(
+        self,
+        current: ProcessSnapshot,
+        group: int,
+        marker: bytes,
+        scope: CommandScope,
+        listed_in_group: bool,
+    ) -> tuple[CommandMember | None, CommandRead]:
+        identity = current.identity
+        owned = identity == scope.leader or identity in scope.tracked
+        original_group = listed_in_group or current.process_group_id == group
+        group_overlap = original_group and scope.overlaps_group()
+        exact_sibling = any(identity == sibling.process for sibling in scope.siblings)
+        sibling_group = any(
+            current.process_group_id == sibling.process_group_id
+            for sibling in scope.siblings
+        )
+        if (
+            not owned
+            and not current.dead
+            and not (group_overlap or exact_sibling or sibling_group)
+            and current.process_group_id == current.session_id == group
+        ):
+            leader = self.read(group).process
+            owned = (
+                leader is not None
+                and leader.identity == scope.leader
+                and leader.process_group_id == leader.session_id == group
+                and leader.parent_pid == self._owner
+            )
+        marked = (
+            False
+            if owned or current.dead
+            else self._command_marker(identity.pid, marker)
+        )
+        owned = owned or marked is True
+        relevant = owned or original_group
+        overlap = relevant and (group_overlap or exact_sibling or sibling_group)
+        stable = self.read(identity.pid).process == current
+        member = (
+            CommandMember(
+                current, owned and stable and not current.dead and not overlap, overlap
+            )
+            if relevant
+            else None
+        )
+        if not stable or marked is CommandRead.UNSTABLE:
+            return member, CommandRead.UNSTABLE
+        if marked is None and not exact_sibling:
+            return member, CommandRead.OPAQUE
+        return member, CommandRead.VERIFIED
 
     def _command_marker(
         self, pid: int, marker: bytes
