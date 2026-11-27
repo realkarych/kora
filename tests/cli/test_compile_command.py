@@ -17,6 +17,8 @@ from kora.engine.graph_version_identity import (
     GraphVersionPin,
     read_graph_version_identity,
 )
+from kora.ir.document import GraphDocument
+from kora.ir.export import export_ir
 from kora.ir.json import JsonObject, parse_json_object
 from kora.models.errors import ApiErrorEnvelope, ValidationDetails
 from kora.models.graphs import DeployResponse
@@ -32,6 +34,14 @@ from tests.support.provider_tooling import create_virtual_environment, run_setup
 __all__ = ["api_capture", "preparer"]
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/walking-skeleton/graph.py"
+LIVE_CLAUDE_EXAMPLE = EXAMPLE.parents[1] / "live-claude-local-git/graph.py"
+LIVE_CLAUDE_REFERENCE_SHA256 = (
+    "be37f69309bd3a5ff278bd6a42c0a0aa01be3a6cba3121469edb32c46474031d"
+)
+LIVE_CLAUDE_VERIFIER_SHA256 = (
+    "9098f7c2d9969281290ce27e0229d34ea395ab8d87c00a97787b1adf9172670e"
+)
+CHANGE_OPERAND = b'"{input_root}/change.json"'
 SOURCE_LIMIT = 65_536
 PRIVATE_FORMAT = "private-format-marker"
 CHECK_SOURCE_CLOSURE = """
@@ -259,6 +269,324 @@ def assert_skeleton(document: JsonObject, source: bytes) -> None:
         "gate": {"type": "CommandResult", "from": "gate", "output": "result"}
     }
     assert approval["outputs"] == {"response": {"type": "StructuredOutput"}}
+
+
+def live_claude_verifier(document: JsonObject) -> str:
+    arguments = child(document, "graph", "nodes", "gate", "config")["cmd"]
+    assert isinstance(arguments, list)
+    verifier = arguments[3]
+    assert isinstance(verifier, str)
+    verifier_bytes = verifier.encode("utf-8")
+    assert len(verifier_bytes) == 3159
+    assert verifier_bytes.endswith(b"\n")
+    assert sha256(verifier_bytes).hexdigest() == LIVE_CLAUDE_VERIFIER_SHA256
+    return verifier
+
+
+def live_claude_reference(verifier: str) -> GraphDocument:
+    repo = "/operator-owned/demo.git"
+    change: JsonObject = {"from": "agent", "output": "change", "type": "VcsRef"}
+    reference: JsonObject = {
+        "ir_version": "1.0",
+        "runtime": {"runtime": "local", "vcs": "git"},
+        "type_contracts": {
+            name: {"builtin_revision": "1"}
+            for name in ("AgentSession", "CommandResult", "StructuredOutput", "VcsRef")
+        },
+        "graph": {
+            "id": "live_claude_local_git",
+            "namespace": "example",
+            "params": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            },
+            "triggers": [{"kind": "manual"}],
+            "nodes": {
+                "agent": {
+                    "kind": "agent",
+                    "config": {
+                        "harness": "claude",
+                        "prompt": (
+                            "Write exactly one line containing kora live demo followed "
+                            "by a newline to demo.txt. Leave the change in the "
+                            "worktree for kora to publish. Do not edit other files, "
+                            "commit, or push."
+                        ),
+                        "trust_repo_config": False,
+                        "workspace": {"repo": repo, "rev": "1" * 40},
+                    },
+                    "outputs": {
+                        "change": {"type": "VcsRef"},
+                        "session": {"type": "AgentSession"},
+                    },
+                },
+                "gate": {
+                    "kind": "command",
+                    "depends_on": ["agent"],
+                    "inputs": {"change": change},
+                    "config": {
+                        "cmd": [
+                            "/operator-owned/bin/python",
+                            "-I",
+                            "-c",
+                            verifier,
+                            "/operator-owned/bin/git",
+                            "{input_root}/change.json",
+                        ],
+                        "workspace": {"repo": repo, "from_ref": "inputs.change"},
+                    },
+                    "outputs": {"result": {"type": "CommandResult"}},
+                },
+                "approve": {
+                    "kind": "human_input",
+                    "inputs": {
+                        "change": change,
+                        "gate": {
+                            "from": "gate",
+                            "output": "result",
+                            "type": "CommandResult",
+                        },
+                    },
+                    "config": {
+                        "channel": "cli",
+                        "timeout": "1h",
+                        "on_expiry": "fail",
+                        "binds": {
+                            "vcs_ref": "inputs.change",
+                            "gate_digests": ["inputs.gate"],
+                        },
+                    },
+                    "outputs": {"response": {"type": "StructuredOutput"}},
+                },
+            },
+        },
+    }
+    reference_bytes = (json.dumps(reference, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    assert sha256(reference_bytes).hexdigest() == LIVE_CLAUDE_REFERENCE_SHA256
+    return GraphDocument.model_validate_json(reference_bytes)
+
+
+def source_line(source: bytes, fragment: bytes) -> int:
+    return source[: source.index(fragment)].count(b"\n") + 1
+
+
+def live_claude_execution_ir(document: GraphDocument) -> JsonObject:
+    fields = export_ir(document)
+    meta = fields.get("meta")
+    if isinstance(meta, dict):
+        meta.pop("compiler", None)
+        meta.pop("source_digest", None)
+        if not meta:
+            del fields["meta"]
+    body = child(fields, "graph")
+    body.pop("source", None)
+    for name in ("agent", "gate", "approve"):
+        child(body, "nodes", name).pop("source", None)
+    return fields
+
+
+@pytest.mark.asyncio
+async def test_compile_live_claude_example_matches_reference_ir() -> None:
+    source = LIVE_CLAUDE_EXAMPLE.read_bytes()
+
+    compiled = await compile_json(LIVE_CLAUDE_EXAMPLE)
+
+    assert compiled.code == 0, compiled.stderr.decode()
+    actual = GraphDocument.model_validate_json(compiled.stdout)
+    fields = export_ir(actual)
+    reference = live_claude_reference(live_claude_verifier(fields))
+    assert actual.unknown_root_key_count == reference.unknown_root_key_count == 0
+    assert live_claude_execution_ir(actual) == live_claude_execution_ir(reference)
+    meta = child(fields, "meta")
+    assert meta["compiler"] == "kora early Python DSL v1"
+    assert meta["source_digest"] == f"sha256:{sha256(source).hexdigest()}"
+    body = child(fields, "graph")
+    assert body["source"] == {
+        "file": "graph.py",
+        "line": source_line(source, b"def live_claude_local_git"),
+    }
+    node_fragments = {
+        "agent": b"prepare = node.agent(",
+        "gate": b"check = node.command(",
+        "approve": b"    approval(",
+    }
+    for node_id, fragment in node_fragments.items():
+        assert child(body, "nodes", node_id)["source"] == {
+            "file": "graph.py",
+            "line": source_line(source, fragment),
+        }
+
+
+def assert_live_claude_refusal(
+    result: ProcessResult, path: Path, code: str, line: int
+) -> None:
+    details = findings_from(result)
+    (finding,) = details.errors
+    assert result.code != 0
+    assert result.stdout == b""
+    assert set(path.parent.iterdir()) == {path}
+    assert finding.location is not None
+    assert (finding.code, finding.location.file, finding.location.line) == (
+        code,
+        "graph.py",
+        line,
+    )
+    assert (details.warnings, details.errors_omitted, details.warnings_omitted) == (
+        (),
+        0,
+        0,
+    )
+    assert str(path.parent).encode() not in result.stderr
+    for source_content in (
+        b"private-",
+        b"Write exactly one line",
+        b"GIT_ALLOW_PROTOCOL",
+        b"/operator-owned/",
+        b"{input_root}/",
+        b"prepare.session",
+    ):
+        assert source_content not in result.stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fragment", "replacement", "owner"),
+    [
+        (b")(change=prepare.change)", b")", b"check = node.command("),
+        (
+            b")(change=prepare.change)",
+            b")(change=unknown.change)",
+            b")(change=prepare.change)",
+        ),
+        (
+            b")(change=prepare.change)",
+            b")(change=prepare.unknown)",
+            b")(change=prepare.change)",
+        ),
+        (
+            b")(change=prepare.change)",
+            b")(change=prepare.session)",
+            b")(change=prepare.change)",
+        ),
+        (
+            b"workspace=prepare.change",
+            b"workspace=prepare.session",
+            b"workspace=prepare.change",
+        ),
+        (
+            b"change=prepare.change, gate=check",
+            b"change=prepare.session, gate=check",
+            b"change=prepare.change, gate=check",
+        ),
+        (
+            b"change=prepare.change, gate=check",
+            b"change=prepare.change, gate=prepare",
+            b"change=prepare.change, gate=check",
+        ),
+    ],
+    ids=[
+        "missing-input-binding",
+        "unbound-producer",
+        "undeclared-output",
+        "incompatible-output",
+        "different-checkout",
+        "different-approval-change",
+        "different-approval-gate",
+    ],
+)
+async def test_compile_refuses_unbound_demo_commit_reference(
+    tmp_path: Path, fragment: bytes, replacement: bytes, owner: bytes
+) -> None:
+    source = LIVE_CLAUDE_EXAMPLE.read_bytes()
+    line = source_line(source, owner)
+    path = write_source(
+        tmp_path / "private-reference.py", source.replace(fragment, replacement)
+    )
+
+    result = await compile_json(path)
+
+    assert_live_claude_refusal(result, path, "DSL003", line)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fragment", "replacement", "owner", "code"),
+    [
+        (
+            b'"/operator-owned/bin/python"',
+            CHANGE_OPERAND,
+            b'"/operator-owned/bin/python"',
+            "DSL016",
+        ),
+        (
+            b"        workspace=prepare.change,\n",
+            b"",
+            b"check = node.command(",
+            "DSL003",
+        ),
+        (
+            b"workspace=prepare.change",
+            b"workspace=check.change",
+            b"workspace=prepare.change",
+            "DSL003",
+        ),
+        (
+            CHANGE_OPERAND,
+            b'"--input={input_root}/change.json"',
+            CHANGE_OPERAND,
+            "DSL016",
+        ),
+        (CHANGE_OPERAND, b'"{input_root}/change.json.bak"', CHANGE_OPERAND, "DSL016"),
+        (
+            CHANGE_OPERAND,
+            b'"{input_root}/private-other.json"',
+            CHANGE_OPERAND,
+            "DSL016",
+        ),
+        (CHANGE_OPERAND, b'"{{ private-value }}"', CHANGE_OPERAND, "DSL016"),
+        (CHANGE_OPERAND, b'"{% private-tag %}"', CHANGE_OPERAND, "DSL016"),
+        (CHANGE_OPERAND, b'"{# private-comment #}"', CHANGE_OPERAND, "DSL016"),
+        (
+            b"prompt=(\n"
+            b'            "Write exactly one line containing kora live demo '
+            b'followed by a newline "\n'
+            b'            "to demo.txt. Leave the change in the worktree '
+            b'for kora to publish. "\n'
+            b'            "Do not edit other files, commit, or push."\n'
+            b"        )",
+            b"prompt=" + CHANGE_OPERAND,
+            b"prompt=(",
+            "DSL016",
+        ),
+    ],
+    ids=[
+        "executable",
+        "missing-workspace",
+        "different-workspace",
+        "prefixed",
+        "suffixed",
+        "another-input",
+        "jinja-expression",
+        "jinja-tag",
+        "jinja-comment",
+        "outside-argv",
+    ],
+)
+async def test_compile_live_claude_refuses_unsupported_placeholders(
+    tmp_path: Path, fragment: bytes, replacement: bytes, owner: bytes, code: str
+) -> None:
+    source = LIVE_CLAUDE_EXAMPLE.read_bytes()
+    line = source_line(source, owner)
+    path = write_source(
+        tmp_path / "private-placeholder.py", source.replace(fragment, replacement)
+    )
+
+    result = await compile_json(path)
+
+    assert_live_claude_refusal(result, path, code, line)
 
 
 @pytest.mark.parametrize(

@@ -25,9 +25,11 @@ from tests.api.deployment_cases import HARNESS, NAMESPACE, preparer, skeleton_ir
 from tests.api.support import api_capture, application, deployment_services
 from tests.cli.test_compile_command import (
     EXAMPLE,
+    LIVE_CLAUDE_EXAMPLE,
     PRIVATE_FORMAT,
     compile_json,
     findings_from,
+    live_claude_verifier,
 )
 from tests.cli.test_deploy_command import closed_origin
 from tests.client.support import running_app
@@ -299,6 +301,28 @@ async def test_mcp_refuses_invalid_calls_and_reports_transport_failures(
     assert cast("JsonObject", record["error"])["origin"] == "client"
     assert cast("JsonObject", record["error"])["code"] == "CLT001"
     assert code == 0
+
+
+@pytest.mark.asyncio
+async def test_compile_live_claude_example_is_deterministic() -> None:
+    relative = Path(os.path.relpath(LIVE_CLAUDE_EXAMPLE))
+    session = await start(
+        {"KORA_URL": closed_origin(), "KORA_MCP_TOKEN": "private-mcp-credential"}
+    )
+
+    first = await compile_json(LIVE_CLAUDE_EXAMPLE)
+    repeated = await compile_json(relative)
+    compiled = await session.compile(relative)
+    code, _ = await session.close()
+
+    assert (first.code, repeated.code, code) == (0, 0, 0)
+    assert first.stdout == repeated.stdout
+    assert first.stdout.endswith(b"\n")
+    assert not first.stdout.endswith(b"\n\n")
+    assert compiled.get("isError") is not True
+    cli_ir = parse_json_object(json.loads(first.stdout))
+    assert compiled["structuredContent"] == cli_ir
+    live_claude_verifier(cli_ir)
 
 
 @pytest.mark.asyncio

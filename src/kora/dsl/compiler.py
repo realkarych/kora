@@ -42,7 +42,60 @@ def location(line: int) -> JsonObject:
 
 def lower(syntax: GraphSyntax, source: bytes) -> GraphDocument:
     agent, command, approval = syntax.agent, syntax.command, syntax.approval
-    workspace = {"repo": syntax.repo, "rev": syntax.rev}
+    workspace: JsonObject = {"repo": syntax.repo, "rev": syntax.rev}
+    type_contracts: JsonObject = {
+        name: {"builtin_revision": "1"} for name in BUILTIN_TYPES
+    }
+    agent_config: JsonObject = {
+        "harness": agent.harness,
+        "prompt": agent.prompt,
+        "workspace": workspace,
+    }
+    agent_outputs: JsonObject = {"session": {"type": "AgentSession"}}
+    command_config: JsonObject = {
+        "cmd": list(command.arguments),
+        "workspace": workspace,
+    }
+    command_node: JsonObject = {
+        "kind": "command",
+        "source": location(command.line),
+        "depends_on": [agent.name],
+        "config": command_config,
+        "outputs": {"result": {"type": "CommandResult"}},
+    }
+    approval_inputs: JsonObject = {
+        approval.input_name: {
+            "type": "CommandResult",
+            "from": command.name,
+            "output": "result",
+        }
+    }
+    approval_config: JsonObject = {
+        "channel": "cli",
+        "on_expiry": "fail",
+        "timeout": approval.timeout,
+    }
+    if syntax.commit_reference:
+        change_input: JsonObject = {
+            "type": "VcsRef",
+            "from": agent.name,
+            "output": "change",
+        }
+        type_contracts["VcsRef"] = {"builtin_revision": "1"}
+        agent_config["trust_repo_config"] = False
+        agent_outputs["change"] = {"type": "VcsRef"}
+        command_config["workspace"] = {
+            "repo": syntax.repo,
+            "from_ref": "inputs.change",
+        }
+        command_node["inputs"] = {"change": change_input}
+        approval_inputs["change"] = change_input
+        approval_config["binds"] = {
+            "vcs_ref": "inputs.change",
+            "gate_digests": ["inputs.gate"],
+        }
+    else:
+        agent_outputs["summary"] = {"type": "StructuredOutput"}
     return GraphDocument.model_validate(
         {
             "ir_version": "1.0",
@@ -50,9 +103,7 @@ def lower(syntax: GraphSyntax, source: bytes) -> GraphDocument:
                 "compiler": "kora early Python DSL v1",
                 "source_digest": "sha256:" + sha256(source).hexdigest(),
             },
-            "type_contracts": {
-                name: {"builtin_revision": "1"} for name in BUILTIN_TYPES
-            },
+            "type_contracts": type_contracts,
             "graph": {
                 "id": syntax.name,
                 "namespace": syntax.namespace,
@@ -67,38 +118,15 @@ def lower(syntax: GraphSyntax, source: bytes) -> GraphDocument:
                     agent.name: {
                         "kind": "agent",
                         "source": location(agent.line),
-                        "config": {
-                            "harness": agent.harness,
-                            "prompt": agent.prompt,
-                            "workspace": workspace,
-                        },
-                        "outputs": {
-                            "session": {"type": "AgentSession"},
-                            "summary": {"type": "StructuredOutput"},
-                        },
+                        "config": agent_config,
+                        "outputs": agent_outputs,
                     },
-                    command.name: {
-                        "kind": "command",
-                        "source": location(command.line),
-                        "depends_on": [agent.name],
-                        "config": {"cmd": command.arguments, "workspace": workspace},
-                        "outputs": {"result": {"type": "CommandResult"}},
-                    },
+                    command.name: command_node,
                     approval.name: {
                         "kind": "human_input",
                         "source": location(approval.line),
-                        "inputs": {
-                            approval.input_name: {
-                                "type": "CommandResult",
-                                "from": command.name,
-                                "output": "result",
-                            }
-                        },
-                        "config": {
-                            "channel": "cli",
-                            "on_expiry": "fail",
-                            "timeout": approval.timeout,
-                        },
+                        "inputs": approval_inputs,
+                        "config": approval_config,
                         "outputs": {"response": {"type": "StructuredOutput"}},
                     },
                 },
