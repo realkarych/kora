@@ -20,12 +20,26 @@ static int koraOpenMain(const char *path, int flags, mode_t mode) {
   return fd;
 }
 
-static int koraOpenJournal(const char *path, int flags, mode_t mode, int *created) {
-  if (!(flags & O_CREAT)) return koraOpenFile(path, flags, mode);
-  int fd = koraOpenFile(path, flags | O_EXCL, mode);
+static const char *koraJournalName(const KoraOpen *scope) {
+  return scope->authorityJournal ? "authority.sqlite3-journal" : "control.sqlite-journal";
+}
+
+static int koraOpenJournalFile(const KoraOpen *scope, const char *path, int flags, mode_t mode) {
+  if (!scope->authorityJournal) return koraOpenFile(path, flags, mode);
+  int fd;
+  do {
+    fd = openat(scope->directory, koraJournalName(scope),
+                flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, mode);
+  } while (fd < 0 && errno == EINTR);
+  return fd;
+}
+
+static int koraOpenJournal(const KoraOpen *scope, const char *path, int flags, mode_t mode, int *created) {
+  if (!(flags & O_CREAT)) return koraOpenJournalFile(scope, path, flags, mode);
+  int fd = koraOpenJournalFile(scope, path, flags | O_EXCL, mode);
   if (fd >= 0) *created = 1;
   return fd < 0 && errno == EEXIST && !(flags & O_EXCL)
-    ? koraOpenFile(path, flags & ~O_CREAT, mode) : fd;
+    ? koraOpenJournalFile(scope, path, flags & ~O_CREAT, mode) : fd;
 }
 
 static int koraSameFile(const KoraFd *left, const KoraFd *right) {
@@ -59,6 +73,7 @@ static int koraTryClose(KoraFd **link) {
   if (!pinned && (!main || (!main->nLock && (!main->koraUnlockUnknown || owner->lockPin)))) {
     owner->state = osClose(owner->descriptor) == 0
       ? KORA_FD_RETIRED : KORA_FD_UNRESOLVED;
+    owner->descriptor = -1;
     if (main && owner->lockPin && owner->state == KORA_FD_RETIRED) main->koraUnlockUnknown = 0;
   }
   if (main) sqlite3_mutex_leave(main->pLockMutex);
@@ -167,6 +182,7 @@ static int koraCapture(KoraFd *owner, int fd, int role, KoraFd *main,
     owner->descriptor = fd;
     owner->role = role;
     owner->main = main ? koraRetainFd(main) : NULL;
+    if (main) owner->custody = main->custody;
   }
   if (!koraKnownIdentity(fd, info)) {
     owner->state = KORA_FD_UNRESOLVED;
@@ -198,7 +214,7 @@ static int koraSelectSidecar(KoraFd *owner, KoraFd *main, int fd, int role, mode
 static int koraInspectJournal(KoraOpen *scope, int empty) {
   if (!scope->journal) return SQLITE_OK;
   struct stat hint;
-  if (fstatat(scope->directory, "control.sqlite-journal", &hint, AT_SYMLINK_NOFOLLOW))
+  if (fstatat(scope->directory, koraJournalName(scope), &hint, AT_SYMLINK_NOFOLLOW))
     return errno == ENOENT ? SQLITE_OK : SQLITE_CANTOPEN;
   unixEnterMutex();
   int blocked = empty || koraBlockedIdentity(&hint);
@@ -208,7 +224,7 @@ static int koraInspectJournal(KoraOpen *scope, int empty) {
   if (!probe) return SQLITE_NOMEM;
   int fd;
   do {
-    fd = openat(scope->directory, "control.sqlite-journal",
+    fd = openat(scope->directory, koraJournalName(scope),
                 O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
   } while (fd < 0 && errno == EINTR);
   int result = SQLITE_CANTOPEN;
@@ -242,6 +258,7 @@ static int koraSelectMain(unixFile *file, int fd, const char *path) {
   file->koraAuthority = koraOpen;
   unixEnterMutex();
   owner->pool = 0;
+  owner->custody = koraOpen->custody;
   int result = koraCapture(owner, fd, SQLITE_OPEN_MAIN_DB, NULL, &info);
   if (result == SQLITE_OK && !koraSidecarReady(owner)) result = SQLITE_CANTOPEN;
   if (result != SQLITE_OK) koraParkFd(owner);

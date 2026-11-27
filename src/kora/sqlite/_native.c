@@ -3,6 +3,7 @@
 #include <Python.h>
 #include <pythread.h>
 #include <ctype.h>
+#include <pthread.h>
 
 #include "sqlite3.c"
 
@@ -17,6 +18,7 @@ typedef struct {
 } NativeDb;
 
 static const char *dbCapsuleName = "kora.sqlite.connection";
+static int forkedCustodyChild;
 
 static const char *errorClass(int code) {
   switch (code & 255) {
@@ -53,6 +55,12 @@ static PyObject *dbError(int code, const char *message) {
   return NULL;
 }
 
+static void *nativePointer(PyObject *capsule, const char *name) {
+  if (forkedCustodyChild)
+    return dbError(SQLITE_MISUSE, "SQLite owner belongs to the parent process.");
+  return PyCapsule_GetPointer(capsule, name);
+}
+
 static int closeDatabase(NativeDb *db) {
   int result = SQLITE_OK;
   Py_BEGIN_ALLOW_THREADS
@@ -74,7 +82,8 @@ static int closeDatabase(NativeDb *db) {
 }
 
 static void destroyDatabase(PyObject *capsule) {
-  NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
+  if (forkedCustodyChild) return;
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
   if (!db || closeDatabase(db) != SQLITE_OK) return;
   PyThread_free_lock(db->lifetime);
   koraReleaseFd(db->main);
@@ -82,6 +91,8 @@ static void destroyDatabase(PyObject *capsule) {
 }
 
 static PyObject *allocateDatabase(PyObject *module, PyObject *unused) {
+  if (forkedCustodyChild)
+    return dbError(SQLITE_MISUSE, "SQLite owner belongs to the parent process.");
   NativeDb *db = calloc(1, sizeof(*db));
   if (!db) return PyErr_NoMemory();
   db->main = koraNewFd();
@@ -109,17 +120,20 @@ static int approveMain(void *context, int descriptor, int empty) {
 static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   PyObject *capsule, *admit, *journal;
   const char *path;
-  int readOnly, timeout, directory, prepare, reuseOnly;
+  int readOnly, timeout, directory, prepare, reuseOnly, custody, authorityJournal;
   unsigned long long pool;
-  if (!PyArg_ParseTuple(args, "OspiOOipKp", &capsule, &path, &readOnly, &timeout,
-                        &admit, &journal, &directory, &prepare, &pool, &reuseOnly)) {
+  if (!PyArg_ParseTuple(args, "OspiOOipKppp", &capsule, &path, &readOnly, &timeout,
+                        &admit, &journal, &directory, &prepare, &pool, &reuseOnly,
+                        &custody, &authorityJournal)) {
     return NULL;
   }
-  NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
   if (!db) return NULL;
   if (db->connection || db->main->state != KORA_FD_ABSENT || koraOpen ||
       path[0] != '/' || !PyCallable_Check(admit) ||
-      (journal != Py_None && !PyCallable_Check(journal))) {
+      (journal != Py_None && !PyCallable_Check(journal)) ||
+      (custody && (pool || prepare || reuseOnly)) ||
+      (authorityJournal && (!custody || journal == Py_None || directory < 0 || readOnly))) {
     return dbError(SQLITE_MISUSE, "SQLite main admission is unavailable");
   }
   int flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) |
@@ -127,7 +141,7 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   if (journal != Py_None) flags |= SQLITE_OPEN_NOFOLLOW;
   db->open = (KoraOpen){&db->main, approveMain, admit,
                        journal == Py_None ? NULL : Py_NewRef(journal), directory,
-                       prepare ? path : NULL, pool, reuseOnly, 0};
+                       prepare ? path : NULL, pool, reuseOnly, 0, custody, authorityJournal};
   int result;
   Py_BEGIN_ALLOW_THREADS
   koraOpen = &db->open;
@@ -150,12 +164,31 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
 }
 
 static PyObject *reusedMain(PyObject *module, PyObject *capsule) {
-  NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
   return db ? PyBool_FromLong(db->open.reused) : NULL;
 }
 
+static PyObject *acquiredMain(PyObject *module, PyObject *capsule) {
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
+  return db ? PyBool_FromLong(db->main->state != KORA_FD_ABSENT) : NULL;
+}
+
+static PyObject *setLengthLimit(PyObject *module, PyObject *args) {
+  PyObject *capsule;
+  int bytes;
+  if (!PyArg_ParseTuple(args, "Oi", &capsule, &bytes)) return NULL;
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
+  if (!db) return NULL;
+  if (!db->connection || bytes <= 0)
+    return dbError(SQLITE_MISUSE, "SQLite length limit is unavailable");
+  sqlite3_limit(db->connection, SQLITE_LIMIT_LENGTH, bytes);
+  if (sqlite3_limit(db->connection, SQLITE_LIMIT_LENGTH, -1) != bytes)
+    return dbError(SQLITE_MISUSE, "SQLite length limit did not apply");
+  Py_RETURN_NONE;
+}
+
 static PyObject *closeDatabaseOwner(PyObject *module, PyObject *capsule) {
-  NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
   if (!db) return NULL;
   int result = closeDatabase(db);
   if (result != SQLITE_OK) return dbError(result, sqlite3_errstr(result));
@@ -163,7 +196,7 @@ static PyObject *closeDatabaseOwner(PyObject *module, PyObject *capsule) {
 }
 
 static PyObject *databaseSettled(PyObject *module, PyObject *capsule) {
-  NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
   if (!db) return NULL;
   int settled;
   Py_BEGIN_ALLOW_THREADS
@@ -175,14 +208,44 @@ static PyObject *databaseSettled(PyObject *module, PyObject *capsule) {
 static PyObject *relatedRetirement(PyObject *module, PyObject *args) {
   PyObject *source, *target;
   if (!PyArg_ParseTuple(args, "OO", &source, &target)) return NULL;
-  NativeDb *released = PyCapsule_GetPointer(source, dbCapsuleName);
-  NativeDb *waiting = PyCapsule_GetPointer(target, dbCapsuleName);
+  NativeDb *released = nativePointer(source, dbCapsuleName);
+  NativeDb *waiting = nativePointer(target, dbCapsuleName);
   if (!released || !waiting) return NULL;
   int related;
   Py_BEGIN_ALLOW_THREADS
   related = koraRelated(released->main, waiting->main);
   Py_END_ALLOW_THREADS
   return PyBool_FromLong(related);
+}
+
+static void prepareCustodyFork(void) {
+  if (!forkedCustodyChild) unixEnterMutex();
+}
+
+static void finishCustodyForkParent(void) {
+  if (!forkedCustodyChild) unixLeaveMutex();
+}
+
+static void finishCustodyForkChild(void) {
+  if (!forkedCustodyChild) {
+    forkedCustodyChild = 1;
+    for (KoraFd *owner = koraFiles; owner; owner = owner->next) {
+      if (owner->custody && owner->descriptor >= 0) close(owner->descriptor);
+    }
+  }
+}
+
+static PyObject *initializeCustodyFork(PyObject *module, PyObject *unused) {
+  static int registered;
+  if (forkedCustodyChild) return dbError(SQLITE_MISUSE, "SQLite owner belongs to the parent process.");
+  if (!registered) {
+    int result = sqlite3_initialize();
+    if (result != SQLITE_OK) return dbError(result, sqlite3_errstr(result));
+    if (pthread_atfork(prepareCustodyFork, finishCustodyForkParent, finishCustodyForkChild))
+      return dbError(SQLITE_IOERR, "SQLite fork ownership could not be registered.");
+    registered = 1;
+  }
+  Py_RETURN_NONE;
 }
 
 static const char *statementCapsuleName = "kora.sqlite.statement";
@@ -203,7 +266,7 @@ static PyObject *newChild(void *resource, const char *name,
 
 static int closeChild(PyObject *capsule, const char *name, int (*close)(void *)) {
   if (PyCapsule_IsValid(capsule, closedCapsuleName)) return SQLITE_OK;
-  void *resource = PyCapsule_GetPointer(capsule, name);
+  void *resource = nativePointer(capsule, name);
   if (!resource) return SQLITE_MISUSE;
   PyObject *database = PyCapsule_GetContext(capsule);
   if (PyCapsule_SetDestructor(capsule, NULL) != 0 ||
@@ -222,7 +285,7 @@ static int finalizeNative(void *statement) {
 }
 
 static void destroyStatement(PyObject *capsule) {
-  closeChild(capsule, statementCapsuleName, finalizeNative);
+  if (!forkedCustodyChild) closeChild(capsule, statementCapsuleName, finalizeNative);
 }
 
 static int bindValue(sqlite3_stmt *statement, int index, PyObject *value) {
@@ -271,7 +334,7 @@ static PyObject *prepareStatement(PyObject *module, PyObject *args) {
   PyObject *database, *parameters;
   const char *sql;
   if (!PyArg_ParseTuple(args, "OsO", &database, &sql, &parameters)) return NULL;
-  NativeDb *db = PyCapsule_GetPointer(database, dbCapsuleName);
+  NativeDb *db = nativePointer(database, dbCapsuleName);
   if (!db) return NULL;
   if (!db->connection) return dbError(SQLITE_MISUSE, "Cannot operate on a closed database.");
   sqlite3_stmt *statement = NULL;
@@ -324,7 +387,7 @@ static PyObject *columnValue(sqlite3_stmt *statement, int index) {
 }
 
 static PyObject *statementValues(PyObject *capsule, int columns) {
-  sqlite3_stmt *statement = PyCapsule_GetPointer(capsule, statementCapsuleName);
+  sqlite3_stmt *statement = nativePointer(capsule, statementCapsuleName);
   if (!statement) return NULL;
   if (!columns) {
     int result;
@@ -364,7 +427,7 @@ static PyObject *closeStatement(PyObject *module, PyObject *capsule) {
 }
 
 static NativeDb *connectedDatabase(PyObject *capsule) {
-  NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
   if (db && !db->connection) {
     dbError(SQLITE_MISUSE, "Cannot operate on a closed database.");
     return NULL;
@@ -381,7 +444,7 @@ static PyObject *databaseState(PyObject *module, PyObject *capsule) {
 }
 
 static PyObject *interruptDatabase(PyObject *module, PyObject *capsule) {
-  NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
   if (!db) return NULL;
   Py_BEGIN_ALLOW_THREADS
   PyThread_acquire_lock(db->lifetime, WAIT_LOCK);
@@ -532,7 +595,7 @@ static int closeNativeBlob(void *blob) {
 }
 
 static void destroyBlob(PyObject *capsule) {
-  closeChild(capsule, blobCapsuleName, closeNativeBlob);
+  if (!forkedCustodyChild) closeChild(capsule, blobCapsuleName, closeNativeBlob);
 }
 
 static PyObject *openBlob(PyObject *module, PyObject *args) {
@@ -554,7 +617,7 @@ static PyObject *openBlob(PyObject *module, PyObject *args) {
 }
 
 static PyObject *blobLength(PyObject *module, PyObject *capsule) {
-  sqlite3_blob *blob = PyCapsule_GetPointer(capsule, blobCapsuleName);
+  sqlite3_blob *blob = nativePointer(capsule, blobCapsuleName);
   if (!blob) return NULL;
   return PyLong_FromLong(sqlite3_blob_bytes(blob));
 }
@@ -569,9 +632,12 @@ static PyMethodDef methods[] = {
   {"allocate", allocateDatabase, METH_NOARGS, NULL},
   {"open", openDatabaseOwner, METH_VARARGS, NULL},
   {"reused_main", reusedMain, METH_O, NULL},
+  {"acquired_main", acquiredMain, METH_O, NULL},
+  {"set_length_limit", setLengthLimit, METH_VARARGS, NULL},
   {"close", closeDatabaseOwner, METH_O, NULL},
   {"settled", databaseSettled, METH_O, NULL},
   {"related", relatedRetirement, METH_VARARGS, NULL},
+  {"initialize_custody_fork", initializeCustodyFork, METH_NOARGS, NULL},
   {"prepare", prepareStatement, METH_VARARGS, NULL},
   {"step", stepStatement, METH_O, NULL},
   {"columns", statementColumns, METH_O, NULL},

@@ -13,7 +13,7 @@ from sqlalchemy import Connection, event
 from sqlalchemy.engine.interfaces import DBAPICursor, ExceptionContext
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
-from sqlalchemy.pool.base import PoolProxiedConnection
+from sqlalchemy.pool.base import ConnectionPoolEntry, PoolProxiedConnection
 from sqlalchemy.util import await_
 
 from kora.db.graph_deployment_stage_reads import PAYLOAD_DIGEST_WIDTH, STORE_ID_WIDTH
@@ -96,6 +96,19 @@ class _SQLiteIntentWidthRow:
                 require_promotion_intent_width(len(value), lower, upper, factor)
 
 
+def sqlite_record_worker(
+    checkout: ConnectionPoolEntry | PoolProxiedConnection,
+) -> SQLiteDriver | None:
+    driver: object = checkout.driver_connection
+    return driver if isinstance(driver, SQLiteDriver) else None
+
+
+async def sqlite_checkout_worker(connection: AsyncConnection) -> SQLiteDriver | None:
+    if connection.closed or connection.invalidated:
+        return None
+    return sqlite_record_worker(await connection.get_raw_connection())
+
+
 async def observe_sqlite_promotion_intent(
     connection: AsyncConnection,
     stage_id: str,
@@ -103,11 +116,8 @@ async def observe_sqlite_promotion_intent(
     check_deadline: Callable[[], None],
 ) -> bool:
     check_deadline()
-    if connection.invalidated:
-        raise PromotionIntentScalarsRejected()
-    raw = await connection.get_raw_connection()
-    driver: object = raw.driver_connection
-    if not isinstance(driver, SQLiteDriver) or not driver.in_transaction:
+    driver = await sqlite_checkout_worker(connection)
+    if driver is None or not driver.in_transaction:
         raise PromotionIntentScalarsRejected()
     async with driver.cursor() as cursor:
         cursor.row_factory = _SQLiteIntentWidthRow

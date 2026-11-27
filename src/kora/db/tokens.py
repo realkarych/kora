@@ -1,8 +1,7 @@
 import sqlite3
-from datetime import UTC, datetime
 from typing import Final
 
-from sqlalchemy import Integer, literal_column, or_, select, update
+from sqlalchemy import Integer, literal_column, select
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as DatabaseTimeout
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -10,10 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from kora.db.connection import Database, DatabaseClosedError, Dialect
 from kora.db.identifiers import is_identifier
 from kora.db.tables import api_token
+from kora.db.token_statements import REVOKED as REVOKED
+from kora.db.token_statements import revoke_token_statement
 from kora.db.transactions import raise_private_metadata_error, writer_transaction
 from kora.db.types import POSTGRESQL, SQLITE
 
-REVOKED: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
 UNAVAILABLE_SQLITE: Final[frozenset[int]] = frozenset(
     (
         sqlite3.SQLITE_BUSY,
@@ -95,10 +95,5 @@ def authentication_unavailable(error: Exception) -> bool:
 
 async def revoke_token(connection: AsyncConnection, token_id: str) -> None:
     await connection.execute(
-        update(api_token)
-        .where(
-            api_token.c.id == token_id,
-            or_(api_token.c.expires_at.is_(None), api_token.c.expires_at != REVOKED),
-        )
-        .values(expires_at=REVOKED)
+        revoke_token_statement(), {"token_id": token_id, "revoked": REVOKED}
     )
