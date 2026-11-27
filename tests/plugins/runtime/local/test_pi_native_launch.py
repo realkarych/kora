@@ -1013,9 +1013,13 @@ async def test_pi_bridge_refuses_resumed_write_after_checkout_replacement(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["closed", "deadline"])
+@pytest.mark.parametrize(
+    "buffered", ["terminal", "malformed", "oversized", "incomplete"]
+)
 async def test_pi_bridge_preserves_stop_cause_for_buffered_reply(
     kora_capture: Capture,
     stop: str,
+    buffered: str,
 ) -> None:
     clock = StepClock()
     async with prepared_channel(kora_capture, clock) as (
@@ -1026,11 +1030,19 @@ async def test_pi_bridge_preserves_stop_cause_for_buffered_reply(
     ):
         pending = asyncio.create_task(channel.prompt(PROMPT))
         async with asyncio.timeout(5):
-            await control_challenge(peer[0], "prompt")
+            challenge = await control_challenge(peer[0], "prompt")
         with pytest.raises(BridgeRefused) as duplicate:
             await channel.prompt(PROMPT)
 
-        reader.feed_data(b"{\n")
+        payload = {
+            "terminal": bridge_reply("terminal", challenge),
+            "malformed": b"{\n",
+            "oversized": b"x" * (MAX_FRAME_BYTES + 1),
+            "incomplete": b"{",
+        }[buffered]
+        reader.feed_data(payload)
+        if buffered == "incomplete":
+            reader.feed_eof()
         if stop == "closed":
             channel.revoke()
         else:

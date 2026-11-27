@@ -165,10 +165,10 @@ class BridgeChannel:
                 record = await self._reader.readuntil(b"\n")
         except TimeoutError:
             raise BridgeRefused("deadline") from None
-        except (OSError, asyncio.IncompleteReadError):
-            raise BridgeRefused("closed") from None
-        except asyncio.LimitOverrunError:
-            raise BridgeRefused("protocol") from None
+        except (OSError, EOFError, asyncio.LimitOverrunError) as error:
+            self._remaining()
+            oversized = isinstance(error, asyncio.LimitOverrunError)
+            raise BridgeRefused("protocol" if oversized else "closed") from None
         self._remaining()
         frame = decode_strict_json(record, MAX_FRAME_BYTES, 1)
         if (
