@@ -11,7 +11,12 @@ from kora.conformance.bridge import ConformanceSelection
 from kora.conformance.capture import Pipe
 from kora.conformance.common import CONFORMANCE_COMPONENT, utc_now
 from kora.conformance.executor import Executor
-from kora.conformance.result import ChildInput, ChildResult, accepted_report
+from kora.conformance.result import (
+    MAX_CHILD_INPUT_BYTES,
+    ChildInput,
+    ChildResult,
+    accepted_report,
+)
 from kora.conformance.session import CURRENT_SESSION, Session
 from kora.observability import Level, LoggingSettings, configure_process
 from kora.protocols.loading import LOADING_COMPONENT, load_provider
@@ -37,7 +42,9 @@ def read_input(path: str | None) -> bytes:
 
 async def inputs(channel: BoundedChannel) -> tuple[ChildInput, bytes, bytes]:
     deadline = SystemClock().monotonic_ns() + 30_000_000_000
-    request = ChildInput.model_validate_json(await channel.read_record(deadline, 16384))
+    request = ChildInput.model_validate_json(
+        await channel.read_record(deadline, MAX_CHILD_INPUT_BYTES)
+    )
     configuration = await channel.read_record(deadline, MAX_RECORD_BYTES)
     fixture_data = await channel.read_record(deadline, MAX_RECORD_BYTES)
     if request.files is not None:

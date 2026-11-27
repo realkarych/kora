@@ -16,6 +16,12 @@ from typing import Final, Literal
 import pytest
 
 from kora.cli.conformance import CommandResult
+from kora.conformance.result import (
+    MAX_CHILD_INPUT_BYTES,
+    ChildInput,
+    HarnessOutputProfile,
+    InputFiles,
+)
 from kora.db.connection import DatabaseSettings
 from kora.ir.json import JsonObject
 from kora.protocols.lifetime import (
@@ -23,6 +29,8 @@ from kora.protocols.lifetime import (
     OriginalOutcome,
 )
 from kora.protocols.metadata import ProtocolName
+from kora.protocols.time import SystemClock
+from kora.runner.channels import BoundedChannel
 from tests.conformance.progress_guard import Progress, progress_run
 from tests.support.configured_conformance import (
     installed_conformance as installed_conformance,
@@ -707,6 +715,58 @@ def test_installed_harness_output_profile_is_selected_by_the_operator(
         assert outcome.expected == 10
         assert_closed(outcome)
     assert not list(home.rglob("journal"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "escaped_characters", "wire_profile", "wire_size"),
+    [
+        pytest.param(None, 4057, None, 16_370, id="omitted"),
+        pytest.param("tool-channel", 4057, None, 16_370, id="explicit-default"),
+        pytest.param(
+            "terminal-text", 4050, "terminal-text", 16_383, id="terminal-text"
+        ),
+    ],
+)
+async def test_harness_output_profile_preserves_the_bounded_child_input(
+    profile: HarnessOutputProfile | None,
+    escaped_characters: int,
+    wire_profile: HarnessOutputProfile | None,
+    wire_size: int,
+) -> None:
+    path = "/" + '"' * escaped_characters
+    request = ChildInput(
+        protocol=ProtocolName.HARNESS,
+        name="configured",
+        fixtures="kora_tooling_fixture.fixtures_harness",
+        files=InputFiles(configuration=path, fixture_data=path),
+        harness_output_profile=profile,
+    )
+    expected: JsonObject = {
+        "protocol": "harness",
+        "name": "configured",
+        "fixtures": "kora_tooling_fixture.fixtures_harness",
+        "files": {"configuration": path, "fixture_data": path},
+    }
+    if wire_profile is not None:
+        expected["harness_output_profile"] = wire_profile
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 5_000_000_000
+    outgoing, incoming = socket.socketpair()
+    with outgoing, incoming:
+        sender = BoundedChannel(outgoing, clock)
+        receiver = BoundedChannel(incoming, clock)
+
+        _, received = await asyncio.gather(
+            sender.write_record(request.model_dump_json().encode(), deadline),
+            receiver.read_record(deadline, MAX_CHILD_INPUT_BYTES),
+        )
+        decoded = ChildInput.model_validate_json(received)
+
+    assert received == json.dumps(expected, separators=(",", ":")).encode()
+    assert len(received) == wire_size
+    assert decoded.files == request.files
+    assert decoded.harness_output_profile == wire_profile
 
 
 @pytest.mark.parametrize(

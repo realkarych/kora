@@ -20,6 +20,7 @@ from kora.conformance.common import (
     utc_now,
 )
 from kora.conformance.harness import kora_capture as kora_capture
+from kora.ir import ErrorClass
 from kora.ir.json import JsonObject, JsonValue
 from kora.observability import LoggingSettings
 from kora.plugins.harness.fake import FakeHarness, ListedScript
@@ -511,17 +512,23 @@ def test_harness_terminal_output_rejects_wrong_candidates_and_channel_events(
 
 
 @pytest.mark.parametrize(
-    ("status", "stop_reason", "result_observed"),
+    ("status", "stop_reason", "error_class", "result_observed"),
     [
-        pytest.param("success", "completed", False, id="missing-result"),
-        pytest.param("error", "completed", True, id="error-result"),
-        pytest.param("success", "cli_exit_without_result", True, id="premature-stop"),
+        pytest.param("success", "completed", None, False, id="missing-result"),
+        pytest.param("error", "completed", None, True, id="error-result-event"),
+        pytest.param(
+            "success", "completed", ErrorClass.HARNESS_ERROR, True, id="session-error"
+        ),
+        pytest.param(
+            "success", "cli_exit_without_result", None, True, id="premature-stop"
+        ),
     ],
 )
 def test_harness_terminal_output_requires_observable_successful_completion(
     kora_capture: Capture,
     status: Literal["success", "error"],
     stop_reason: str,
+    error_class: ErrorClass | None,
     result_observed: bool,
 ) -> None:
     provider = FakeHarness(
@@ -536,7 +543,13 @@ def test_harness_terminal_output_requires_observable_successful_completion(
     completed = checks.HarnessHost().run(provider, DENIED_TOOL, None)
     run = replace(
         completed,
-        result=completed.result.model_copy(update={"stop_reason": stop_reason}),
+        result=SessionResult.model_validate(
+            {
+                **completed.result.model_dump(),
+                "stop_reason": stop_reason,
+                "error_class": error_class,
+            }
+        ),
         events=tuple(
             event
             for event in completed.events
