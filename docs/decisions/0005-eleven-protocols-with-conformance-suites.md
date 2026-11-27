@@ -34,7 +34,7 @@ kora is designed for an instance shared by many teams on an organisation's own i
 Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` for its deployment configuration and conformance cases marked `kora_conformance`.
 
 1. **runtime**: where a session executes (`submit` keyed by attempt id, `lookup`, `adopt`, `events`, late `finalize`, `cancel`). MVP: `local`, `docker`.
-2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude` and `codex`, plus the fake harness for tests, which is injected and never registered; `acp` after MVP (ADR-0004).
+2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude`, `codex` and `pi` (the [Pi installation profile](../../knowledge/specs/pi-execution-profile.md)), plus the fake harness for tests, which is injected and never registered; `acp` after MVP (ADR-0004).
 3. **VCS**: typed checkout and publish plans (`checkout_plan`, `publish_plan`) that the session runner executes inside the runtime, change requests, the branch head, CI status. MVP: `git` with the GitHub and GitLab APIs.
 4. **approval channel**: request, poll, feedback, cancel; never decides validity. MVP: `cli`, `vcs`.
 5. **secrets**: `resolve(secret://…)` bound to namespace prefixes. MVP: `env`, `file`.

@@ -105,6 +105,12 @@ Each moved item keeps its specification text as the contract for when its issue 
 | Code host, remote credential issuer, change requests and VCS approval | Pending; no remote network publication or channel selection | Code-host implementation activates remote identity/issuer/API/change-request evidence; local late authorization is required now |
 | Notifications, /plan, /reference/*, artifact-type registry routes, cost reads, GET /workers, HTTP-mounted MCP | Deferred | Each owning feature activates complete parity and corresponding tests; built-in artifact descriptors and approval run_cost remain required |
 
+## Pi qualification within MVP
+
+The existing “Required” entries define baseline first-slice readiness for Claude and Codex. In addition, full MVP requires [independent Pi qualification](pi-execution-profile.md#qualification-and-activation) of the same local sequence under [ADR-0001](../../docs/decisions/0001-own-control-plane.md#pi-mvp-qualification-amendment-of-2026-11-27). This applies the shared refusal, selected Policy, version, result, bounded output, actual resource closure, same-attempt adoption and operation parity obligations to the Pi installation. Pi activation requires its own SDK and installed history evidence with the existing producer boundaries. The walking-skeleton and second-slice milestones keep their established scope.
+
+Ordinary validation rejects unqualified Pi installation choices before effects. The controlled MCP interception fixture is separate from the production inventory, which excludes graph-provided MCP and subagents. The local model workflow uses the qualified Pi profile and retains the exact commit, gate input, approval and observed usage in the existing scoped history.
+
 ## Refusal contract
 
 The [same-call trusted validation-facts contract](validation-facts.md) defines the accepted lifetime and ownership of installation-aware input. Missing or inconsistent required protection facts cannot become normal validation success or admission; [section 7](validation-facts.md#7-public-disposition-of-incomplete-trusted-facts) defines their public failure disposition under #628. Concrete producer, normalization and consuming integration prerequisites remain under #549; authored first-slice checks and fake-provider facts do not establish them.

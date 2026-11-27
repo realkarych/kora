@@ -4,6 +4,7 @@
 - Reviewed: by the project owner, 2026-10-16; publication-boundary amendment dated 2026-10-17 pending owner review
 - Superseded in part by: [ADR-0016](0016-trusted-execution-and-publication.md) (publication placement and phases)
 - Amended by: [ADR-0022](0022-inherited-execution-deadlines.md), 2026-10-17 (inherited lifecycle deadlines and expiry); wording pending owner review
+- Amended by: [ADR-0030](0030-pi-sdk-candidate-process.md), 2026-11-27 (optional Pi SDK candidate process); wording pending owner review
 - Deciders: project owner, after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md), which replaced three generated clients with [one shared API client](../../knowledge/reviews/review-2026-10-15.md#one-shared-api-client) and settled the [build backend and CEL binding](../../knowledge/reviews/review-2026-10-15.md#stack-details)
 - Absorbs: requirements decision 18 (stack part; its "harness CLI + JSONL" part was replaced by requirements decision 19, see ADR-0004), the [stack reference](../../knowledge/architecture/detailed.md#stack-per-component)
 - Related: [0001-own-control-plane.md](0001-own-control-plane.md), [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0004-harness-adapters-over-vendor-sdks.md](0004-harness-adapters-over-vendor-sdks.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md)
@@ -21,7 +22,7 @@ The architecture fixes a control plane, outbound-only workers per runtime, proto
 
 ## Decision
 
-- **Python 3.11+ with `asyncio` throughout** (NFR-11.1).
+- **Python 3.11+ with `asyncio`** for the control plane, worker and runner (NFR-11.1). The optional Pi execution installation uses a pinned Node.js child under [ADR-0030](0030-pi-sdk-candidate-process.md).
 - **`uv` + `hatchling`, one distribution `kora`** with extras (`kora[postgres]`, `kora[docker]`, `kora[otel]`, `kora[cel]`), `src/` layout, monorepo with the frontend in `web/`. `hatchling` is kept over `uv_build` because the embedded web build needs a custom build hook.
 - **FastAPI + Pydantic v2** for the HTTP API. Pydantic models are the single definition of the intermediate representation (IR) and publish `ir.schema.json`; OpenAPI feeds the web client generator and the parity coverage test.
 - **SQLAlchemy 2.0 + Alembic** over **PostgreSQL via `asyncpg`** and **SQLite via `aiosqlite`** for standalone. Row claims use `SELECT … FOR UPDATE SKIP LOCKED` on PostgreSQL and a single-writer process on SQLite; an external queue was rejected because run state must live only in the database (NFR-1.2).
