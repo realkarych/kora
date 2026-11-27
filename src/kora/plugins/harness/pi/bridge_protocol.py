@@ -15,9 +15,7 @@ from kora.runner.process_stdio import StdioStreams
 MAX_FRAME_BYTES: Final[int] = 65_536
 MAX_PROMPT_BYTES: Final[int] = 32_768
 _NONCE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{32}")
-_FAILURES: Final[frozenset[str]] = frozenset(
-    {"protocol", "startup", "credential", "prompt", "stopped"}
-)
+_FAILURES: Final = ("protocol", "startup", "credential", "prompt", "stopped")
 Command = Literal["init", "credential", "prompt"]
 Reply = Literal["ready", "credential_ready", "terminal"]
 
@@ -39,7 +37,7 @@ class BridgeChannel:
         nonce: str,
         cutoff_ns: int,
         clock: Clock,
-        require_live: Callable[[], None],
+        require_binding: Callable[[bool], None],
         recheck_installation: Callable[[], Awaitable[None]],
     ) -> None:
         if _NONCE.fullmatch(nonce) is None:
@@ -49,7 +47,7 @@ class BridgeChannel:
         self._nonce = nonce
         self._cutoff_ns = cutoff_ns
         self._clock = clock
-        self._require_live = require_live
+        self._require_binding = require_binding
         self._recheck_installation = recheck_installation
         self._phase: Command | None = "init"
         self._revoked: bool = False
@@ -86,11 +84,12 @@ class BridgeChannel:
         self._phase = None
         complete = False
         try:
-            self._require_live()
+            self._require_binding(False)
             challenge = new_operation_id()
             if secret is not None:
                 fields["key"] = secret.reveal()
-            await self._send(kind, challenge=challenge, **fields)
+            await self._send(kind, **fields)
+            await self._send("activate", challenge=challenge)
             response = await self._receive(reply, challenge)
             self._phase = following
             complete = True
@@ -142,7 +141,7 @@ class BridgeChannel:
         try:
             remaining = memoryview(record)
             while remaining:
-                self._require_live()
+                self._require_binding(False)
                 self._remaining()
                 descriptor = self._endpoint.fileno()
                 try:
@@ -150,7 +149,7 @@ class BridgeChannel:
                 except BlockingIOError:
                     await self._wait_writable(descriptor)
                     self._remaining()
-                    self._require_live()
+                    self._require_binding(False)
                     await self._recheck_installation()
                     continue
                 if written <= 0:
@@ -171,7 +170,6 @@ class BridgeChannel:
             raise BridgeRefused("closed") from None
         except asyncio.LimitOverrunError:
             raise BridgeRefused("protocol") from None
-        self._remaining()
         frame = decode_strict_json(record, MAX_FRAME_BYTES, 1)
         if (
             b"\r" in record
@@ -180,6 +178,8 @@ class BridgeChannel:
             or frame.pop("challenge", None) != challenge
         ):
             raise BridgeRefused("protocol")
+        self._require_binding(frame.get("kind") in ("failure", "terminal"))
+        self._remaining()
         match frame:
             case {"kind": "failure", "code": str(code)} if (
                 len(frame) == 2 and code in _FAILURES
