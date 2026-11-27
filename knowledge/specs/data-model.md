@@ -2181,7 +2181,7 @@ The output lookup uses the native unique `(attempt_id, output_name)` owner key i
 
 The publication alternatives use [the Worker evidence rules](api-and-agent-surface.md#worker-route-bodies-issue-139):
 
-- `not_applicable` binds the checked sealed no-publication request (version-1 `publication: null`), the saved no-`VcsRef` output contract and the absence of a conflicting operation.
+- `not_applicable` binds the checked sealed no-publication request (version-1 `publication: null`), the saved no-`VcsRef` output contract and the absence of a conflicting operation. The [ordinary v2 command mapping](execution-request.md#command-terminal-publication-evidence) uses these same references and checks.
 - `not_dispatched` requires authoritative evidence of no dispatch for the original scope and no recorded publication operation.
 - `completed` or `failed` binds the original operation, its revision/destination and the authenticated typed supervisor summary identity. For `completed`, match the full saved runtime-result digest and `VcsRef` contract identity.
 - `unknown` is admissible only for `cancelled` and `lost`. Preserve the original scoped obligation. When the original operation is identified, authenticated read-only reconciliation must resolve that operation and its exact revision/destination under the existing dispatch closure conditions. Without an operation identity, a later operation for the same attempt supplies no proof. Closure remains unresolved until qualified evidence for the original scope or applicable existing operator attestation. The recovery owner commits new authoritative evidence and the scheduling marker under the original run lock. The binding is immutable.

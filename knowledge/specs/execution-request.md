@@ -206,6 +206,12 @@ The trusted consumer verifies the original accepted source, original grant and c
 
 Verify the sealed name, digest and size before transfer allocation. Before command start, check the exact file inventory and re-hash the private input root's files. A missing, extra, wrong-size or wrong-digest file refuses command start. Local runtime retains input protection `none`. Its selected runtime identity has `protected_execution: false` and the existing checks refuse `require_protected_execution`. [Runtime and command inputs](protocols.md#2-runtime-fr-81)
 
+### Command terminal publication evidence
+
+For the [existing terminal-report check](api-and-agent-surface.md#worker-route-bodies-issue-139) owned by #1454, the original checked sealed v2 command's `publication: null` supplies the sealed no-publication decision. Match that decision to the exact accepted request and the pinned saved output contract, which must declare no `VcsRef` output. The command consumes an accepted VcsRef as input. That consumption supplies no publication intent or publication outcome. Require the absence of a conflicting operation under the [existing durable report binding](data-model.md#165-durable-attempt-report-acceptance).
+
+The runtime protocol's logical `publish: None` refers to this checked no-publication decision. A runtime projection, the report's own `not_applicable` value or an unsealed request cannot independently establish it. Missing original proof remains unresolved. Existing report authorization, evidence binding, replay and settlement rules apply. This mapping is a prerequisite for a qualified #1454 consumer of the v2 command and leaves [the skeleton's v1 closure](first-local-grant-closure.md#4-report-release-and-replay) at its existing scope.
+
 ### Descriptor envelope and owner transitions
 
 The [closed request descriptor](api-and-agent-surface.md#worker-route-bodies-issue-139) retains envelope `version: 1`, its exact existing members and the 16 KiB bound. Before runtime effects, the descriptor digest, the complete qualified bytes and the canonical body codec recorded by the original owner must agree. A v1-only consumer refuses a v2 body. An authorized metadata-only replay can return the saved descriptor and actual availability without selecting a body codec or reacquiring bytes. There is no descriptor rewrite. If an owning persisted or transport consumer couples the two versions, the affected variant stays closed pending an approved compatible change to that boundary.
