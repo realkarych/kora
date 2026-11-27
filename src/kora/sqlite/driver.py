@@ -62,6 +62,8 @@ class Connection:
         prepare: bool = False,
         pool: int = 0,
         reuse_only: bool = False,
+        custody: bool = False,
+        authority_journal: bool = False,
     ) -> None:
         self.native.open(
             self.handle,
@@ -74,11 +76,19 @@ class Connection:
             prepare,
             pool,
             reuse_only,
+            custody,
+            authority_journal,
         )
         self._opened = True
 
     def reused_main(self) -> bool:
         return self.native.reused_main(self.handle)
+
+    def acquired_main(self) -> bool:
+        return self.native.acquired_main(self.handle)
+
+    def set_length_limit(self, maximum: int) -> None:
+        self.native.set_length_limit(self.handle, maximum)
 
     def close(self) -> None:
         for cursor in tuple(self.cursors):

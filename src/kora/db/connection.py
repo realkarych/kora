@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import enum
 import math
@@ -13,12 +15,18 @@ from collections.abc import (
     Iterable,
     Mapping,
 )
-from contextlib import AsyncExitStack, asynccontextmanager, closing, contextmanager
+from contextlib import (
+    AbstractAsyncContextManager,
+    AsyncExitStack,
+    asynccontextmanager,
+    closing,
+    contextmanager,
+)
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
-from typing import Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, ParamSpec, Protocol, TypeVar, cast, overload
 from weakref import ReferenceType, ref
 
 import aiosqlite
@@ -42,7 +50,17 @@ from sqlalchemy.pool.base import ConnectionPoolEntry, PoolProxiedConnection
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.util import await_, greenlet_spawn
 
-from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
+from kora.db import (
+    CLOSE_TIMED_OUT,
+    DB_COMPONENT,
+    DB_LOGGER_NAME,
+    TRANSACTION_FAILED,
+    CustodyUnavailable,
+)
+from kora.db.completion import complete as complete
+from kora.db.completion import finish_releasing as finish_releasing
+from kora.db.completion import nothing as nothing
+from kora.db.completion import wait_releasing
 from kora.db.maintenance import (
     NATIVE_READ_RETIRE,
     NativeReadExpired,
@@ -56,11 +74,22 @@ from kora.db.transactions import (
     WriterTransactionError,
     managed_writer,
     raise_private_metadata_error,
+    writer_transaction,
 )
-from kora.db.types import POSTGRESQL, SQLITE
+from kora.db.types import POSTGRESQL, SQLITE, SQLITE_SYNCHRONOUS_FULL
 from kora.observability import ComponentLogger, current_diagnostics
 from kora.sqlite.driver import Connection as NativeConnection
 from kora.sqlite.driver import NativeRetirement, driver_version
+
+if TYPE_CHECKING:
+    from kora.db.custody_journal import CustodyJournalLease, CustodySQLiteInstallation
+    from kora.db.custody_sqlite import SQLiteWorkerOriginal
+    from kora.db.custody_transaction import OriginalCustodyTransaction
+    from kora.db.custody_writer import (
+        LocalSQLiteWriterLoan,
+        LocalSQLiteWriterScope,
+        SQLitePhysicalWriter,
+    )
 
 DATABASE_URL_VARIABLE: str = "KORA_DATABASE_URL"
 SQLITE_DRIVER: str = "sqlite+aiosqlite"
@@ -74,7 +103,6 @@ SQLITE_BUSY_TIMEOUT_SECONDS: float = 5.0
 SQLITE_PREPARATION: ContextVar[Path | None] = ContextVar(
     "sqlite_preparation", default=None
 )
-SQLITE_SYNCHRONOUS_FULL: int = 2
 SQLITE_READERS: int = 4
 AIOSQLITE_ITER_CHUNK_SIZE: int = 64
 DEFAULT_POOL_SIZE: int = 5
@@ -112,6 +140,7 @@ POSTGRESQL_LOCAL_FLUSH_MODES: tuple[str, ...] = (
 )
 
 Result = TypeVar("Result")
+DriverArgs = ParamSpec("DriverArgs")
 
 
 class DatabaseClosedError(RuntimeError):
@@ -386,11 +415,27 @@ def keep_connection_on_cancellation(context: ExceptionContext) -> None:
         context.is_disconnect = False
 
 
-class SqliteDriverConnection(aiosqlite.Connection):
-    def __init__(self, opened: NativeConnection) -> None:
-        super().__init__(
-            lambda: cast(sqlite3.Connection, opened), AIOSQLITE_ITER_CHUNK_SIZE
-        )
+if TYPE_CHECKING:
+
+    class _SQLiteWorker(aiosqlite.Connection):
+        async def _execute(
+            self,
+            work: Callable[DriverArgs, Result],
+            *args: DriverArgs.args,
+            **kwargs: DriverArgs.kwargs,
+        ) -> Result: ...
+else:
+    _SQLiteWorker = aiosqlite.Connection
+
+
+class SqliteDriverConnection(_SQLiteWorker):
+    def __init__(
+        self, opened: NativeConnection | Callable[[], NativeConnection]
+    ) -> None:
+        def connect() -> sqlite3.Connection:
+            return cast(sqlite3.Connection, opened() if callable(opened) else opened)
+
+        super().__init__(connect, AIOSQLITE_ITER_CHUNK_SIZE)
         self._thread.daemon = True
 
 
@@ -497,12 +542,15 @@ def open_sqlite_file(
     lifetime: _SqliteServingLifetime | None = None,
     *,
     guarded_reader: _GuardedSqliteReader | None = None,
+    custody: SQLitePhysicalWriter | None = None,
 ) -> NativeConnection:
     driver_version()
     if guarded_reader is not None:
         guarded_reader.require_live()
     NativeRetirement.drain(path)
     reserved = slots.acquire(blocking=False)
+    if custody is not None and not reserved:
+        raise CustodyUnavailable
 
     def release() -> None:
         slots.release()
@@ -519,10 +567,14 @@ def open_sqlite_file(
     def admit(descriptor: int, empty: int) -> bool:
         if guarded_reader is not None:
             guarded_reader.require_live()
+        if custody is not None:
+            return custody.admit(descriptor, empty)
         return not empty or sqlite_empty_admitted(path, descriptor)
 
     try:
-        connection = NativeConnection(retire)
+        connection = (
+            NativeConnection(retire) if custody is None else custody.allocate(retire)
+        )
     except BaseException:
         if reserved:
             slots.release()
@@ -530,7 +582,7 @@ def open_sqlite_file(
     if reserved and lifetime is not None:
         lifetime.opened()
     try:
-        prepare = reserved and SQLITE_PREPARATION.get() == path
+        prepare = custody is None and reserved and SQLITE_PREPARATION.get() == path
         if prepare:
             path.parent.mkdir(parents=True, exist_ok=True)
         connection.open(
@@ -539,8 +591,9 @@ def open_sqlite_file(
             int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000),
             admit,
             prepare=prepare,
-            pool=id(slots) if guarded_reader is None else 0,
+            pool=id(slots) if guarded_reader is None and custody is None else 0,
             reuse_only=not reserved,
+            custody=custody is not None,
         )
         if reserved and connection.reused_main():
             reserved = False
@@ -557,8 +610,11 @@ def sqlite_connector(
     lifetime: _SqliteServingLifetime | None = None,
     *,
     guarded_reader: _GuardedSqliteReader | None = None,
+    custody: SQLitePhysicalWriter | None = None,
 ) -> Callable[[], Awaitable[aiosqlite.Connection]]:
     slots = BoundedSemaphore(capacity)
+    if custody is not None:
+        return custody.connector(path, slots)
 
     async def connect() -> aiosqlite.Connection:
         async def acquire() -> _GuardedSqliteDriverConnection:
@@ -596,6 +652,7 @@ def sqlite_engine(
     require_full_sync: bool = False,
     serving_lifetime: _SqliteServingLifetime | None = None,
     guarded_reader: _GuardedSqliteReader | None = None,
+    custody: SQLitePhysicalWriter | None = None,
 ) -> AsyncEngine:
     capacity = 1 if writer or guarded_reader is not None else SQLITE_READERS
     connector = sqlite_connector(
@@ -603,6 +660,7 @@ def sqlite_engine(
         capacity,
         serving_lifetime,
         guarded_reader=guarded_reader,
+        custody=custody,
     )
     module = sqlite_driver_module()
     if writer:
@@ -619,6 +677,8 @@ def sqlite_engine(
             async_creator=connector,
             module=module,
         )
+    if custody is not None:
+        event.listen(engine.pool, "checkin", custody.checkin)
     if require_full_sync:
         configure = configure_full_sync_writer if writer else configure_full_sync_reader
         event.listen(engine.sync_engine, "connect", configure)
@@ -706,48 +766,8 @@ def rollback_postgresql_migration_commit(connection: Connection) -> None:
         raise
 
 
-async def wait_through_cancellations(task: asyncio.Future[Result]) -> None:
-    while not task.done():
-        try:
-            await asyncio.shield(asyncio.wait({task}))
-        except asyncio.CancelledError:
-            continue
-    if not task.cancelled():
-        task.exception()
-
-
-async def finish_releasing(
-    pending: Awaitable[Result], release: Callable[[Result], Awaitable[None]]
-) -> Result:
-    task = asyncio.ensure_future(pending)
-    return await wait_releasing(task, asyncio.shield(task), release)
-
-
-async def wait_releasing(
-    task: asyncio.Future[Result],
-    protected: asyncio.Future[Result],
-    release: Callable[[Result], Awaitable[None]],
-) -> Result:
-    try:
-        return await protected
-    except asyncio.CancelledError:
-        await wait_through_cancellations(task)
-        if not task.cancelled() and task.exception() is None:
-            release_task = asyncio.ensure_future(release(task.result()))
-            await wait_through_cancellations(release_task)
-        raise
-
-
 async def close_connection(connection: AsyncConnection) -> None:
     await connection.close()
-
-
-async def nothing(result: object) -> None:
-    return None
-
-
-async def complete(pending: Awaitable[Result]) -> Result:
-    return await finish_releasing(pending, nothing)
 
 
 async def start_snapshot_phase(
@@ -903,6 +923,28 @@ class _SnapshotAdmission:
 
 
 Unit = Callable[[AsyncConnection], Awaitable[Result]]
+
+
+class LocalSQLiteWriterEntry:
+    __slots__ = ()
+
+
+@dataclass(frozen=True)
+class LocalSQLiteWriterUnit:
+    entry: LocalSQLiteWriterEntry
+    token_id: str
+    next_token_id: str | None = None
+
+
+@dataclass
+class LocalSQLiteCheckout:
+    connection: AsyncConnection | None = None
+    worker: SQLiteWorkerOriginal | None = None
+    original: OriginalCustodyTransaction | None = None
+    released: bool = False
+    attempted: bool = False
+
+
 SNAPSHOT_NATIVE_ERRORS: tuple[type[Exception], ...] = (
     DatabaseClosedError,
     OSError,
@@ -921,7 +963,7 @@ class Database:
     @classmethod
     def guarded_sqlite_reader(
         cls, path: Path, require_live: Callable[[], None]
-    ) -> "Database":
+    ) -> Database:
         if not path.is_absolute() or ".." in path.parts:
             raise DatabaseConfigurationError(
                 "the protected SQLite path must be canonical"
@@ -943,7 +985,16 @@ class Database:
         require_postgresql_wal_settings: bool = False,
         observe_sqlite_serving: bool = False,
         _guarded_reader: _GuardedSqliteReader | None = None,
+        _local_sqlite_writer: LocalSQLiteWriterScope | None = None,
     ) -> None:
+        if _local_sqlite_writer is not None and (
+            settings.dialect is not Dialect.SQLITE
+            or not require_sqlite_full_sync
+            or observe_sqlite_serving
+            or _guarded_reader is not None
+        ):
+            raise CustodyUnavailable
+        self._local_sqlite_writer = _local_sqlite_writer
         if require_sqlite_full_sync and settings.dialect is not Dialect.SQLITE:
             raise ValueError("the SQLite writer mode requires SQLite")
         if (
@@ -986,6 +1037,9 @@ class Database:
                 writer=True,
                 require_full_sync=require_sqlite_full_sync,
                 serving_lifetime=self._sqlite_serving,
+                custody=None
+                if _local_sqlite_writer is None
+                else _local_sqlite_writer.physical,
             )
             self._reader = sqlite_engine(
                 settings,
@@ -1014,13 +1068,19 @@ class Database:
 
     @property
     def writer_engine(self) -> AsyncEngine:
+        self._require_ordinary_database()
         if self._writer is None:
             raise DatabaseClosedError("the database writer is unavailable")
         return self._writer
 
     @property
     def reader_engine(self) -> AsyncEngine:
+        self._require_ordinary_database()
         return self._reader
+
+    def _require_ordinary_database(self) -> None:
+        if self._local_sqlite_writer is not None:
+            raise CustodyUnavailable
 
     def postgresql_driver_error(self) -> type[Exception] | None:
         if self.dialect is not Dialect.POSTGRESQL:
@@ -1060,10 +1120,36 @@ class Database:
         if self._lifecycle is Lifecycle.CLOSED:
             raise DatabaseClosedError("the database closed before the unit finished")
 
+    @overload
+    def transaction(
+        self, *, admission_deadline: float | None = None
+    ) -> AbstractAsyncContextManager[AsyncConnection]: ...
+
+    @overload
+    def transaction(
+        self,
+        *,
+        _local_sqlite_writer: LocalSQLiteWriterEntry,
+        admission_deadline: float | None = None,
+    ) -> AbstractAsyncContextManager[LocalSQLiteWriterLoan]: ...
+
     @asynccontextmanager
     async def transaction(
-        self, *, admission_deadline: float | None = None
-    ) -> AsyncGenerator[AsyncConnection, None]:
+        self,
+        *,
+        admission_deadline: float | None = None,
+        _local_sqlite_writer: LocalSQLiteWriterEntry | None = None,
+    ) -> AsyncGenerator[AsyncConnection | LocalSQLiteWriterLoan, None]:
+        if _local_sqlite_writer is not None:
+            async with self._admit_local_sqlite_writer(
+                _local_sqlite_writer, admission_deadline
+            ) as admitted:
+                async with self._local_sqlite_transaction(
+                    *admitted, admission_deadline
+                ) as loan:
+                    yield loan
+            return
+        self._require_ordinary_database()
         if admission_deadline is None:
             async with self._lease(transactional=True) as connection:
                 with managed_writer(connection):
@@ -1071,6 +1157,236 @@ class Database:
             return
         async with self._timed_writer(admission_deadline) as connection:
             yield connection
+
+    @asynccontextmanager
+    async def _admit_local_sqlite_writer(
+        self, entry: LocalSQLiteWriterEntry, deadline: float | None
+    ) -> AsyncGenerator[
+        tuple[LocalSQLiteWriterScope, CustodyJournalLease, CustodySQLiteInstallation]
+    ]:
+        from kora.db.custody_journal import journal_lease
+        from kora.db.custody_sqlite import require_sqlite_anchor
+
+        scope = self._local_sqlite_writer
+        if (
+            scope is None
+            or entry is not scope.entry
+            or self._lifecycle is not Lifecycle.OPEN
+        ):
+            raise CustodyUnavailable
+        self._require_local_sqlite_entry(deadline)
+        async with journal_lease(
+            scope.root,
+            ordinary=(scope.lifetime, scope.participant),
+            sqlite_accounting=(self._enter_unit, self._leave_unit_and_release),
+        ) as journal:
+            self._require_local_sqlite_entry(deadline)
+            installation = await journal.require_sqlite_installation(
+                scope.lifetime, scope.participant
+            )
+            require_sqlite_anchor(
+                self.settings.sqlite_path.absolute(), installation.anchor
+            )
+            self._require_local_sqlite_entry(deadline)
+            yield scope, journal, installation
+
+    def _require_local_sqlite_entry(self, deadline: float | None) -> None:
+        if self._lifecycle is not Lifecycle.OPEN or not self._sqlite_writer_usable:
+            raise CustodyUnavailable
+        if deadline is not None:
+            if type(deadline) is not float or not math.isfinite(deadline):
+                raise DatabaseWriterRejected(DatabaseWriterFailure.UNAVAILABLE)
+            if asyncio.get_running_loop().time() >= deadline:
+                raise DatabaseWriterRejected(DatabaseWriterFailure.DEADLINE)
+
+    @asynccontextmanager
+    async def _local_sqlite_transaction(
+        self,
+        scope: LocalSQLiteWriterScope,
+        journal: CustodyJournalLease,
+        installation: CustodySQLiteInstallation,
+        deadline: float | None,
+    ) -> AsyncGenerator[LocalSQLiteWriterLoan]:
+        from kora.db.custody_models import CustodyIssuerKind
+        from kora.db.custody_writer import LocalSQLiteWriterLoan
+
+        async with self._writer_lock:
+            self._require_local_sqlite_entry(deadline)
+            scope.root.require_open_latch()
+            checkout = LocalSQLiteCheckout()
+            try:
+                timer = asyncio.timeout_at(deadline)
+                try:
+                    async with timer:
+                        await self._open_local_sqlite_checkout(
+                            checkout, scope, journal, installation, deadline
+                        )
+                except (
+                    DatabaseSnapshotRejected,
+                    TimeoutError,
+                    *WRITER_ENTRY_NATIVE_ERRORS,
+                ) as error:
+                    if deadline is None:
+                        raise
+                    reason = (
+                        DatabaseWriterFailure.DEADLINE
+                        if timer.expired()
+                        or isinstance(error, DatabaseSnapshotRejected)
+                        and error.reason is DatabaseSnapshotFailure.DEADLINE
+                        else DatabaseWriterFailure.UNAVAILABLE
+                    )
+                    raise_private_metadata_error(DatabaseWriterRejected(reason))
+                connection, worker, original = (
+                    checkout.connection,
+                    checkout.worker,
+                    checkout.original,
+                )
+                if connection is None or worker is None or original is None:
+                    raise CustodyUnavailable
+                with managed_writer(connection):
+                    with LocalSQLiteWriterLoan.lend(
+                        writer_transaction(connection), worker
+                    ) as loan:
+                        yield loan
+                self._refuse_when_closed()
+                participant = scope.participant
+                prepared = await journal.prepare_original_commit(
+                    original,
+                    journal_id=participant.journal_id,
+                    generation=participant.generation,
+                    previous=installation.frontier,
+                    issuer_kind=CustodyIssuerKind.ORDINARY,
+                )
+                await journal.commit_prepared(original, prepared)
+            finally:
+                await self._finish_local_sqlite_checkout(checkout, scope, journal)
+
+    async def _open_local_sqlite_checkout(
+        self,
+        checkout: LocalSQLiteCheckout,
+        scope: LocalSQLiteWriterScope,
+        journal: CustodyJournalLease,
+        installation: CustodySQLiteInstallation,
+        deadline: float | None,
+    ) -> None:
+        writer = self._writer
+        if writer is None:
+            raise CustodyUnavailable
+
+        async def acquire() -> AsyncConnection:
+            self._require_local_sqlite_entry(deadline)
+            scope.root.require_open_latch()
+            journal.own_sqlite_checkout(checkout)
+            checkout.attempted = True
+            scope.physical.returned = None
+            scope.physical.installation = installation
+            connection = await writer.connect()
+            checkout.connection = connection
+            return connection
+
+        connection = await start_snapshot_phase(acquire, nothing)
+        self._require_local_sqlite_entry(deadline)
+        if deadline is None:
+            await complete(connection.begin())
+        else:
+            await self._prepare_writer_entry(connection, deadline)
+        await complete(
+            self._bind_local_sqlite_checkout(checkout, connection, scope, installation)
+        )
+        self._require_local_sqlite_entry(deadline)
+
+    async def _bind_local_sqlite_checkout(
+        self,
+        checkout: LocalSQLiteCheckout,
+        connection: AsyncConnection,
+        scope: LocalSQLiteWriterScope,
+        installation: CustodySQLiteInstallation,
+    ) -> None:
+        from kora.db.custody_models import custody_counter
+        from kora.db.custody_sqlite import SQLiteWorkerOriginal
+        from kora.db.custody_transaction import (
+            OriginalCustodyTransaction,
+            native_writer_driver,
+        )
+        from kora.db.custody_writer import (
+            LOCAL_SQLITE_NATIVE_SEQUENCE,
+            CustodyDriverConnection,
+        )
+
+        driver = await native_writer_driver(connection)
+        if (
+            not isinstance(driver, CustodyDriverConnection)
+            or driver is not scope.physical.driver
+        ):
+            raise CustodyUnavailable
+        participant = scope.participant
+        root = await driver.bind_custody_root(installation, participant.journal_id)
+        worker = SQLiteWorkerOriginal(driver, root)
+        checkout.worker = worker
+        checkout.original = await OriginalCustodyTransaction.capture(
+            connection,
+            metadata_id=installation.metadata_id,
+            issuer_sequence=participant.issuer_sequence,
+            connection_sequence=custody_counter(next(LOCAL_SQLITE_NATIVE_SEQUENCE)),
+            transaction_sequence=custody_counter(next(LOCAL_SQLITE_NATIVE_SEQUENCE)),
+            sqlite=worker,
+        )
+
+    async def _close_local_sqlite_checkout(
+        self, checkout: LocalSQLiteCheckout, physical: SQLitePhysicalWriter
+    ) -> None:
+        from kora.db.custody_models import CustodyNativeOutcome
+
+        original = checkout.original
+        if original is not None:
+            if original.outcome is None:
+                await original.rollback()
+            await original.release_sqlite(physical.require_release)
+            if original.outcome is CustodyNativeOutcome.UNKNOWN:
+                raise CustodyUnavailable
+        else:
+            worker = checkout.worker
+            if worker is not None:
+                await worker.rollback()
+                await worker.require_native_closed()
+            if checkout.connection is None:
+                if self._writer is not None:
+                    await self._writer.dispose()
+                driver = physical.driver
+                if driver is not None and not driver.retired:
+                    await driver.close()
+            else:
+                if self._lifecycle is not Lifecycle.OPEN:
+                    await checkout.connection.invalidate()
+                await checkout.connection.close()
+            physical.require_release()
+        checkout.released = True
+
+    async def _finish_local_sqlite_checkout(
+        self,
+        checkout: LocalSQLiteCheckout,
+        scope: LocalSQLiteWriterScope,
+        journal: CustodyJournalLease,
+    ) -> None:
+        if not checkout.attempted:
+            return
+        try:
+            await complete(self._close_local_sqlite_checkout(checkout, scope.physical))
+        except asyncio.CancelledError:
+            if checkout.released:
+                await complete(self._settle_local_sqlite_checkout(checkout, journal))
+            raise
+        await self._settle_local_sqlite_checkout(checkout, journal)
+
+    async def _settle_local_sqlite_checkout(
+        self, checkout: LocalSQLiteCheckout, journal: CustodyJournalLease
+    ) -> None:
+        original = checkout.original
+        try:
+            if original is not None and await journal.has_sqlite_preparation(original):
+                await journal.settle_original(original)
+        finally:
+            journal.release_sqlite_checkout(checkout)
 
     @asynccontextmanager
     async def _timed_writer(
@@ -1252,12 +1568,31 @@ class Database:
                 if not cancelled_entry:
                     raise
 
-    async def run(self, unit: Unit[Result]) -> Result:
+    @overload
+    async def run(self, unit: Unit[Result]) -> Result: ...
+
+    @overload
+    async def run(self, unit: LocalSQLiteWriterUnit) -> int: ...
+
+    async def run(self, unit: Unit[Result] | LocalSQLiteWriterUnit) -> Result | int:
+        if isinstance(unit, LocalSQLiteWriterUnit):
+            return await self._run_local_sqlite_unit(unit)
+        self._require_ordinary_database()
+
         async def execute() -> Result:
             async with self.transaction() as connection:
                 return await unit(connection)
 
         return await complete(execute())
+
+    async def _run_local_sqlite_unit(self, unit: LocalSQLiteWriterUnit) -> int:
+        async with self._admit_local_sqlite_writer(unit.entry, None) as admitted:
+
+            async def execute() -> int:
+                async with self._local_sqlite_transaction(*admitted, None) as loan:
+                    return await loan.revoke_token(unit.token_id, unit.next_token_id)
+
+            return await complete(execute())
 
     async def read(self, unit: Unit[Result]) -> Result:
         async def execute() -> Result:
@@ -1268,6 +1603,7 @@ class Database:
 
     @asynccontextmanager
     async def read_transaction(self) -> AsyncGenerator[AsyncConnection, None]:
+        self._require_ordinary_database()
         async with self._read_transaction(None) as connection:
             yield connection
 
@@ -1306,6 +1642,7 @@ class Database:
     async def read_snapshot(
         self, *, deadline: float | None = None
     ) -> AsyncGenerator[AsyncConnection, None]:
+        self._require_ordinary_database()
         connection = None
         if deadline is None:
             try:

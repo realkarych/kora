@@ -20,6 +20,7 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 
 POSTGRESQL: str = "postgresql"
 SQLITE: str = "sqlite"
+SQLITE_SYNCHRONOUS_FULL: int = 2
 BYTE_ORDER_COLLATION: str = "C"
 TIMESTAMP_TEXT_FORMAT: str = "%Y-%m-%dT%H:%M:%S.%f+00:00"
 TIMESTAMP_TEXT_LENGTH: int = 32

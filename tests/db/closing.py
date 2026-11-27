@@ -120,10 +120,10 @@ def sqlite_companions(database: Database) -> list[str]:
 
 @contextmanager
 def sqlite_contender(
-    path: Path, *, timeout_ms: int = 0
+    path: Path, *, timeout_ms: int = 0, readonly: bool = False
 ) -> Generator[NativeSqliteConnection]:
     with closing(NativeSqliteConnection()) as connection:
-        connection.open(path, False, timeout_ms, lambda descriptor, empty: not empty)
+        connection.open(path, readonly, timeout_ms, lambda descriptor, empty: not empty)
         yield connection
 
 

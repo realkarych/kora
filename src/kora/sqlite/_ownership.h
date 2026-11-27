@@ -25,6 +25,7 @@ struct KoraFd {
   KoraFd *lastUser;
   int descriptor;
   int role;
+  int custody;
   unsigned long long pool;
   dev_t device;
   ino_t inode;
@@ -42,6 +43,8 @@ typedef struct {
   unsigned long long pool;
   int reuseOnly;
   int reused;
+  int custody;
+  int authorityJournal;
 } KoraOpen;
 
 static _Thread_local KoraOpen *koraOpen;

@@ -1,4 +1,6 @@
-from kora.observability import CATALOG, EventSpec, FieldKind, Level
+from typing import Literal
+
+from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
 DB_COMPONENT: str = CATALOG.register_component("db")
 DB_LOGGER_NAME: str = "kora.db"
@@ -78,6 +80,59 @@ RUN_INPUT_PARENT_CHECKED: EventSpec = CATALOG.register(
         fields={"verified": FieldKind.BOOLEAN},
     )
 )
+
+CUSTODY_TRANSITION: EventSpec = CATALOG.register(
+    EventSpec(
+        "db.custody.transition",
+        DB_COMPONENT,
+        Level.INFO,
+        "native custody transition confirmed",
+        {"state": FieldKind.STRING},
+    )
+)
+CUSTODY_REFUSED: EventSpec = CATALOG.register(
+    EventSpec(
+        "db.custody.refused",
+        DB_COMPONENT,
+        Level.DEBUG,
+        "native custody admission refused",
+        {"state": FieldKind.STRING},
+    )
+)
+CUSTODY_UNFINISHED: EventSpec = CATALOG.register(
+    EventSpec(
+        "db.custody.unfinished",
+        DB_COMPONENT,
+        Level.WARNING,
+        "native custody closure remains unfinished",
+        {"state": FieldKind.STRING},
+    )
+)
+
+
+CustodyDiagnostic = Literal[
+    "hint_published",
+    "successor_denial_persisted",
+    "successor_registered",
+    "native_turn",
+    "ordinary_open",
+    "ordinary_admission",
+    "coordinator_admission",
+    "coordinator_operation",
+    "coordinator_closure",
+]
+
+
+class CustodyUnavailable(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("execution custody is unavailable")
+
+
+def custody_log(spec: EventSpec, state: CustodyDiagnostic) -> None:
+    diagnostics = current_diagnostics()
+    if diagnostics is not None:
+        diagnostics.logger(DB_COMPONENT, name=DB_LOGGER_NAME).emit(spec, state=state)
+
 
 __all__ = [
     "BOOTSTRAP_COMPLETED",

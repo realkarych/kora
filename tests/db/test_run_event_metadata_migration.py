@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from kora.db.claim_source_values import ClaimSourcesRejected
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.first_claim_basis import first_claim_basis_available
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision, database_is_at_head, upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.run_event_page_v1 import (
     RUN_EVENT_REVISION,
@@ -18,6 +18,7 @@ from kora.db.run_event_page_v1 import (
 from kora.db.tables import attempt_dispatcher
 from tests.db.test_db_upgrade_process import events, records, upgrade
 from tests.engine.test_grant_history import legacy, seed
+from tests.support.observability import run_python
 
 
 async def populate_predecessor(database: Database) -> None:
@@ -44,13 +45,26 @@ async def test_run_event_metadata_upgrade_preserves_claim_receipt_and_qualifies(
     database = Database(empty_database_settings)
     try:
         await populate_predecessor(database)
+        assert not await database_is_at_head(database)
         async with database.read_snapshot() as reader:
             predecessor = await first_claim_basis_available(reader)
             original = (await reader.execute(select(attempt_dispatcher))).one()
             old_catalog = await native_catalog(reader)
 
-        migrated = await upgrade_database(empty_database_settings)
-        repeated = await upgrade_database(empty_database_settings)
+        if database.dialect is Dialect.POSTGRESQL:
+            await asyncio.to_thread(
+                assert_postgres_migration_is_independent, empty_database_settings
+            )
+        else:
+            migrated = await upgrade_database(empty_database_settings)
+            repeated = await upgrade_database(empty_database_settings)
+            assert (migrated.from_revision, migrated.to_revision, migrated.steps) == (
+                "0033",
+                RUN_EVENT_REVISION,
+                1,
+            )
+            assert repeated.steps == 0
+        assert await database_is_at_head(database)
         async with database.read_snapshot() as reader:
             revision = await reader.run_sync(current_revision)
             available = await first_claim_basis_available(reader)
@@ -59,17 +73,50 @@ async def test_run_event_metadata_upgrade_preserves_claim_receipt_and_qualifies(
 
         assert predecessor is available is True
         assert revision == RUN_EVENT_REVISION
-        assert (migrated.from_revision, migrated.to_revision, migrated.steps) == (
-            "0033",
-            RUN_EVENT_REVISION,
-            1,
-        )
-        assert repeated.steps == 0
         assert current == original
         assert old_catalog == (new_catalog[0], False)
         assert new_catalog[1] is (database.dialect is Dialect.SQLITE)
     finally:
         await database.close()
+
+
+POSTGRES_ORDINARY_MIGRATION = """
+import asyncio
+import os
+import sys
+
+import kora.__main__
+from kora.db.connection import Database, Dialect, read_database_settings
+from kora.db.migrations import database_is_at_head, upgrade_database
+from kora.db.run_event_page_v1 import RUN_EVENT_REVISION
+
+async def exercise() -> None:
+    settings = read_database_settings(os.environ)
+    assert settings.dialect is Dialect.POSTGRESQL
+    database = Database(settings)
+    try:
+        assert not await database_is_at_head(database)
+        report = await upgrade_database(settings)
+        assert (report.from_revision, report.to_revision, report.steps) == (
+            "0033", RUN_EVENT_REVISION, 1,
+        )
+        assert (await upgrade_database(settings)).steps == 0
+        assert await database_is_at_head(database)
+    finally:
+        await database.close()
+
+assert "kora.db.custody_native" not in sys.modules
+asyncio.run(exercise())
+assert "kora.db.custody_native" not in sys.modules
+"""
+
+
+def assert_postgres_migration_is_independent(settings: DatabaseSettings) -> None:
+    result = run_python(
+        ["-c", POSTGRES_ORDINARY_MIGRATION],
+        {"KORA_DATABASE_URL": settings.url.render_as_string(hide_password=False)},
+    )
+    assert result.code == 0, result.stderr.decode()
 
 
 @pytest.mark.asyncio
