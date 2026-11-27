@@ -12,6 +12,7 @@ typedef struct {
   PyThread_type_lock lifetime;
   KoraFd *main;
   KoraOpen open;
+  pthread_t opener;
   PyObject *progress;
   PyObject *trace;
   PyObject *authorizer;
@@ -65,7 +66,9 @@ static int closeDatabase(NativeDb *db) {
   int result = SQLITE_OK;
   Py_BEGIN_ALLOW_THREADS
   PyThread_acquire_lock(db->lifetime, WAIT_LOCK);
-  if (db->connection) {
+  if (db->open.markerPending) {
+    result = SQLITE_BUSY;
+  } else if (db->connection) {
     result = sqlite3_close(db->connection);
     if (result == SQLITE_OK) db->connection = NULL;
   }
@@ -120,11 +123,11 @@ static int approveMain(void *context, int descriptor, int empty) {
 static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   PyObject *capsule, *admit, *journal;
   const char *path;
-  int readOnly, timeout, directory, prepare, reuseOnly, custody, authorityJournal;
+  int readOnly, timeout, directory, prepare, reuseOnly, custody, authorityJournal, marker;
   unsigned long long pool;
-  if (!PyArg_ParseTuple(args, "OspiOOipKppp", &capsule, &path, &readOnly, &timeout,
+  if (!PyArg_ParseTuple(args, "OspiOOipKpppi", &capsule, &path, &readOnly, &timeout,
                         &admit, &journal, &directory, &prepare, &pool, &reuseOnly,
-                        &custody, &authorityJournal)) {
+                        &custody, &authorityJournal, &marker)) {
     return NULL;
   }
   NativeDb *db = nativePointer(capsule, dbCapsuleName);
@@ -133,15 +136,19 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
       path[0] != '/' || !PyCallable_Check(admit) ||
       (journal != Py_None && !PyCallable_Check(journal)) ||
       (custody && (pool || prepare || reuseOnly)) ||
-      (authorityJournal && (!custody || journal == Py_None || directory < 0 || readOnly))) {
+      (authorityJournal && (!custody || journal == Py_None || directory < 0 || readOnly)) ||
+      (marker && (marker < KORA_MARKER_METADATA || marker > KORA_MARKER_JOURNAL_REOPEN ||
+                  !custody || readOnly || journal == Py_None || directory < 0 ||
+                  authorityJournal != (marker != KORA_MARKER_METADATA)))) {
     return dbError(SQLITE_MISUSE, "SQLite main admission is unavailable");
   }
   int flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) |
               SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_EXRESCODE;
   if (journal != Py_None) flags |= SQLITE_OPEN_NOFOLLOW;
+  db->opener = pthread_self();
   db->open = (KoraOpen){&db->main, approveMain, admit,
                        journal == Py_None ? NULL : Py_NewRef(journal), directory,
-                       prepare ? path : NULL, pool, reuseOnly, 0, custody, authorityJournal};
+                       prepare ? path : NULL, pool, reuseOnly, 0, custody, authorityJournal, marker, 0, 0};
   int result;
   Py_BEGIN_ALLOW_THREADS
   koraOpen = &db->open;
@@ -160,6 +167,50 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
     return dbError(result, reuseOnly && !db->open.reused && result == SQLITE_BUSY
       ? "SQLite native admission is full." : sqlite3_errstr(result));
   }
+  Py_RETURN_NONE;
+}
+
+static PyObject *commitMarker(PyObject *module, PyObject *capsule) {
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
+  if (!db) return NULL;
+  KoraOpen *scope = &db->open;
+  KoraFd *main = db->main;
+  int marker = scope->marker;
+  if (!db->connection || !pthread_equal(db->opener, pthread_self()) ||
+      (marker != KORA_MARKER_METADATA && marker != KORA_MARKER_JOURNAL) ||
+      scope->markerPending || !sqlite3_get_autocommit(db->connection) ||
+      sqlite3_next_stmt(db->connection, NULL)) {
+    return dbError(SQLITE_MISUSE, "SQLite marker checkout is unavailable");
+  }
+  int result = SQLITE_NOTADB;
+  struct stat identity;
+  Py_BEGIN_ALLOW_THREADS
+  PyThread_acquire_lock(db->lifetime, WAIT_LOCK);
+  if (main->state == KORA_FD_LIVE && !fstat(main->descriptor, &identity) &&
+      identity.st_dev == main->device && identity.st_ino == main->inode &&
+      koraMainHeader(main->descriptor, &identity) == KORA_MAIN_EMPTY) {
+    scope->markerPending = 1;
+    result = sqlite3_exec(db->connection, marker == KORA_MARKER_METADATA
+      ? "BEGIN IMMEDIATE; PRAGMA application_id=1263359025;"
+      : "BEGIN IMMEDIATE; PRAGMA application_id=1263162417;", NULL, NULL, NULL);
+    if (result == SQLITE_OK) {
+      scope->markerSync = -1;
+      result = sqlite3_exec(db->connection, "COMMIT", NULL, NULL, NULL);
+      if (result == SQLITE_OK && (scope->markerSync != 1 || fstat(main->descriptor, &identity) ||
+          identity.st_dev != main->device || identity.st_ino != main->inode ||
+          koraMainHeader(main->descriptor, &identity) !=
+            (marker == KORA_MARKER_METADATA ? KORA_MAIN_METADATA_TEST : KORA_MAIN_JOURNAL_TEST))) {
+        result = SQLITE_IOERR;
+      }
+      if (result == SQLITE_OK) scope->markerPending = 0;
+    } else if (sqlite3_get_autocommit(db->connection) ||
+               sqlite3_exec(db->connection, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK) {
+      scope->markerPending = 0;
+    }
+  }
+  PyThread_release_lock(db->lifetime);
+  Py_END_ALLOW_THREADS
+  if (result != SQLITE_OK) return dbError(result, "SQLite marker outcome was not confirmed");
   Py_RETURN_NONE;
 }
 
@@ -337,6 +388,8 @@ static PyObject *prepareStatement(PyObject *module, PyObject *args) {
   NativeDb *db = nativePointer(database, dbCapsuleName);
   if (!db) return NULL;
   if (!db->connection) return dbError(SQLITE_MISUSE, "Cannot operate on a closed database.");
+  if (db->open.markerPending)
+    return dbError(SQLITE_MISUSE, "SQLite owner cannot accept new work.");
   sqlite3_stmt *statement = NULL;
   const char *tail = NULL;
   int result;
@@ -428,7 +481,7 @@ static PyObject *closeStatement(PyObject *module, PyObject *capsule) {
 
 static NativeDb *connectedDatabase(PyObject *capsule) {
   NativeDb *db = nativePointer(capsule, dbCapsuleName);
-  if (db && !db->connection) {
+  if (db && (!db->connection || db->open.markerPending)) {
     dbError(SQLITE_MISUSE, "Cannot operate on a closed database.");
     return NULL;
   }
@@ -631,6 +684,7 @@ static PyObject *closeBlob(PyObject *module, PyObject *capsule) {
 static PyMethodDef methods[] = {
   {"allocate", allocateDatabase, METH_NOARGS, NULL},
   {"open", openDatabaseOwner, METH_VARARGS, NULL},
+  {"commit_marker", commitMarker, METH_O, NULL},
   {"reused_main", reusedMain, METH_O, NULL},
   {"acquired_main", acquiredMain, METH_O, NULL},
   {"set_length_limit", setLengthLimit, METH_VARARGS, NULL},

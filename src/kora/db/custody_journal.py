@@ -65,6 +65,10 @@ from kora.db.custody_schema import (
     AUTHORITY,
     IMAGE,
     INVOCATION_COLUMNS,
+    ISOLATED_AUTHORITY,
+    ISOLATED_AUTHORITY_VERSION,
+    ISOLATED_PROVISIONING,
+    ISOLATED_RELATIONS,
     PARTICIPANT,
     PENDING,
     PROVISIONING,
@@ -78,7 +82,7 @@ from kora.db.custody_transaction import (
     OriginalCustodyTransaction,
     ReleasedCustodyCommit,
 )
-from kora.sqlite.driver import Connection, NativeRetirement
+from kora.sqlite.driver import Connection, IsolatedMarker, NativeRetirement
 
 NativeValue: TypeAlias = int | str | bytes | None
 NativeRow: TypeAlias = dict[str, NativeValue]
@@ -168,12 +172,17 @@ def _read_admission(
 
 
 _READ_ADMISSIONS: Final = MappingProxyType(
-    {relation.name: _read_admission(relation) for relation in RELATIONS}
+    {
+        relation: _read_admission(relation)
+        for relation in (*RELATIONS, ISOLATED_AUTHORITY, ISOLATED_PROVISIONING)
+    }
 )
 
 
-def require_relation(relation: CustodyRelation) -> None:
-    if not any(relation is registered for registered in RELATIONS):
+def require_relation(
+    relation: CustodyRelation, registered: tuple[CustodyRelation, ...]
+) -> None:
+    if not any(relation is candidate for candidate in registered):
         raise CustodyUnavailable
 
 
@@ -210,9 +219,15 @@ def scalar(connection: Connection, statement: str) -> object:
 
 
 def open_journal(
-    root: CustodyNativeDirectory, connection: Connection, *, initialize: bool
+    root: CustodyNativeDirectory,
+    connection: Connection,
+    *,
+    initialize: bool,
+    marker: IsolatedMarker | None = None,
 ) -> None:
     root.require_current()
+    if marker is not None:
+        root.require_isolated()
     connection.open(
         root.path / "authority.sqlite3",
         False,
@@ -222,6 +237,7 @@ def open_journal(
         directory=root.journal_directory(),
         custody=True,
         authority_journal=True,
+        _marker=marker,
     )
     connection.set_length_limit(MAX_CUSTODY_ROW_BYTES)
     connection.execute("PRAGMA foreign_keys=ON").close()
@@ -276,7 +292,9 @@ class CustodyJournalPhase:
             self._resume = resume
 
     @contextmanager
-    def connection(self, *, initialize: bool = False) -> Generator[Connection]:
+    def connection(
+        self, *, initialize: bool = False, marker: IsolatedMarker | None = None
+    ) -> Generator[Connection]:
         if self._order is not None:
             raise CustodyUnavailable
         order = self._root.open_wait("journal-order.lock")
@@ -289,7 +307,9 @@ class CustodyJournalPhase:
                 attempt = Connection(self._retain)
                 self._attempt = attempt
                 try:
-                    open_journal(self._root, attempt, initialize=initialize)
+                    open_journal(
+                        self._root, attempt, initialize=initialize, marker=marker
+                    )
                     yield attempt
                 finally:
                     attempt.close()
@@ -346,10 +366,15 @@ class CustodyJournalTransaction:
     _open: bool
 
     def __init__(
-        self, connection: Connection, *, completion_owner: object | None
+        self,
+        connection: Connection,
+        *,
+        completion_owner: object | None,
+        relations: tuple[CustodyRelation, ...] = RELATIONS,
     ) -> None:
         self._connection = connection
         self._completion_owner = completion_owner
+        self._relations = relations
         self._open = True
 
     def close(self) -> None:
@@ -358,7 +383,7 @@ class CustodyJournalTransaction:
     def _require_current(self, relation: CustodyRelation) -> None:
         if not self._open or not self._connection.in_transaction:
             raise CustodyUnavailable
-        require_relation(relation)
+        require_relation(relation, self._relations)
 
     def read(self, relation: CustodyRelation, key: int = 1) -> NativeRow | None:
         self._require_current(relation)
@@ -367,7 +392,7 @@ class CustodyJournalTransaction:
         )
         checked_value(key_column, key)
         table = TABLES[relation.name]
-        statement, values = _READ_ADMISSIONS[relation.name]
+        statement, values = _READ_ADMISSIONS[relation]
         parameters = {**values, "bound_key": key}
         try:
             with closing(self._connection.execute(statement, parameters)) as cursor:
@@ -391,7 +416,10 @@ class CustodyJournalTransaction:
             column.name: checked_value(column, value)
             for column, value in zip(relation.columns, values, strict=True)
         }
-        if parsed["format_version"] != (2 if relation is AUTHORITY else 1):
+        expected = 2 if relation is AUTHORITY else 1
+        if relation is ISOLATED_AUTHORITY:
+            expected = ISOLATED_AUTHORITY_VERSION
+        if parsed["format_version"] != expected:
             raise CustodyUnavailable
         return parsed
 
@@ -928,6 +956,7 @@ class CustodyJournalLease:
     _pending: Awaitable[object] | None
     _open: bool
     _closing: bool
+    _initialized_isolated: bool = False
     _phase: CustodyJournalPhase
     _last_outcome: CustodyNativeOutcome | None
     _original_owner: object
@@ -1217,20 +1246,26 @@ class CustodyJournalLease:
     ) -> Result:
         self._last_outcome = None
         with self._phase.connection(initialize=initialize) as connection:
-            with closing(connection.execute("BEGIN IMMEDIATE")):
-                pass
-            try:
-                value = operation(connection)
-                self._root.require_current()
-                self._last_outcome = CustodyNativeOutcome.UNKNOWN
-                connection.commit()
-                self._last_outcome = CustodyNativeOutcome.COMMITTED
-            finally:
-                if connection.in_transaction:
-                    connection.rollback()
-                    if self._last_outcome is None:
-                        self._last_outcome = CustodyNativeOutcome.ABORTED
-        return value
+            return self._commit(connection, operation)
+
+    def _commit(
+        self, connection: Connection, operation: Callable[[Connection], Result]
+    ) -> Result:
+        self._last_outcome = None
+        with closing(connection.execute("BEGIN IMMEDIATE")):
+            pass
+        try:
+            result = operation(connection)
+            self._root.require_current()
+            self._last_outcome = CustodyNativeOutcome.UNKNOWN
+            connection.commit()
+            self._last_outcome = CustodyNativeOutcome.COMMITTED
+            return result
+        finally:
+            if connection.in_transaction:
+                connection.rollback()
+                if self._last_outcome is None:
+                    self._last_outcome = CustodyNativeOutcome.ABORTED
 
     def _initialize(self) -> None:
         self._root.require_fresh_provision()
@@ -1241,6 +1276,78 @@ class CustodyJournalLease:
                     pass
 
         self._perform(create, initialize=True)
+
+    async def initialize_isolated(
+        self,
+        authority: NativeRow,
+        provisioning: NativeRow,
+        checkpoint: Callable[[], None],
+    ) -> None:
+        def initialize() -> None:
+            self._root.require_fresh_provision()
+            with self._phase.connection(
+                initialize=True, marker=IsolatedMarker.JOURNAL
+            ) as db:
+                self._root.require_isolated()
+                self._last_outcome = CustodyNativeOutcome.UNKNOWN
+                db.commit_isolated_marker()
+                self._last_outcome = CustodyNativeOutcome.COMMITTED
+                checkpoint()
+
+                def create(connection: Connection) -> None:
+                    for relation in ISOLATED_RELATIONS:
+                        connection.execute(relation.create).close()
+                    tx = CustodyJournalTransaction(
+                        connection, completion_owner=None, relations=ISOLATED_RELATIONS
+                    )
+                    tx.insert(ISOLATED_AUTHORITY, authority)
+                    tx.insert(ISOLATED_PROVISIONING, provisioning)
+                    self._require_isolated_rows(tx, authority, provisioning)
+
+                self._commit(db, create)
+
+        await self._run(initialize)
+        self._initialized_isolated = True
+
+    async def bind_isolated(
+        self, authority: NativeRow, provisioning: NativeRow, sequence: int
+    ) -> None:
+        if not self._initialized_isolated:
+            raise CustodyUnavailable
+
+        def bind() -> None:
+            with self._phase.connection(marker=IsolatedMarker.JOURNAL_REOPEN) as db:
+
+                def bind_original(connection: Connection) -> None:
+                    tx = CustodyJournalTransaction(
+                        connection, completion_owner=None, relations=ISOLATED_RELATIONS
+                    )
+                    self._require_isolated_rows(tx, authority, provisioning)
+                    bound = {"migration_connection_sequence": sequence}
+                    tx.update(ISOLATED_PROVISIONING, bound)
+                    self._require_isolated_rows(
+                        tx, authority, {**provisioning, **bound}
+                    )
+
+                self._commit(db, bind_original)
+
+        await self._run(bind)
+        self._initialized_isolated = False
+
+    def _require_isolated_rows(
+        self,
+        tx: CustodyJournalTransaction,
+        authority: NativeRow,
+        provisioning: NativeRow,
+    ) -> None:
+        self._root.require_isolated()
+        if (
+            tx.read(ISOLATED_AUTHORITY) != authority
+            or tx.read(ISOLATED_PROVISIONING) != provisioning
+            or not matches_journal_anchors(authority, self._root)
+            or not matches_process(provisioning, self._root.process)
+        ):
+            raise CustodyUnavailable
 
     async def close(self) -> None:
         self._closing = True

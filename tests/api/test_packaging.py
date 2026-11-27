@@ -2247,6 +2247,12 @@ def test_installed_api_and_upgrade_refuse_a_marker_only_main(
 ) -> None:
     main = tmp_path / "marker.sqlite"
     image = marker_only_sqlite(main, marker)
+    assert_installed_marker_refusal(serving_installation, tmp_path, main, image)
+
+
+def assert_installed_marker_refusal(
+    serving_installation: Path, tmp_path: Path, main: Path, image: bytes
+) -> None:
     url = f"sqlite+aiosqlite:///{main}"
     provider_probe = """
 import asyncio
