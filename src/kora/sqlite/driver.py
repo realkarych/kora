@@ -82,7 +82,7 @@ class Connection:
                 if retire is not None:
                     retire(self)
             finally:
-                if opened:
+                if opened or (retire is not None and self.reused_main()):
                     NativeRetirement.progress(self)
 
     def settled(self) -> bool:

@@ -4,6 +4,7 @@ import sys
 import threading
 from contextlib import AsyncExitStack, closing
 from pathlib import Path
+from typing import cast
 
 import pytest
 from aiosqlite import Connection as SQLiteDriverConnection
@@ -32,6 +33,7 @@ from tests.db.closing import (
     sqlite_contender,
     until,
 )
+from tests.db.native_read_support import SqliteTraceControl
 from tests.db.test_read_snapshot import assert_native_closed, physical_handle
 from tests.db.test_sqlite_writer_entry import writer_driver
 from tests.support.databases import copy_sqlite_template
@@ -330,22 +332,35 @@ async def test_replacement_writer_reuses_charged_wal_main_until_reader_releases(
         copy_sqlite_template(sqlite_template, path), require_sqlite_full_sync=True
     )
     identity = native_identity(path)
+    workers: set[threading.Thread] = set()
+
+    def observe_worker(statement: str) -> None:
+        workers.add(threading.current_thread())
+
     try:
         async with database.transaction() as writer:
+            driver = await writer_driver(writer)
+            await cast(SqliteTraceControl, driver).set_trace_callback(observe_worker)
             await writer.exec_driver_sql("CREATE TABLE probe (id INTEGER)")
             await writer.exec_driver_sql("INSERT INTO probe VALUES (7)")
-            original = physical_handle(database, await writer_driver(writer))
+            original = physical_handle(database, driver)
         assert isinstance(original, GuardedConnection)
         assert not original.reused_main()
+        (original_worker,) = workers
         async with database.read_snapshot() as reader:
             assert await reader.scalar(text("SELECT COUNT(*) FROM probe")) == 1
             descriptors = held_main_descriptors(identity)
             assert len(descriptors) == 2
             await database.writer_engine.dispose()
             assert_native_closed(original)
+            assert not original_worker.is_alive()
             assert held_main_descriptors(identity) == descriptors
             async with database.transaction() as replacement:
-                native = physical_handle(database, await writer_driver(replacement))
+                driver = await writer_driver(replacement)
+                await cast(SqliteTraceControl, driver).set_trace_callback(
+                    observe_worker
+                )
+                native = physical_handle(database, driver)
                 assert isinstance(native, GuardedConnection)
                 assert native is not original
                 assert native.reused_main()
@@ -360,6 +375,8 @@ async def test_replacement_writer_reuses_charged_wal_main_until_reader_releases(
 
     assert native.settled()
     assert original.settled()
+    assert len(workers) == 2
+    assert not any(worker.is_alive() for worker in workers)
     assert held_main_descriptors(identity) == ()
 
 

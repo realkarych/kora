@@ -510,12 +510,11 @@ def open_sqlite_file(
             lifetime.closed()
 
     def retire(owned: NativeConnection) -> None:
-        if reserved and not owned.reused_main():
-            NativeRetirement.retain(path, owned, release)
-        else:
-            if reserved:
+        if reserved:
+            if owned.reused_main():
                 release()
-            NativeRetirement.drain(path, report=False)
+            else:
+                NativeRetirement.retain(path, owned, release)
 
     def admit(descriptor: int, empty: int) -> bool:
         if guarded_reader is not None:
