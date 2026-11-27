@@ -2,3 +2,4 @@ strictDepBuilds: true
 allowBuilds: {}
 overrides:
   minimatch@10.2.6: 11.0.1
+  '@hey-api/json-schema-ref-parser@1.4.4>js-yaml': 4.3.2

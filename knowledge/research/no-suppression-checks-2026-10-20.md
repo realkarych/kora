@@ -195,3 +195,9 @@ The owner-approved #1627 plan requires one fail-closed `Exception` handler in `c
 ## Claude replay fixture allowance removed under #1653
 
 Under #1653 the replay fixture path left production code, and with it `sdk.run_replayed_client`, whose PreToolUse callback held the `claude/sdk.py` blind handler allowed under #980. The `BLE001` per-file ignore for `claude/sdk.py` and its pinned count are removed; the fail-closed callback handler of the policy bridge in `claude/policy.py` is the only remaining Claude allowance. Owner `klukashka` approved the removal on 2026-11-16.
+
+## Run-event client generation under #1904
+
+The owner [approved the generated-file inventory](https://github.com/realkarych/kora/issues/1904#issuecomment-7196450892) on 2026-11-26. The installed API's finite run-event operation and the schemas it references are the input to `@hey-api/openapi-ts` 0.99.0, pinned as a development dependency. The npm registry signature and SLSA provenance tied that publication to [the generator release source](https://github.com/hey-api/hey-api/tree/c9dc0b94b0bfd53b8614e31f450607e1db4d3c05) on 2026-11-26. The tarball matched the lockfile integrity. The verification covered the generator publication itself.
+
+The manifest `web/openapi/generated-run-events-files.json` lists all 16 generated TypeScript paths. The emitted files carry generator headers and two files contain inline ESLint directives. The exact manifest is checked against the paths pinned by `tests/architecture/test_no_suppression.py`, and ESLint reads those entries as individual ignores. Strict TypeScript covers the generated output. The architecture regression exercises a handwritten sibling containing a prohibited directive and a manifest that attempts to admit that sibling. `test_run_events_codegen_matches_installed_schema` compares the operation and schema closure with the installed API and compares the exact committed bytes with two local regenerations.

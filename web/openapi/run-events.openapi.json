@@ -1,0 +1,746 @@
+{
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ApiErrorCode"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmptyDetails"
+              },
+              {
+                "$ref": "#/components/schemas/ConflictDetails"
+              },
+              {
+                "$ref": "#/components/schemas/BacklogDetails"
+              },
+              {
+                "$ref": "#/components/schemas/ReadProjectionDetails"
+              },
+              {
+                "$ref": "#/components/schemas/ValidationDetails"
+              },
+              {
+                "$ref": "#/components/schemas/RuntimeEvidenceDetails"
+              },
+              {
+                "$ref": "#/components/schemas/DispatcherEvidenceDetails"
+              }
+            ],
+            "title": "Details"
+          },
+          "location": {
+            "title": "Location",
+            "type": "null"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "details",
+          "request_id"
+        ],
+        "title": "ApiError",
+        "type": "object"
+      },
+      "ApiErrorCode": {
+        "enum": [
+          "API001",
+          "API002",
+          "API003",
+          "API004",
+          "API005",
+          "API006",
+          "API007",
+          "API008",
+          "API009",
+          "API010",
+          "API011",
+          "API012",
+          "API013"
+        ],
+        "title": "ApiErrorCode",
+        "type": "string"
+      },
+      "ApiErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ApiError"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ApiErrorEnvelope",
+        "type": "object"
+      },
+      "BacklogDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "limit_name": {
+            "const": "max_pending_runs",
+            "title": "Limit Name",
+            "type": "string"
+          },
+          "next_action": {
+            "const": "retry_start",
+            "title": "Next Action",
+            "type": "string"
+          },
+          "reason": {
+            "const": "run_backlog_full",
+            "title": "Reason",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/LimitScope"
+          },
+          "used": {
+            "minimum": 0.0,
+            "title": "Used",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reason",
+          "scope",
+          "limit_name",
+          "limit",
+          "used",
+          "next_action"
+        ],
+        "title": "BacklogDetails",
+        "type": "object"
+      },
+      "ConflictDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "enum": [
+              "lock_timeout",
+              "grant_history_conflict",
+              "usage_conflict",
+              "usage_regression",
+              "read_budget_exceeded"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ConflictDetails",
+        "type": "object"
+      },
+      "Diagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceLocation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node"
+          },
+          "offset": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offset"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "maximum": 9007199254740991.0,
+                      "minimum": 0.0,
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "Diagnostic",
+        "type": "object"
+      },
+      "DispatcherEvidenceDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "dispatcher_id": {
+            "pattern": "^[\\x21-\\x7e]{1,256}$",
+            "title": "Dispatcher Id",
+            "type": "string"
+          },
+          "index": {
+            "maximum": 127.0,
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          },
+          "item": {
+            "const": "dispatchers",
+            "title": "Item",
+            "type": "string"
+          },
+          "lease_epoch": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Lease Epoch",
+            "type": "integer"
+          },
+          "reason": {
+            "enum": [
+              "evidence_unbound",
+              "evidence_conflict"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "item",
+          "index",
+          "dispatcher_id",
+          "lease_epoch"
+        ],
+        "title": "DispatcherEvidenceDetails",
+        "type": "object"
+      },
+      "EmptyDetails": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "EmptyDetails",
+        "type": "object"
+      },
+      "LimitScope": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "namespace",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "title": "LimitScope",
+        "type": "object"
+      },
+      "ReadProjectionDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "const": "read_projection_too_large",
+            "title": "Reason",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "run_id"
+        ],
+        "title": "ReadProjectionDetails",
+        "type": "object"
+      },
+      "RunEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "discriminator": {
+              "mapping": {
+                "service": "#/components/schemas/TokenEventActor",
+                "system": "#/components/schemas/SystemEventActor",
+                "user": "#/components/schemas/TokenEventActor"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SystemEventActor"
+              },
+              {
+                "$ref": "#/components/schemas/TokenEventActor"
+              }
+            ],
+            "title": "Actor"
+          },
+          "at": {
+            "title": "At",
+            "type": "string"
+          },
+          "attempt_id": {
+            "anyOf": [
+              {
+                "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Id"
+          },
+          "id": {
+            "pattern": "^event_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_instance_id": {
+            "anyOf": [
+              {
+                "pattern": "^node_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Instance Id"
+          },
+          "run_id": {
+            "pattern": "^run_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "at",
+          "actor",
+          "run_id",
+          "node_instance_id",
+          "attempt_id"
+        ],
+        "title": "RunEvent",
+        "type": "object"
+      },
+      "RunEventPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunEvent"
+            },
+            "maxItems": 100,
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "maxLength": 8192,
+                "pattern": "^[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "observed_at"
+        ],
+        "title": "RunEventPage",
+        "type": "object"
+      },
+      "RuntimeEvidenceDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "item": {
+            "const": "runtime",
+            "title": "Item",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "evidence_unbound",
+              "evidence_conflict"
+            ],
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "item"
+        ],
+        "title": "RuntimeEvidenceDetails",
+        "type": "object"
+      },
+      "SourceLocation": {
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "title": "File",
+            "type": "string"
+          },
+          "line": {
+            "maximum": 9007199254740991.0,
+            "minimum": 1.0,
+            "title": "Line",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "file",
+          "line"
+        ],
+        "title": "SourceLocation",
+        "type": "object"
+      },
+      "SystemEventActor": {
+        "additionalProperties": false,
+        "properties": {
+          "component": {
+            "const": "scheduler",
+            "title": "Component",
+            "type": "string"
+          },
+          "kind": {
+            "const": "system",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "component"
+        ],
+        "title": "SystemEventActor",
+        "type": "object"
+      },
+      "TokenEventActor": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "user",
+              "service"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "owner": {
+            "pattern": "^[\\x21-\\x7e]{1,256}$",
+            "title": "Owner",
+            "type": "string"
+          },
+          "token_id": {
+            "pattern": "^[\\x21-\\x7e]{1,256}$",
+            "title": "Token Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "owner",
+          "token_id"
+        ],
+        "title": "TokenEventActor",
+        "type": "object"
+      },
+      "ValidationDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/Diagnostic"
+            },
+            "maxItems": 1000,
+            "title": "Errors",
+            "type": "array"
+          },
+          "errors_omitted": {
+            "maximum": 9007199254740991.0,
+            "minimum": 0.0,
+            "title": "Errors Omitted",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/Diagnostic"
+            },
+            "maxItems": 1000,
+            "title": "Warnings",
+            "type": "array"
+          },
+          "warnings_omitted": {
+            "maximum": 9007199254740991.0,
+            "minimum": 0.0,
+            "title": "Warnings Omitted",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "errors",
+          "warnings",
+          "errors_omitted",
+          "warnings_omitted"
+        ],
+        "title": "ValidationDetails",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "kora",
+    "version": "1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/namespaces/{ns}/runs/{run}/events": {
+      "get": {
+        "description": "RunEventRoute(database: kora.db.connection.Database, clock: kora.protocols.time.Clock)",
+        "operationId": "list_run_events",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "title": "Ns",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run",
+            "required": true,
+            "schema": {
+              "title": "Run",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 8192,
+                  "pattern": "^[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "follow",
+            "schema": {
+              "const": false,
+              "default": false,
+              "description": "true returns API003.",
+              "title": "Follow",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunEventPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Runeventroute"
+      }
+    }
+  }
+}
