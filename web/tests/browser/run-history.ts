@@ -201,6 +201,7 @@ const requestAborts = new Set<string>()
 const expectedRequests = new WeakMap<Request, string>()
 const abortedRequests = new WeakSet<Request>()
 const responseStatuses = new WeakMap<Request, number>()
+const pendingReads = new WeakMap<Page, Set<Request>>()
 const validatedReads = new WeakSet<Request>()
 type DiagnosticContext = { phase: string; route: RouteClass | 'other'; status: number }
 const postResponseAborts = new Map<Request, DiagnosticContext>()
@@ -228,6 +229,13 @@ function routeClass(url: string): RouteClass | undefined {
 }
 
 function watchSafeDiagnostics(page: Page): void {
+  const pending = new Set<Request>()
+  pendingReads.set(page, pending)
+  page.on('request', request => {
+    if (!isPageRead(request, eventPath)) return
+    if (pending.size < 128) pending.add(request)
+    else rejectDiagnostic('request-overflow', 'event')
+  })
   page.on('pageerror', () => {
     evidence.diagnostics.pageError++
     rejectDiagnostic('page-error', undefined)
@@ -259,11 +267,13 @@ function watchSafeDiagnostics(page: Page): void {
     else if (status !== expected || route === 'canonical') rejectDiagnostic('http-status', route, status)
   })
   page.on('requestfinished', request => {
+    pending.delete(request)
     if (evidence.stage === 'native-sign-in' && routeClass(request.url()) === 'event') {
       evidence.nativeSignIn.eventFinished = true
     }
   })
   page.on('requestfailed', request => {
+    pending.delete(request)
     const route = routeClass(request.url())
     if (evidence.stage === 'native-sign-in' && route === 'event') evidence.nativeSignIn.eventFailed = true
     const receipt = expectedRequests.get(request)
@@ -294,11 +304,36 @@ function checkDiagnostics(): void {
   evidence.checks.push('expected-browser-diagnostics')
 }
 
+function isPageRead(request: Request, path: string): boolean {
+  const url = new URL(request.url())
+  return url.origin === origin && url.pathname === path && request.method() === 'GET'
+}
+
 function waitEventPage(page: Page, path = eventPath): Promise<Response> {
-  return page.waitForResponse(response => {
-    const url = new URL(response.url())
-    return url.origin === origin && url.pathname === path && response.request().method() === 'GET'
-  })
+  return page.waitForResponse(response => isPageRead(response.request(), path))
+}
+
+async function checkPageRead(
+  page: Page, exercise: (response: Promise<Response>, began: number) => Promise<Response>,
+): Promise<void> {
+  assert.equal(pendingReads.get(page)?.size, 0)
+  let started: Request | undefined
+  let repeated = false
+  const record = (request: Request) => {
+    if (!isPageRead(request, eventPath)) return
+    if (started === undefined) started = request
+    else repeated = true
+  }
+  page.on('request', record)
+  try {
+    const observed = page.waitForResponse(response => response.request() === started)
+    void observed.catch(() => undefined)
+    const response = await exercise(observed, Date.now())
+    assert(!repeated && response.request() === started)
+    validatedReads.add(response.request())
+  } finally {
+    page.off('request', record)
+  }
 }
 
 const rows = (page: Page) => page.locator('.run-timeline ol > li')
@@ -328,23 +363,29 @@ async function assertPageRows(page: Page, expected: Document[]): Promise<void> {
   for (const [index, event] of expected.entries()) {
     const row = rows(page).nth(index)
     const actor = object(event.actor)
-    assert.equal(await row.locator('time').getAttribute('datetime'), event.at)
-    assert.equal(await row.locator('strong').textContent(), event.kind)
-    assert.equal(await row.locator('code').first().textContent(), event.id)
-    for (const identity of [event.node_instance_id, event.attempt_id]) {
-      if (identity !== null) assert.equal(await row.getByText(string(identity), { exact: true }).count(), 1)
-    }
+    const time = row.locator(':scope > time')
+    assert(await time.isVisible())
+    assert.equal(await time.getAttribute('datetime'), event.at)
+    assert.equal(await time.textContent(), event.at)
+    const details = row.locator(':scope > div').first()
+    assert.equal(await details.locator(':scope > strong').textContent(), event.kind)
+    const identities = [event.id, event.node_instance_id, event.attempt_id]
+      .filter(value => value !== null).map(string)
+    assert.deepEqual(await details.locator(':scope > code').allTextContents(), identities)
+    const attribution = row.locator(':scope > div').last()
     if (actor.kind === 'system') {
-      assert.equal(await row.getByText(`${string(actor.component)} (system)`, { exact: true }).count(), 1)
+      assert.equal(await attribution.textContent(), `${string(actor.component)} (system)`)
+      assert.equal(await attribution.locator('code, bdi').count(), 0)
     } else {
-      assert.equal(await row.locator('bdi').last().textContent(), actor.owner)
-      assert((await row.locator('div').last().innerText()).includes(`(${string(actor.kind)})`))
-      assert.equal(await row.locator('code').last().textContent(), actor.token_id)
+      assert.deepEqual(await attribution.locator(':scope > bdi').allTextContents(), [actor.owner])
+      assert.deepEqual(await attribution.locator(':scope > code').allTextContents(), [actor.token_id])
+      assert.equal(await attribution.textContent(), `${string(actor.owner)} (${string(actor.kind)})${string(actor.token_id)}`)
     }
   }
 }
 
 async function assertRenderedPage(page: Page, expected: Document[], began: number): Promise<void> {
+  await page.locator('.run-timeline ol[aria-busy=false]').waitFor({ state: 'visible' })
   await assertPageRows(page, expected)
   const observation = page.locator('.timeline-observed time')
   await observation.waitFor({ state: 'visible' })
@@ -361,54 +402,55 @@ async function latest(page: Page, response: Response, began: number): Promise<vo
   paginationStep('latest-dom')
   await assertRenderedPage(page, canonicalRows, began)
   assert(await earlier(page).isVisible())
-  validatedReads.add(response.request())
 }
 
 async function signIn(page: Page, context: BrowserContext, url: string): Promise<void> {
   assert.equal(new URL(url).origin, origin)
   assert.match(new URL(url).pathname, /^\/api\/v1\/auth\/session\/[0-9a-f]{64}$/u)
-  const observed = waitEventPage(page)
-  const redemption = page.waitForResponse(response => response.url() === url)
-  const began = Date.now()
-  signInStep('navigate')
-  const navigation = await page.goto(url, { waitUntil: 'domcontentloaded' })
-  signInStep('redemption')
-  const response = await redemption
-  signInStep('redirect-headers')
-  assert.equal(response.status(), 303)
-  assert.equal(await response.headerValue('location'), timeline)
-  assert.equal(await response.headerValue('referrer-policy'), 'no-referrer')
-  assert.match(string(await response.headerValue('cache-control')), /no-store/iu)
-  const request = response.request()
-  signInStep('fetch-metadata')
-  const metadata = await Promise.all([
-    'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user',
-  ].map(name => request.headerValue(name)))
-  assert.deepEqual(metadata, ['none', 'navigate', 'document', '?1'])
-  signInStep('document-headers')
-  assert.equal(navigation?.status(), 200)
-  assert.equal(await navigation.request().headerValue('referer'), null)
-  assert.equal(page.url(), origin + timeline)
-  signInStep('cookies')
-  const cookies = await context.cookies(origin)
-  const session = cookies.find(cookie => cookie.name === '__Host-kora_session')
-  const csrf = cookies.find(cookie => cookie.name === '__Host-kora_csrf')
-  assert(session && csrf && session.value !== csrf.value)
-  send({ type: 'markers', values: [session.value, csrf.value] })
-  for (const cookie of [session, csrf]) {
-    assert.equal(cookie.domain, '127.0.0.1')
-    assert.equal(cookie.path, '/')
-    assert.equal(cookie.sameSite, 'Strict')
-    assert(cookie.secure)
-  }
-  assert(session.httpOnly && !csrf.httpOnly)
-  signInStep('cookie-visibility')
-  assert.equal(await page.evaluate(() => document.cookie.includes('__Host-kora_session=')), false)
-  signInStep('event-response')
-  await latest(page, await observed, began)
-  signInStep('clean-page')
-  const rendered = await page.locator('body').innerText()
-  assert(![url, new URL(url).pathname, session.value, csrf.value].some(marker => rendered.includes(marker)))
+  await checkPageRead(page, async (observed, began) => {
+    const redemption = page.waitForResponse(response => response.url() === url)
+    signInStep('navigate')
+    const navigation = await page.goto(url, { waitUntil: 'domcontentloaded' })
+    signInStep('redemption')
+    const response = await redemption
+    signInStep('redirect-headers')
+    assert.equal(response.status(), 303)
+    assert.equal(await response.headerValue('location'), timeline)
+    assert.equal(await response.headerValue('referrer-policy'), 'no-referrer')
+    assert.match(string(await response.headerValue('cache-control')), /no-store/iu)
+    const request = response.request()
+    signInStep('fetch-metadata')
+    const metadata = await Promise.all([
+      'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user',
+    ].map(name => request.headerValue(name)))
+    assert.deepEqual(metadata, ['none', 'navigate', 'document', '?1'])
+    signInStep('document-headers')
+    assert.equal(navigation?.status(), 200)
+    assert.equal(await navigation.request().headerValue('referer'), null)
+    assert.equal(page.url(), origin + timeline)
+    signInStep('cookies')
+    const cookies = await context.cookies(origin)
+    const session = cookies.find(cookie => cookie.name === '__Host-kora_session')
+    const csrf = cookies.find(cookie => cookie.name === '__Host-kora_csrf')
+    assert(session && csrf && session.value !== csrf.value)
+    send({ type: 'markers', values: [session.value, csrf.value] })
+    for (const cookie of [session, csrf]) {
+      assert.equal(cookie.domain, '127.0.0.1')
+      assert.equal(cookie.path, '/')
+      assert.equal(cookie.sameSite, 'Strict')
+      assert(cookie.secure)
+    }
+    assert(session.httpOnly && !csrf.httpOnly)
+    signInStep('cookie-visibility')
+    assert.equal(await page.evaluate(() => document.cookie.includes('__Host-kora_session=')), false)
+    signInStep('event-response')
+    const events = await observed
+    await latest(page, events, began)
+    signInStep('clean-page')
+    const rendered = await page.locator('body').innerText()
+    assert(![url, new URL(url).pathname, session.value, csrf.value].some(marker => rendered.includes(marker)))
+    return events
+  })
 }
 
 async function appearance(page: Page): Promise<void> {
@@ -454,25 +496,27 @@ async function paginate(page: Page): Promise<void> {
   paginationStep('tab-earlier')
   await page.keyboard.press('Tab')
   assert(await earlier(page).evaluate(element => element === document.activeElement))
-  paginationStep('earlier-enter')
-  const first = waitEventPage(page)
-  const earlierBegan = Date.now()
-  await page.keyboard.press('Enter')
-  paginationStep('earlier-response')
-  const response = await first
-  await assertPageResponse(response, canonicalCursor)
-  paginationStep('earlier-dom')
-  await assertRenderedPage(page, canonicalEarlierRows, earlierBegan)
-  assert.equal(await earlier(page).count(), 0)
-  validatedReads.add(response.request())
-  paginationStep('restored-focus')
-  assert(await refresh(page).evaluate(element => element === document.activeElement))
-  paginationStep('latest-enter')
-  const latestPage = waitEventPage(page)
-  const began = Date.now()
-  await page.keyboard.press('Enter')
-  paginationStep('latest-response')
-  await latest(page, await latestPage, began)
+  await checkPageRead(page, async (observed, began) => {
+    paginationStep('earlier-enter')
+    await page.keyboard.press('Enter')
+    paginationStep('earlier-response')
+    const response = await observed
+    await assertPageResponse(response, canonicalCursor)
+    paginationStep('earlier-dom')
+    await assertRenderedPage(page, canonicalEarlierRows, began)
+    assert.equal(await earlier(page).count(), 0)
+    paginationStep('restored-focus')
+    assert(await refresh(page).evaluate(element => element === document.activeElement))
+    return response
+  })
+  await checkPageRead(page, async (observed, began) => {
+    paginationStep('latest-enter')
+    await page.keyboard.press('Enter')
+    paginationStep('latest-response')
+    const response = await observed
+    await latest(page, response, began)
+    return response
+  })
   paginationStep('complete')
 }
 
@@ -576,10 +620,12 @@ async function checkRefusal(page: Page, ns: string, runId: string, status: numbe
 }
 
 async function navigateLatest(page: Page, navigate: () => Promise<Response | null>): Promise<void> {
-  const response = waitEventPage(page)
-  const began = Date.now()
-  assert.equal((await navigate())?.status(), 200)
-  await latest(page, await response, began)
+  await checkPageRead(page, async (observed, began) => {
+    assert.equal((await navigate())?.status(), 200)
+    const response = await observed
+    await latest(page, response, began)
+    return response
+  })
 }
 
 function reload(page: Page): Promise<void> {
