@@ -109,6 +109,7 @@ class BrowserData:
     first_token: str
     second_token: str
     event_ids: tuple[str, ...]
+    scope: EventScope
 
 
 async def seed_data(database: Database) -> BrowserData:
@@ -164,6 +165,7 @@ async def seed_data(database: Database) -> BrowserData:
         owner.token_id,
         successor.principal.token_id,
         tuple(f"event_{event_id}" for event_id in reversed(event_ids)),
+        scope,
     )
 
 
@@ -491,12 +493,13 @@ async def browser_exchange(
     environment: dict[str, str],
     second_environment: dict[str, str],
     data: BrowserData,
+    context: ssl.SSLContext,
     channels: PrivateChannels,
 ) -> None:
     assert process.stdin is not None
     assert process.stdout is not None
     await send_json(process.stdin, launch)
-    next_action = ["relogin", "expire", "revoke", "finish"]
+    next_action = ["append-event", "relogin", "expire", "revoke", "finish"]
     async with asyncio.timeout(125):
         while line := await process.stdout.readline():
             message = parse_json_object(json.loads(line))
@@ -530,6 +533,33 @@ async def browser_exchange(
                 )
                 assert url is not None
                 await send_json(process.stdin, {"url": url})
+            elif action == "append-event":
+                async with database.transaction() as writer:
+                    newest = await seed_event(
+                        writer, data.scope, SYSTEM, 0, event_id=f"{PAGE_SIZE + 2:026d}"
+                    )
+                async with httpx.AsyncClient(
+                    base_url=environment["KORA_URL"],
+                    verify=context,
+                    trust_env=False,
+                    timeout=SERVE_TIMEOUT,
+                ) as client:
+                    observed = await observed_page(
+                        raw_event_page(
+                            client, data.run_id, data.first_credential, None, PAGE_SIZE
+                        )
+                    )
+                latest = observed.page
+                assert observed.began <= latest.observed_at <= observed.ended
+                assert latest.next_cursor is not None
+                assert tuple(event.id for event in latest.items) == (
+                    f"event_{newest}",
+                    *data.event_ids[: PAGE_SIZE - 1],
+                )
+                await send_json(
+                    process.stdin,
+                    {"page": parse_json_object(latest.model_dump(mode="json"))},
+                )
             elif action == "revoke":
                 async with database.transaction() as writer:
                     await revoke_token(writer, data.second_token)
@@ -710,6 +740,7 @@ async def exercise_browser(
                     environment,
                     second_environment,
                     data,
+                    context,
                     channels,
                 )
 
@@ -733,7 +764,7 @@ async def exercise_browser(
     with closing(sqlite3.connect(settings.sqlite_path, timeout=0)) as observer:
         assert observer.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
         assert observer.execute("SELECT count(*) FROM event").fetchone() == (
-            PAGE_SIZE + 1,
+            PAGE_SIZE + 2,
         )
 
 

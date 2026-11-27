@@ -20,7 +20,7 @@ type SignInStep = 'start' | 'open-page' | 'navigate' | 'redemption' | 'redirect-
   | 'canonical-cookie' | 'complete'
 type PageSelection = 'earlier' | 'latest'
 type PaginationStep = 'start' | 'focus-reload' | 'tab-sign-out' | 'tab-earlier'
-  | 'restored-focus' | 'complete'
+  | 'restored-focus' | 'append-event' | 'complete'
   | `${PageSelection}-${'enter' | 'response' | 'headers' | 'selector' | 'dom'}`
 
 const browserTimeoutMs = 10000
@@ -75,7 +75,7 @@ const knownTimelinePaths = new Set(knownScopes.map(([ns, run]) =>
 
 const canonical = object(bootstrap.page)
 const canonicalCursor = string(canonical.next_cursor)
-const canonicalRows = pageItems(canonical)
+let canonicalRows = pageItems(canonical)
 const canonicalEarlierRows = pageItems(object(bootstrap.earlier_page))
 
 const evidence = {
@@ -520,6 +520,11 @@ async function paginate(page: Page): Promise<void> {
     assert(await refresh(page).evaluate(element => element === document.activeElement))
     return response
   })
+  paginationStep('append-event')
+  send({ type: 'append-event' })
+  const updated = pageItems(object((await receive()).page))
+  assert.notEqual(string(updated[0]?.id), string(canonicalRows[0]?.id))
+  canonicalRows = updated
   await checkPageRead(page, async (observed, began) => {
     paginationStep('latest-enter')
     await page.keyboard.press('Enter')
