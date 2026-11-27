@@ -16,6 +16,12 @@ from typing import Final, Literal
 import pytest
 
 from kora.cli.conformance import CommandResult
+from kora.conformance.result import (
+    MAX_CHILD_INPUT_BYTES,
+    ChildInput,
+    HarnessOutputProfile,
+    InputFiles,
+)
 from kora.db.connection import DatabaseSettings
 from kora.ir.json import JsonObject
 from kora.protocols.lifetime import (
@@ -23,6 +29,8 @@ from kora.protocols.lifetime import (
     OriginalOutcome,
 )
 from kora.protocols.metadata import ProtocolName
+from kora.protocols.time import SystemClock
+from kora.runner.channels import BoundedChannel
 from tests.conformance.progress_guard import Progress, progress_run
 from tests.support.configured_conformance import (
     installed_conformance as installed_conformance,
@@ -666,6 +674,151 @@ def test_installed_provider_supports_local_tooling(
     if protocol is ProtocolName.VCS:
         assert preparation == ("prepare_entered", "prepare_complete")
         assert timed_steps == VCS_PREPARATION_STEPS
+
+
+def test_installed_harness_output_profile_is_selected_by_the_operator(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    home = private_home(tmp_path / "home")
+    config = tmp_path / "config.json"
+    config.write_text('{"prefix":"terminal-exercise-"}')
+    fixture_data = tmp_path / "fixture-data.json"
+    fixture_data.write_text(
+        '{"exercise":"terminal-only","harness_output_profile":"terminal-text"}'
+    )
+    arguments = conformance_arguments(
+        "harness", "configured", config, "fixtures_harness", fixture_data
+    )
+    environment = {
+        "HOME": str(home),
+        "XDG_STATE_HOME": str(home / "state"),
+    }
+
+    omitted = installed_conformance.run(*arguments, environment=environment)
+    tool = installed_conformance.run(
+        *arguments, "--harness-output-profile", "tool-channel", environment=environment
+    )
+    terminal = installed_conformance.run(
+        *arguments, "--harness-output-profile", "terminal-text", environment=environment
+    )
+
+    for process, accepted in ((omitted, False), (tool, False), (terminal, True)):
+        assert process.code == (0 if accepted else 1), (
+            process.stdout,
+            process.stderr,
+        )
+        outcome = CommandResult.model_validate_json(process.stdout)
+        assert outcome.outcome is (
+            OriginalOutcome.COMPLETE if accepted else OriginalOutcome.FAILED
+        )
+        assert outcome.completed == (10 if accepted else 9)
+        assert outcome.expected == 10
+        assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "escaped_characters", "wire_profile", "wire_size"),
+    [
+        pytest.param(None, 4057, None, 16_370, id="omitted"),
+        pytest.param("tool-channel", 4057, None, 16_370, id="explicit-default"),
+        pytest.param(
+            "terminal-text", 4050, "terminal-text", 16_383, id="terminal-text"
+        ),
+    ],
+)
+async def test_harness_output_profile_preserves_the_bounded_child_input(
+    profile: HarnessOutputProfile | None,
+    escaped_characters: int,
+    wire_profile: HarnessOutputProfile | None,
+    wire_size: int,
+) -> None:
+    path = "/" + '"' * escaped_characters
+    request = ChildInput(
+        protocol=ProtocolName.HARNESS,
+        name="configured",
+        fixtures="kora_tooling_fixture.fixtures_harness",
+        files=InputFiles(configuration=path, fixture_data=path),
+        harness_output_profile=profile,
+    )
+    expected: JsonObject = {
+        "protocol": "harness",
+        "name": "configured",
+        "fixtures": "kora_tooling_fixture.fixtures_harness",
+        "files": {"configuration": path, "fixture_data": path},
+    }
+    if wire_profile is not None:
+        expected["harness_output_profile"] = wire_profile
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 5_000_000_000
+    outgoing, incoming = socket.socketpair()
+    with outgoing, incoming:
+        sender = BoundedChannel(outgoing, clock)
+        receiver = BoundedChannel(incoming, clock)
+
+        _, received = await asyncio.gather(
+            sender.write_record(request.model_dump_json().encode(), deadline),
+            receiver.read_record(deadline, MAX_CHILD_INPUT_BYTES),
+        )
+        decoded = ChildInput.model_validate_json(received)
+
+    assert received == json.dumps(expected, separators=(",", ":")).encode()
+    assert len(received) == wire_size
+    assert decoded.files == request.files
+    assert decoded.harness_output_profile == wire_profile
+
+
+@pytest.mark.parametrize(
+    ("protocol", "profile"),
+    [
+        ("harness", "unrecognized"),
+        ("secrets", "terminal-text"),
+        ("secrets", "tool-channel"),
+        ("cleanup", "terminal-text"),
+    ],
+)
+def test_installed_conformance_rejects_invalid_profile_before_launch(
+    installed_conformance: InstalledTooling,
+    tmp_path: Path,
+    protocol: str,
+    profile: str,
+) -> None:
+    home = private_home(tmp_path / "home")
+    config = tmp_path / "config.json"
+    arguments: tuple[str, ...]
+    if protocol == "cleanup":
+        arguments = ("conformance", "cleanup", "0" * 32)
+    elif protocol == "harness":
+        config.write_text('{"prefix":"configured-"}')
+        arguments = conformance_arguments(
+            protocol, "configured", config, "fixtures_harness"
+        )
+    else:
+        config.write_text('{"value":"configured"}')
+        arguments = conformance_arguments(
+            protocol, "configured", config, "fixtures_configured"
+        )
+
+    process = installed_conformance.run(
+        *arguments,
+        "--harness-output-profile",
+        profile,
+        environment={
+            "HOME": str(home),
+            "XDG_STATE_HOME": str(home / "state"),
+            "KORA_LOG_COMPONENT_LEVELS": (
+                "protocols.loading=DEBUG,conformance.lifetime=DEBUG"
+            ),
+        },
+    )
+
+    assert process.code == 1, (process.stdout, process.stderr)
+    assert CommandResult.model_validate_json(process.stdout) == CommandResult(
+        outcome=OriginalOutcome.FAILED, reason="refused"
+    )
+    assert not process.records()
+    assert not (home / "state").exists()
 
 
 @pytest.mark.parametrize(

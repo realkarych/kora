@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 from copy import deepcopy
+from dataclasses import replace
 from typing import Literal
 
 from kora.conformance.bridge import ConstructorArguments, PreparedConformance
@@ -10,7 +11,7 @@ from kora.conformance.harness import (
     run_harness_case,
 )
 from kora.ir import ToolPolicy
-from kora.ir.json import JsonObject
+from kora.ir.json import JsonObject, JsonValue
 from kora.plugins.harness.fake import CallScope, FakeHarness, ListedScript, ScriptHeader
 from kora.plugins.harness.fake.script import STEP_ADAPTER, EventStep, Step
 from kora.protocols.common import ProtocolContext
@@ -21,11 +22,11 @@ from kora.protocols.policy import PolicyLayers
 from kora.protocols.vcs import WorkspaceRef, WorkspaceTarget
 
 
-def turn(name: str) -> JsonObject:
+def turn(name: str, text: str | None = None) -> JsonObject:
     return {
         "kind": "event",
         "event": "turn",
-        "data": {"message_id": name, "truncated": False},
+        "data": {"message_id": name, "truncated": False, "text": text},
     }
 
 
@@ -40,8 +41,10 @@ def tool(name: str, identifier: str) -> JsonObject:
     }
 
 
-def output(source: Literal["structured_output", "result_text"]) -> JsonObject:
-    return {"kind": "output", "source": source, "value": {"answer": 42}}
+def output(
+    source: Literal["structured_output", "result_text"], value: JsonValue
+) -> JsonObject:
+    return {"kind": "output", "source": source, "value": value}
 
 
 def script(case: HarnessCase | None) -> ListedScript:
@@ -102,11 +105,23 @@ def script(case: HarnessCase | None) -> ListedScript:
         documents = [
             turn("m1"),
             {**tool("StructuredOutput", "output"), "outcome": None},
-            output("structured_output"),
+            output("structured_output", {"answer": 42}),
             result,
         ]
     elif case is HarnessCase.RESULT_TEXT:
-        documents = [turn("m1"), output("result_text"), result]
+        documents = [turn("m1"), output("result_text", {"answer": 42}), result]
+    elif case is HarnessCase.TERMINAL_JSON_OBJECT:
+        documents = [
+            turn("m1", '{"answer":true}'),
+            output("result_text", {"answer": True}),
+            result,
+        ]
+    elif case is HarnessCase.TERMINAL_JSON_NULL:
+        documents = [turn("m1", "null"), output("result_text", None), result]
+    elif case is HarnessCase.EARLIER_JSON_WITHOUT_TERMINAL_TEXT:
+        documents = [turn("m1", '{"answer":true}'), turn("m2"), result]
+    elif case is HarnessCase.MALFORMED_TERMINAL_JSON:
+        documents = [turn("m1", '{"answer":'), result]
     else:
         documents = [turn("m1"), result]
     return ListedScript(
@@ -217,6 +232,17 @@ async def prepare_case(
     provider.select(case, context)
 
 
+async def prepare_terminal_case(
+    provider: HarnessAdapter,
+    config: JsonObject,
+    case: HarnessCase,
+    context: ProtocolContext,
+) -> None:
+    if case is HarnessCase.STRUCTURED_OUTPUT:
+        case = HarnessCase.TERMINAL_JSON_OBJECT
+    await prepare_case(provider, config, case, context)
+
+
 async def effect(
     provider: HarnessAdapter, config: JsonObject, context: ProtocolContext
 ) -> None:
@@ -243,6 +269,11 @@ class Adapter:
         fixture_data: JsonObject,
         lifetime: ConformanceLifetime,
     ) -> PreparedConformance:
+        self.exercises = (
+            replace(INPUTS, prepare_case=prepare_terminal_case)
+            if fixture_data.get("exercise") == "terminal-only"
+            else INPUTS
+        )
         return self
 
     def bind_configuration(self, config: JsonObject) -> ConstructorArguments:
