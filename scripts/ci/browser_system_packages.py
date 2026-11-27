@@ -18,7 +18,7 @@ SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 PYTHON = "/usr/bin/python3"
 UBUNTU_APT = ROOT / "scripts/ci/browser_ubuntu_apt.py"
-BROWSER_APT_RUNTIME = Path("/run/kora-browser-apt")
+BROWSER_APT_RUNTIME = Path("/var/lib/kora-browser-apt")
 PLAYWRIGHT_WORK = frozenset(
     ("install", "refusal-witness", "unavailable-adapter-witness")
 )

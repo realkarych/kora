@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[2]
-RUNTIME = Path("/run/kora-browser-apt")
+RUNTIME = Path("/var/lib/kora-browser-apt")
 SOURCE = Path("/etc/apt/sources.list.d/ubuntu.sources")
 SIGNER = Path("/usr/share/keyrings/ubuntu-archive-keyring.gpg")
 MIRRORS = Path("/etc/apt/apt-mirrors.txt")
@@ -57,6 +57,13 @@ TRUE_VALUES = frozenset(("1", "true", "yes", "on"))
 
 class AptRefused(RuntimeError):
     pass
+
+
+def executable_mount(path: Path) -> bool:
+    noexec: object = getattr(os, "ST_NOEXEC", None)
+    if type(noexec) is not int:
+        raise AptRefused("Native package stage mount flags are unavailable.")
+    return not os.statvfs(path).f_flag & noexec
 
 
 def admitted_owner(status: os.stat_result, *, hash_only: bool) -> bool:
@@ -345,9 +352,20 @@ class Stage(NamedTuple):
 
     def prepare(self, invocation: str) -> None:
         payload = self.invocation_record(invocation)
+        check_directory(
+            RUNTIME.parent.parent.stat(follow_symlinks=False), "Package host"
+        )
         check_directory(RUNTIME.parent.stat(follow_symlinks=False), "Package runtime")
         RUNTIME.mkdir(mode=0o755, exist_ok=True)
         check_directory(RUNTIME.stat(follow_symlinks=False), "Package stage root")
+        if not executable_mount(RUNTIME):
+            raise AptRefused(
+                "The private Noble package stage filesystem disallows execution."
+            )
+        prior_mount = "exec" if executable_mount(Path("/run")) else "noexec"
+        sys.stderr.write(
+            f"Console Noble APT stage mount: exec. /run mount: {prior_mount}.\n"
+        )
         self.path.mkdir(mode=0o755)
         (self.path / "invocation").write_bytes(payload)
         (self.path / "cgroup").write_bytes(self.cgroup_identity())
