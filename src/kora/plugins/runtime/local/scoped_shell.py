@@ -496,8 +496,9 @@ class ScopedShell:
                 )
                 try:
                     if not gate.closed:
-                        await gate.settle(cutoff)
-                        await gate.drain(cutoff)
+                        if gate.returncode is None:
+                            await gate.settle(cutoff)
+                            await gate.drain(cutoff)
                         gate.release(cutoff)
                 finally:
                     if sweep is not None:

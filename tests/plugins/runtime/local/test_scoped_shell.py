@@ -49,6 +49,7 @@ from kora.runner.identity import CommandRead, IdentityState, NativeIdentityReade
 from kora.runner.installed_executable import ExecutablePin, verify_installed_executable
 from kora.runner.processes import start_gated
 from tests.plugins.runtime.local.test_command import opaque_environment_process
+from tests.runner.test_gated_process_settlement import FailedWaitReceipt
 from tests.support.event_loop import turn
 from tests.support.local_peers import until
 from tests.support.local_runners import short_directory
@@ -71,7 +72,6 @@ DESCENDANT: Final[str] = (
 import os
 import signal
 import sys
-import time
 record('leader', os.getpid())
 if os.fork() == 0:
     if os.fork() != 0:
@@ -82,9 +82,9 @@ if os.fork() == 0:
         signal.pause()
     os._exit(0)
 os.wait()
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
 record('ready', 1)
-while not Path('finish').exists():
-    time.sleep(.01)
+signal.sigwait({signal.SIGUSR1})
 with open('executions', 'a') as counted:
     counted.write('ran')
 print('finished')
@@ -138,6 +138,7 @@ async def shell_owner(
     *,
     altered_stamp: bool = False,
     start_reaper: bool = True,
+    reaper: AdoptedReaper | None = None,
 ) -> AsyncGenerator[tuple[ScopedShell, BoundCheckout, AdoptedReaper]]:
     content = BASH_PATH.read_bytes()
     pin = ExecutablePin(len(content), hashlib.sha256(content).hexdigest())
@@ -145,7 +146,8 @@ async def shell_owner(
     if altered_stamp:
         executable = replace(executable, inode=executable.inode + 1)
     checkout = BoundCheckout.capture(workspace)
-    reaper = AdoptedReaper(grace_ns=0, interval=0.02)
+    if reaper is None:
+        reaper = AdoptedReaper(grace_ns=0, interval=0.02)
     with subreaper():
         if start_reaper:
             reaper.start()
@@ -209,11 +211,12 @@ async def assert_adopted_zombie_retains_shell_call(
                 )
 
             await until(adopted_zombie)
+            await until(lambda: (workspace / "ready").exists())
             zombie = reader.read(pid).process
             assert zombie is not None
             leader = current_identity(workspace / "leader")
             assert zombie.process_group_id != leader.pid
-            (workspace / "finish").touch()
+            os.kill(leader.pid, signal.SIGUSR1)
             with pytest.raises(ScopedShellError) as unresolved:
                 await task
             assert unresolved.value.reason is ScopedShellFailure.UNRESOLVED
@@ -338,7 +341,7 @@ async def test_scoped_shell_keeps_registered_sibling_and_settles_descendants(
                 assert observed.process_group_id != leader.pid
                 if sys.platform == "linux":
                     assert observed.parent_pid == os.getpid()
-                (workspace / "finish").touch()
+                os.kill(leader.pid, signal.SIGUSR1)
                 assert await call == ScopedShellResult(0, "finished\n")
                 assert not owner.occupied
                 assert (workspace / "executions").read_text() == "ran"
@@ -451,9 +454,9 @@ OUTPUT_FIXTURE: Final[str] = (
     WRITE_PID
     + """
 import os
+import signal
 import stat
 import sys
-import time
 descriptor = int(sys.argv[1])
 assert os.read(0, 1) == b''
 assert stat.S_ISCHR(os.fstat(0).st_mode)
@@ -474,14 +477,13 @@ assert os.environ['HOME'] == os.path.join(os.getcwd(), 'home')
 assert os.environ['TMPDIR'] == os.path.join(os.getcwd(), 'tmp')
 assert len(os.environ['KORA_SCOPED_SHELL']) == 32
 assert os.environ['KORA_ATTEMPT_TOKEN'] == sys.argv[3]
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
 record('masked.pid', os.getpid())
 os.write(2, b'private-stderr-marker' * 17000)
 os.write(1, b'private-sens')
-while not Path('first').exists():
-    time.sleep(.01)
+signal.sigwait({signal.SIGUSR1})
 os.write(1, b'itive-split \\xe2')
-while not Path('second').exists():
-    time.sleep(.01)
+signal.sigwait({signal.SIGUSR1})
 os.write(1, b'\\x82\\xac:\\xe2')
 """
 )
@@ -523,12 +525,12 @@ async def test_scoped_shell_bounds_and_masks_stdout_through_eof(
             )
             assert not task.done()
             leader = current_identity(workspace / "masked.pid")
-            (workspace / "first").touch()
+            os.kill(leader.pid, signal.SIGUSR1)
             await until(
                 lambda: owner.stdout_bytes == len(PRIVATE_TEXT) + 2 or task.done()
             )
             assert not task.done()
-            (workspace / "second").touch()
+            os.kill(leader.pid, signal.SIGUSR1)
             assert await task == ScopedShellResult(0, "[redacted] €:�")
             assert_gone(leader)
             assert gate_descriptors() == descriptors
@@ -673,3 +675,27 @@ async def test_scoped_shell_keeps_unresolved_ownership(
         assert_gone(leader)
         assert gate_descriptors() == descriptors
         assert await owner.run(replacement) == ScopedShellResult(0, "replacement")
+
+
+@pytest.mark.asyncio
+async def test_scoped_shell_finishes_collected_gate_after_cleanup_failure(
+    tmp_path: Path, shell_diagnostics: Capture
+) -> None:
+    clock = SystemClock()
+    waiter = FailedWaitReceipt()
+    async with shell_owner(
+        tmp_path.resolve(), shell_diagnostics, clock, reaper=waiter
+    ) as (owner, _, _):
+        descriptors = gate_descriptors()
+        invocation = admit(clock, "printf original")
+
+        with pytest.raises(ScopedShellError) as refused:
+            await owner.run(invocation)
+        assert owner.occupied
+        settled = await owner.settle(before(clock))
+
+        assert refused.value.reason is ScopedShellFailure.UNRESOLVED
+        assert settled
+        assert not owner.occupied
+        assert waiter.releases == 1
+        assert gate_descriptors() == descriptors
