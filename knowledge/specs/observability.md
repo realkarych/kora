@@ -42,7 +42,6 @@ Provider-loading amendment dated 2026-10-21: the provider-registry row of sectio
 
 Read this contract whenever implementing or changing a component's behavior, logging configuration, collection, context, redaction or output. The [research](../research/orchestrator-logging-patterns-2026-10-18.md) and [planning review](../reviews/structured-logging-plan-review-2026-10-18.md) explain its basis; they do not replace the contract or prove runtime behavior.
 
-
 Private SQLite custody under #1981 uses the database logger. It emits `db.custody.transition` at INFO for a confirmed native transition, `db.custody.refused` at DEBUG for refusal and `db.custody.unfinished` at WARNING when closure is unconfirmed. The only event-specific field is one fixed `state` value. Paths, authority tokens, row content and native process identifiers stay with their owners. Diagnostic output has no role in committing or releasing custody. `tests/db/test_custody_diagnostics.py` exercises that boundary in the private composition.
 
 ## 1. Streams and authority

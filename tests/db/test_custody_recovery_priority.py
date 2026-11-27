@@ -811,6 +811,43 @@ async def test_recovery_registration_and_withdrawal_release_preopen_failure(
 
 
 @pytest.mark.asyncio
+async def test_recovery_registration_releases_c_after_retained_journal(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    path = journal_path(tmp_path)
+    incumbent_path = tmp_path / "independent.sqlite"
+    copy_sqlite_template(sqlite_template, incumbent_path)
+    identity = native_identity(incumbent_path)
+    sidecar = path / "authority.sqlite3-journal"
+    with (
+        closing(
+            CustodyNativeDirectory(path, NativeCustodyPlatform(), provision=True)
+        ) as root,
+        closing(CustodyRecoveryPriority(root)) as priority,
+        sqlite_contender(incumbent_path) as incumbent,
+    ):
+        await initialize(root)
+        incumbent.execute("BEGIN IMMEDIATE").close()
+        try:
+            sidecar.hardlink_to(incumbent_path)
+            with pytest.raises((CustodyUnavailable, sqlite3.Error)):
+                await register(priority)
+            for name in ("commit.lock", "journal-order.lock"):
+                with pytest.raises(BlockingIOError), root.acquire(name):
+                    pytest.fail("the original coordinator lease released early")
+            assert len(held_main_descriptors(identity)) == 2
+        finally:
+            sidecar.unlink(missing_ok=True)
+            incumbent.commit()
+            await asyncio.to_thread(incumbent.close)
+        await until(lambda: descriptor_count(path / "commit.lock") == 1)
+        assert not held_main_descriptors(identity)
+        with root.acquire("commit.lock"), root.acquire("journal-order.lock"):
+            assert root.read_latch() is CustodyLatch.ARMED
+        await register(priority)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("damaged", [b"", b"\0", b"\xa5\xa5", b"\xff", b"\x3c"])
 async def test_fresh_and_serving_peer_refuse_invalid_or_bootstrap_latch(
     tmp_path: Path, damaged: bytes

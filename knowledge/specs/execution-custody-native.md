@@ -6,7 +6,6 @@ The [original-writer refinement under #1738](https://github.com/realkarych/kora/
 
 The authority specification's governing decisions, uncertainty rules and resource limits apply throughout. [ADR-0026](../../docs/decisions/0026-package-layers.md) additionally governs module ownership. The [dated source inventory and delivery assessment](../research/execution-custody-native-plan-2026-11-15.md) distinguishes existing code, proposed producers and native facts checked against primary documentation. #216 owns integration, #1320 owns deletion custody, and #1581 owns the upload-retirement handoff fields accepted in #1583. This document grants none of their missing runtime capabilities.
 
-
 ## Private SQLite writer
 
 Issue #1981 exercises the existing token revocation through the original aiosqlite writer and the guarded SQLite engine. The private composition uses a disposable fixture with the v1 frontier. The installed metadata revision remains `run_event_metadata_0034`, and the installed CLI, API and ordinary database configuration expose no selector for the private composition.

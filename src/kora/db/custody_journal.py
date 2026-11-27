@@ -919,6 +919,7 @@ class CustodyJournalLease:
     _prepared: CustodyPendingCommit | None
     _sqlite_checkout: object | None
     _deferred_close: Callable[[], None] | None
+    _deferred_settlement: Callable[[], None] | None
 
     def __init__(
         self, root: CustodyNativeDirectory, ownership: CustodyDescriptor
@@ -938,6 +939,7 @@ class CustodyJournalLease:
         self._prepared = None
         self._sqlite_checkout = None
         self._deferred_close = None
+        self._deferred_settlement = None
         ACTIVE_LEASES.add(self)
 
     @property
@@ -1151,8 +1153,20 @@ class CustodyJournalLease:
             if not self._phase.released:
                 self._phase.after_release(self.resume_close)
 
+    def defer_sqlite_settlement(self, resume: Callable[[], None]) -> bool:
+        if self._phase.released:
+            return False
+        self._deferred_settlement = resume
+        self._phase.after_release(self.resume_close)
+        return True
+
     def resume_close(self) -> None:
-        if self._phase.released and self._sqlite_checkout is None:
+        if not self._phase.released:
+            return
+        settle, self._deferred_settlement = self._deferred_settlement, None
+        if settle is not None:
+            settle()
+        elif self._sqlite_checkout is None:
             resume, self._deferred_close = self._deferred_close, None
             if resume is not None:
                 resume()

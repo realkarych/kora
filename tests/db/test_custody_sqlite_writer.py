@@ -1677,6 +1677,62 @@ async def test_custody_dispatch_cancellation_joins_original_commit(
 
 
 @pytest.mark.asyncio
+async def test_custody_abort_settles_after_retained_dispatch_journal_closes(
+    writer_owners: WriterOwners, sqlite_template: Path, tmp_path: Path
+) -> None:
+    owners = writer_owners
+    root = owners.root
+    metadata = owners.settings.sqlite_path.resolve(strict=True)
+    incumbent_path = tmp_path / "independent.sqlite"
+    copy_sqlite_template(sqlite_template, incumbent_path)
+    identity = native_identity(incumbent_path)
+    sidecar = root.path / "authority.sqlite3-journal"
+    database, entry = local_sqlite_writer(
+        owners.settings, root, owners.lifetime, owners.participant
+    )
+    before = read_metadata(metadata)
+    with (
+        sqlite_contender(incumbent_path) as incumbent,
+        observe_writer(WriterCut.FRONTIER_ADVANCED) as native,
+        observe_pool() as pool,
+    ):
+        incumbent.execute("BEGIN IMMEDIATE").close()
+        task = asyncio.create_task(
+            database.run(LocalSQLiteWriterUnit(entry, owners.tokens[0]))
+        )
+        try:
+            await until(native.entered.is_set)
+            sidecar.hardlink_to(incumbent_path)
+            native.release.set()
+            with pytest.raises(CustodyUnavailable):
+                await task
+            assert pool.checked_in == pool.checked_out
+            assert_native_commands(native, (*ORIGINAL_COMMIT[:5], "ROLLBACK"))
+            assert database.units_in_flight() == 1
+            assert_commit_lock_owned(root)
+            with pytest.raises(BlockingIOError), root.acquire("journal-order.lock"):
+                pytest.fail("exact J released before the retained native receipt")
+            assert len(held_main_descriptors(identity)) == 2
+            sidecar.unlink()
+            saved = read_pending(root)
+            assert saved is not None
+            assert saved[:2] == ("prepared", FIRST_ALLOCATION)
+            incumbent.commit()
+            await asyncio.to_thread(incumbent.close)
+            await until(lambda: database.units_in_flight() == 0)
+            assert not held_main_descriptors(identity)
+            assert read_metadata(metadata) == before
+            assert read_pending(root) is None
+            assert_confirmed(read_authority(root.path), before.frontier)
+            assert_released(root, metadata)
+        finally:
+            sidecar.unlink(missing_ok=True)
+            native.release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await database.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cut", [WriterCut.RECORDING, WriterCut.COMPACTING])
 async def test_custody_writer_keeps_original_lease_until_settled(
     writer_owners: WriterOwners, cut: WriterCut

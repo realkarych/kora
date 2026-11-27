@@ -1395,14 +1395,18 @@ class Database:
                 if driver is not None:
                     driver.after_retirement(schedule_retirement)
                 raise CustodyUnavailable
-            await self._confirm_local_sqlite_release(checkout, journal)
+            await settle_when_released()
+
+        async def settle_when_released() -> None:
+            if not journal.defer_sqlite_settlement(schedule_retirement):
+                await self._confirm_local_sqlite_release(checkout, journal)
 
         def schedule_retirement() -> None:
             asyncio.create_task(resume_retirement())
 
         async def resume_retirement() -> None:
             try:
-                await self._confirm_local_sqlite_release(checkout, journal)
+                await settle_when_released()
             except (CustodyUnavailable, *WRITER_ENTRY_NATIVE_ERRORS):
                 custody_log(CUSTODY_UNFINISHED, "ordinary_admission")
             finally:
