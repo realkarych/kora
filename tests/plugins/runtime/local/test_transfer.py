@@ -81,6 +81,7 @@ from kora.runner.identity import (
 from kora.runner.journal import read_records
 from kora.runner.native_io import NativeIOSubmissionUncertain, NativeIOUnresolved
 from kora.runner.peers import kernel_source
+from kora.runner.processes import ExitAnchor, SignalResult
 from kora.runner.registry import (
     Registry,
     Running,
@@ -1793,8 +1794,13 @@ async def test_transfer_out_returns_the_sealed_file(
         diagnostics = transfer_diagnostics(attempt / "runner.log")
         pid = await running_pid(runtime, "attempt-1")
         before = live_descriptors()
-        os.kill(pid, signal.SIGKILL)
-        assert exited_within(pid, 5)
+        runner_exit = ExitAnchor(pid, direct_child=False)
+        try:
+            assert runner_exit.signal(signal.SIGKILL) is SignalResult.SENT
+            await runner_exit.wait(ctx.clock.monotonic_ns() + 5_000_000_000, ctx.clock)
+            assert runner_exit.exited
+        finally:
+            runner_exit.close()
 
         async def exhausted() -> None:
             async for _chunk in runtime.transfer_out(handle, "empty", ctx):
