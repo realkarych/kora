@@ -70,6 +70,7 @@ from kora.db.maintenance import (
     NativeReadUnavailable,
     handle_native_read_error,
     postgresql_transaction_active,
+    sqlite_checkout_worker,
 )
 from kora.db.maintenance import PostgreSQLDurabilityError as PostgreSQLDurabilityError
 from kora.db.transactions import (
@@ -1326,16 +1327,13 @@ class Database:
     ) -> None:
         from kora.db.custody_models import custody_counter
         from kora.db.custody_sqlite import SQLiteWorkerOriginal
-        from kora.db.custody_transaction import (
-            OriginalCustodyTransaction,
-            native_writer_driver,
-        )
+        from kora.db.custody_transaction import OriginalCustodyTransaction
         from kora.db.custody_writer import (
             LOCAL_SQLITE_NATIVE_SEQUENCE,
             CustodyDriverConnection,
         )
 
-        driver = await native_writer_driver(connection)
+        driver = await sqlite_checkout_worker(connection)
         if (
             not isinstance(driver, CustodyDriverConnection)
             or driver is not scope.physical.driver

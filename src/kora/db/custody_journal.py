@@ -6,9 +6,11 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapp
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import Final, TypeAlias, TypeVar, cast
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Integer,
     LargeBinary,
@@ -20,8 +22,8 @@ from sqlalchemy import (
     case,
     delete,
     insert,
+    literal_column,
     select,
-    text,
     update,
 )
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
@@ -144,8 +146,34 @@ def native_statement(
     return str(compiled), values
 
 
+def _read_admission(
+    relation: CustodyRelation,
+) -> tuple[str, Mapping[str, NativeValue]]:
+    table = TABLES[relation.name]
+    predicates = (
+        *relation.constraints,
+        *(column.predicate for column in relation.columns),
+        f"({relation.width}) <= {MAX_CUSTODY_ROW_BYTES}",
+    )
+    typed = and_(
+        *(literal_column(f"({condition})", Boolean()) for condition in predicates)
+    )
+    statement = (
+        select(case((typed, 1), else_=0))
+        .select_from(table)
+        .where(table.c[relation.key] == bindparam("bound_key"))
+    )
+    sql, parameters = native_statement(statement)
+    return sql, MappingProxyType(parameters)
+
+
+_READ_ADMISSIONS: Final = MappingProxyType(
+    {relation.name: _read_admission(relation) for relation in RELATIONS}
+)
+
+
 def require_relation(relation: CustodyRelation) -> None:
-    if relation not in RELATIONS:
+    if not any(relation is registered for registered in RELATIONS):
         raise CustodyUnavailable
 
 
@@ -338,21 +366,9 @@ class CustodyJournalTransaction:
             column for column in relation.columns if column.name == relation.key
         )
         checked_value(key_column, key)
-        predicates = (
-            *relation.constraints,
-            *(column.predicate for column in relation.columns),
-        )
         table = TABLES[relation.name]
-        admitted = and_(
-            *(text(f"({condition})") for condition in predicates),
-            text(f"({relation.width}) <= {MAX_CUSTODY_ROW_BYTES}"),
-        )
-        admission = (
-            select(case((admitted, 1), else_=0))
-            .select_from(table)
-            .where(table.c[relation.key] == bindparam("bound_key"))
-        )
-        statement, parameters = native_statement(admission, {"bound_key": key})
+        statement, values = _READ_ADMISSIONS[relation.name]
+        parameters = {**values, "bound_key": key}
         try:
             with closing(self._connection.execute(statement, parameters)) as cursor:
                 decision: object = cursor.fetchone()

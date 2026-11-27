@@ -32,6 +32,7 @@ from kora.db.custody_sqlite import (
     SQLiteWorkerOriginal,
 )
 from kora.db.identifiers import is_identifier
+from kora.db.maintenance import sqlite_record_worker
 from kora.db.token_statements import REVOKED, revoke_token_statement
 from kora.db.transactions import WriterTransaction, WriterTransactionError
 from kora.sqlite.driver import Connection
@@ -169,7 +170,7 @@ class SQLitePhysicalWriter:
     def checkin(
         self, connection: DBAPIConnection | None, record: ConnectionPoolEntry
     ) -> None:
-        if connection is not None and record.driver_connection is self.driver:
+        if connection is not None and sqlite_record_worker(record) is self.driver:
             self.returned = self.driver
 
     def observe_retirement(self, connection: Connection) -> None:

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Final, Self
+from typing import Final, Self, cast
 
 import aiosqlite
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncTransaction
@@ -12,14 +12,10 @@ from kora.db.custody_models import (
     CustodyUnavailable,
 )
 from kora.db.custody_sqlite import SQLiteWorkerOriginal
+from kora.db.maintenance import sqlite_checkout_worker
 from kora.db.types import SQLITE
 
 _FRONTIER_APPLIED: Final[object] = object()
-
-
-async def native_writer_driver(connection: AsyncConnection) -> object:
-    proxied = await connection.get_raw_connection()
-    return proxied.driver_connection
 
 
 @dataclass(frozen=True, init=False)
@@ -44,7 +40,7 @@ class OriginalCustodyTransaction:
     _connection: AsyncConnection
     _transaction: AsyncTransaction
     _binding: CustodyTransactionBinding
-    _driver: object
+    _driver: aiosqlite.Connection
     _custody_owner: object | None
     _started: bool
     _outcome: CustodyNativeOutcome | None
@@ -56,7 +52,7 @@ class OriginalCustodyTransaction:
         connection: AsyncConnection,
         transaction: AsyncTransaction,
         binding: CustodyTransactionBinding,
-        driver: object,
+        driver: aiosqlite.Connection,
         sqlite: SQLiteWorkerOriginal,
     ) -> None:
         self._connection = connection
@@ -88,8 +84,8 @@ class OriginalCustodyTransaction:
             or not transaction.is_active
         ):
             raise CustodyUnavailable
-        driver = await native_writer_driver(connection)
-        if driver is not sqlite.driver or not isinstance(driver, aiosqlite.Connection):
+        driver = await sqlite_checkout_worker(connection)
+        if driver is None or driver is not cast(object, sqlite.driver):
             raise CustodyUnavailable
         original = cls(
             connection,
@@ -191,7 +187,7 @@ class OriginalCustodyTransaction:
 
     async def _require_native_original(self) -> None:
         self._require_original()
-        driver = await native_writer_driver(self._connection)
+        driver = await sqlite_checkout_worker(self._connection)
         if driver is not self._driver:
             raise CustodyUnavailable
         await self._sqlite.require_original()
