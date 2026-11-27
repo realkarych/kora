@@ -15,6 +15,7 @@ from sqlalchemy.exc import DBAPIError
 from kora.db.connection import Database, DatabaseSettings, Dialect, parse_database_url
 from kora.db.migrations import current_revision, upgrade_database
 from kora.db.tables import namespace, price_table
+from tests.db.closing import legacy_preparation
 from tests.db.seed import START, Seeder, seed_predecessor
 from tests.db.test_pricing_migration import price_check, retained_index_progress
 from tests.observability.conftest import ProcessResult, run_kora
@@ -188,7 +189,7 @@ async def test_db_upgrade_partial_failure_is_content_free(
     database = Database(empty_database_settings)
     marker = "PRIVATE-ACCOUNTING-MARKER"
     try:
-        async with database.transaction() as connection:
+        async with legacy_preparation(database) as connection:
             await connection.run_sync(seed_predecessor)
             if database.dialect is Dialect.POSTGRESQL:
                 await connection.exec_driver_sql(
@@ -260,7 +261,7 @@ async def test_db_upgrade_index_failure_is_content_free_and_recoverable(
     try:
         if database.dialect is Dialect.POSTGRESQL:
             await retained_index_progress(empty_database_settings)
-        async with database.transaction() as connection:
+        async with legacy_preparation(database) as connection:
             if database.dialect is Dialect.SQLITE:
                 await connection.run_sync(seed_predecessor)
                 await connection.exec_driver_sql(

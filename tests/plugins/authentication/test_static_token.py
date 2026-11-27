@@ -1,7 +1,6 @@
 import asyncio
 import json
 import socket
-import sqlite3
 from contextlib import AsyncExitStack, closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -24,7 +23,7 @@ from kora.protocols.authentication import Principal, RequestInfo
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.loading import load_provider
 from kora.protocols.metadata import ProtocolName
-from tests.db.closing import ConnectionLedger
+from tests.db.closing import ConnectionLedger, sqlite_contender
 from tests.db.seed import START, Seeder
 from tests.plugins.authentication.support import AuthorityClock, seed_case
 from tests.support.databases import sqlite_settings
@@ -361,7 +360,7 @@ async def test_real_database_connection_unavailability_is_not_bad_credentials(
             )
         database = Database(settings)
         if settings.dialect is Dialect.SQLITE:
-            settings.sqlite_path.unlink()
+            assert not settings.sqlite_path.exists()
             settings.sqlite_path.mkdir()
         provider = StaticTokenAuthenticator({}, database)
         ledger = ConnectionLedger(database)
@@ -404,9 +403,7 @@ async def test_sqlite_revoke_busy_writer_returns_safe_retryable_refusal(
                 pass
         ledger = ConnectionLedger(database)
 
-        with closing(
-            sqlite3.connect(settings.sqlite_path, timeout=0, isolation_level=None)
-        ) as competing_writer:
+        with sqlite_contender(settings.sqlite_path) as competing_writer:
             with closing(competing_writer.execute("BEGIN IMMEDIATE")):
                 pass
             with pytest.raises(KoraProtocolError) as busy:

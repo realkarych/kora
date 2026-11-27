@@ -19,7 +19,7 @@ from kora.db.migrations import (
     upgrade_to_head,
 )
 from kora.db.tables import metadata, price_table, usage_record
-from tests.db.closing import until
+from tests.db.closing import legacy_preparation, until
 from tests.db.predecessor import upgraded_predecessor
 from tests.db.seed import START, predecessor_snapshot, seed_predecessor
 from tests.db.test_migrations import differences_ignoring_expression_indexes
@@ -54,7 +54,7 @@ async def test_price_schema_upgrade_preserves_history(
         return migration
 
     try:
-        async with database.transaction() as connection:
+        async with legacy_preparation(database) as connection:
             before = await connection.run_sync(seed_predecessor)
 
         await database.close()
@@ -143,7 +143,7 @@ async def test_pricing_migration_refuses_altered_column_defaults(
     database = Database(empty_database_settings)
     original_default: str | None = None
     try:
-        async with database.transaction() as connection:
+        async with legacy_preparation(database) as connection:
             before = await connection.run_sync(seed_predecessor)
             if database.dialect is Dialect.POSTGRESQL:
                 await connection.exec_driver_sql(
@@ -235,7 +235,7 @@ async def test_pricing_migration_recovers_after_failure(
 ) -> None:
     database = Database(empty_database_settings)
     try:
-        async with database.transaction() as connection:
+        async with legacy_preparation(database) as connection:
             before = await connection.run_sync(seed_predecessor)
             if database.dialect is Dialect.SQLITE:
                 await connection.exec_driver_sql(
@@ -365,7 +365,7 @@ async def test_pricing_migration_recovers_after_index_interruption(
     if empty_database_settings.dialect is Dialect.SQLITE:
         database = Database(empty_database_settings)
         try:
-            async with database.transaction() as connection:
+            async with database.migration_connection() as connection:
                 await connection.run_sync(seed_predecessor)
             async with database.transaction() as holder:
                 await holder.exec_driver_sql("UPDATE price_table SET model = model")
@@ -503,7 +503,7 @@ async def test_migration_lease_closed_before_stamp_keeps_predecessor(
     empty_database_settings: DatabaseSettings,
 ) -> None:
     database = Database(empty_database_settings)
-    async with database.transaction() as connection:
+    async with legacy_preparation(database) as connection:
         await connection.run_sync(seed_predecessor)
 
     with pytest.raises(DatabaseClosedError):

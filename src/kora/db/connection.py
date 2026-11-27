@@ -505,8 +505,7 @@ def open_sqlite_file(
     driver_version()
     if guarded_reader is not None:
         guarded_reader.require_live()
-    if not NativeRetirement.drain(path):
-        raise sqlite3.OperationalError("SQLite native retirement is pending.")
+    NativeRetirement.drain(path)
 
     def release() -> None:
         slots.release()

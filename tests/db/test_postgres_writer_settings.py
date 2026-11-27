@@ -34,7 +34,7 @@ from tests.support.databases import (
     TEMPLATE_DATABASE,
     DatabaseKind,
     DisabledPostgresWALSetting,
-    sqlite_settings,
+    copy_sqlite_template,
     start_postgres,
 )
 
@@ -71,10 +71,13 @@ async def set_session_commit_mode(
 @pytest.mark.asyncio
 async def test_ordinary_writer_remains_available_with_ordinary_settings(
     empty_database_settings: DatabaseSettings,
+    sqlite_template: Path,
 ) -> None:
     settings = narrow_settings(empty_database_settings, pool_size=1)
-    database = Database(settings)
     postgres = settings.dialect is Dialect.POSTGRESQL
+    if not postgres:
+        copy_sqlite_template(sqlite_template, settings.sqlite_path)
+    database = Database(settings)
 
     try:
         if postgres:
@@ -488,11 +491,13 @@ async def check_native_sqlite_settings(settings: DatabaseSettings) -> None:
 
 
 def test_writer_entry_checks_native_durability_settings(
-    database_kind: DatabaseKind, tmp_path: Path
+    database_kind: DatabaseKind, tmp_path: Path, sqlite_template: Path
 ) -> None:
     if database_kind is DatabaseKind.SQLITE:
         asyncio.run(
-            check_native_sqlite_settings(sqlite_settings(tmp_path / "metadata.db"))
+            check_native_sqlite_settings(
+                copy_sqlite_template(sqlite_template, tmp_path / "metadata.db")
+            )
         )
         return
     for disabled_setting in DisabledPostgresWALSetting:

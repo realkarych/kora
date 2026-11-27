@@ -16,6 +16,7 @@ from kora.db.migrations import upgrade_database
 from tests.api.serving_lifecycle_child import PRIVATE_LIFESPAN_REASON, serving_event
 from tests.api.support import api_capture
 from tests.client.support import write_tls_material
+from tests.support.databases import copy_sqlite_template
 
 __all__ = ["api_capture"]
 
@@ -208,8 +209,10 @@ async def test_tls_accept_pressure_retries_or_settles_on_stop(
 
 
 @pytest.mark.asyncio
-async def test_sqlite_serving_close_waits_for_the_original_unit(tmp_path: Path) -> None:
-    settings = parse_database_url(f"sqlite+aiosqlite:///{tmp_path / 'metadata.sqlite'}")
+async def test_sqlite_serving_close_waits_for_the_original_unit(
+    tmp_path: Path, sqlite_template: Path
+) -> None:
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "metadata.sqlite")
     database = Database(settings, observe_sqlite_serving=True)
     entered = asyncio.Event()
     release = asyncio.Event()

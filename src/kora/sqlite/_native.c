@@ -282,7 +282,8 @@ static PyObject *prepareStatement(PyObject *module, PyObject *args) {
     result = SQLITE_MISUSE;
   }
   sqlite3_finalize(statement);
-  return dbError(result, sqlite3_errstr(result));
+  return dbError(result, result == SQLITE_MISUSE
+    ? sqlite3_errstr(result) : sqlite3_errmsg(db->connection));
 }
 
 static PyObject *columnValue(sqlite3_stmt *statement, int index) {
@@ -311,7 +312,7 @@ static PyObject *statementValues(PyObject *capsule, int columns) {
     result = sqlite3_step(statement);
     Py_END_ALLOW_THREADS
     if (result == SQLITE_DONE) Py_RETURN_NONE;
-    if (result != SQLITE_ROW) return dbError(result, sqlite3_errstr(result));
+    if (result != SQLITE_ROW) return dbError(result, sqlite3_errmsg(sqlite3_db_handle(statement)));
   }
   int count = sqlite3_column_count(statement);
   if (columns && !count) Py_RETURN_NONE;

@@ -76,7 +76,7 @@ async def test_a_failed_connection_leaves_no_driver_thread(
     )
     database = Database(settings)
     if settings.dialect is Dialect.SQLITE:
-        settings.sqlite_path.unlink()
+        assert not settings.sqlite_path.exists()
         settings.sqlite_path.mkdir()
     before = driver_threads()
     try:

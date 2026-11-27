@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlencode
 
 import httpx
@@ -1989,7 +1990,6 @@ def test_installed_api_and_upgrade_refuse_a_marker_only_main(
     main = tmp_path / "marker.sqlite"
     image = marker_only_sqlite(main, marker)
     url = f"sqlite+aiosqlite:///{main}"
-    root = tmp_path / "storage"
     provider_probe = """
 import asyncio
 import sys
@@ -2032,14 +2032,23 @@ assert not (root / "control.sqlite-journal").exists()
         check=False,
         timeout=SERVE_TIMEOUT,
     )
-    provider = subprocess.run(
-        [str(serving_installation), "-I", "-c", provider_probe, str(root), str(main)],
-        cwd=tmp_path,
-        env={"PATH": os.defpath},
-        capture_output=True,
-        check=False,
-        timeout=SERVE_TIMEOUT,
-    )
+    with TemporaryDirectory(prefix="kora-installed-sqlite-", dir="/tmp") as directory:
+        root = Path(directory).resolve() / "storage"
+        provider = subprocess.run(
+            [
+                str(serving_installation),
+                "-I",
+                "-c",
+                provider_probe,
+                str(root),
+                str(main),
+            ],
+            cwd=tmp_path,
+            env={"PATH": os.defpath},
+            capture_output=True,
+            check=False,
+            timeout=SERVE_TIMEOUT,
+        )
 
     assert api.returncode == 78
     assert api.stdout == b""
@@ -2048,7 +2057,7 @@ assert not (root / "control.sqlite-journal").exists()
     assert upgrade.stdout == b""
     assert provider.returncode == 0, provider.stderr
     assert main.read_bytes() == image
-    assert set(tmp_path.iterdir()) == {main, root}
+    assert set(tmp_path.iterdir()) == {main}
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ from kora.db.connection import (
     Dialect,
     Lifecycle,
 )
-from tests.db.closing import CONDITION_DEADLINE_SECONDS, until
+from tests.db.closing import CONDITION_DEADLINE_SECONDS, sqlite_contender, until
 from tests.db.native_read_support import (
     NativeQuery,
     owned_reader,
@@ -99,11 +99,15 @@ async def test_snapshot_preserves_tighter_native_timeout(
 ) -> None:
     async with owned_reader(database_settings) as reader:
         if reader.dialect is Dialect.SQLITE:
-            with closing(sqlite3.connect(database_settings.sqlite_path)) as writer:
-                writer.execute("PRAGMA journal_mode=DELETE")
+            with sqlite_contender(
+                database_settings.sqlite_path, timeout_ms=5000
+            ) as writer:
+                with closing(writer.execute("PRAGMA journal_mode=DELETE")) as mode:
+                    assert mode.fetchone() == ("delete",)
                 async with reader.read_transaction() as connection:
                     await connection.exec_driver_sql("PRAGMA busy_timeout=20")
-                writer.execute("BEGIN EXCLUSIVE")
+                with closing(writer.execute("BEGIN EXCLUSIVE")):
+                    pass
                 try:
                     with pytest.raises(DatabaseSnapshotRejected) as refused:
                         async with reader.read_snapshot(
@@ -172,8 +176,11 @@ async def test_snapshot_native_busy_wait_uses_remaining_deadline(
                 await observer.close()
             expected: object = "0"
         else:
-            with closing(sqlite3.connect(database_settings.sqlite_path)) as writer:
-                writer.execute("BEGIN EXCLUSIVE")
+            with sqlite_contender(
+                database_settings.sqlite_path, timeout_ms=5000
+            ) as writer:
+                with closing(writer.execute("BEGIN EXCLUSIVE")):
+                    pass
                 try:
                     with pytest.raises(DatabaseSnapshotRejected):
                         await read_locked_table()

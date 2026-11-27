@@ -517,7 +517,7 @@ async def test_cancelled_pricing_upgrade_keeps_diagnostics_content_free(
     else:
         initial = Database(empty_database_settings)
         try:
-            async with initial.transaction() as connection:
+            async with initial.migration_connection() as connection:
                 await connection.run_sync(seed_predecessor)
         finally:
             await initial.close()

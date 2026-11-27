@@ -1,6 +1,5 @@
 import asyncio
 import json
-import sqlite3
 import threading
 from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import asynccontextmanager, closing, contextmanager
@@ -31,6 +30,7 @@ from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     REFUSAL_DEADLINE_SECONDS,
     ConnectionLedger,
+    sqlite_contender,
     until,
 )
 from tests.db.test_graph_stage_promotion_snapshot import (
@@ -353,9 +353,9 @@ async def test_sqlite_metadata_cursor_keeps_ownership_until_native_release(
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, CONDITION_DEADLINE_SECONDS)
         await trace_driver.set_trace_callback(None)
-        with closing(sqlite3.connect(settings.sqlite_path, timeout=0)) as native:
-            checkpoint = native.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            assert checkpoint == (0, 0, 0)
+        with sqlite_contender(settings.sqlite_path) as native:
+            with closing(native.execute("PRAGMA wal_checkpoint(TRUNCATE)")) as cursor:
+                assert cursor.fetchone() == (0, 0, 0)
         assert await sqlite_worker(database) is driver
         recovered = await read(database, binding)
     finally:

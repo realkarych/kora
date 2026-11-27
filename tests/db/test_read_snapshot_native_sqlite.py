@@ -9,12 +9,13 @@ import pytest
 from kora.db.connection import DatabaseSnapshotFailure, DatabaseSnapshotRejected
 from tests.db.closing import CONDITION_DEADLINE_SECONDS
 from tests.db.native_read_support import NativeQuery, owned_reader
-from tests.support.databases import sqlite_settings
+from tests.support.databases import copy_sqlite_template
 
 
 @pytest.mark.asyncio
 async def test_snapshot_repeated_cancellation_waits_for_native_guard_restoration(
     tmp_path: Path,
+    sqlite_template: Path,
 ) -> None:
     loop = asyncio.get_running_loop()
     cancel_requested = Event()
@@ -29,7 +30,7 @@ async def test_snapshot_repeated_cancellation_waits_for_native_guard_restoration
                 restoration_expired.set()
 
     async with owned_reader(
-        sqlite_settings(tmp_path / "native-restoration.db")
+        copy_sqlite_template(sqlite_template, tmp_path / "native-restoration.db")
     ) as reader:
         probe = NativeQuery(reader, observe)
         task = asyncio.create_task(probe.run(loop.time() + CONDITION_DEADLINE_SECONDS))
@@ -57,6 +58,7 @@ async def test_snapshot_repeated_cancellation_waits_for_native_guard_restoration
 @pytest.mark.asyncio
 async def test_snapshot_progress_interrupts_native_work_without_asyncio_timer(
     tmp_path: Path,
+    sqlite_template: Path,
 ) -> None:
     loop = asyncio.get_running_loop()
     native_settled = Event()
@@ -66,7 +68,9 @@ async def test_snapshot_progress_interrupts_native_work_without_asyncio_timer(
         if statement == "SELECT 42":
             native_settled.set()
 
-    async with owned_reader(sqlite_settings(tmp_path / "native-progress.db")) as reader:
+    async with owned_reader(
+        copy_sqlite_template(sqlite_template, tmp_path / "native-progress.db")
+    ) as reader:
         probe = NativeQuery(reader, observe)
         deadline = loop.time() + 1.0
         task = asyncio.create_task(probe.run(deadline))

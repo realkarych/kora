@@ -17,7 +17,7 @@ from kora.db.connection import (
 from kora.db.migrations import upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt
-from tests.db.closing import ConnectionLedger
+from tests.db.closing import ConnectionLedger, legacy_preparation
 from tests.db.seed import (
     START,
     PredecessorHistory,
@@ -101,7 +101,7 @@ async def seed_cause_predecessor(
     database: Database, rich: bool = False
 ) -> CausePredecessor:
     if rich:
-        async with database.transaction() as connection:
+        async with legacy_preparation(database) as connection:
             await connection.run_sync(seed_predecessor)
     async with database.migration_connection() as connection:
         await connection.run_sync(
