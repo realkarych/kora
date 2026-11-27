@@ -396,7 +396,7 @@ async def test_scheduler_rotates_past_future_wait_and_recovers_terminal_parent(
     database: Database, preparer: DeploymentPreparer, api_capture: Capture
 ) -> None:
     setup = await scheduler_claim_setup(database, preparer, api_capture)
-    orphan = await execution_case(database)
+    orphan = await execution_case(database, seeder=setup.seeder)
     setup.clock.advance(60)
     cutoff = setup.clock.now()
     async with database.transaction() as writer:

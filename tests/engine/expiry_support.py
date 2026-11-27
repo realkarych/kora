@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -67,11 +68,12 @@ async def execution_case(
     timeout: str | None = "1h",
     granted: bool = True,
     status: str = "running",
+    seeder: Callable[[AsyncConnection], Seeder] = Seeder,
 ) -> ExecutionCase:
-    case = await promotion_case(database, timeout=timeout)
+    case = await promotion_case(database, timeout=timeout, seeder=seeder)
     await case.promote(database)
     async with database.transaction() as writer:
-        seed = Seeder(writer)
+        seed = seeder(writer)
         node_id = str(
             await writer.scalar(
                 select(node_instance.c.id)

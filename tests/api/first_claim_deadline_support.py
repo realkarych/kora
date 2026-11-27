@@ -384,6 +384,7 @@ async def verify_repeated_refusal_cannot_release_again(
         setup.user.principal.namespaces[0].namespace_id,
         credential=COMPETING_CREDENTIAL,
         owner=COMPETITOR,
+        seeder=setup.seeder,
     )
     competing_registration = registration(competitor)
     other = competing_registration.model_copy(
