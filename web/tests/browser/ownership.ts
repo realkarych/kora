@@ -50,6 +50,7 @@ export function scheduleClose(deadline: number, callback: () => void): () => voi
 
 interface OwnershipInputs {
   server?: ChildProcess
+  browserEnvironment?: Record<string, string>
   observe?: typeof nativeResources
   schedule?: typeof scheduleClose
 }
@@ -72,11 +73,13 @@ export class Ownership {
   private closing: Promise<Cleanup> | undefined
   private readonly acquiring = new Set<Promise<unknown>>()
   readonly traceDirectory: string | undefined
+  private readonly browserEnvironment: Record<string, string>
   private readonly observe: typeof nativeResources
   private readonly schedule: typeof scheduleClose
 
   constructor(traceDirectory?: string, inputs: OwnershipInputs = {}) {
     this.traceDirectory = traceDirectory
+    this.browserEnvironment = inputs.browserEnvironment ?? childEnvironment()
     this.observe = inputs.observe ?? nativeResources
     this.schedule = inputs.schedule ?? scheduleClose
     this.server = inputs.server
@@ -145,7 +148,7 @@ export class Ownership {
     assert(this.origin)
     const proxy = await this.proxy.listen(this.origin)
     assert(!this.isClosing(), 'Owner is closing')
-    const launching = chromium.launchServer({ headless: true, handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false, timeout: 15000, env: childEnvironment(), proxy: { server: proxy, bypass: '<-loopback>' }, tracesDir: this.traceDirectory })
+    const launching = chromium.launchServer({ headless: true, handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false, timeout: 15000, env: this.browserEnvironment, proxy: { server: proxy, bypass: '<-loopback>' }, tracesDir: this.traceDirectory })
     this.lifecycle.dispatchEvent(new Event('launching'))
     this.browserServer = await launching
     const pid = this.browserServer.process().pid

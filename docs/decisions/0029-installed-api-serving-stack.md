@@ -28,6 +28,12 @@ The foreground serving owner closes the listener, settles pending TLS handshakes
 
 The owner [approved the implementation plan under #1897](https://github.com/realkarych/kora/issues/1897#issuecomment-7194815671). The project owner reviewed this wording line by line and [accepted it on 2026-11-26](https://github.com/realkarych/kora/pull/1899#issuecomment-7196577109).
 
+### Opt-in installed known-run console
+
+The ordinary verified SQLite HTTPS profile may separately opt in to the known-run console under [#1896](https://github.com/realkarych/kora/issues/1896). The verified listener serves the fixed packaged frontend and the browser uses the selected trusted profile from [ADR-0011](0011-namespaces-and-personal-tokens.md). Startup requires the packaged document and referenced assets. The process owns one-time codes and sessions until request or lifecycle settlement. A restart requires fresh sign-in.
+
+The project owner reviewed and accepted the installed browser amendment line by line on 2026-11-26. [Owner approval](https://github.com/realkarych/kora/issues/1896#issuecomment-7198632426).
+
 ### Private Unix HTTP for installed selection evidence
 
 The [catalog architecture approved under #1640](https://github.com/realkarych/kora/issues/1640#issuecomment-7082305733) specifies one additional private Unix-domain HTTP listener for future SQLite installed selection evidence. Ordinary SQLite serving uses only its single IPv4 loopback listener. A trusted, explicitly provisioned installation may also bind the private path after separate activation approval and startup verification. The original foreground serving owner owns both paths on the same selector loop. The private listener uses the same Worker HTTP operations and service authorization, with one request per accepted connection. The API binds the native peer observation on that connection to the independently verified original Worker launch and to the exact request.

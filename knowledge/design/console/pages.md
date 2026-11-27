@@ -23,6 +23,7 @@ Every page has a browser address with the namespace in its path; the console roo
 
 | page | address | carried in the address |
 |---|---|---|
+| known run history | `/console/runs/{ns}/{run}` | namespace and run ID |
 | Graphs | `/{ns}/graphs` | the search text as `?q=` |
 | graph page | `/{ns}/graphs/{graph}` for the newest run; `/{ns}/graphs/{graph}/runs/{run}` for a selected run | `?node={node_path}` for the open node panel (the path percent-encoded); each repeated `expand=` value is one percent-encoded JSON array containing the complete declared topology scope path, using the same IDs/path meaning as API `scope`. Reused subgraph bodies retain their distinct parent paths; runtime element indexes are excluded. Restore against the selected pinned version and apply the eight-scope expansion-limit state, including Back restoration. Before decoding, raw encoded expansion values use the 8 KiB selector bound and entries use the existing eight-scope admission; only flat string arrays are accepted. Invalid values show an inert restoration state without an invalid API call. The timeline filter stays out. |
 | review page | `/{ns}/approvals/{apr}` | |
@@ -32,6 +33,12 @@ Every page has a browser address with the namespace in its path; the console roo
 | System | `/{ns}/system` | |
 | logs | `/{ns}/runs/{run}/nodes/{node_path}/attempts/{att}/logs` | |
 | attempt comparison | `/{ns}/runs/{run}/nodes/{node_path}/attempts/{att}/compare` | `?against={att}` |
+
+## Installed known-run history
+
+The first installed view shows one finite page of committed run history for a known namespace and run ID. The title and identifiers frame an ordered list of the API's event kinds, timestamps, event IDs and saved attribution. Optional node and attempt identifiers remain metadata. It preserves server order and treats every returned value as text.
+
+Earlier events replaces the page when the server supplies a continuation. Reload latest makes a fresh first-page read. The address contains no credential or cursor. The view distinguishes a malformed link, loading, empty history, missing run, denied scope, expired or revoked session and unavailable service. Sign-out ends the browser session. A changed page identity, expired authority or sign-out discards obsolete protected data and settles pending reads. The address remains a scoped link when the graph view lands, with live follow, graph state and payload selection on their existing activation paths.
 
 ## Graphs (the entry)
 

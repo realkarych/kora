@@ -14,6 +14,8 @@ External-observation amendment dated 2026-10-17: direction and implementation pl
 
 Consistency amendment dated 2026-10-18: scope approved under [issue #95](https://github.com/realkarych/kora/issues/95); wording pending line-by-line owner review.
 
+The project owner reviewed and accepted the installed browser amendment line by line on 2026-11-26. [Owner approval](https://github.com/realkarych/kora/issues/1896#issuecomment-7198632426).
+
 ## Who it is for
 
 The console is designed for the engineer who owns targets: the person who triggers a run, waits for it, approves the change it produces and handles the errors on the way. Those are the three human touchpoints of the canonical use case in [positioning.md](positioning.md), and they are the three things the console lets a person do. The platform team has its own section, System, which is never the entry screen.
@@ -106,6 +108,6 @@ Retry and cancellation dialogs show the operation's scope, exact affected counts
 
 ## What the console needs from the API
 
-The console is a composition of public routes and adds no route of its own. The design found data the routes did not yet expose; [ADR-0015](decisions/0015-web-console-design.md) records what they expose now: a per-graph summary on the graphs list, the node's current wait, the attempt's worker and lease, a status filter on the approvals list, and the collection phase after a session ends. The two pilot scenarios in [knowledge/design/console/pilot-scenarios.md](../knowledge/design/console/pilot-scenarios.md) walk through the console step by step and name, for each step, the view and the route that answer it.
+The console is a composition of public API operations. The [installed known-run history](../knowledge/design/console/pages.md#installed-known-run-history) uses the finite events operation through a same-origin session ingress. It opens via `kora open` at a known run address. The graph design and the two pilot scenarios have their own activation requirements. [ADR-0015](decisions/0015-web-console-design.md) records the public read projections the full console design requires: a per-graph summary on the graphs list, the node's current wait, the attempt's worker and lease, a status filter on the approvals list, and the collection phase after a session ends. The two pilot scenarios in [knowledge/design/console/pilot-scenarios.md](../knowledge/design/console/pilot-scenarios.md) walk through the console step by step and name, for each step, the view and the route that answer it.
 
 Publication progress follows [ADR-0016](decisions/0016-trusted-execution-and-publication.md): the running attempt exposes supervisor phases for sealing, inspection, awaiting authorization and publication, with the inspected revision and trusted destination. `finishing` follows the reconciled runtime outcome and describes final output validation/storage. Unknown push outcomes reconcile the original prepared revision; another attempt publishes to its own branch. These phases add no console action.

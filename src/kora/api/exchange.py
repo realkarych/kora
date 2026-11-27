@@ -1,10 +1,11 @@
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import cast
 
 import structlog.contextvars
 from opentelemetry.context import Context, attach, detach
+from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from kora.observability import (
@@ -69,6 +70,8 @@ class Exchange:
     failed: bool = False
     principal: Principal | None = None
     admit_claim: Callable[[], None] | None = None
+    authorize_run_events: Callable[[], Awaitable[Response | None]] | None = None
+    response_policy: tuple[tuple[bytes, bytes], ...] = ()
 
     def failure(self, error: Exception) -> None:
         if not self.failed:
@@ -94,13 +97,16 @@ def method_of(scope: Scope) -> str:
 
 
 def response_headers(
-    message: Message, request_id: str, head: bool
+    message: Message,
+    request_id: str,
+    head: bool,
+    policy: tuple[tuple[bytes, bytes], ...],
 ) -> list[tuple[bytes, bytes]]:
     value: object = message.get("headers", [])
     if not isinstance(value, list | tuple):
         raise ValueError("Response headers must be pairs of bytes.")
     headers: list[tuple[bytes, bytes]] = []
-    excluded = {b"x-request-id"}
+    excluded = {b"x-request-id", *(name for name, _ in policy)}
     if head:
         excluded.update({b"content-length", b"transfer-encoding"})
     for item in cast("Sequence[object]", value):
@@ -114,6 +120,7 @@ def response_headers(
             raise ValueError("Response headers must be pairs of bytes.")
         if name.lower() not in excluded:
             headers.append((name, content))
+    headers.extend(policy)
     headers.append((b"x-request-id", request_id.encode("ascii")))
     return headers
 
@@ -156,7 +163,9 @@ class ApiExchange:
                         status = value
                         message = {
                             **message,
-                            "headers": response_headers(message, identity, head),
+                            "headers": response_headers(
+                                message, identity, head, exchange.response_policy
+                            ),
                         }
                     elif message["type"] == "http.response.body" and head:
                         message = {**message, "body": b""}

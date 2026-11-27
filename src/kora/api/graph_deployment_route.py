@@ -53,9 +53,9 @@ async def read_json_body(request: Request, model: type[Body], max_bytes: int) ->
     body = bytearray()
     try:
         async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > max_bytes:
+            if len(chunk) > max_bytes - len(body):
                 raise BodyRejected(RequestRejection.BYTE_LIMIT)
+            body.extend(chunk)
     except ClientDisconnect:
         raise BodyRejected(RequestRejection.INCOMPLETE_BODY) from None
     try:

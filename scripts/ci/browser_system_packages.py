@@ -18,6 +18,7 @@ SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 PYTHON = "/usr/bin/python3"
 DPKG = "/usr/bin/dpkg"
+APT_GET = "/usr/bin/apt-get"
 SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 MANAGER_ENV = {"PATH": SYSTEM_PATH, "LANG": "C.UTF-8", "SYSTEMD_COLORS": "0"}
 START_SECONDS = 5.0
@@ -502,7 +503,7 @@ async def worker(arguments: Sequence[str]) -> int:
     recovery = await run_child((DPKG, "--configure", "-a"), MANAGER_ENV)
     if recovery:
         return recovery
-    return await run_child(
+    dependency_result = await run_child(
         (
             str(pnpm),
             "--dir",
@@ -513,6 +514,19 @@ async def worker(arguments: Sequence[str]) -> int:
             "chromium-headless-shell",
         ),
         environment,
+    )
+    if dependency_result:
+        return dependency_result
+    return await run_child(
+        (
+            APT_GET,
+            "-y",
+            "--no-install-recommends",
+            "install",
+            "libnss3-tools",
+            "xdg-utils",
+        ),
+        {**MANAGER_ENV, "DEBIAN_FRONTEND": "noninteractive"},
     )
 
 

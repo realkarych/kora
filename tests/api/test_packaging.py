@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlencode
@@ -189,6 +190,18 @@ def https_installation(
 ) -> Path:
     return installed_core(
         core_wheel, tmp_path_factory.mktemp("installed-api-https"), serve=True, mcp=True
+    )
+
+
+@pytest.fixture(scope="module")
+def console_installation(
+    core_wheel: Path, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    return installed_core(
+        core_wheel,
+        tmp_path_factory.mktemp("installed-console"),
+        serve=True,
+        copy_payload=True,
     )
 
 
@@ -919,13 +932,13 @@ async def seed_installed_run_events(
     )
 
 
-def event_arguments(run_id: str, cursor: str | None) -> list[str]:
+def event_arguments(run_id: str, cursor: str | None, limit: int = 1) -> list[str]:
     return [
         "events",
         run_id,
         "--json",
         "--limit",
-        "1",
+        str(limit),
         *(["--cursor", cursor] if cursor is not None else []),
     ]
 
@@ -970,13 +983,13 @@ async def installed_operating_mcp(
 
 
 async def installed_mcp_event_result(
-    session: StdioSession, run_id: str, cursor: str | None
+    session: StdioSession, run_id: str, cursor: str | None, limit: int = 1
 ) -> JsonObject:
     arguments: JsonObject = {
         "mode": "events",
         "namespace": TLS_EVENTS_NAMESPACE,
         "run_id": run_id,
-        "limit": 1,
+        "limit": limit,
     }
     if cursor is not None:
         arguments["cursor"] = cursor
@@ -987,9 +1000,13 @@ async def installed_mcp_event_result(
 
 
 async def raw_event_page(
-    client: httpx.AsyncClient, run_id: str, credential: str, cursor: str | None
+    client: httpx.AsyncClient,
+    run_id: str,
+    credential: str,
+    cursor: str | None,
+    limit: int = 1,
 ) -> RunEventPage:
-    query = {"limit": "1"}
+    query = {"limit": str(limit)}
     if cursor is not None:
         query["cursor"] = cursor
     response = await client.get(
@@ -1007,9 +1024,10 @@ async def cli_event_page(
     environment: dict[str, str],
     run_id: str,
     cursor: str | None,
+    limit: int = 1,
 ) -> RunEventPage:
     outcome = await installed_cli(
-        python, directory, environment, event_arguments(run_id, cursor)
+        python, directory, environment, event_arguments(run_id, cursor, limit)
     )
     assert outcome.code == 0, outcome.stderr
     for name in ("KORA_TOKEN", "KORA_URL", CA_BUNDLE):
@@ -1018,9 +1036,9 @@ async def cli_event_page(
 
 
 async def mcp_event_page(
-    session: StdioSession, run_id: str, cursor: str | None
+    session: StdioSession, run_id: str, cursor: str | None, limit: int = 1
 ) -> RunEventPage:
-    response = await installed_mcp_event_result(session, run_id, cursor)
+    response = await installed_mcp_event_result(session, run_id, cursor, limit)
     assert response["isError"] is False
     return RunEventPage.model_validate(response["structuredContent"])
 
@@ -1171,6 +1189,175 @@ async def test_installed_sqlite_https_preserves_event_surface_parity(
         probe.listen()
         assert observer.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
         assert observer.execute("SELECT count(*) FROM event").fetchone() == (2,)
+
+
+CONSOLE_FONT_HASHES = frozenset(
+    {
+        "78efbe80177406a1b80d5925e706e3366290bf0d5309d7b0bd2d7f0d607f3c4c",
+        "0ee7512b5d3b040fe7c0b874df0965b357777d3929f627dfea202ff63834d05d",
+        "ba204497f16b6d334cee9d1e963a831b73e3a56e1d6300a8489d18df7214b350",
+    }
+)
+CONSOLE_LICENSE_HASH = (
+    "91c25c350d3cac39da2736d74f7ba37ef648f5237a4e330a240615bc8d8c4360"
+)
+
+
+def packaged_console(python: Path) -> Path:
+    return installed_site_packages(python) / "kora" / "api" / "static"
+
+
+def packaged_console_files(static: Path) -> tuple[Path, ...]:
+    index = parse_json_object(
+        json.loads((static / "console-manifest.json").read_bytes())
+    )
+    entry = parse_json_object(index["index.html"])
+    css, assets = entry["css"], entry["assets"]
+    assert isinstance(css, list)
+    assert isinstance(assets, list)
+    paths: list[Path] = []
+    for value in [entry["file"], *css, *assets]:
+        assert isinstance(value, str)
+        paths.append(static / value)
+    return tuple(paths)
+
+
+@pytest.mark.asyncio
+async def test_console_tls_profile_serves_packaged_run_history(
+    console_installation: Path, tmp_path: Path, sqlite_template: Path
+) -> None:
+    static = packaged_console(console_installation)
+    assets = packaged_console_files(static)
+    material = write_tls_material(tmp_path)
+    port = unused_loopback_port()
+    profile = https_environment(material, port)
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
+    context = ssl.create_default_context(cafile=str(material.authority))
+    timeline = f"/console/runs/default/run_{'0' * 26}"
+    types = {".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2"}
+    process = await asyncio.create_subprocess_exec(
+        *api_command(console_installation, port),
+        cwd=tmp_path,
+        env={**api_environment(str(settings.url)), **profile, "KORA_API_CONSOLE": "1"},
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        bound, early = await read_bound_port(process)
+        assert bound == port
+        async with httpx.AsyncClient(
+            base_url=profile[HTTPS_ORIGIN],
+            verify=context,
+            trust_env=False,
+            timeout=SERVE_TIMEOUT,
+        ) as client:
+            document = await client.get(timeline)
+            responses = [
+                (path, await client.get(f"/{path.relative_to(static)}"))
+                for path in assets
+            ]
+            unknown = [
+                await client.get(path)
+                for path in (
+                    "/console-manifest.json",
+                    "/IBM-Plex-OFL.txt",
+                    "/assets/unknown.js",
+                    "/console/runs/default/unbounded/extra",
+                )
+            ]
+            wrong_method = await client.post(timeline)
+    finally:
+        stdout, trailing = await terminate_installed_api(process)
+
+    assert document.status_code == 200
+    assert document.content == (static / "index.html").read_bytes()
+    assert "font-src 'self'" in document.headers["content-security-policy"]
+    assert all(response.status_code == 404 for response in unknown)
+    assert wrong_method.status_code == 405
+    for path, response in responses:
+        assert response.status_code == 200
+        assert response.headers["content-type"].split(";")[0] == types[path.suffix]
+        assert response.content == path.read_bytes()
+    font_hashes = {
+        sha256(response.content).hexdigest()
+        for path, response in responses
+        if path.suffix == ".woff2"
+    }
+    assert font_hashes == CONSOLE_FONT_HASHES
+    assert sha256((static / "IBM-Plex-OFL.txt").read_bytes()).hexdigest() == (
+        CONSOLE_LICENSE_HASH
+    )
+    assert process.returncode == 0
+    assert stdout == b""
+    assert [record["event"] for record in diagnostics(early + trailing)].count(
+        "api.serving_stopped"
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["index", "font", "html-reference", "css-reference", "css-comment", "css-escape"],
+)
+def test_console_tls_profile_refuses_invalid_installation_before_bind(
+    console_installation: Path, tmp_path: Path, sqlite_template: Path, missing: str
+) -> None:
+    static = packaged_console(console_installation)
+    suffix = {
+        "index": ".html",
+        "font": ".woff2",
+        "html-reference": ".html",
+        "css-reference": ".css",
+        "css-comment": ".css",
+        "css-escape": ".css",
+    }[missing]
+    target = (
+        static / "index.html"
+        if suffix == ".html"
+        else next(
+            path for path in packaged_console_files(static) if path.suffix == suffix
+        )
+    )
+    addition = {
+        "html-reference": b"\n<script src='/unpackaged.js'></script>",
+        "css-reference": b'\n@import"/unpackaged.css";',
+        "css-comment": b'\n@import/**/"/unpackaged.css";',
+        "css-escape": b'\n@\\69mport "/unpackaged.css";',
+    }.get(missing)
+    original = target.read_bytes()
+    moved = target.with_suffix(".disabled")
+    material = write_tls_material(tmp_path)
+    settings = copy_sqlite_template(sqlite_template, tmp_path / "prepared.sqlite")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+        reserved.bind((LOOPBACK, 0))
+        port = socket_port(reserved)
+        if addition is None:
+            target.rename(moved)
+        else:
+            target.write_bytes(addition + b"\n" + original)
+        try:
+            outcome = subprocess.run(
+                api_command(console_installation, port),
+                cwd=tmp_path,
+                env={
+                    **api_environment(str(settings.url)),
+                    **https_environment(material, port),
+                    "KORA_API_CONSOLE": "1",
+                },
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=False,
+                timeout=SERVE_TIMEOUT,
+            )
+        finally:
+            if addition is None:
+                moved.rename(target)
+            else:
+                target.write_bytes(original)
+
+    assert outcome.returncode == 78
+    assert outcome.stdout == b""
+    assert refusal_reason(outcome) == "console_configuration"
 
 
 @pytest.mark.asyncio

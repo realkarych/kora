@@ -384,6 +384,16 @@ Set `KORA_URL=https://127.0.0.1:8443` in the CLI and stdio MCP environments. For
 
 Leave the three serving TLS settings unset to use the default loopback HTTP profile. For HTTPS use the ordinary SQLite profile and leave the harness, Worker and Scheduler selectors unset. See the [serving contract](../knowledge/specs/api-and-agent-surface.md#installed-sqlite-loopback-https-1897) for the accepted origin forms and startup refusals. The project owner reviewed the #1897 setup instructions line by line and [accepted them on 2026-11-26](https://github.com/realkarych/kora/pull/1899#issuecomment-7196577109).
 
+### Installed known-run console
+
+Prepare SQLite and a verified loopback HTTPS installation as above. Set `KORA_API_CONSOLE=1` before running `kora api`. The installation must include the built web assets. Trust the local CA separately in the selected Chromium profile and use that profile for the system HTTPS handler. The browser and the shared CLI client each verify the certificate for the literal IP. Use one trusted Kora installation on `127.0.0.1` in that profile. Trust every HTTPS listener on that host because cookies are scoped by host across ports.
+
+Set `KORA_URL` to the configured HTTPS origin, `KORA_CA_BUNDLE` to the private CA bundle when needed and `KORA_TOKEN` to the personal CLI credential. Run `kora open <run> --namespace <namespace>`. The command requests a fresh link and hands it to the operating-system HTTPS handler. The handler's successful return confirms the handoff. If the handler remains active after ten seconds, the command reports an unconfirmed handoff and leaves it running. Check the browser for the directly opened tab. The operating system and browser, including history and extensions, may observe the brief one-time URL. Sign out from the timeline or sign in again after the API restarts.
+
+The existing browser lane runs the installed exercise with a private Linux Chromium NSS store, a fixture-owned desktop handler and the real Linux opener. The fixture uses fixed outcomes and clean-page evidence for authenticated requests.
+
+The project owner reviewed and accepted the installed browser amendment line by line on 2026-11-26. [Owner approval](https://github.com/realkarych/kora/issues/1896#issuecomment-7198632426).
+
 ## Documentation and schema checks
 
 The documentation jobs use pinned Markdown and Mermaid tools through npx, lychee as recorded in the [dated research](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#ci-and-documentation-check-record), and a pinned schema checker through uvx. Install that lychee release using its [official installation instructions](https://lychee.cli.rs/installation/). These tool setups may download dependencies; the link check itself uses the repository's offline configuration.

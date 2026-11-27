@@ -104,12 +104,17 @@ class StaticTokenAuthenticator:
     async def authenticate(
         self, request: RequestInfo, ctx: AuthenticationContext
     ) -> Principal:
-        from kora.db.reads import token_by_digest
-        from kora.db.tokens import REVOKED, authentication_unavailable
-
         digest = credential_digest(request)
         if digest is None:
             raise refuse(ctx, "authenticate", "authentication_rejected")
+        return await self.authenticate_digest(digest, ctx)
+
+    async def authenticate_digest(
+        self, digest: str, ctx: AuthenticationContext
+    ) -> Principal:
+        from kora.db.reads import token_by_digest
+        from kora.db.tokens import REVOKED, authentication_unavailable
+
         failure: str | None = None
         row: TokenRow | None = None
         try:

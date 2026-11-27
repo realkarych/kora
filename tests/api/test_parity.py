@@ -99,3 +99,20 @@ def test_worker_protocol_exclusion_preserves_worker_read_parity(tmp_path: Path) 
     uncovered = uncovered_operations(paths, root)
 
     assert uncovered == ["cli: GET /api/v1/workers", "mcp: GET /api/v1/workers"]
+
+
+def test_frontend_auth_exclusion_keeps_deferred_post_visible(tmp_path: Path) -> None:
+    root = synthetic_tree(tmp_path, cli=True, mcp=True)
+    paths: dict[str, object] = {
+        **PATHS,
+        "/api/v1/auth/login-links": {"post": {}},
+        "/api/v1/auth/session/{code}": {"get": {}},
+        "/api/v1/auth/session": {"delete": {}, "post": {}},
+    }
+
+    uncovered = uncovered_operations(paths, root)
+
+    assert uncovered == [
+        "cli: POST /api/v1/auth/session",
+        "mcp: POST /api/v1/auth/session",
+    ]

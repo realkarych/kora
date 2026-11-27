@@ -987,7 +987,21 @@ jobs:
         if: ${{ needs.change-scope.outputs.full != 'false' }}
         with:
           path: ${{ runner.temp }}/kora-acquisitions
-          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-node-${{ hashFiles('scripts/ci/acquire.py') }}
+          key: kora-acquisitions-${{ runner.os }}-${{ runner.arch }}-browser-uv-python-3.11.17-${{ hashFiles('scripts/ci/acquire.py') }}
+      - name: Prepare verified uv and Python
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        run: bash scripts/ci/setup_uv_cache.sh 3.11.17
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: console-browser
+      - name: Install locked wheel dependencies
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        run: uv sync --locked --no-build --group build --extra serve --extra mcp
       - name: Prepare verified Node
         if: ${{ needs.change-scope.outputs.full != 'false' }}
         run: bash scripts/ci/setup_scaffold_node.sh
@@ -1029,7 +1043,10 @@ jobs:
           pnpm --dir web run build
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Run browser checks
-        run: pnpm --dir web run test:browser
+        run: |
+          pnpm --dir web run test:browser
+          dpkg-query -W libnss3-tools xdg-utils
+          uv run --no-sync python -m tests.api.console_browser_fixture
         if: ${{ needs.change-scope.outputs.full != 'false' }}
         id: verification
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f

@@ -76,7 +76,6 @@ if TYPE_CHECKING:
     from kora.api.graph_deployment_worker import DeploymentPreparer
     from kora.db.connection import Database, DatabaseSettings
     from kora.ir.json import JsonObject
-    from kora.protocols.authentication import Authenticator
     from kora.runner.channels import BoundedChannel
     from kora.runner.filesystem import DirectoryAnchor
     from kora.runner.processes import GatedProcess
@@ -800,6 +799,7 @@ def serve_api(
     from kora.api.exchange import COMPONENT
     from kora.api.installed_scheduler import FIRST_CLAIM, SCHEDULER_VARIABLE
     from kora.api.serving import (
+        TLS_ORIGIN_VARIABLE,
         ServingFailure,
         ServingRefusal,
         read_tls_context,
@@ -863,6 +863,10 @@ def serve_api(
             log, ServingRefusal.POSTGRESQL_ACTIVATION_UNAVAILABLE, EXIT_CONFIGURATION
         )
 
+    console_setting = environment.get("KORA_API_CONSOLE")
+    origin = environment.get(TLS_ORIGIN_VARIABLE)
+    if console_setting is not None and (console_setting != "1" or tls_context is None):
+        return refuse(log, ServingRefusal.CONSOLE_CONFIGURATION, EXIT_CONFIGURATION)
     return serve_sqlite_api(
         settings,
         harness,
@@ -872,6 +876,7 @@ def serve_api(
         diagnostics,
         log,
         tls_context=tls_context,
+        console_origin=origin if console_setting == "1" else None,
     )
 
 
@@ -885,8 +890,12 @@ def serve_sqlite_api(
     log: ComponentLogger,
     *,
     tls_context: "SSLContext | None",
+    console_origin: str | None,
 ) -> int:
     from kora.api.application import create_application
+    from kora.api.console_assets import ConsoleAssetError, load_console_assets
+    from kora.api.console_routes import ConsoleRoutes
+    from kora.api.console_sessions import ConsoleSessions
     from kora.api.exchange import ApiExchange
     from kora.api.graph_services import GraphServices, deployment_selection
     from kora.api.installed_scheduler import installed_root_admission
@@ -905,12 +914,24 @@ def serve_sqlite_api(
     from kora.db.identifiers import IdentifierGenerator
     from kora.engine.admission_initialization import AdmissionInitialization
     from kora.engine.worker_claim_poll import WorkerClaimPoll
+    from kora.plugins.authentication.static_token import (
+        StaticTokenAuthenticator,
+        credential_digest,
+    )
     from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
     from kora.protocols.errors import KoraProtocolError
     from kora.protocols.loading import load_provider
     from kora.protocols.metadata import ProtocolName
     from kora.scheduler.loop import first_claim_scheduler
 
+    try:
+        assets = (
+            None
+            if console_origin is None
+            else load_console_assets(Path(__file__).parent / "api" / "static")
+        )
+    except ConsoleAssetError:
+        return refuse(log, ServingRefusal.CONSOLE_CONFIGURATION, EXIT_CONFIGURATION)
     clock = SystemClock()
     worker = None
     if worker_uncertainty is not None:
@@ -948,7 +969,8 @@ def serve_sqlite_api(
             ProtocolName.AUTHENTICATION, "static_token", diagnostics
         )
         factory = cast(
-            "Callable[[JsonObject, Database], Authenticator]", provider.implementation
+            "Callable[[JsonObject, Database], StaticTokenAuthenticator]",
+            provider.implementation,
         )
         identifiers = IdentifierGenerator(clock.now)
         deployment = (
@@ -972,13 +994,28 @@ def serve_sqlite_api(
                 )
             )
             initialization = AdmissionInitialization(database, clock, identifiers.new)
+        authentication = factory({}, database)
+        run_events = RunEventRoute(database, clock)
+        console = (
+            None
+            if assets is None or console_origin is None
+            else ConsoleRoutes(
+                console_origin.removesuffix(":443"),
+                assets,
+                ConsoleSessions(clock),
+                credential_digest,
+                authentication.authenticate_digest,
+                run_events,
+            )
+        )
         return create_application(
-            factory({}, database),
+            authentication,
             diagnostics,
             clock,
             new_instance_id,
             deployment,
-            run_events=RunEventRoute(database, clock),
+            run_events=run_events,
+            console=console,
             worker_registration=registration,
             worker_claims=claims,
             admission_initialization=initialization,
@@ -1258,6 +1295,14 @@ def compose_application(
         events_command(
             environment, diagnostics, run, namespace, limit, cursor, follow, as_json
         )
+
+    @app.command(name="open", help="Sign in and open a run's history in your browser.")
+    def open_console(
+        run: str, namespace: str | None = typer.Option(None, "--namespace")
+    ) -> None:
+        from kora.cli.open_console import open_console_command
+
+        open_console_command(environment, diagnostics, run, namespace)
 
     @app.command(name="mcp", help="Serve the kora MCP tools over stdio.")
     def serve_mcp_command(

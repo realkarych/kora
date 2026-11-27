@@ -6,6 +6,8 @@ from fastapi.routing import APIRoute
 from starlette.routing import Match
 from starlette.types import Scope
 
+from kora.models.console import LOGIN_LINK_PATH, REDEEM_PATH
+
 RECOGNIZED_METHODS: frozenset[str] = frozenset(
     {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"}
 )
@@ -17,6 +19,12 @@ class RouteName(StrEnum):
     GRAPH_VERSIONS = "/api/v1/namespaces/{ns}/graphs/{graph}/versions"
     GRAPH_RUNS = "/api/v1/namespaces/{ns}/graphs/{graph}/runs"
     RUN_EVENTS = "/api/v1/namespaces/{ns}/runs/{run}/events"
+    LOGIN_LINKS = LOGIN_LINK_PATH
+    REDEEM_LOGIN = REDEEM_PATH
+    CONSOLE_LOGOUT = "/api/v1/auth/session"
+    CONSOLE_PAGE = "/console/runs/{ns}/{run}"
+    CONSOLE_ASSET = "/assets/{asset}"
+    CONSOLE_EVENTS = "/console/api/v1/namespaces/{ns}/runs/{run}/events"
     WORKERS = "/api/v1/workers"
     WORKER_CLAIMS = "/api/v1/workers/{worker_id:path}/claims"
     WORKER_HISTORY = "/api/v1/attempts/{att}/grants"
@@ -24,6 +32,14 @@ class RouteName(StrEnum):
     HEARTBEAT = "/api/v1/attempts/{att}/heartbeat"
 
 
+CONSOLE_ROUTES: dict[RouteName, frozenset[str]] = {
+    RouteName.LOGIN_LINKS: frozenset({"POST"}),
+    RouteName.REDEEM_LOGIN: frozenset({"GET"}),
+    RouteName.CONSOLE_LOGOUT: frozenset({"DELETE"}),
+    RouteName.CONSOLE_PAGE: frozenset({"GET"}),
+    RouteName.CONSOLE_ASSET: frozenset({"GET"}),
+    RouteName.CONSOLE_EVENTS: frozenset({"GET"}),
+}
 ROUTE_METHODS: dict[RouteName, frozenset[str]] = {
     RouteName.HEALTH: frozenset({"GET"}),
     RouteName.SCHEMA: frozenset({"GET"}),
@@ -35,6 +51,7 @@ ROUTE_METHODS: dict[RouteName, frozenset[str]] = {
     RouteName.WORKER_HISTORY: frozenset({"GET"}),
     RouteName.USAGE: frozenset({"POST"}),
     RouteName.HEARTBEAT: frozenset({"POST"}),
+    **CONSOLE_ROUTES,
 }
 REQUIRED_ROUTES: frozenset[RouteName] = frozenset({RouteName.HEALTH, RouteName.SCHEMA})
 PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
@@ -43,6 +60,7 @@ PROTECTED_ROUTES: frozenset[RouteName] = frozenset(
         RouteName.GRAPH_VERSIONS,
         RouteName.GRAPH_RUNS,
         RouteName.RUN_EVENTS,
+        RouteName.LOGIN_LINKS,
         RouteName.WORKERS,
         RouteName.WORKER_CLAIMS,
         RouteName.WORKER_HISTORY,

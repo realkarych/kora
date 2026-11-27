@@ -11,7 +11,14 @@ CLIENT_CLASS = "KoraClient"
 REQUEST_METHOD = "_request_json"
 CLIENT_RECEIVER = "client"
 PARAMETER = re.compile(r"\{[^}]*\}")
-EXCLUDED_OPERATIONS: frozenset[tuple[str, str]] = frozenset(
+FRONTEND_AUTH_OPERATIONS = frozenset(
+    {
+        ("POST", "/api/v1/auth/login-links"),
+        ("GET", "/api/v1/auth/session/{}"),
+        ("DELETE", "/api/v1/auth/session"),
+    }
+)
+EXCLUDED_OPERATIONS: frozenset[tuple[str, str]] = FRONTEND_AUTH_OPERATIONS | frozenset(
     {
         ("GET", "/healthz"),
         ("POST", "/api/v1/workers"),

@@ -13,6 +13,8 @@
 
 Retained dispatcher-history amendment dated 2026-10-23: the project owner approved the [contract plan and exact documentation wording](https://github.com/realkarych/kora/issues/226#issuecomment-6368198702), [approval recorded](https://github.com/realkarych/kora/issues/226#issuecomment-6368236030).
 
+The project owner reviewed and accepted the installed browser amendment line by line on 2026-11-26. [Owner approval](https://github.com/realkarych/kora/issues/1896#issuecomment-7198632426).
+
 ## Context
 
 kora's design centre is a platform instance shared by many teams on an organisation's own infrastructure (NFR-0.1). Namespaces group graphs, secret references, presets, tool policies and quotas (FR-12.4). Requirements decision 15 kept access control post-MVP: the MVP would ship namespaces and a single shared API token, with role-based access control and credential management arriving later through the authentication protocol.
@@ -41,6 +43,8 @@ Installation-wide operational metrics are readable by a personal token with `pla
 Workers hold service principals: a service token belongs to a worker and is bound to a runtime and a namespace list enforced at claim. A service token permits worker registration, claim, heartbeat, upload, transition and bounded worker-only reads for attempts whose current grant it holds. Retained dispatcher-history reads recheck the worker, namespace, attempt, original execution domain and current grant on every page; a continuation position grants no authority of its own. There are no tokens for agent nodes (ADR-0002).
 
 Frontend login (amended 2026-10-16): `kora open` asks the API for a one-time login link with the user's token (`POST /auth/login-links`) and opens it in the browser; the link carries a single-use code valid for 60 seconds, and `GET /auth/session/{code}` exchanges it for an opaque server-side session cookie (`SameSite=Strict`, `Secure`, HTTP-only) with the token's namespaces and flags. Pasting the token into the login form (`POST /auth/session`) remains the fallback for a machine without the CLI. OIDC sign-in replaces both through the authentication protocol after MVP. Cookie-authenticated mutations carry CSRF protection, the single-page application ships a Content Security Policy, and cookies are never accepted on Bearer-only API paths. The approver recorded from the frontend is the token's owner.
+
+The first installed browser profile was approved in [#1896](https://github.com/realkarych/kora/issues/1896#issuecomment-7193596076). It activates one-time link login and CSRF-protected sign-out over the opted-in loopback HTTPS listener. The browser holds an opaque session, and the server validates the current personal credential and its immutable identity on redemption and each protected page request. The single same-origin browser ingress invokes the existing finite run event operation. The canonical personal route takes a Bearer. Pasted-token login remains deferred. A browser profile must trust every HTTPS listener on the selected loopback cookie host. [Owner scope decision](https://github.com/realkarych/kora/issues/1896#issuecomment-7196193359).
 
 There are no per-token rate limits in the MVP. The built-in authenticator is `static_token`; the authentication protocol returns a `Principal`, so OIDC, RBAC, groups and credential management can replace the token check after the MVP without changing routes.
 

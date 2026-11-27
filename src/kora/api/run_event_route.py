@@ -129,16 +129,18 @@ def refusal(
 
 
 async def watch_request(
-    request: Request, scoped: asyncio.Event, body: asyncio.Future[None]
+    request: Request, scoped: asyncio.Event, body: asyncio.Future[bool]
 ) -> ApiErrorCode:
     remaining = MAX_REQUEST_BYTES
+    browser = current_exchange().authorize_run_events is not None
     while (message := await request.receive())["type"] != "http.disconnect":
-        remaining -= len(message.get("body", b""))
-        if remaining < 0:
+        remaining = max(-1, remaining - len(message.get("body", b"")))
+        if remaining < 0 and (not browser or scoped.is_set()):
             await scoped.wait()
             return ApiErrorCode.VALIDATION
-        if not body.done() and not message.get("more_body", False):
-            body.set_result(None)
+        if not body.done() and (remaining < 0 or not message.get("more_body", False)):
+            body.set_result(remaining >= 0)
+        del message
         await asyncio.sleep(0)
     return ApiErrorCode.UNAVAILABLE
 
@@ -155,8 +157,17 @@ class RunEventRoute:
         deadline = started + 5
         rows = size = 0
         scoped = asyncio.Event()
-        page = asyncio.create_task(self.page(ns, run, request, deadline, scoped))
-        body: asyncio.Future[None] = loop.create_future()
+        body: asyncio.Future[bool] = loop.create_future()
+
+        async def read() -> tuple[Response, int]:
+            nonlocal deadline
+            if (authorize := exchange.authorize_run_events) is not None:
+                if (rejected := await authorize()) is not None:
+                    return rejected, 0
+                deadline = loop.time() + 5
+            return await self.page(ns, run, request, deadline, scoped, body)
+
+        page = asyncio.create_task(read())
         ingress = asyncio.create_task(watch_request(request, scoped, body))
         try:
             try:
@@ -201,6 +212,7 @@ class RunEventRoute:
         request: Request,
         deadline: float,
         scoped: asyncio.Event,
+        body: asyncio.Future[bool],
     ) -> tuple[Response, int]:
         principal = current_exchange().principal
         if principal is None:
@@ -221,6 +233,8 @@ class RunEventRoute:
                 if not await run_event_scope(connection, namespace, run_id):
                     return refusal(ApiErrorCode.NOT_FOUND), 0
                 scoped.set()
+                if body.done() and not body.result():
+                    return refusal(ApiErrorCode.VALIDATION), 0
                 try:
                     query = parse_event_query(request.scope.get("query_string", b""))
                     position = decode_event_position(query, namespace, run_id)
