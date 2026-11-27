@@ -2,9 +2,11 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Awaitable, Callable
 from typing import Final, Literal, Protocol, cast
 
 from kora.ir.vcs_ref_json import decode_strict_json
+from kora.protocols.lifetime import new_operation_id
 from kora.protocols.secret_value import SecretValue
 from kora.protocols.time import Clock
 from kora.runner.channels import ChannelError, DescriptorReadiness, wait_future
@@ -32,7 +34,13 @@ class BridgeRefused(ValueError):
 
 class BridgeChannel:
     def __init__(
-        self, streams: StdioStreams, nonce: str, cutoff_ns: int, clock: Clock
+        self,
+        streams: StdioStreams,
+        nonce: str,
+        cutoff_ns: int,
+        clock: Clock,
+        require_live: Callable[[], None],
+        recheck_installation: Callable[[], Awaitable[None]],
     ) -> None:
         if _NONCE.fullmatch(nonce) is None:
             raise BridgeRefused("protocol")
@@ -41,6 +49,8 @@ class BridgeChannel:
         self._nonce = nonce
         self._cutoff_ns = cutoff_ns
         self._clock = clock
+        self._require_live = require_live
+        self._recheck_installation = recheck_installation
         self._phase: Command | None = "init"
         self._revoked: bool = False
         self._waiting: tuple[int, DescriptorReadiness] | None = None
@@ -76,10 +86,12 @@ class BridgeChannel:
         self._phase = None
         complete = False
         try:
+            self._require_live()
+            challenge = new_operation_id()
             if secret is not None:
                 fields["key"] = secret.reveal()
-            await self._send(kind, **fields)
-            response = await self._receive(reply)
+            await self._send(kind, challenge=challenge, **fields)
+            response = await self._receive(reply, challenge)
             self._phase = following
             complete = True
             return response
@@ -130,23 +142,26 @@ class BridgeChannel:
         try:
             remaining = memoryview(record)
             while remaining:
+                self._require_live()
                 self._remaining()
                 descriptor = self._endpoint.fileno()
                 try:
                     written = os.write(descriptor, remaining)
                 except BlockingIOError:
                     await self._wait_writable(descriptor)
+                    self._remaining()
+                    self._require_live()
+                    await self._recheck_installation()
                     continue
                 if written <= 0:
                     raise BridgeRefused("closed")
                 remaining = remaining[written:]
-            self._remaining()
         except ChannelError:
             raise BridgeRefused("deadline") from None
         except OSError:
             raise BridgeRefused("closed") from None
 
-    async def _receive(self, expected: Reply) -> str:
+    async def _receive(self, expected: Reply, challenge: str) -> str:
         try:
             async with asyncio.timeout(self._remaining()):
                 record = await self._reader.readuntil(b"\n")
@@ -157,26 +172,24 @@ class BridgeChannel:
         except asyncio.LimitOverrunError:
             raise BridgeRefused("protocol") from None
         self._remaining()
-        if b"\r" in record:
-            raise BridgeRefused("protocol")
         frame = decode_strict_json(record, MAX_FRAME_BYTES, 1)
-        if not isinstance(frame, dict) or frame.get("nonce") != self._nonce:
-            raise BridgeRefused("protocol")
-        kind, code, text = frame.get("kind"), frame.get("code"), frame.get("text")
         if (
-            kind == "failure"
-            and frame.keys() == {"kind", "nonce", "code"}
-            and isinstance(code, str)
-            and code in _FAILURES
+            b"\r" in record
+            or not isinstance(frame, dict)
+            or frame.pop("nonce", None) != self._nonce
+            or frame.pop("challenge", None) != challenge
         ):
-            raise BridgeRefused(code)
-        if kind == expected:
-            if (
-                expected == "terminal"
-                and frame.keys() == {"kind", "nonce", "text"}
-                and isinstance(text, str)
+            raise BridgeRefused("protocol")
+        match frame:
+            case {"kind": "failure", "code": str(code)} if (
+                len(frame) == 2 and code in _FAILURES
+            ):
+                raise BridgeRefused(code)
+            case {"kind": "terminal", "text": str(text)} if (
+                len(frame) == 2 and expected == "terminal"
             ):
                 return text
-            if expected != "terminal" and frame.keys() == {"kind", "nonce"}:
+            case {"kind": kind} if len(frame) == 1 and kind == expected != "terminal":
                 return ""
-        raise BridgeRefused("protocol")
+            case _:
+                raise BridgeRefused("protocol")

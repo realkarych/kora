@@ -16,37 +16,22 @@ const responseLimit = 256 * 1024;
 const provider = "anthropic";
 const messagesPath = "/v1/messages?beta=true";
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-const fieldPattern = /[ \t]*("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")[ \t]*:[ \t]*("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")[ \t]*(,|})/y;
+const exchangeId = /^[0-9a-f]{32}$/;
 
 type Phase = "init" | "starting" | "credential" | "installing" | "prompt" | "running" | "closed";
 type Failure = "protocol" | "startup" | "credential" | "prompt" | "stopped";
 
-function decodeField(source: string | undefined): string {
-  if (source === undefined) throw new Error();
-  const value: unknown = JSON.parse(source);
-  if (typeof value !== "string" || !value.isWellFormed()) throw new Error();
-  return value;
-}
-
 function frameFields(source: Uint8Array): Map<string, string> {
   const text = utf8.decode(source);
-  const prefix = /^[ \t]*\{/.exec(text);
-  if (!prefix) throw new Error();
-
+  const parsed: unknown = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
   const fields = new Map<string, string>();
-  fieldPattern.lastIndex = prefix[0].length;
-  while (fields.size < 4) {
-    const match = fieldPattern.exec(text);
-    if (!match) throw new Error();
-    const name = decodeField(match[1]);
-    if (fields.has(name)) throw new Error();
-    fields.set(name, decodeField(match[2]));
-    if (match[3] === "}") {
-      if (!/^[ \t]*$/.test(text.slice(fieldPattern.lastIndex))) throw new Error();
-      return fields;
-    }
+  for (const [name, value] of Object.entries(parsed) as [string, unknown][]) {
+    if (fields.size === 5 || typeof value !== "string" || !value.isWellFormed()) throw new Error();
+    fields.set(name, value);
   }
-  throw new Error();
+  if (JSON.stringify(parsed) !== text) throw new Error();
+  return fields;
 }
 
 function emptyResources(): ResourceLoader {
@@ -101,6 +86,7 @@ class Bridge {
   private end = 0;
   private pendingWrite: Promise<void> | undefined;
   private nonce: string | undefined;
+  private readonly challenges: string[] = [];
   private session: AgentSession | undefined;
   private models: ModelRuntime | undefined;
   private model: string | undefined;
@@ -140,32 +126,37 @@ class Bridge {
   private accept(fields: Map<string, string>): void {
     const kind = fields.get("kind");
     const nonce = fields.get("nonce");
-    if (nonce === undefined || !/^[0-9a-f]{32}$/.test(nonce)) throw new Error();
+    const challenge = fields.get("challenge");
+    if (!nonce || !challenge || !exchangeId.test(nonce) || !exchangeId.test(challenge)) throw new Error();
 
-    if (this.phase === "init" && kind === "init" && fields.size === 4) {
+    if (this.phase === "init" && kind === "init" && fields.size === 5) {
       const origin = fields.get("origin");
       const model = fields.get("model");
       if (!origin || !model || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(origin)
         || new URL(origin).origin !== origin || !/^[a-z0-9][a-z0-9-]{0,127}$/.test(model)) throw new Error();
       this.nonce = nonce;
+      this.challenges.push(challenge);
       this.phase = "starting";
       void this.start(origin, model).catch(() => this.fail("startup"));
       return;
     }
 
     if (nonce !== this.nonce) throw new Error();
-    if (kind === "stop" && fields.size === 2) {
+    if (kind === "stop" && fields.size === 3 && challenge === this.challenges.at(-1)) {
       this.fail("stopped");
       return;
     }
-    if (this.phase === "credential" && kind === "credential" && fields.size === 3) {
-      const key = fields.get("key");
+    if (this.challenges.includes(challenge)) throw new Error();
+    const key = fields.get("key");
+    if (this.phase === "credential" && kind === "credential" && fields.size === 4 && key !== undefined) {
+      this.challenges.push(challenge);
       this.phase = "installing";
       void this.installCredential(key).catch(() => this.fail("credential"));
       return;
     }
-    if (this.phase === "prompt" && kind === "prompt" && fields.size === 3) {
-      const text = fields.get("text");
+    const text = fields.get("text");
+    if (this.phase === "prompt" && kind === "prompt" && fields.size === 4 && text !== undefined) {
+      this.challenges.push(challenge);
       this.phase = "running";
       void this.prompt(text).catch(() => this.fail("prompt"));
       return;
@@ -226,7 +217,7 @@ class Bridge {
     this.send({ kind: "ready" });
   }
 
-  private async installCredential(key: string | undefined): Promise<void> {
+  private async installCredential(key: string): Promise<void> {
     await this.pendingWrite;
     this.stop.signal.throwIfAborted();
     if (!this.models || !key || !/^[!-~]{1,4096}$/.test(key) || key.includes("sk-ant-oat")) throw new Error();
@@ -237,11 +228,11 @@ class Bridge {
     this.send({ kind: "credential_ready" });
   }
 
-  private async prompt(text: string | undefined): Promise<void> {
+  private async prompt(text: string): Promise<void> {
     await this.pendingWrite;
     this.stop.signal.throwIfAborted();
     const session = this.session;
-    if (!session || text === undefined || !text.length || Buffer.byteLength(text) > promptLimit
+    if (!session || !text.length || Buffer.byteLength(text) > promptLimit
       || !this.key || text.includes(this.key)) throw new Error();
 
     await session.prompt(text, { expandPromptTemplates: false });
@@ -274,7 +265,7 @@ class Bridge {
   }
 
   private send(value: Record<string, string>, exitCode?: number): void {
-    const frame = JSON.stringify({ ...value, nonce: this.nonce }) + "\n";
+    const frame = JSON.stringify({ ...value, nonce: this.nonce, challenge: this.challenges.at(-1) }) + "\n";
     if (this.pendingWrite || Buffer.byteLength(frame) > frameLimit) exit(1);
     this.pendingWrite = new Promise((written) => {
       stdout.write(frame, "utf8", (error) => {
