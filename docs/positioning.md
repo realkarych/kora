@@ -56,7 +56,7 @@ Distribution: **public open source, Apache-2.0**, general purpose. Every protoco
 | Capability | Vendor cloud sessions | Orchestrators | OSS multi-agent tools | kora |
 |---|---|---|---|---|
 | Node = full coding-agent session | yes (single) | no (LLM loop in a task) | yes | **yes, as a graph node** |
-| Harness-agnostic (Claude Code and Codex in MVP; ACP agents such as OpenCode, Pi, Gemini after MVP) | no | n/a | partly | **yes** |
+| Harness-agnostic (Claude Code, Codex and Pi in MVP; generic ACP support after MVP) | no | n/a | partly | **yes** |
 | Persisted DAG with dependency rules | no | yes | rarely | **yes** |
 | Approval gate between stages, typed, with timeout and default | no (per-tool only) | yes | rarely | **yes, pluggable channel** |
 | Retry policy per node and per sub-graph | no | node only | rarely (node only) | **node and sub-graph** |

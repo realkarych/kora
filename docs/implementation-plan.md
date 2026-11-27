@@ -247,6 +247,15 @@ The component gates of the specifications stay with the slice that implements ea
 
 Under the amendment of 2026-11-11, startup durability as a whole, with the separate startup I/O-helper of #616, the crash and diagnostic collector of #700/#701 and their native filesystem barriers, is outside the first slice; the contract below remains the specification for when #616 resumes. The accepted startup durability design under #615/#616 uses a separate I/O-helper. The protected runner must actually exit within its five-second startup interval on failure; helper I/O may remain unresolved and retain the root slot until actual completion and safe reconciliation. This contract does not claim implemented native-stall isolation, workspace preparation, delivered-workload durability or completed execution. Running-state journal producers retain their full-disk fencing, stop and terminal-retry obligations in #196. The [startup I/O specification](../knowledge/specs/startup-io.md) records ownership, late-registration recovery, deployment prerequisites and pending native evidence.
 
+### Pi MVP deliveries
+
+[ADR-0030](decisions/0030-pi-sdk-candidate-process.md) and the [Pi execution profile](../knowledge/specs/pi-execution-profile.md) define the additional independent MVP qualification. The baseline first-slice and second-slice sequence above remains governed by ADR-0001. Pi uses the same local topology and shared contracts when its own selected profile can deliver the evidence.
+
+1. Qualify the pinned SDK child, bootstrap and trusted launch using a scripted model. [Issue #1933](https://github.com/realkarych/kora/issues/1933) owns the tools-disabled launch witness. The next delivery adds the reviewed tool inventory, before-effect Policy and shell lifecycle. Reconcile launch and tool ownership with #199 and #233.
+2. Compose the Pi harness adapter with bounded observations, terminal results, usage and installed-provider conformance. A staged provider check supplies no ordinary graph execution authority.
+3. Bind the qualified installation in the runner. Check exact identity and version, configured credential delivery and `kora doctor`. The API's same-call validation facts remain with #549 and the shared validation owner.
+4. Activate ordinary installed deploy and trigger after the shared prerequisites. Run the independent local Git publication, gate and CLI approval workflow with exact input, output and usage evidence, adoption and release. Run the production-model compatibility probe separately from deterministic CI. Shared sealing, Scheduler integration, terminal acceptance and custody remain with #1453, #1448, #1472 and #1640.
+
 ## 2. Contract-freeze order
 
 A step is frozen when its specification text is merged. The work item in the last column then lands the step's typed models, in the package that [issue #104](https://github.com/realkarych/kora/issues/104) assigns. After that, a change goes through a pull request of the owning side, and the other side reviews it. In the work items of section 6, "step N" means the merged specification text of that step.

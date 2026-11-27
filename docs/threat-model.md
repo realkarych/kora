@@ -383,6 +383,19 @@ API refusal dispositions advance evidence delivery only. Each accepted or refuse
 
 These amendments cover TM-01/TM-02 and TM-08/TM-09/TM-10/TM-11, with the existing TM-06/TM-07 diagnostic exclusions. The [shared history contract](../knowledge/specs/protocols.md#resumable-retained-dispatcher-history-issue-226) defines the future cases and their activation owners.
 
+### Pi SDK profile
+
+The [Pi execution profile](../knowledge/specs/pi-execution-profile.md) defines prospective controls for a separate qualified local installation under [ADR-0030](decisions/0030-pi-sdk-candidate-process.md). Source inspection informs the design. Its runtime and installed evidence are pending. The existing local same-user residual, late publication and retention controls apply.
+
+| Threat | Pi control and owning qualification |
+| --- | --- |
+| TM-03 | Closed SDK configuration and verified tool definitions keep ambient project code out. The runner grants one before-effect response for the verified action and keeps unsupported authority fail-closed. Check exact tool inventory, deny precedence, no effect on malformed or lost decisions, real alias protection and no child agent context. |
+| TM-05, TM-11 | Bind the attempt, roles and effective target to the prepared checkout. The runtime owns shell and descendants through confirmed closure, leaving publication and sealed transfer with their existing owners. Exercise substituted executable, role, placement and paths, retained uncertainty and ordinary local Git handoff. |
+| TM-06, TM-07 | Deliver one installation key to the SDK model runtime in memory with scoped masking. Supply no key to shell and retain only scoped, masked session evidence. Verify environment, model endpoint, private stdio, failed input and DEBUG output. Local gains no new egress or same-user containment guarantees. |
+| TM-09 | Lost replies and logical stop never grant a repeat effect, replacement or publication. Exercise missing post-effect and terminal replies, cancellation and adoption with retained ownership and actual release. |
+| TM-10 | The runner owns deadlines, counts and capacity. Bound frames, native context, queues and tool output before retaining them. Check saturation, stalled peers, termination and release of all owned resources. |
+| TM-12 | Pin and independently verify Node, the resolved SDK closure and bridge bytes for the selected installation. Verify startup and doctor refusal, qualified version checks and installed conformance before ordinary selection. |
+
 ### Staged storage controls and evidence
 
 The [storage contract](../knowledge/specs/protocols.md#7-artifact-storage-fr-44) assigns byte effects and actual closure to providers, and current authorization, immutable validation and full-address owner admission to core. Its [conformance cases](../knowledge/specs/protocols.md#artifact-storage-contracts-issue-229) activate with the local provider in work item 8; API/metadata/retention integration activates with 11/12/17 and #216 on both databases. Concrete S3 evidence activates with that backend. All these runtime cases remain pending implementation.
