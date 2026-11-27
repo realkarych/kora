@@ -1759,14 +1759,21 @@ class Database:
     async def close_sqlite_serving(
         self, deadline_seconds: float = DEFAULT_CLOSE_DEADLINE_SECONDS
     ) -> None:
-        if self._sqlite_serving is None:
+        lifetime = self._sqlite_serving
+        if lifetime is None:
             raise DatabaseConfigurationError("the serving observer was not installed")
-        try:
-            await self.close(deadline_seconds)
-        finally:
-            if not NativeRetirement.drain(self.settings.sqlite_path.absolute()):
-                raise sqlite3.OperationalError("SQLite native retirement is pending.")
-            await self._sqlite_serving.wait_settled()
+        path = self.settings.sqlite_path.absolute()
+        with NativeRetirement.observe(path) as retirement:
+
+            async def settle() -> None:
+                NativeRetirement.drain(path, report=False)
+                await lifetime.wait_settled()
+                await retirement()
+
+            try:
+                await self.close(deadline_seconds)
+            finally:
+                await complete(settle())
 
     def _mark_closed(self, closing: asyncio.Future[None]) -> None:
         self._lifecycle = Lifecycle.CLOSED

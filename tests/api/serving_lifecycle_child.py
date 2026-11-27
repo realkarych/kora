@@ -9,8 +9,8 @@ import ssl
 import sys
 import threading
 from asyncio.trsock import TransportSocket
-from collections.abc import Callable, Mapping
-from contextlib import ExitStack
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, closing
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -54,6 +54,8 @@ from kora.plugins.authentication.static_token import StaticTokenAuthenticator
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.protocols.time import SystemClock
 from kora.scheduler.loop import Scheduler, first_claim_scheduler
+from kora.sqlite.driver import Connection as GuardedConnection
+from kora.sqlite.driver import NativeRetirement
 
 PRIVATE_LIFESPAN_REASON: str = "private-lifespan-startup-reason"
 SLOW_RESPONSE_BYTES: int = 4 * 1024 * 1024
@@ -65,19 +67,23 @@ class SqliteTraceControl(Protocol):
     ) -> None: ...
 
 
-def owns_sqlite_descriptor(path: Path) -> bool:
+def sqlite_descriptors(path: Path) -> Iterator[int]:
     expected = path.stat()
     inventory = "/dev/fd" if sys.platform == "darwin" else "/proc/self/fd"
     for name in os.listdir(inventory):
+        descriptor = int(name)
         try:
-            held = os.fstat(int(name))
+            held = os.fstat(descriptor)
         except OSError as error:
             if error.errno != errno.EBADF:
                 raise
             continue
         if (held.st_dev, held.st_ino) == (expected.st_dev, expected.st_ino):
-            return True
-    return False
+            yield descriptor
+
+
+def owns_sqlite_descriptor(path: Path) -> bool:
+    return next(sqlite_descriptors(path), None) is not None
 
 
 def await_native_release(path: Path, release: int, *, native_sigterm: bool) -> None:
@@ -361,6 +367,61 @@ def tls_held_shutdown(database: Database, release: int) -> ASGIApp:
     return exercise
 
 
+def native_charges_settled(database: Database) -> bool:
+    lifetime: object = vars(database)["_sqlite_serving"]
+    closed: object = vars(type(lifetime))["_all_native_closed"]
+    return cast("Callable[[object], bool]", closed)(lifetime)
+
+
+def hold_retirement(database: Database, reader_fds: set[int], release: int) -> None:
+    path = database.settings.sqlite_path
+    with closing(GuardedConnection()) as incumbent:
+        incumbent.open(path, False, 0, lambda descriptor, empty: not empty)
+        incumbent.execute("BEGIN IMMEDIATE").close()
+        held = set(sqlite_descriptors(path))
+        assert reader_fds < held
+        os.write(1, b"native_retirement_incumbent_held\n")
+        assert os.read(release, 1) == b"c"
+        assert held == set(sqlite_descriptors(path))
+        assert not NativeRetirement.drain(path, report=False)
+        assert not native_charges_settled(database)
+        os.write(1, b"original_reader_retirement_pending\n")
+        assert os.read(release, 1) == b"r"
+        incumbent.commit()
+
+
+def held_retirement_app(
+    database: Database,
+    release: int,
+    owners: list[tuple[Database, threading.Thread, threading.Thread]],
+) -> ASGIApp:
+    async def exercise(scope: Scope, receive: Receive, send: Send) -> None:
+        assert scope["type"] == "lifespan"
+        assert (await receive())["type"] == "lifespan.startup"
+        async with database.read_transaction() as connection:
+            assert await connection.scalar(text("SELECT 42")) == 42
+            driver = (await connection.get_raw_connection()).driver_connection
+            assert isinstance(driver, aiosqlite.Connection)
+            worker: object = vars(driver)["_thread"]
+            assert isinstance(worker, threading.Thread)
+            assert worker.is_alive()
+        path = database.settings.sqlite_path
+        reader_fds = set(sqlite_descriptors(path))
+        assert reader_fds
+        incumbent = threading.Thread(
+            target=hold_retirement,
+            args=(database, reader_fds, release),
+            daemon=True,
+        )
+        owners.append((database, worker, incumbent))
+        incumbent.start()
+        await send({"type": "lifespan.startup.complete"})
+        assert (await receive())["type"] == "lifespan.shutdown"
+        await send({"type": "lifespan.shutdown.complete"})
+
+    return exercise
+
+
 def scheduler_lifecycle_owner(
     database: Database,
     release: int,
@@ -545,6 +606,7 @@ def launch() -> int:
     tls_context = None
     make_scheduler: Callable[[Database], Scheduler] | None = None
     forced_owners: list[Database] = []
+    retirement_owners: list[tuple[Database, threading.Thread, threading.Thread]] = []
     try:
         match sys.argv[1:]:
             case ["tls_accept_pressure", requested_port, authority, mode]:
@@ -561,6 +623,10 @@ def launch() -> int:
                 make_application = refused_lifespan
             case ["hold_native", release]:
                 make_application = partial(held_request_app, release=int(release))
+            case ["hold_retirement", release]:
+                make_application = partial(
+                    held_retirement_app, release=int(release), owners=retirement_owners
+                )
             case ["hold_preparation", release]:
                 preparer = serving_deployment_preparer(SystemClock())
                 make_application = partial(
@@ -635,6 +701,15 @@ def launch() -> int:
         if sys.argv[1:2] == ["hold_native"]:
             assert not owns_sqlite_descriptor(settings.sqlite_path)
             os.write(1, b"native_sqlite_file_closed\n")
+        if sys.argv[1:2] == ["hold_retirement"]:
+            [(database, worker, incumbent)] = retirement_owners
+            assert not owns_sqlite_descriptor(settings.sqlite_path)
+            assert native_charges_settled(database)
+            assert not worker.is_alive()
+            assert database.lifecycle is Lifecycle.CLOSED
+            assert database.units_in_flight() == 0
+            incumbent.join()
+            os.write(1, b"native_retirement_settled\n")
         if sys.argv[1:2] == ["hold_tls_shutdown"]:
             assert not owns_sqlite_descriptor(settings.sqlite_path)
             os.write(1, b"tls_database_settled\n")
@@ -660,12 +735,18 @@ def launch() -> int:
 
 
 async def serving_event(
-    stderr: asyncio.StreamReader, event_name: str, *, outcome: str | None = None
+    stderr: asyncio.StreamReader,
+    event_name: str,
+    *,
+    outcome: str | None = None,
+    observed: list[dict[object, object]] | None = None,
 ) -> dict[object, object]:
     while line := await stderr.readline():
         event: object = json.loads(line)
         if isinstance(event, dict):
             fields = cast("dict[object, object]", event)
+            if observed is not None:
+                observed.append(fields)
             if fields.get("event") == event_name and (
                 outcome is None or fields.get("outcome") == outcome
             ):
