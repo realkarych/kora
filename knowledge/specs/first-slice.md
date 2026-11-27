@@ -111,6 +111,10 @@ The existing “Required” entries define baseline first-slice readiness for Cl
 
 Ordinary validation rejects unqualified Pi installation choices before effects. The controlled MCP interception fixture is separate from the production inventory, which excludes graph-provided MCP and subagents. The local model workflow uses the qualified Pi profile and retains the exact commit, gate input, approval and observed usage in the existing scoped history.
 
+## Live Claude and local Git demo
+
+The [single-host execution profile](live-demo-execution-profile.md) specifies prospective placement and qualification for [#1919](https://github.com/realkarych/kora/issues/1919). The demo has separate execution and console lifetimes. [ADR-0001](../../docs/decisions/0001-own-control-plane.md) governs the standalone release and first-slice acceptance.
+
 ## Refusal contract
 
 The [same-call trusted validation-facts contract](validation-facts.md) defines the accepted lifetime and ownership of installation-aware input. Missing or inconsistent required protection facts cannot become normal validation success or admission; [section 7](validation-facts.md#7-public-disposition-of-incomplete-trusted-facts) defines their public failure disposition under #628. Concrete producer, normalization and consuming integration prerequisites remain under #549; authored first-slice checks and fake-provider facts do not establish them.

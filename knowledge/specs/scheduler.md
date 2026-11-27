@@ -323,6 +323,8 @@ Passes run every 1 s when idle and immediately after a wake-up. A state transiti
 
 ## 10. Standalone (SQLite) versus Postgres
 
+The [live demo execution profile](live-demo-execution-profile.md) specifies a demo-only SQLite placement pending implementation and activation. Its foreground API owns the Scheduler and their one original qualified metadata writer. A separately launched Worker uses authenticated HTTP under [ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md#decision).
+
 The [walking-skeleton acquisition exception](first-slice.md#skeleton-depth) temporarily defers the pinned-graph shared migration lease under explicit maintenance prerequisites. It does not qualify that lease through the generic snapshot; full qualification remains required before first-slice acceptance.
 
 The table describes the standard database paths. A qualified custody installation also applies the [native and pool priority contract](execution-custody-recovery-priority.md). The [installed API profile](execution-custody-recovery-priority.md#qualified-postgresql-api-launch-profile) adds the process, dial and retirement prerequisites for opening the qualified PostgreSQL pool.
