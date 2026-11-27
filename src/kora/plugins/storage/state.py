@@ -1,6 +1,7 @@
 import os
 import stat
 from collections.abc import Generator, Iterator
+from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
@@ -126,7 +127,6 @@ class LocalState:
 
     def validate_files(
         self,
-        connection: sqlite3.Connection,
         descriptor: int,
         empty: int,
         creating: bool,
@@ -158,7 +158,6 @@ class LocalState:
             refuse("storage_identity")
         if not stat.S_ISREG(journal.st_mode) or stat.S_IMODE(journal.st_mode) != 0o600:
             refuse("storage_path")
-        connection.inspect_journal(self.root.fd)
         return True
 
     def admit_journal(self, descriptor: int) -> bool:
@@ -196,6 +195,7 @@ class LocalState:
             admit,
             nofollow=True,
             journal=self.admit_journal,
+            directory=self.root.fd,
         )
         try:
             connection.execute("PRAGMA busy_timeout=0")
@@ -230,22 +230,24 @@ class LocalState:
             root_lock.callback(gate.close)
             connection: sqlite3.Connection | None = None
             recovery = False
+            completed = False
+            settlement: Future[None] = Future()
 
             def admit(descriptor: int, empty: int) -> bool:
                 nonlocal recovery
                 can_create = creating and not self.root.manifest.control_initialized
-                recovery = self.validate_files(owned, descriptor, empty, can_create)
+                recovery = self.validate_files(descriptor, empty, can_create)
                 return True
 
-            def release() -> KoraProtocolError | None:
+            def release() -> None:
                 try:
-                    if recovery:
-                        self.root.synchronize_directory(self.root.fd)
-                except KoraProtocolError as error:
-                    return error
-                finally:
-                    gate.close()
-                return None
+                    with gate:
+                        if recovery:
+                            self.root.synchronize_directory(self.root.fd)
+                except (KoraProtocolError, OSError) as error:
+                    settlement.set_exception(error)
+                else:
+                    settlement.set_result(None)
 
             try:
                 owned = sqlite3.Connection(
@@ -263,6 +265,7 @@ class LocalState:
                 connection.commit()
                 if (write or synchronize) and not recovery:
                     self.root.synchronize_directory(self.root.fd)
+                completed = True
             except ValueError:
                 refuse("storage_integrity")
             except sqlite3.Error as error:
@@ -278,8 +281,10 @@ class LocalState:
                 if connection is not None:
                     connection.close()
                     self.connections -= 1
-            if not NativeRetirement.drain(path):
-                refuse("storage_io")
+                if settlement.done():
+                    settlement.result()
+                elif completed:
+                    refuse("storage_io")
 
     def initialize(self) -> int:
         creating = not self.root.manifest.control_initialized

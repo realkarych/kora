@@ -26,13 +26,16 @@ struct KoraFd {
   int role;
   dev_t device;
   ino_t inode;
+  dev_t sidecarDevice;
+  ino_t sidecarInode;
 };
 
 typedef struct {
   KoraFd **owner;
   int (*admit)(void *, int, int);
   void *context;
-  void *journal;
+  PyObject *journal;
+  int directory;
 } KoraOpen;
 
 static _Thread_local KoraOpen *koraOpen;

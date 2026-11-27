@@ -16,7 +16,7 @@ Admission: TypeAlias = Callable[[int, int], bool]
 Authorizer: TypeAlias = Callable[
     [int, str | None, str | None, str | None, str | None], int
 ]
-RetiredAction: TypeAlias = Callable[[], Exception | None]
+RetiredAction: TypeAlias = Callable[[], None]
 
 
 @cache
@@ -51,14 +51,19 @@ class Connection:
         *,
         nofollow: bool = False,
         journal: Callable[[int], bool] | None = None,
+        directory: int = -1,
     ) -> None:
         self.native.open(
-            self.handle, str(path), readonly, timeout_ms, nofollow, admit, journal
+            self.handle,
+            str(path),
+            readonly,
+            timeout_ms,
+            nofollow,
+            admit,
+            journal,
+            directory,
         )
         self._opened = True
-
-    def inspect_journal(self, directory: int) -> None:
-        self.native.inspect_journal(directory)
 
     def close(self) -> None:
         for cursor in tuple(self.cursors):
@@ -73,7 +78,7 @@ class Connection:
                     retire(self)
             finally:
                 if opened:
-                    NativeRetirement.progress()
+                    NativeRetirement.progress(self)
 
     def settled(self) -> bool:
         return self.native.settled(self.handle)
@@ -171,6 +176,9 @@ class NativeRetirement:
 
     @classmethod
     def retain(cls, path: Path, connection: Connection, release: RetiredAction) -> None:
+        if connection.settled():
+            release()
+            return
         with cls._lock:
             cls._pending.setdefault(path, {})[connection] = release
             if path in cls._draining:
@@ -178,21 +186,24 @@ class NativeRetirement:
         cls.drain(path)
 
     @classmethod
-    def progress(cls) -> None:
+    def progress(cls, released: Connection) -> None:
         with cls._lock:
-            paths = tuple(cls._pending)
-        for path in paths:
-            cls.drain(path, report=False)
+            pending = tuple(
+                (path, tuple(scope)) for path, scope in cls._pending.items()
+            )
+        for path, scope in pending:
+            if any(
+                released.native.related(released.handle, held.handle) for held in scope
+            ):
+                cls.drain(path, report=False)
 
     @classmethod
     def _release(cls, path: Path, action: RetiredAction) -> None:
         try:
-            failure = action()
+            action()
         except OSError as error:
-            failure = error
-        if failure is not None:
             with cls._lock:
-                cls._errors.setdefault(path, failure)
+                cls._errors.setdefault(path, error)
 
     @classmethod
     def drain(cls, path: Path, *, report: bool = True) -> bool:
@@ -206,6 +217,7 @@ class NativeRetirement:
                 return cls._result(path, report)
             cls._draining.add(path)
             pending = tuple(scope.items())
+        owns_drain = True
         try:
             while True:
                 for connection, release in pending:
@@ -218,19 +230,21 @@ class NativeRetirement:
                         cls._retry.remove(path)
                         pending = tuple(scope.items())
                         continue
-                    if scope:
-                        return False
-                    actions = cls._after.pop(path, ())
+                    actions = () if scope else cls._after.pop(path, ())
                     if not actions:
+                        cls._draining.remove(path)
+                        owns_drain = False
+                        if scope:
+                            return False
                         del cls._pending[path]
                         return cls._result(path, report)
                     pending = ()
                 for action in actions:
                     cls._release(path, action)
         finally:
-            with cls._lock:
-                cls._draining.remove(path)
-                cls._retry.discard(path)
+            if owns_drain:
+                with cls._lock:
+                    cls._draining.remove(path)
 
     @classmethod
     def _result(cls, path: Path, report: bool) -> bool:

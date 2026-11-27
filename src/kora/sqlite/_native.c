@@ -11,7 +11,6 @@ typedef struct {
   PyThread_type_lock lifetime;
   KoraFd *main;
   KoraOpen open;
-  PyObject *journal;
   PyObject *progress;
   PyObject *trace;
   PyObject *authorizer;
@@ -66,7 +65,7 @@ static int closeDatabase(NativeDb *db) {
   koraSettleFd(db->main);
   Py_END_ALLOW_THREADS
   if (result == SQLITE_OK) {
-    Py_CLEAR(db->journal);
+    Py_CLEAR(db->open.journal);
     Py_CLEAR(db->progress);
     Py_CLEAR(db->trace);
     Py_CLEAR(db->authorizer);
@@ -87,12 +86,8 @@ static PyObject *allocateDatabase(PyObject *module, PyObject *unused) {
   if (!db) return PyErr_NoMemory();
   db->main = koraNewFd();
   db->lifetime = PyThread_allocate_lock();
-  PyObject *capsule = NULL;
-  if (db->main && db->lifetime) {
-    capsule = PyCapsule_New(db, dbCapsuleName, destroyDatabase);
-  } else {
-    PyErr_NoMemory();
-  }
+  PyObject *capsule = db->main && db->lifetime
+    ? PyCapsule_New(db, dbCapsuleName, destroyDatabase) : PyErr_NoMemory();
   if (!capsule) {
     if (db->lifetime) PyThread_free_lock(db->lifetime);
     free(db->main);
@@ -114,9 +109,9 @@ static int approveMain(void *context, int descriptor, int empty) {
 static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   PyObject *capsule, *admit, *journal;
   const char *path;
-  int readOnly, timeout, noFollow;
-  if (!PyArg_ParseTuple(args, "OspipOO", &capsule, &path, &readOnly, &timeout,
-                        &noFollow, &admit, &journal)) {
+  int readOnly, timeout, noFollow, directory;
+  if (!PyArg_ParseTuple(args, "OspipOOi", &capsule, &path, &readOnly, &timeout,
+                        &noFollow, &admit, &journal, &directory)) {
     return NULL;
   }
   NativeDb *db = PyCapsule_GetPointer(capsule, dbCapsuleName);
@@ -129,8 +124,8 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   int flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) |
               SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_EXRESCODE;
   if (noFollow) flags |= SQLITE_OPEN_NOFOLLOW;
-  if (journal != Py_None) db->journal = Py_NewRef(journal);
-  db->open = (KoraOpen){&db->main, approveMain, admit, db->journal};
+  db->open = (KoraOpen){&db->main, approveMain, admit,
+                       journal == Py_None ? NULL : Py_NewRef(journal), directory};
   int result;
   Py_BEGIN_ALLOW_THREADS
   koraOpen = &db->open;
@@ -142,18 +137,6 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
     closeDatabase(db);
     return dbError(result, sqlite3_errstr(result));
   }
-  Py_RETURN_NONE;
-}
-
-static PyObject *inspectJournal(PyObject *module, PyObject *args) {
-  int directory;
-  if (!PyArg_ParseTuple(args, "i", &directory)) return NULL;
-  if (!koraOpen || !koraOpen->journal) return dbError(SQLITE_MISUSE, "Missing SQLite journal owner");
-  int result;
-  Py_BEGIN_ALLOW_THREADS
-  result = koraInspectJournal(directory);
-  Py_END_ALLOW_THREADS
-  if (result != SQLITE_OK) return dbError(result, sqlite3_errstr(result));
   Py_RETURN_NONE;
 }
 
@@ -173,6 +156,15 @@ static PyObject *databaseSettled(PyObject *module, PyObject *capsule) {
   settled = koraSettleFd(db->main);
   Py_END_ALLOW_THREADS
   return PyBool_FromLong(settled && !db->connection);
+}
+
+static PyObject *relatedRetirement(PyObject *module, PyObject *args) {
+  PyObject *source, *target;
+  if (!PyArg_ParseTuple(args, "OO", &source, &target)) return NULL;
+  NativeDb *released = PyCapsule_GetPointer(source, dbCapsuleName);
+  NativeDb *waiting = PyCapsule_GetPointer(target, dbCapsuleName);
+  if (!released || !waiting) return NULL;
+  return PyBool_FromLong(koraRelated(released->main, waiting->main));
 }
 
 static const char *statementCapsuleName = "kora.sqlite.statement";
@@ -551,9 +543,9 @@ static PyObject *closeBlob(PyObject *module, PyObject *capsule) {
 static PyMethodDef methods[] = {
   {"allocate", allocateDatabase, METH_NOARGS, NULL},
   {"open", openDatabaseOwner, METH_VARARGS, NULL},
-  {"inspect_journal", inspectJournal, METH_VARARGS, NULL},
   {"close", closeDatabaseOwner, METH_O, NULL},
   {"settled", databaseSettled, METH_O, NULL},
+  {"related", relatedRetirement, METH_VARARGS, NULL},
   {"prepare", prepareStatement, METH_VARARGS, NULL},
   {"step", stepStatement, METH_O, NULL},
   {"columns", statementColumns, METH_O, NULL},

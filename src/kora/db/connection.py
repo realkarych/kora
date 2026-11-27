@@ -518,11 +518,15 @@ def open_sqlite_file(
             guarded_reader.require_live()
         return not empty or sqlite_empty_admitted(path, descriptor)
 
-    connection = NativeConnection(
-        lambda owned: NativeRetirement.retain(path, owned, release)
-    )
     if not slots.acquire(blocking=False):
         raise sqlite3.OperationalError("SQLite native admission is full.")
+    try:
+        connection = NativeConnection(
+            lambda owned: NativeRetirement.retain(path, owned, release)
+        )
+    except BaseException:
+        slots.release()
+        raise
     if lifetime is not None:
         lifetime.opened()
     try:
