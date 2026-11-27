@@ -1,0 +1,77 @@
+# Execution request version-two examples
+
+These vectors use artificial Claims, provider selections, accepted artifact versions and publication facts. They fix the exact canonical bytes for the two ordinary branches and the input file. Runtime qualification requires the real owners and sources. [Version-two contract](../execution-request.md#6-version-two-ordinary-requests)
+
+## Canonical identities
+
+Hash the UTF-8 bytes between the opening and closing braces in each JSON block. The fences and the LF before a closing fence are Markdown framing. The canonical JSON has no BOM or final LF. Each config row is the request's `resolved_config_digest` and byte count for its canonical `config` alone.
+
+| Value | Byte count | SHA-256 |
+| --- | ---: | --- |
+| Publishing agent v2 body | 2243 | `sha256:260d65d4a3f657180c6d84286337eb51fc7e6828e05d4fca1d6aef3d19f1d94d` |
+| Publishing agent v2 config | 164 | `sha256:0af123f4dd54a76ddc88fa2d51e69d8541ec889052015c6509bf454271b5dc4a` |
+| Command A v2 body | 2175 | `sha256:448a4b8fddcb91cb2acef30ded29a93c2c40934a5b1c4af532db97644e9bb785` |
+| Command B v2 body | 2175 | `sha256:0f6a14b8e0ee7578cb9bcc63112651bdd3dade144d9a408d84a448d55aa480f3` |
+| Command A and B v2 config | 173 | `sha256:418efed3d2c3a06bd130a5a420d807d7c1a3cd2efdbc97fc43ea6781d73d8d1e` |
+| Command A and B `candidate.json` | 393 | `sha256:07c674f40349dcf63428741d97f8fe89249c1b2a3690b67e57e1196cb33b404b` |
+| Publishing agent downgrade body | 2129 | `sha256:9d8659d816e5a82a82a9082aba0178ea418131d6b644a92eaa1f0f4e27a20939` |
+
+### Publishing agent
+
+In the synthetic graph `demo`, the pinned node `agent` declares no inputs, the mandatory AgentSession output and one built-in VcsRef revision 1 output. The original Claim verifies Claude, local runtime, Git and its renderer, and selects the immutable Git binding `demo-publication` at revision `3`. The logical repository `demo` uses a qualified native 40-digit format in these examples. The pinned literal revision is the base of the later synthetic publication. The original preparation checkpoint pins the binding before workspace preparation. The authenticated principal stays in the trusted push observation.
+
+```json
+{"attempt_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","config":{"harness":"claude","prompt":"Update src/check.py and keep café display text intact.","workspace":{"repo":"demo","rev":"abcdef1234567890abcdef1234567890abcdef12"}},"deadline":{"value":{"at":"2026-01-01T00:01:30.123456Z","clock_uncertainty_us":"250001","grace_seconds":30,"scope_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","scope_kind":"attempt"},"version":1},"execution_policy":{"namespace_revision":7,"semantics":"kora.execution.v1","values":{"namespace":{"require_protected_execution":false},"node":{"tool_policy":{}}}},"feedback":null,"graph":{"contract_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","semantics":"kora.execution.v1","version_id":"01ARZ3NDEKTSV4RRFFQ69G5FAX"},"input_bindings":[],"kind":"agent","limits":{"max_events":128,"stall_after_us":"900000000","timeout":"90s"},"materialized_inputs":[],"node_path":"agent","price_table":{"effective_from":"2026-01-01T00:00:00Z","id":"01ARZ3NDEKTSV4RRFFQ69G5FB1","namespace_id":null,"normalization_version":1,"prices":{"synthetic-model":{"cache_creation_1h":null,"cache_creation_5m":null,"cached_input":null,"input":"1.25","output":"0","reasoning":null}},"version":1},"protected_paths":[],"providers":{"harness":{"implementation_version":"1.0","name":"claude","selection_id":"01ARZ3NDEKTSV4RRFFQ69G5FAY","selection_revision":1},"runtime":{"implementation_version":"1.0","name":"local","selection_id":"01ARZ3NDEKTSV4RRFFQ69G5FAZ","selection_revision":1},"vcs":{"implementation_version":"1.0","name":"git","selection_id":"01ARZ3NDEKTSV4RRFFQ69G5FB0","selection_revision":1}},"publication":{"binding":"demo-publication","binding_revision":3,"credential_mode":"local_credential_free"},"render_profile":"kora.jinja2.v1","rendered":{"prompt":"Update src/check.py and keep café display text intact.","system_prompt_append":null,"workspace_revision":{"source":"rev","value":"abcdef1234567890abcdef1234567890abcdef12"}},"resources":[],"retry_policy":{"infrastructure_retry":{"max_attempts":1},"interpretation":"kora.disabled-retry-policies.v1","provider_retry":{"max_wait":"0s"},"retry":{"backoff_coefficient":1.0,"max_attempts":1}},"retry_source":null,"run_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","secret_aliases":{},"version":2}
+```
+
+### Input-bearing command
+
+The synthetic pinned command declares one whole required VcsRef revision 1 input named `candidate` from the preceding publisher in the same run and namespace. Its original admission freezes artifact version A, `01ARZ3NDEKTSV4RRFFQ69G5FB3`. The accepted VcsRef's `commit` and `base_commit` differ. The API derives the exact whole file shown below through the accepted owner, saves the result under the original attempt, preparation grant and generation, and independently verifies both rendered commit IDs and arguments. The command's exact logical revision consumes the accepted commit and its base. The examples use an empty checked protected-path list.
+
+```json
+{"attempt_id":"01ARZ3NDEKTSV4RRFFQ69G5FB2","config":{"cmd":["/usr/bin/git","diff","--check","{{ inputs.candidate.base_commit }}","{{ inputs.candidate.commit }}","--"],"workspace":{"from_ref":"inputs.candidate","repo":"demo"}},"deadline":{"value":null,"version":1},"execution_policy":{"namespace_revision":7,"semantics":"kora.execution.v1","values":{"namespace":{"require_protected_execution":false},"node":{"tool_policy":{}}}},"feedback":null,"graph":{"contract_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","semantics":"kora.execution.v1","version_id":"01ARZ3NDEKTSV4RRFFQ69G5FAX"},"input_bindings":[{"name":"candidate","path":null,"relation":"consumed","source":{"artifact_version_id":"01ARZ3NDEKTSV4RRFFQ69G5FB3","kind":"artifact"}}],"kind":"command","limits":{"stall_after_us":"900000000"},"materialized_inputs":[{"sha256":"sha256:07c674f40349dcf63428741d97f8fe89249c1b2a3690b67e57e1196cb33b404b","size":393}],"node_path":"gate","price_table":{"effective_from":"2026-01-01T00:00:00Z","id":"01ARZ3NDEKTSV4RRFFQ69G5FB1","namespace_id":null,"normalization_version":1,"prices":{"synthetic-model":{"cache_creation_1h":null,"cache_creation_5m":null,"cached_input":null,"input":"1.25","output":"0","reasoning":null}},"version":1},"protected_paths":[],"providers":{"harness":null,"runtime":{"implementation_version":"1.0","name":"local","selection_id":"01ARZ3NDEKTSV4RRFFQ69G5FAZ","selection_revision":1},"vcs":{"implementation_version":"1.0","name":"git","selection_id":"01ARZ3NDEKTSV4RRFFQ69G5FB0","selection_revision":1}},"publication":null,"render_profile":"kora.jinja2.v1","rendered":{"cmd":["/usr/bin/git","diff","--check","abcdef1234567890abcdef1234567890abcdef12","1234567890abcdef1234567890abcdef12345678","--"],"workspace_revision":{"base_commit":"abcdef1234567890abcdef1234567890abcdef12","source":"from_ref","value":"1234567890abcdef1234567890abcdef12345678"}},"resources":[],"retry_policy":{"infrastructure_retry":{"max_attempts":1},"interpretation":"kora.disabled-retry-policies.v1","provider_retry":{"max_wait":"0s"},"retry":{"max_attempts":1}},"retry_source":null,"run_id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","secret_aliases":{},"version":2}
+```
+
+The alternative command B is the same complete body with just the `input_bindings[0].source.artifact_version_id` value replaced by `01ARZ3NDEKTSV4RRFFQ69G5FB4`. To reproduce it, replace the unique quoted A ID in the canonical command block with that quoted B ID. Its input file and config are byte-for-byte identical. A and B can each compare successfully in a separate history in which that exact version was the original accepted binding for the same target attempt ID. In a history that already binds A, B is a substitution. The A/B digests isolate the only changed logical field.
+
+### Prepared input file
+
+These are the complete canonical bytes for the synthetic VcsRef and its whole prepared input file `candidate.json` for either command history. The branch uses the deterministic graph, run, node and attempt number of the first publication. `pushed_by` is part of the accepted artifact payload from the trusted push observation. It is not a member of the agent's request or an authorization for a command.
+
+```json
+{"base_commit":"abcdef1234567890abcdef1234567890abcdef12","branch":"kora/demo/01ARZ3NDEKTSV4RRFFQ69G5FAW/agent/1","changed_paths":["src/check.py"],"commit":"1234567890abcdef1234567890abcdef12345678","diff_stat":"1 file changed, 1 insertion(+)","pushed_by":{"display_name":"Demo Git service","kind":"local_service","provider_instance":"git-local-demo","stable_id":"demo-service"},"repo":"demo"}
+```
+
+## Existing v1 compatibility
+
+The original [v1 vectors](execution-request-v1.md) retain their exact bytes and digests. In particular, the 2212-byte agent is `sha256:2bc8058738971ff562eb5d84dd39bf24708321bd911ff12875300a035633aee2`, and the 1612-byte input-free command is `sha256:78fd5481f36074da5c472eb1de3d8e26ec145897ac1d75705d328bea48a69fbe`. An eligible saved v1 owner keeps the v1 body codec and the original read-only replay result. The isolated first sealed test agent still uses the v1 contract.
+
+For the downgrade vector, start from the publishing agent above, replace the exact final `"version":2` with `"version":1`, replace the complete three-member publication object with `null`, and remove `"materialized_inputs":[],` from the root. Keep all other bytes, including the pinned revision. The resulting body satisfies the v1 field grammar but refuses under the original ordinary publishing Claim before ready or first seal.
+
+In both body versions, the saved descriptor retains its existing closed shape and envelope integer `version: 1`. Authorized metadata replay of either body version returns the saved descriptor and current availability without parsing that body. A v1-only byte consumer refuses v2 even if the envelope, digest and size match.
+
+## Expected transitions and refusals
+
+The rows name design expectations. Positive runtime cases supply authentic Claim, owner, policy, custody, grant and installed evidence. Replay cases use the exact original authorized boundary. Refusals use their existing content-free forms.
+
+| Case | Expected outcome |
+| --- | --- |
+| Eligible ordinary agent and command A, through either supported seal form | Compare the full body before ready or first inline seal. First seal commits the original descriptor and policy with the exact request owner and, for A, the exact prepared input owner. The verified consumer reads the original bytes under the qualified hold before new effects. |
+| v1 request with non-null publication, a materialized input member or a declared command input including optional absence | Refuse under the existing v1 grammar and coverage. A submitted empty inventory cannot hide the pinned declaration. |
+| Ordinary publishing Claim with the downgrade body or ordinary command with a v1 input-free body | Refuse the trusted version or declaration mismatch before ready or first seal. |
+| Missing version, unknown version `3`, string `"2"`, real `2.0`, or duplicate decoded names such as `"ver\u0073ion":2,"version":2` | Refuse before ready or first seal. Duplicate spelling or numeric coercion cannot repair the body. |
+| Agent carrying command bindings or materialization, command carrying publication or a harness, explicit nulls for required arrays, or an additional field | Refuse the closed variant before ready or first seal. |
+| Materialized descriptor with an unknown field, a digest outside the `sha256:<64 lowercase hex>` domain, negative or noninteger size, or size over 256 MiB | Refuse the malformed closed descriptor before ready or first seal. |
+| Agent supplies a substituted publication tuple, even with the same logical repo, or the trusted selection changes after comparison and restores its previous spelling under another revision | Refuse new ready or first seal using the stale evidence. No preparation or publish is authorized by it. |
+| Agent submits an abbreviated, symbolic or wrong-format pinned revision, or runtime presents a checkout under another repository anchor | Invalid pinned source refuses before ready or first seal. The substituted anchor refuses preparation. An actual checkout mismatch prevents candidate start. |
+| Trusted binding changes after the agent's seal or the late heartbeat expectation lacks the exact authorized echo | Preserve saved seal and preparation identity. Refuse new finalize effects. Unknown effects keep the existing recovery obligations. |
+| Command B submitted in A's history, with the same commit and file bytes | Refuse the mismatched accepted artifact before ready or first seal. After A is sealed, B is different complete canonical content and cannot replay or replace it. |
+| Command A with unchanged body, but a foreign preparation grant, generation or ready owner whose file digest and size equal A's | The exact original handoff fails and seals nothing. This does not change the already committed match in an exact authorized replay. |
+| Command input missing, optional or absent, cut, list-composed, from another run or namespace, or sourced through an unrelated owner of the same address | Refuse qualification of the pinned input or deny the source read at its owner boundary. Do not use fallback data or create a valid seal. |
+| New command prepare with only stall authority, a positively qualified agent but no command qualification, or a supplied command body alone | Refuse before source planning or reads, derivation slot or reservation, and staging. Preserve authorized read-only receipt lookup. |
+| Sealed A with a wrong base, repository or literal `CheckoutSource.rev` against the same sealed commit, different protected paths, or an empty-workspace submission | Refuse before workload acceptance or checkout. No command starts. A submitted body with a wrong rendered base or logical repo fails earlier during independent comparison. |
+| File data missing or changed at the original source, before transfer, or in the private input root | A missing eligible source or a short or mismatched read cannot produce a verified preparation. Refuse a transfer identity mismatch before allocation, and refuse missing, extra or corrupted files before command start. |
+| Matching upload or inline seal replay after response loss, API restart, policy change or cancellation, with current replay authorization | Return the original saved descriptor and policy read-only. With qualified retained access use the original owner, bytes and hold. Do not rederive or choose a new source from the current producer or configuration. |
+| Exact authorized metadata replay after original content expiry or loss, or a retained read lacking an eligible original hold | Return the saved metadata and actual availability on replay. Refuse byte use without resurrecting an owner, borrowing equal bytes or renewing rights. |
+| Only one ordinary branch is qualified | That branch may be enabled after its own and shared prerequisites. The other branch refuses new effects, and the complete demonstrating graph remains closed to deploy and fresh trigger. |
+| Policy requires protected execution and the selected runtime is local | Existing feature and policy checks refuse. A verified private-root manifest does not provide isolation on local. |

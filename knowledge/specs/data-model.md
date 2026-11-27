@@ -1637,6 +1637,8 @@ The pass itself runs these steps:
 - **No source reads.** Seal replay and delivery read no sources.
 - **New attempts.** A new attempt of the node starts with its own counters.
 
+The [ordinary v2 command request](execution-request.md#input-bearing-command) binds the complete preparation result for one whole required accepted VcsRef. Its first seal checks this original preparation's grant, generation and ready owner independently of the file's byte identity. The [v2 owner transitions](execution-request.md#descriptor-envelope-and-owner-transitions) govern eligibility for a fresh pass and preserve authorized read-only lookup.
+
 **Refusals.** The reasons below are `API002` with `retryable: false` and content-free details ([api-and-agent-surface.md](api-and-agent-surface.md#2-resources-and-operations)). Busy, pending and capacity refusals keep their retryable forms. Unavailable sources keep `execution_inputs_unavailable`, reported by the worker as `config_error`.
 
 | Condition | `details.reason` and fields | Worker reports |
