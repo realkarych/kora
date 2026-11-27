@@ -13,6 +13,11 @@ import { checkCleanup, childEnvironment, closeOwners, Ownership } from './owners
 type Document = Record<string, unknown>
 type Theme = 'light' | 'dark'
 type RouteClass = 'timeline' | 'asset' | 'event' | 'canonical' | 'signIn' | 'signOut'
+type SignInStep = 'start' | 'open-page' | 'navigate' | 'redemption' | 'redirect-headers'
+  | 'fetch-metadata' | 'document-headers' | 'cookies' | 'cookie-visibility'
+  | 'event-response' | 'event-headers' | 'event-body' | 'event-parity' | 'latest-dom'
+  | 'clean-page' | 'open-replay' | 'replay-navigation' | 'replay-response' | 'close-replay'
+  | 'canonical-cookie' | 'complete'
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 const lines = input[Symbol.asyncIterator]()
@@ -67,6 +72,12 @@ const evidence = {
   stage: 'certificate',
   checks: [] as string[],
   diagnostics: { pageError: 0, warning: 0, error: 0, validatedReadTerminations: 0 },
+  nativeSignIn: {
+    step: 'start' as SignInStep,
+    failedStep: null as SignInStep | null,
+    eventFinished: false,
+    eventFailed: false,
+  },
   routes: {} as Partial<Record<RouteClass, number[]>>,
 }
 const cancellation = new AbortController()
@@ -79,6 +90,10 @@ function stage(next: string): void {
   evidence.checks.push(evidence.stage)
   evidence.stage = next
   assert(!cancellation.signal.aborted)
+}
+
+function signInStep(step: SignInStep): void {
+  if (evidence.stage === 'native-sign-in') evidence.nativeSignIn.step = step
 }
 
 async function profile(name: string, trust: boolean): Promise<Ownership> {
@@ -223,8 +238,14 @@ function watchSafeDiagnostics(page: Page): void {
     if (expectedRefusals.includes(receipt)) remember(httpRefusals, receipt)
     else if (status !== expected || route === 'canonical') rejectDiagnostic('http-status', route, status)
   })
+  page.on('requestfinished', request => {
+    if (evidence.stage === 'native-sign-in' && routeClass(request.url()) === 'event') {
+      evidence.nativeSignIn.eventFinished = true
+    }
+  })
   page.on('requestfailed', request => {
     const route = routeClass(request.url())
+    if (evidence.stage === 'native-sign-in' && route === 'event') evidence.nativeSignIn.eventFailed = true
     const receipt = expectedRequests.get(request)
     const status = responseStatuses.get(request)
     if (route !== 'event' || request.failure()?.errorText !== 'net::ERR_ABORTED') {
@@ -266,8 +287,10 @@ const earlier = (page: Page) => page.getByRole('button', { name: 'Earlier events
 const signOut = (page: Page) => page.getByRole('button', { name: 'Sign out' })
 
 async function checkedResponse(response: Response): Promise<Document> {
+  signInStep('event-headers')
   assert.equal(response.status(), 200)
   assert.match(string(await response.headerValue('cache-control')), /no-store/iu)
+  signInStep('event-body')
   const content: unknown = await response.json()
   return object(content)
 }
@@ -299,6 +322,7 @@ async function assertPageRows(page: Page, expected: Document[]): Promise<void> {
 
 async function latest(page: Page, response: Response, began: number): Promise<void> {
   const body = await checkedResponse(response)
+  signInStep('event-parity')
   const query = new URL(response.url()).searchParams
   assert.equal(query.get('limit'), '20')
   assert(!query.has('cursor'))
@@ -306,6 +330,7 @@ async function latest(page: Page, response: Response, began: number): Promise<vo
   assert.equal(body.next_cursor, canonical.next_cursor)
   const observed = Date.parse(string(body.observed_at))
   assert(began <= observed && observed <= Date.now())
+  signInStep('latest-dom')
   const observation = page.locator('time').filter({ hasText: string(body.observed_at) })
   await observation.waitFor({ state: 'visible' })
   assert.equal(await observation.getAttribute('datetime'), body.observed_at)
@@ -320,20 +345,26 @@ async function signIn(page: Page, context: BrowserContext, url: string): Promise
   const observed = waitEventPage(page)
   const redemption = page.waitForResponse(response => response.url() === url)
   const began = Date.now()
+  signInStep('navigate')
   const navigation = await page.goto(url, { waitUntil: 'domcontentloaded' })
+  signInStep('redemption')
   const response = await redemption
+  signInStep('redirect-headers')
   assert.equal(response.status(), 303)
   assert.equal(await response.headerValue('location'), timeline)
   assert.equal(await response.headerValue('referrer-policy'), 'no-referrer')
   assert.match(string(await response.headerValue('cache-control')), /no-store/iu)
   const request = response.request()
+  signInStep('fetch-metadata')
   const metadata = await Promise.all([
     'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user',
   ].map(name => request.headerValue(name)))
   assert.deepEqual(metadata, ['none', 'navigate', 'document', '?1'])
+  signInStep('document-headers')
   assert.equal(navigation?.status(), 200)
   assert.equal(await navigation.request().headerValue('referer'), null)
   assert.equal(page.url(), origin + timeline)
+  signInStep('cookies')
   const cookies = await context.cookies(origin)
   const session = cookies.find(cookie => cookie.name === '__Host-kora_session')
   const csrf = cookies.find(cookie => cookie.name === '__Host-kora_csrf')
@@ -346,8 +377,11 @@ async function signIn(page: Page, context: BrowserContext, url: string): Promise
     assert(cookie.secure)
   }
   assert(session.httpOnly && !csrf.httpOnly)
+  signInStep('cookie-visibility')
   assert.equal(await page.evaluate(() => document.cookie.includes('__Host-kora_session=')), false)
+  signInStep('event-response')
   await latest(page, await observed, began)
+  signInStep('clean-page')
   const rendered = await page.locator('body').innerText()
   assert(![url, new URL(url).pathname, session.value, csrf.value].some(marker => rendered.includes(marker)))
 }
@@ -557,20 +591,26 @@ async function trustedJourney(): Promise<void> {
       await checkSecondAuthority(outside, owner)
       await outside.close()
       stage('native-sign-in')
+      signInStep('open-page')
       const page = await context.newPage()
       watchSafeDiagnostics(page)
       const signInUrl = string(bootstrap.url)
       await signIn(page, context, signInUrl)
+      signInStep('open-replay')
       const replay = await context.newPage()
       try {
         watchSafeDiagnostics(replay)
+        signInStep('replay-navigation')
         const refused = await replay.goto(signInUrl, { waitUntil: 'domcontentloaded' })
+        signInStep('replay-response')
         assert.equal(refused?.status(), 401)
         const body: unknown = await refused.json()
         assert.equal(object(object(body).error).code, 'API009')
+        signInStep('close-replay')
       } finally {
         await replay.close()
       }
+      signInStep('canonical-cookie')
       const cookieOnly = await page.evaluate(async path => {
         const response = await fetch(path)
         const body: unknown = await response.json()
@@ -578,6 +618,7 @@ async function trustedJourney(): Promise<void> {
       }, eventPath.replace('/console', ''))
       assert.equal(cookieOnly.status, 401)
       assert.equal(object(object(cookieOnly.body).error).code, 'API009')
+      signInStep('complete')
       stage('responsive-appearance')
       await appearance(page)
       stage('pagination')
@@ -647,6 +688,9 @@ async function trustedJourney(): Promise<void> {
       await loseAuthority(another)
       checkDiagnostics()
       send({ type: 'finish' })
+    } catch (error) {
+      if (evidence.stage === 'native-sign-in') evidence.nativeSignIn.failedStep = evidence.nativeSignIn.step
+      throw error
     } finally {
       await context.close()
     }
