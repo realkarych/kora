@@ -1707,7 +1707,7 @@ def lane_job_static_violations(location: str, job: dict[str, object]) -> list[st
     ]
 
 
-def test_pi_sdk_stage_precedes_tests_in_both_local_runtime_lanes() -> None:
+def test_pi_sdk_stage_precedes_tests_in_both_launcher_matrices() -> None:
     workflows = repository_workflows()
     jobs = dict(jobs_of(workflows))
 
@@ -1737,7 +1737,7 @@ def test_pi_sdk_stage_precedes_tests_in_both_local_runtime_lanes() -> None:
         assert step == {
             "name": "Stage the locked Pi SDK witness",
             "id": "pi_sdk_stage",
-            "if": "${{ matrix.lane == 'local-runtime' }}",
+            "if": "${{ matrix.lane == 'local-runtime-launch' }}",
             "run": "bash scripts/ci/setup_pi_sdk_witness.sh",
         }
 

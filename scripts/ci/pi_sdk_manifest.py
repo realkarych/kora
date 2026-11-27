@@ -105,8 +105,7 @@ def inventory(root: Path) -> list[DirectoryRecord | FileRecord]:
 
 
 def write_manifest(stage: Path) -> None:
-    records = inventory(stage / "installed")
-    encoded = json.dumps(records, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(inventory(stage / "installed"), separators=(",", ":")).encode()
     if len(encoded) > MAX_MANIFEST_BYTES:
         raise ValueError("Pi SDK installation manifest exceeds its byte limit")
     with (stage / "manifest.json").open("xb") as receipt:

@@ -74,12 +74,14 @@ LAUNCH_MODULES = (
     "tests/plugins/runtime/local/test_launcher.py",
     "tests/plugins/runtime/local/test_bound_native_launch.py",
     "tests/plugins/runtime/local/test_claude_runtime_launcher.py",
+    "tests/plugins/runtime/local/test_pi_native_launch.py",
 )
 LAUNCH_NODES = (
     f"{LAUNCH_MODULES[0]}::Case::test_param[alpha::beta/gamma]",
     f"{LAUNCH_MODULES[0]}::test_other",
     f"{LAUNCH_MODULES[1]}::test_value",
     f"{LAUNCH_MODULES[2]}::test_value",
+    f"{LAUNCH_MODULES[3]}::test_pi_sdk_uses_closed_session_and_reaps",
 )
 LANES = 2
 COUNTS = {environment_key(system, python): LANES for system, python, _ in ENVIRONMENTS}

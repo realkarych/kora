@@ -177,7 +177,7 @@ jobs:
           bash scripts/ci/check-local-runtime-unit-collisions.sh user
       - name: Stage the locked Pi SDK witness
         id: pi_sdk_stage
-        if: ${{ matrix.lane == 'local-runtime' }}
+        if: ${{ matrix.lane == 'local-runtime-launch' }}
         run: bash scripts/ci/setup_pi_sdk_witness.sh
       - name: Prepare local runtime host fixtures
         id: preparation
@@ -326,7 +326,7 @@ jobs:
           /usr/bin/git --version
       - name: Stage the locked Pi SDK witness
         id: pi_sdk_stage
-        if: ${{ matrix.lane == 'local-runtime' }}
+        if: ${{ matrix.lane == 'local-runtime-launch' }}
         run: bash scripts/ci/setup_pi_sdk_witness.sh
       - name: Prepare local runtime host fixtures
         id: preparation
