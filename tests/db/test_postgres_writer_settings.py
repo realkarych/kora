@@ -68,15 +68,23 @@ async def set_session_commit_mode(
         return postgres_driver(raw.driver_connection)
 
 
-@pytest.mark.asyncio
-async def test_ordinary_writer_remains_available_with_ordinary_settings(
+@pytest.fixture
+def writer_probe_settings(
     empty_database_settings: DatabaseSettings,
     sqlite_template: Path,
-) -> None:
+) -> DatabaseSettings:
     settings = narrow_settings(empty_database_settings, pool_size=1)
-    postgres = settings.dialect is Dialect.POSTGRESQL
-    if not postgres:
+    if settings.dialect is Dialect.SQLITE:
         copy_sqlite_template(sqlite_template, settings.sqlite_path)
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_ordinary_writer_remains_available_with_ordinary_settings(
+    writer_probe_settings: DatabaseSettings,
+) -> None:
+    settings = writer_probe_settings
+    postgres = settings.dialect is Dialect.POSTGRESQL
     database = Database(settings)
 
     try:
@@ -190,9 +198,9 @@ async def refuse_weak_postgres_session(
 
 @pytest.mark.asyncio
 async def test_postgres_entry_refuses_weak_session_then_reuses_the_backend(
-    empty_database_settings: DatabaseSettings,
+    writer_probe_settings: DatabaseSettings,
 ) -> None:
-    settings = narrow_settings(empty_database_settings, pool_size=1)
+    settings = writer_probe_settings
     postgres = settings.dialect is Dialect.POSTGRESQL
     database = Database(
         settings,
@@ -240,9 +248,9 @@ async def read_probe_snapshot(database: Database, deadline: float) -> SnapshotPr
 
 @pytest.mark.asyncio
 async def test_timed_snapshot_composes_with_native_durable_writer_entry(
-    empty_database_settings: DatabaseSettings,
+    writer_probe_settings: DatabaseSettings,
 ) -> None:
-    settings = narrow_settings(empty_database_settings, pool_size=1)
+    settings = writer_probe_settings
     postgres = settings.dialect is Dialect.POSTGRESQL
     database = Database(
         settings,
@@ -355,9 +363,9 @@ async def test_timed_snapshot_composes_with_native_durable_writer_entry(
 @pytest.mark.parametrize("interrupt", ["cancel", "close"])
 @pytest.mark.asyncio
 async def test_durable_writer_owns_native_transaction_through_interrupted_entry(
-    empty_database_settings: DatabaseSettings, interrupt: str
+    writer_probe_settings: DatabaseSettings, interrupt: str
 ) -> None:
-    settings = narrow_settings(empty_database_settings, pool_size=1)
+    settings = writer_probe_settings
     postgres = settings.dialect is Dialect.POSTGRESQL
     database = Database(
         settings,
@@ -513,12 +521,11 @@ def test_writer_entry_checks_native_durability_settings(
 
 
 async def check_transaction_local_mode_before_commit(
-    empty_database_settings: DatabaseSettings,
+    settings: DatabaseSettings,
     local_mode: str,
     timed_admission: bool,
     cutoff_loop: WriterCutoffLoop,
 ) -> None:
-    settings = narrow_settings(empty_database_settings, pool_size=1)
     postgres = settings.dialect is Dialect.POSTGRESQL
     database = Database(
         settings,
@@ -631,14 +638,14 @@ async def check_transaction_local_mode_before_commit(
 @pytest.mark.parametrize("local_mode", ["off", "remote_apply"])
 @pytest.mark.parametrize("timed_admission", [False, True])
 def test_durable_writer_checks_transaction_local_mode_before_commit(
-    empty_database_settings: DatabaseSettings, local_mode: str, timed_admission: bool
+    writer_probe_settings: DatabaseSettings, local_mode: str, timed_admission: bool
 ) -> None:
     loop = WriterCutoffLoop()
 
     with asyncio.Runner(loop_factory=lambda: loop) as runner:
         runner.run(
             check_transaction_local_mode_before_commit(
-                empty_database_settings, local_mode, timed_admission, loop
+                writer_probe_settings, local_mode, timed_admission, loop
             )
         )
 
@@ -647,9 +654,9 @@ def test_durable_writer_checks_transaction_local_mode_before_commit(
 @pytest.mark.parametrize("timed_admission", [False, True])
 @pytest.mark.asyncio
 async def test_durable_writer_owns_native_transaction_through_interrupted_commit(
-    empty_database_settings: DatabaseSettings, interrupt: str, timed_admission: bool
+    writer_probe_settings: DatabaseSettings, interrupt: str, timed_admission: bool
 ) -> None:
-    settings = narrow_settings(empty_database_settings, pool_size=1)
+    settings = writer_probe_settings
     postgres = settings.dialect is Dialect.POSTGRESQL
     database = Database(
         settings,

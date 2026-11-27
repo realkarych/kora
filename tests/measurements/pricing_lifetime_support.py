@@ -78,6 +78,7 @@ from kora.ir.json import parse_json_object
 from tests.cel_eval.children import full_path
 from tests.db.closing import (
     ConnectionLedger,
+    legacy_preparation,
     narrow_settings,
     until,
 )
@@ -765,7 +766,7 @@ async def pricing_storage(database: Database, report: Report, label: str) -> Non
 
 
 async def pricing_dataset(database: Database) -> None:
-    async with database.transaction() as connection:
+    async with legacy_preparation(database) as connection:
         revision = await connection.run_sync(current_revision)
         if revision is None:
             await connection.run_sync(seed_pricing_measurement_history)
