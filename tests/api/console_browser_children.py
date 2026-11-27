@@ -87,12 +87,12 @@ async def release_adopted(
     async with asyncio.timeout(RECOVERY_SECONDS):
         while True:
             children = adopted_pids()
-            assert children is not None
-            owned = set(children) - preserve
-            if not owned:
-                return
-            for pid in owned:
-                await reap_child(pid, terminate)
+            if children is not None:
+                owned = set(children) - preserve
+                if not owned:
+                    return
+                for pid in owned:
+                    await reap_child(pid, terminate)
             await asyncio.sleep(0)
 
 
