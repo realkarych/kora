@@ -159,6 +159,14 @@ ARTIFACTS: Mapping[str, Artifact] = {
         ASSET_HOST,
         30.0,
     ),
+    "pnpm-12.14.0-darwin-arm64": Artifact(
+        "https://github.com/pnpm/pnpm/releases/download/v12.14.0/pnpm-darwin-arm64.tar.gz",
+        "pnpm-darwin-arm64.tar.gz",
+        21_337_766,
+        "50f48e0e17508952790a3fbf58fcf14f3b82efa5f594ca04ad904e29aaf854b0",
+        ASSET_HOST,
+        30.0,
+    ),
     "lychee-0.24.2-x86_64-unknown-linux-gnu": Artifact(
         LYCHEE_ASSET,
         "lychee-0.24.2-x86_64-unknown-linux-gnu.tar.gz",

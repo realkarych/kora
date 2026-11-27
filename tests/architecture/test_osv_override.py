@@ -16,11 +16,18 @@ CRATE_LOCK = COPY_DIRECTORY / "Cargo.lock"
 OVERRIDE = COPY_DIRECTORY / "osv-scanner.toml"
 CRATE_LOCK_SHA256 = "7115bab240a98243c913e2c97c1ba79ba94b501c8f1370f10820ad155ca107cd"
 OVERRIDE_KEYS = frozenset({"name", "version", "ecosystem", "ignore", "reason"})
-SCAN_ARGUMENTS = (
+COMMON_LOCKS = (
     "--lockfile=uv.lock",
     "--lockfile=web/pnpm-lock.yaml",
     "--lockfile=.github/osv/common-expression-language/Cargo.lock",
 )
+SCAN_ARGUMENTS = {
+    "pull-request": (*COMMON_LOCKS, "--recursive", "src/kora/plugins/harness"),
+    "full-scan": (
+        *COMMON_LOCKS,
+        "--lockfile=src/kora/plugins/harness/pi/bridge/pnpm-lock.yaml",
+    ),
+}
 SCANNER_WORKFLOWS = "google/osv-scanner-action/.github/workflows"
 SCANNING_JOBS = {
     "pull-request": (
@@ -37,7 +44,7 @@ EXPECTED_SCANS: dict[str, tuple[object, ...]] = {
         condition,
         workflow,
         frozenset({"scan-args", "fail-on-vuln"}),
-        SCAN_ARGUMENTS,
+        SCAN_ARGUMENTS[identity],
         True,
     )
     for identity, (condition, workflow) in SCANNING_JOBS.items()
@@ -129,12 +136,27 @@ def stop_failing_on_findings(document: dict[str, object]) -> None:
 
 def drop_the_crate_lock(document: dict[str, object]) -> None:
     inputs = scan_inputs(document, "full-scan")
-    inputs["scan-args"] = "\n".join(SCAN_ARGUMENTS[:2])
+    inputs["scan-args"] = "\n".join(
+        argument
+        for argument in SCAN_ARGUMENTS["full-scan"]
+        if not argument.endswith("Cargo.lock")
+    )
+
+
+def require_the_new_lock_in_the_old_base(document: dict[str, object]) -> None:
+    scan_inputs(document, "pull-request")["scan-args"] = "\n".join(
+        SCAN_ARGUMENTS["full-scan"]
+    )
 
 
 @pytest.mark.parametrize(
     "mutation",
-    [pass_a_configuration_file, stop_failing_on_findings, drop_the_crate_lock],
+    [
+        pass_a_configuration_file,
+        stop_failing_on_findings,
+        drop_the_crate_lock,
+        require_the_new_lock_in_the_old_base,
+    ],
 )
 def test_osv_scan_check_refuses_a_mutated_workflow(
     mutation: Callable[[dict[str, object]], None],
@@ -147,7 +169,7 @@ def test_osv_scan_check_refuses_a_mutated_workflow(
     assert scans != EXPECTED_SCANS
 
 
-def test_osv_scans_pass_only_the_three_lockfiles_and_fail_on_findings() -> None:
+def test_osv_scans_discover_new_harness_locks_and_fail_on_findings() -> None:
     document = workflow_document("osv-scanner.yml")
 
     scans = scan_configurations(document)

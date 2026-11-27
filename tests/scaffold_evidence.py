@@ -53,6 +53,7 @@ LOCAL_RUNTIME_LAUNCH_MODULES = (
     f"{LOCAL_RUNTIME_PATH}/test_launcher.py",
     f"{LOCAL_RUNTIME_PATH}/test_bound_native_launch.py",
     f"{LOCAL_RUNTIME_PATH}/test_claude_runtime_launcher.py",
+    f"{LOCAL_RUNTIME_PATH}/test_pi_native_launch.py",
 )
 SPECIAL_PATHS = (*STORAGE_ARGUMENTS, LOCAL_RUNTIME_PATH)
 SPECIAL_MATRIX_ARGUMENTS = {

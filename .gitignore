@@ -9,6 +9,7 @@ dist/
 build/
 *.egg-info/
 web/node_modules/
+src/kora/plugins/harness/pi/bridge/node_modules/
 web/.vite/
 src/kora/api/static/
 src/kora/sqlite/_native.abi3.so
