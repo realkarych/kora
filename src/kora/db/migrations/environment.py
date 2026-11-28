@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
-from alembic.runtime.migration import MigrationContext
+from alembic.runtime.migration import MigrationContext, MigrationInfo
 from alembic.script import ScriptDirectory
 from sqlalchemy import Column, Connection
 from sqlalchemy.schema import SchemaItem
@@ -20,6 +20,8 @@ from kora.db.connection import (
     MIGRATION_LOCK_TIMEOUT,
     POSTGRESQL_MIGRATION_TIMEOUT_QUERY,
 )
+from kora.db.custody_models import CustodyUnavailable
+from kora.db.custody_schema import ISOLATED_FRONTIER_REVISION
 from kora.db.graph_publication_digest_v1 import INVALID_ID_INDEX
 from kora.db.graph_publication_ordinal_v1 import (
     ORDINAL_INVALID_INDEX,
@@ -37,6 +39,7 @@ from kora.db.types import POSTGRESQL, SQLITE
 MIGRATIONS_DIRECTORY: Path = Path(__file__).resolve().parent
 HEAD: str = "head"
 CONNECTION_ATTRIBUTE: str = "connection"
+ISOLATED_ANCESTRY: str = "isolated_sqlite_ancestry"
 
 
 @dataclass(frozen=True)
@@ -97,6 +100,68 @@ def upgrade_to_head(connection: Connection) -> MigrationReport:
         to_revision=head,
         steps=steps,
     )
+
+
+@dataclass
+class IsolatedAncestry:
+    connection: Connection
+    expected: tuple[str, ...]
+    applied: int = 0
+
+    def observe(
+        self,
+        ctx: MigrationContext,
+        step: MigrationInfo,
+        heads: Collection[str],
+        run_args: Mapping[str, object],
+    ) -> None:
+        if self.applied >= len(self.expected) or ctx.connection is not self.connection:
+            raise CustodyUnavailable
+        revision = self.expected[self.applied]
+        if (
+            not step.is_upgrade
+            or step.is_stamp
+            or step.up_revision_id != revision
+            or set(heads) != {revision}
+        ):
+            raise CustodyUnavailable
+        self.applied += 1
+
+
+def upgrade_isolated_sqlite(connection: Connection, scripts: Path) -> None:
+    if connection.dialect.name != SQLITE or not connection.in_transaction():
+        raise CustodyUnavailable
+    config = alembic_config(connection)
+    prefix = "run_event_metadata_0034"
+    ordinary = ScriptDirectory.from_config(config)
+    config.set_main_option("path_separator", "newline")
+    config.set_main_option(
+        "version_locations", f"{MIGRATIONS_DIRECTORY / 'versions'}\n{scripts}"
+    )
+    graph = ScriptDirectory.from_config(config)
+    target = graph.get_revision(ISOLATED_FRONTIER_REVISION)
+    selected = tuple(
+        script.revision for script in graph.iterate_revisions(target.revision, "base")
+    )
+    if (
+        target.down_revision != prefix
+        or Path(target.path) != scripts / f"{ISOLATED_FRONTIER_REVISION}.py"
+        or selected
+        != (
+            target.revision,
+            *(script.revision for script in ordinary.iterate_revisions(prefix, "base")),
+        )
+        or current_revision(connection) is not None
+    ):
+        raise CustodyUnavailable
+    proof = IsolatedAncestry(connection, selected[::-1])
+    config.attributes[ISOLATED_ANCESTRY] = proof
+    command.upgrade(config, target.revision)
+    if (
+        proof.applied != len(proof.expected)
+        or current_revision(connection) != target.revision
+    ):
+        raise CustodyUnavailable
 
 
 def column_types_differ(

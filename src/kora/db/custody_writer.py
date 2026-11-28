@@ -56,6 +56,10 @@ class CustodyDriverConnection(SqliteDriverConnection):
         native = self.native_candidate
         return self._joined and (native is None or native.settled())
 
+    @property
+    def joined(self) -> bool:
+        return self._joined
+
     def observe_retirement(self, connection: Connection) -> None:
         if connection is self.native_candidate:
             try:

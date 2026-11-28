@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import stat
 import sys
 from contextlib import ExitStack
@@ -10,6 +11,7 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import CheckConstraint
+from sqlalchemy.exc import DBAPIError
 
 from kora.db.custody_models import CustodyUnavailable
 from kora.db.custody_native import DIRECTORY_FLAGS, file_anchor
@@ -43,12 +45,17 @@ from tests.api.guarded_sqlite_prebind_child import (
     unprivileged,
 )
 from tests.api.isolated_sqlite_marker_witness import (
+    MIGRATION_CASES,
     MODULE,
-    ObservedMetadataMain,
+    ObservedSchemaMain,
     assert_mountpoint_pinned,
+    barrier,
     check_refusal,
     checkpoint,
+    observe_schema,
     run_original,
+    schema_canceller,
+    test_installed_ordinary_open_refuses_migrated_private_main_copies,
 )
 from tests.api.isolated_sqlite_migrations.isolated_sqlite_frontier_v1 import (
     __file__ as PRIVATE_REVISION_PATH,
@@ -90,7 +97,10 @@ def isolated_head() -> str:
 
 
 def verify_writable(launch: ProtectedRead, parent: int) -> None:
-    launch.require_launcher()
+    try:
+        launch.require_launcher()
+    except WitnessScopeClosed as error:
+        raise CustodyUnavailable from error
     main = launch.main
     paths = protected_directories(launch.domain)
     parents = tuple(path.lstat() for path in paths)
@@ -131,24 +141,97 @@ async def run_marker_child(binding: int, lifetime: int, case: WitnessCase) -> No
         journal = (
             launch.main.parent / "custody-parent" / "custody" / "authority.sqlite3"
         )
+        sidecar = launch.main.with_name("main.db-shm")
 
+        def metadata_checkpoint() -> None:
+            checkpoint(launch.main, b"KMT1")
+            if case is WitnessCase.MIGRATION_BLOCKED:
+                sidecar.write_bytes(b"owned existing sidecar")
+            if case is WitnessCase.MIGRATION_PRE_CANCEL:
+                caller = asyncio.current_task()
+                assert caller is not None
+                caller.cancel()
+
+        refused = False
         try:
             sequence = await isolated_marker_checkpoints(
-                ObservedMetadataMain(
+                ObservedSchemaMain(
                     launch.main,
                     file_anchor(info, launch.main),
                     parent,
                     require_live,
-                    ObservedMetadataMain.canceller(case),
+                    ObservedSchemaMain.canceller(case),
+                    schema_canceller()
+                    if case is WitnessCase.MIGRATION_CANCELLED
+                    else None,
+                    case,
                 ),
                 isolated_head(),
                 lambda: checkpoint(journal, b"KJT1"),
-                lambda: checkpoint(launch.main, b"KMT1"),
+                metadata_checkpoint,
+                schema=observe_schema(launch.main, journal, case)
+                if case in MIGRATION_CASES
+                else None,
             )
         except asyncio.CancelledError:
-            if case is not WitnessCase.CANCELLED:
+            if case not in (
+                WitnessCase.CANCELLED,
+                WitnessCase.MIGRATION_CANCELLED,
+                WitnessCase.MIGRATION_PRE_CANCEL,
+            ):
                 raise
             sequence = None
+        except (sqlite3.OperationalError, DBAPIError) as error:
+            native = error.orig if isinstance(error, DBAPIError) else error
+            code: object = getattr(native, "sqlite_errorcode", None)
+            if case is not WitnessCase.MIGRATION_PARTIAL_SHM and (
+                (case, code)
+                not in (
+                    (WitnessCase.MIGRATION_BLOCKED, sqlite3.SQLITE_CANTOPEN),
+                    (WitnessCase.MIGRATION_ACQUIRE_FAILED, sqlite3.SQLITE_INTERRUPT),
+                )
+            ):
+                raise
+            if case is WitnessCase.MIGRATION_BLOCKED:
+                assert sidecar.read_bytes() == b"owned existing sidecar"
+            else:
+                assert not sidecar.exists()
+            assert not launch.main.with_name("main.db-wal").exists()
+            refused = True
+            sequence = None
+        except CustodyUnavailable:
+            if case is WitnessCase.MIGRATION_JOURNAL_WITHDRAWN:
+                assert not sidecar.exists()
+                assert not launch.main.with_name("main.db-wal").exists()
+                assert not held_main_descriptors(launch.binding.main)
+                assert not held_main_descriptors(native_identity(journal))
+                assert not isolated_marker_owner_retained()
+                sys.stdout.write("MIGRATION_REFUSED original_closed=1\n")
+                return
+            if case not in (
+                WitnessCase.MIGRATION_UNSETTLED,
+                WitnessCase.MIGRATION_UNMAP_UNKNOWN,
+                WitnessCase.MIGRATION_JOURNAL_UNKNOWN,
+            ):
+                raise
+            assert isolated_marker_owner_retained()
+            assert not held_main_descriptors(launch.binding.main)
+            wal_name = (
+                "held-wal" if case is WitnessCase.MIGRATION_UNSETTLED else "main.db-wal"
+            )
+            wal = launch.main.with_name(wal_name)
+            if case is WitnessCase.MIGRATION_JOURNAL_UNKNOWN:
+                assert not wal.exists()
+                assert not sidecar.exists()
+            else:
+                assert not held_main_descriptors(native_identity(wal))
+            assert not held_main_descriptors(native_identity(journal))
+            barrier(
+                b"JOURNAL_UNSETTLED"
+                if case is WitnessCase.MIGRATION_JOURNAL_UNKNOWN
+                else b"UNSETTLED"
+            )
+            return
         finally:
             if isolated_marker_owner_retained():
                 UNSETTLED_LAUNCH.append(owned.pop_all())
@@ -159,6 +242,8 @@ async def run_marker_child(binding: int, lifetime: int, case: WitnessCase) -> No
         result = (
             f"SETTLED sequence={sequence}"
             if sequence
+            else "MIGRATION_REFUSED original_closed=1"
+            if refused
             else "CANCELLED original_closed=1"
         )
         sys.stdout.write(result + "\n")
@@ -242,6 +327,36 @@ def test_isolated_sqlite_marks_each_original_main_before_schema(
     fixture_message("MARKER_RELEASE pin_released=1 original_child_reaped=1")
 
 
+def test_isolated_sqlite_private_migration_publishes_schema_complete_after_release(
+    domain: Path, device: str
+) -> None:
+    test_isolated_sqlite_marks_each_original_main_before_schema(
+        domain, device, WitnessCase.MIGRATION
+    )
+
+
+def test_isolated_sqlite_private_migration_keeps_unsettled_original_fenced(
+    domain: Path, device: str, case: WitnessCase
+) -> None:
+    assert case in MIGRATION_CASES.difference({WitnessCase.MIGRATION})
+    test_isolated_sqlite_marks_each_original_main_before_schema(domain, device, case)
+
+
+def run_case(domain: Path, device: str, case: WitnessCase) -> None:
+    if case is WitnessCase.MIGRATION:
+        test_isolated_sqlite_private_migration_publishes_schema_complete_after_release(
+            domain, device
+        )
+    elif case in MIGRATION_CASES:
+        test_isolated_sqlite_private_migration_keeps_unsettled_original_fenced(
+            domain, device, case
+        )
+    else:
+        test_isolated_sqlite_marks_each_original_main_before_schema(
+            domain, device, case
+        )
+
+
 if __name__ == "__main__":
     role, *words = sys.argv[1:]
     os.umask(0o077)
@@ -251,19 +366,27 @@ if __name__ == "__main__":
         try:
             asyncio.run(run_marker_child(int(initial), int(live), case))
         except (CustodyUnavailable, WitnessScopeClosed):
-            if case in (WitnessCase.SCHEMA, WitnessCase.CANCELLED):
+            if case in MIGRATION_CASES or case in (
+                WitnessCase.SCHEMA,
+                WitnessCase.CANCELLED,
+            ):
                 raise
             sys.stdout.write("REFUSED\n")
+        else:
+            if isolated_marker_owner_retained():
+                barrier(b"RETAINED_AT_EXIT")
+                sys.stdout.write("MIGRATION_UNSETTLED\n")
     elif role == "launcher":
         base, namespace, selected = words
         run_launcher(
             Path(base),
             int(namespace),
-            lambda domain, device: (
-                test_isolated_sqlite_marks_each_original_main_before_schema(
-                    domain, device, WitnessCase(selected)
-                )
-            ),
+            lambda domain, device: run_case(domain, device, WitnessCase(selected)),
+        )
+    elif role == "copies":
+        directory, marker = words
+        test_installed_ordinary_open_refuses_migrated_private_main_copies(
+            Path(directory), marker
         )
     elif role == "guest":
         if NAMESPACE_GATE.read_text().strip() != "0":

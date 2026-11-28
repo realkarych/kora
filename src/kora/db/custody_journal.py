@@ -957,6 +957,7 @@ class CustodyJournalLease:
     _open: bool
     _closing: bool
     _initialized_isolated: bool = False
+    _isolated_sequence: int | None = None
     _phase: CustodyJournalPhase
     _last_outcome: CustodyNativeOutcome | None
     _original_owner: object
@@ -1249,16 +1250,33 @@ class CustodyJournalLease:
             return self._commit(connection, operation)
 
     def _commit(
-        self, connection: Connection, operation: Callable[[Connection], Result]
+        self,
+        connection: Connection,
+        operation: Callable[[Connection], Result],
+        *,
+        isolated: bool = False,
+        dispatch: Callable[[], None] | None = None,
+        committed: Callable[[], None] | None = None,
     ) -> Result:
         self._last_outcome = None
         with closing(connection.execute("BEGIN IMMEDIATE")):
             pass
         try:
             result = operation(connection)
-            self._root.require_current()
+            if dispatch is not None:
+                dispatch()
+            if isolated:
+                self._root.require_isolated()
+                if not connection.in_transaction:
+                    raise CustodyUnavailable
+            else:
+                self._root.require_current()
             self._last_outcome = CustodyNativeOutcome.UNKNOWN
             connection.commit()
+            if isolated and connection.in_transaction:
+                raise CustodyUnavailable
+            if committed is not None:
+                committed()
             self._last_outcome = CustodyNativeOutcome.COMMITTED
             return result
         finally:
@@ -1333,6 +1351,39 @@ class CustodyJournalLease:
 
         await self._run(bind)
         self._initialized_isolated = False
+        self._isolated_sequence = sequence
+
+    async def complete_isolated_schema(
+        self,
+        authority: NativeRow,
+        provisioning: NativeRow,
+        sequence: int,
+        dispatch: Callable[[], None],
+        committed: Callable[[], None],
+    ) -> None:
+        if self._isolated_sequence != sequence:
+            raise CustodyUnavailable
+        self._isolated_sequence = None
+        bound = {**provisioning, "migration_connection_sequence": sequence}
+
+        def complete_schema() -> None:
+            self._root.require_isolated()
+            with self._phase.connection(marker=IsolatedMarker.JOURNAL_REOPEN) as db:
+
+                def advance(connection: Connection) -> None:
+                    tx = CustodyJournalTransaction(
+                        connection, completion_owner=None, relations=ISOLATED_RELATIONS
+                    )
+                    self._require_isolated_rows(tx, authority, bound)
+                    completed: NativeRow = {"phase": "schema_complete"}
+                    tx.update(ISOLATED_PROVISIONING, completed)
+                    self._require_isolated_rows(tx, authority, {**bound, **completed})
+
+                self._commit(
+                    db, advance, isolated=True, dispatch=dispatch, committed=committed
+                )
+
+        await self._run(complete_schema)
 
     def _require_isolated_rows(
         self,
@@ -1379,6 +1430,16 @@ class CustodyJournalLease:
                 self._executor.shutdown(wait=True)
                 self._ownership.close()
                 ACTIVE_LEASES.remove(self)
+
+
+def open_isolated_journal_lease(root: CustodyNativeDirectory) -> CustodyJournalLease:
+    root.require_isolated()
+    with ExitStack() as entry:
+        ownership = root.lock("commit.lock")
+        entry.callback(ownership.close)
+        lease = CustodyJournalLease(root, ownership)
+        entry.pop_all()
+        return lease
 
 
 @asynccontextmanager

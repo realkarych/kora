@@ -26,6 +26,9 @@ struct KoraFd {
   int descriptor;
   int role;
   int custody;
+  int migration;
+  int unmap;
+  int unlinked;
   unsigned long long pool;
   dev_t device;
   ino_t inode;
@@ -36,6 +39,8 @@ struct KoraFd {
 enum {
   KORA_MARKER_NONE, KORA_MARKER_METADATA, KORA_MARKER_JOURNAL, KORA_MARKER_JOURNAL_REOPEN
 };
+
+enum { KORA_SHM_ACQUIRED = 1, KORA_SHM_UNMAPPED = 2 };
 
 typedef struct {
   KoraFd **owner;
@@ -52,9 +57,24 @@ typedef struct {
   int marker;
   int markerPending;
   int markerSync;
+  int markerConfirmed;
+  int migration;
+  int migrationCommit;
+  int checkpoint;
+  KoraFd *wal;
+  KoraFd *shm;
+  KoraFd *rollback;
+  PyObject *observeMigration;
 } KoraOpen;
 
 static _Thread_local KoraOpen *koraOpen;
+static _Thread_local KoraOpen *koraMigrationIo;
+
+static KoraOpen *koraSwapMigrationIo(KoraOpen *scope) {
+  KoraOpen *previous = koraMigrationIo;
+  koraMigrationIo = scope && scope->migration ? scope : NULL;
+  return previous;
+}
 static atomic_int koraUnresolvedIdentity;
 
 static KoraFd *koraNewFd(void) {

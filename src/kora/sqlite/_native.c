@@ -69,7 +69,11 @@ static int closeDatabase(NativeDb *db) {
   if (db->open.markerPending) {
     result = SQLITE_BUSY;
   } else if (db->connection) {
+    KoraOpen *previous = koraSwapMigrationIo(&db->open);
+    if (db->open.migration && sqlite3_get_autocommit(db->connection))
+      koraMigrationEmptyWal(&db->open);
     result = sqlite3_close(db->connection);
+    koraMigrationIo = previous;
     if (result == SQLITE_OK) db->connection = NULL;
   }
   PyThread_release_lock(db->lifetime);
@@ -89,6 +93,10 @@ static void destroyDatabase(PyObject *capsule) {
   NativeDb *db = nativePointer(capsule, dbCapsuleName);
   if (!db || closeDatabase(db) != SQLITE_OK) return;
   PyThread_free_lock(db->lifetime);
+  if (db->open.wal) koraReleaseFd(db->open.wal);
+  if (db->open.shm) koraReleaseFd(db->open.shm);
+  if (db->open.rollback) koraReleaseFd(db->open.rollback);
+  Py_XDECREF(db->open.observeMigration);
   koraReleaseFd(db->main);
   free(db);
 }
@@ -202,7 +210,10 @@ static PyObject *commitMarker(PyObject *module, PyObject *capsule) {
             (marker == KORA_MARKER_METADATA ? KORA_MAIN_METADATA_TEST : KORA_MAIN_JOURNAL_TEST))) {
         result = SQLITE_IOERR;
       }
-      if (result == SQLITE_OK) scope->markerPending = 0;
+      if (result == SQLITE_OK) {
+        scope->markerPending = 0;
+        scope->markerConfirmed = 1;
+      }
     } else if (sqlite3_get_autocommit(db->connection) ||
                sqlite3_exec(db->connection, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK) {
       scope->markerPending = 0;
@@ -211,6 +222,106 @@ static PyObject *commitMarker(PyObject *module, PyObject *capsule) {
   PyThread_release_lock(db->lifetime);
   Py_END_ALLOW_THREADS
   if (result != SQLITE_OK) return dbError(result, "SQLite marker outcome was not confirmed");
+  Py_RETURN_NONE;
+}
+
+static int koraOriginalMetadata(NativeDb *db) {
+  KoraOpen *scope = &db->open;
+  KoraFd *main = db->main;
+  struct stat info;
+  return db->connection && pthread_equal(db->opener, pthread_self()) &&
+    scope->marker == KORA_MARKER_METADATA && scope->markerConfirmed && !scope->markerPending &&
+    main->state == KORA_FD_LIVE && !fstat(main->descriptor, &info) &&
+    info.st_dev == main->device && info.st_ino == main->inode &&
+    koraNamedFile(scope, "main.db", main) == 1 &&
+    koraMainHeader(main->descriptor, &info) == KORA_MAIN_METADATA_TEST;
+}
+
+static int migrationAuthorizer(void *context, int action, const char *first,
+                               const char *second, const char *db, const char *origin) {
+  KoraOpen *scope = context;
+  if (action == SQLITE_ATTACH ||
+      (action == SQLITE_TRANSACTION && !sqlite3_stricmp(first, "COMMIT") &&
+       scope->migrationCommit != -1)) return SQLITE_DENY;
+  if (action == SQLITE_PRAGMA &&
+      (!sqlite3_stricmp(first, "wal_checkpoint") ||
+       (second && (!sqlite3_stricmp(first, "wal_autocheckpoint") ||
+                   !sqlite3_stricmp(first, "locking_mode") ||
+                   !sqlite3_stricmp(first, "application_id") ||
+                   (!sqlite3_stricmp(first, "journal_mode") &&
+                    sqlite3_stricmp(second, "wal")))))) return SQLITE_DENY;
+  return SQLITE_OK;
+}
+
+static PyObject *beginMigration(PyObject *module, PyObject *args) {
+  PyObject *capsule, *observer;
+  if (!PyArg_ParseTuple(args, "OO", &capsule, &observer)) return NULL;
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
+  if (!db) return NULL;
+  KoraOpen *scope = &db->open;
+  int setting = 0;
+  if (!PyCallable_Check(observer) || scope->migration ||
+      (db->authorizer && db->authorizer != Py_None) ||
+      !koraOriginalMetadata(db) ||
+      !sqlite3_get_autocommit(db->connection) || sqlite3_next_stmt(db->connection, NULL) ||
+      koraNamedFile(scope, "main.db-wal", NULL) || koraNamedFile(scope, "main.db-shm", NULL) ||
+      koraNamedFile(scope, "main.db-journal", NULL) ||
+      sqlite3_db_config(db->connection, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, &setting) ||
+      setting != 1 || sqlite3_wal_autocheckpoint(db->connection, 0) ||
+      sqlite3_set_authorizer(db->connection, migrationAuthorizer, scope) ||
+      !koraReserveMigration(scope))
+    return dbError(SQLITE_CANTOPEN, "SQLite private migration admission failed.");
+  scope->migration = 1;
+  scope->observeMigration = Py_NewRef(observer);
+  Py_RETURN_NONE;
+}
+
+static PyObject *commitMigration(PyObject *module, PyObject *capsule) {
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
+  if (!db) return NULL;
+  KoraOpen *scope = &db->open;
+  if (!scope->migration || scope->migrationCommit || !koraOriginalMetadata(db) ||
+      sqlite3_get_autocommit(db->connection))
+    return dbError(SQLITE_MISUSE, "SQLite private migration transaction is unavailable.");
+  scope->migrationCommit = -1;
+  int result;
+  Py_BEGIN_ALLOW_THREADS
+  KoraOpen *previous = koraSwapMigrationIo(scope);
+  result = sqlite3_exec(db->connection, "COMMIT", NULL, NULL, NULL);
+  koraMigrationIo = previous;
+  Py_END_ALLOW_THREADS
+  if (result != SQLITE_OK || !sqlite3_get_autocommit(db->connection))
+    return dbError(result ? result : SQLITE_IOERR, "SQLite private migration commit was not confirmed.");
+  scope->migrationCommit = 1;
+  Py_RETURN_NONE;
+}
+
+static PyObject *checkpointMigration(PyObject *module, PyObject *args) {
+  PyObject *capsule;
+  int committed;
+  if (!PyArg_ParseTuple(args, "Op", &capsule, &committed)) return NULL;
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
+  if (!db) return NULL;
+  KoraOpen *scope = &db->open;
+  if (!scope->migration || scope->checkpoint || !koraOriginalMetadata(db) ||
+      scope->migrationCommit != committed || !sqlite3_get_autocommit(db->connection) ||
+      sqlite3_next_stmt(db->connection, NULL))
+    return dbError(SQLITE_MISUSE, "SQLite private migration checkpoint is unavailable.");
+  if (!committed && !scope->wal && !scope->shm) Py_RETURN_NONE;
+  int log = -1, written = -1, result;
+  scope->markerSync = -1;
+  Py_BEGIN_ALLOW_THREADS
+  KoraOpen *previous = koraSwapMigrationIo(scope);
+  result = sqlite3_wal_checkpoint_v2(db->connection, "main", SQLITE_CHECKPOINT_FULL,
+                                     &log, &written);
+  koraMigrationIo = previous;
+  Py_END_ALLOW_THREADS
+  if (result != SQLITE_OK || log != written || log < committed ||
+      (log > 0 && scope->markerSync != 1) || !scope->wal || !scope->shm ||
+      !koraMigrationCurrent(scope, scope->wal, SQLITE_OPEN_WAL, scope->wal->descriptor) ||
+      !koraMigrationCurrent(scope, scope->shm, KORA_SHM, scope->shm->descriptor))
+    return dbError(result ? result : SQLITE_IOERR, "SQLite private migration checkpoint was not confirmed.");
+  scope->checkpoint = 1;
   Py_RETURN_NONE;
 }
 
@@ -251,9 +362,23 @@ static PyObject *databaseSettled(PyObject *module, PyObject *capsule) {
   if (!db) return NULL;
   int settled;
   Py_BEGIN_ALLOW_THREADS
-  settled = koraSettleFd(db->main);
+  settled = koraSettleFd(db->main) && !db->connection;
   Py_END_ALLOW_THREADS
-  return PyBool_FromLong(settled && !db->connection);
+  return PyBool_FromLong(settled);
+}
+
+static PyObject *retireMigrationNames(PyObject *module, PyObject *capsule) {
+  NativeDb *db = nativePointer(capsule, dbCapsuleName);
+  if (!db) return NULL;
+  int settled;
+  Py_BEGIN_ALLOW_THREADS
+  PyThread_acquire_lock(db->lifetime, WAIT_LOCK);
+  settled = !db->connection && koraSettleFd(db->main) &&
+            koraMigrationSettled(&db->open);
+  PyThread_release_lock(db->lifetime);
+  Py_END_ALLOW_THREADS
+  if (PyErr_Occurred()) return NULL;
+  return PyBool_FromLong(settled);
 }
 
 static PyObject *relatedRetirement(PyObject *module, PyObject *args) {
@@ -320,11 +445,15 @@ static int closeChild(PyObject *capsule, const char *name, int (*close)(void *))
   void *resource = nativePointer(capsule, name);
   if (!resource) return SQLITE_MISUSE;
   PyObject *database = PyCapsule_GetContext(capsule);
+  NativeDb *db = nativePointer(database, dbCapsuleName);
+  if (!db) return SQLITE_MISUSE;
   if (PyCapsule_SetDestructor(capsule, NULL) != 0 ||
       PyCapsule_SetName(capsule, closedCapsuleName) != 0) return SQLITE_MISUSE;
   int result;
   Py_BEGIN_ALLOW_THREADS
+  KoraOpen *previous = koraSwapMigrationIo(&db->open);
   result = close(resource);
+  koraMigrationIo = previous;
   Py_END_ALLOW_THREADS
   Py_DECREF(database);
   return result;
@@ -394,7 +523,9 @@ static PyObject *prepareStatement(PyObject *module, PyObject *args) {
   const char *tail = NULL;
   int result;
   Py_BEGIN_ALLOW_THREADS
+  KoraOpen *previous = koraSwapMigrationIo(&db->open);
   result = sqlite3_prepare_v2(db->connection, sql, -1, &statement, &tail);
+  koraMigrationIo = previous;
   Py_END_ALLOW_THREADS
   if (result == SQLITE_OK) {
     while (isspace((unsigned char)*tail)) tail++;
@@ -443,9 +574,13 @@ static PyObject *statementValues(PyObject *capsule, int columns) {
   sqlite3_stmt *statement = nativePointer(capsule, statementCapsuleName);
   if (!statement) return NULL;
   if (!columns) {
+    NativeDb *db = nativePointer(PyCapsule_GetContext(capsule), dbCapsuleName);
+    if (!db) return NULL;
     int result;
     Py_BEGIN_ALLOW_THREADS
+    KoraOpen *previous = koraSwapMigrationIo(&db->open);
     result = sqlite3_step(statement);
+    koraMigrationIo = previous;
     Py_END_ALLOW_THREADS
     if (result == SQLITE_DONE) Py_RETURN_NONE;
     if (result != SQLITE_ROW) return dbError(result, sqlite3_errmsg(sqlite3_db_handle(statement)));
@@ -567,6 +702,7 @@ static PyObject *configureCallback(PyObject *module, PyObject *args) {
                                context ? runTrace : NULL, context);
       break;
     case 2:
+      if (db->open.migration) return dbError(SQLITE_MISUSE, "SQLite private authorizer is fixed.");
       owned = &db->authorizer;
       result = sqlite3_set_authorizer(db->connection, context ? runAuthorizer : NULL, context);
       break;
@@ -685,6 +821,10 @@ static PyMethodDef methods[] = {
   {"allocate", allocateDatabase, METH_NOARGS, NULL},
   {"open", openDatabaseOwner, METH_VARARGS, NULL},
   {"commit_marker", commitMarker, METH_O, NULL},
+  {"begin_migration", beginMigration, METH_VARARGS, NULL},
+  {"commit_migration", commitMigration, METH_O, NULL},
+  {"checkpoint_migration", checkpointMigration, METH_VARARGS, NULL},
+  {"retire_migration_names", retireMigrationNames, METH_O, NULL},
   {"reused_main", reusedMain, METH_O, NULL},
   {"acquired_main", acquiredMain, METH_O, NULL},
   {"set_length_limit", setLengthLimit, METH_VARARGS, NULL},

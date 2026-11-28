@@ -46,7 +46,13 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     create_async_engine,
 )
-from sqlalchemy.pool import AsyncAdaptedQueuePool, Pool, StaticPool
+from sqlalchemy.pool import (
+    AsyncAdaptedQueuePool,
+    NullPool,
+    Pool,
+    PoolResetState,
+    StaticPool,
+)
 from sqlalchemy.pool.base import ConnectionPoolEntry, PoolProxiedConnection
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.util import await_, greenlet_spawn
@@ -91,6 +97,7 @@ if TYPE_CHECKING:
     from kora.db.custody_sqlite import SQLiteWorkerOriginal
     from kora.db.custody_transaction import OriginalCustodyTransaction
     from kora.db.custody_writer import (
+        CustodyDriverConnection,
         LocalSQLiteWriterLoan,
         LocalSQLiteWriterScope,
         SQLitePhysicalWriter,
@@ -530,6 +537,82 @@ class IsolatedMetadataMain:
             attempt.execute(statement).close()
         self.require_live()
         attempt.commit_isolated_marker()
+
+    async def migrate(
+        self,
+        original: CustodyDriverConnection,
+        attempt: NativeConnection,
+        scripts: Path,
+        checkpoint: Callable[[], None],
+    ) -> None:
+        from kora.db.migrations.environment import upgrade_isolated_sqlite
+
+        admitted = False
+        checkpointed = False
+
+        async def creator() -> CustodyDriverConnection:
+            nonlocal admitted
+            if admitted:
+                raise CustodyUnavailable
+            admitted = True
+            self.require_live()
+            return original
+
+        def admit_phase() -> None:
+            self.require_live()
+            attempt.begin_isolated_migration(self.observe_migration)
+
+        def observe_return(
+            raw: DBAPIConnection,
+            entry: ConnectionPoolEntry,
+            state: PoolResetState,
+        ) -> None:
+            if checkpointed:
+                checkpoint()
+
+        self.require_live()
+        await original.custody_worker(admit_phase)
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=NullPool,
+            module=sqlite_driver_module(),
+            async_creator=creator,
+        )
+        event.listen(engine.sync_engine, "connect", configure_full_sync_writer)
+        event.listen(engine.sync_engine, "begin", begin_verified_sqlite_write)
+        event.listen(engine.sync_engine, "reset", observe_return)
+        committed = False
+        try:
+            async with engine.connect() as connection:
+                await self.verify_migration_checkout(connection, original, creator)
+                try:
+                    await connection.begin()
+                    await connection.run_sync(upgrade_isolated_sqlite, scripts)
+                    self.require_live()
+                    await connection.commit()
+                    committed = True
+                finally:
+                    if not committed and connection.in_transaction():
+                        await connection.rollback()
+                    await original.custody_worker(
+                        lambda: attempt.checkpoint_isolated_migration(committed)
+                    )
+                checkpointed = True
+        finally:
+            await engine.dispose()
+
+    def observe_migration(self, descriptor: int, stage: int) -> bool:
+        self.require_live()
+        return True
+
+    async def verify_migration_checkout(
+        self,
+        connection: AsyncConnection,
+        original: CustodyDriverConnection,
+        creator: Callable[[], Awaitable[CustodyDriverConnection]],
+    ) -> None:
+        if await sqlite_checkout_worker(connection) is not original:
+            raise CustodyUnavailable
 
 
 @dataclass(frozen=True)
