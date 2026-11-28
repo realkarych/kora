@@ -31,18 +31,29 @@ from kora.plugins.harness.pi.installation import (
     PiInstallation,
     verify_pi_installation,
 )
-from kora.plugins.runtime.local.bound_checkout import BoundCheckout, BoundCheckoutError
+from kora.plugins.runtime.local.bound_checkout import (
+    BoundCheckout,
+    BoundCheckoutError,
+    CheckoutFailure,
+)
 from kora.protocols.lifetime import (
     EnvironmentVariable,
     ProcessDomain,
     ProcessLaunch,
     ProcessOutput,
+    ProcessRegistration,
     new_operation_id,
 )
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import ChannelError, ChannelFailure, wait_future
-from kora.runner.child_wait import Readiness, native_direct_child_wait
-from kora.runner.identity import NativeIdentityReader
+from kora.runner.channels import ChannelError, ChannelFailure, cancel_task, wait_future
+from kora.runner.child_wait import (
+    ChildWatch,
+    DirectChildProbe,
+    KernelChildWatch,
+    Readiness,
+    native_direct_child_wait,
+)
+from kora.runner.identity import IdentityState, NativeIdentityReader
 from kora.runner.native_io import observed
 from kora.runner.process_stdio import StdioStreams
 from kora.runner.processes import GatedProcess, start_gated
@@ -262,10 +273,11 @@ class PiGate:
         checkout: BoundCheckout,
         home: Path,
         scan_clock: Clock | None,
+        clock: Clock | None,
     ) -> None:
         self.installation: PiInstallation = installation
         self.checkout: BoundCheckout = checkout
-        self.clock: SystemClock = SystemClock()
+        self.clock: Clock = SystemClock() if clock is None else clock
         self._scan_clock: Clock = self.clock if scan_clock is None else scan_clock
         self._installation_scan: asyncio.Task[None] | None = None
         self._release_task: asyncio.Task[int] | None = None
@@ -321,6 +333,12 @@ class PiGate:
         model: str = MODEL,
         barrier: tuple[asyncio.Event, asyncio.Event] | None = None,
     ) -> None:
+        channel = await self.connect(barrier)
+        await channel.initialize(origin, model)
+
+    async def connect(
+        self, barrier: tuple[asyncio.Event, asyncio.Event] | None = None
+    ) -> BridgeChannel:
         registration = await self.owner.prepare()
         self.pid = registration.process.pid
         if barrier is not None:
@@ -338,10 +356,11 @@ class PiGate:
             self.clock,
             self.require_binding,
             self.recheck_installation,
+            self.require_final_binding,
         )
-        await self.channel.initialize(origin, model)
+        return self.channel
 
-    def require_binding(self, allow_exit: bool = False) -> None:
+    def _binding_registration(self) -> ProcessRegistration:
         if self.stopped:
             raise BridgeRefused("stopped")
         self.checkout.verify(self.checkout.path, self.cutoff_ns, self.clock)
@@ -349,7 +368,13 @@ class PiGate:
         registration = self.owner.registration
         if registration is None:
             raise BridgeRefused("stopped")
-        process = self.identities.read(self.pid).process
+        return registration
+
+    def _matches_binding(
+        self, registration: ProcessRegistration, *, allow_exit: bool
+    ) -> bool:
+        observation = self.identities.read(self.pid)
+        process = observation.process
         if (
             process is not None
             and process.identity == registration.process
@@ -358,15 +383,103 @@ class PiGate:
             and process.parent_pid == os.getpid()
             and (allow_exit or not process.dead)
         ):
-            return
-        if (
-            process is None
-            and allow_exit
-            and self._child_probe is not None
-            and self._child_probe.read(registration) is Readiness.READY
-        ):
-            return
+            return True
+        if observation.state is IdentityState.ABSENT and allow_exit:
+            return False
         raise BridgeRefused("stopped")
+
+    def require_binding(self, allow_exit: bool = False) -> None:
+        registration = self._binding_registration()
+        probe = self._child_probe
+        if self._matches_binding(registration, allow_exit=allow_exit):
+            return
+        if probe is None or probe.read(registration) is not Readiness.READY:
+            raise BridgeRefused("stopped")
+
+    def _require_current_receipt(self, revoked: asyncio.Future[None]) -> None:
+        if revoked.done():
+            raise BridgeRefused("closed")
+        if self.stopped:
+            raise BridgeRefused("stopped")
+        if self.clock.monotonic_ns() >= self.cutoff_ns:
+            raise BridgeRefused("deadline")
+
+    def _receipt_registration(
+        self, revoked: asyncio.Future[None]
+    ) -> ProcessRegistration:
+        self._require_current_receipt(revoked)
+        try:
+            return self._binding_registration()
+        except BoundCheckoutError as error:
+            if error.reason is not CheckoutFailure.DEADLINE:
+                raise
+            raise BridgeRefused("deadline") from None
+
+    async def require_final_binding(self, revoked: asyncio.Future[None]) -> None:
+        registration = self._receipt_registration(revoked)
+        if self._matches_binding(registration, allow_exit=True):
+            return
+
+        probe, watch_child = self._child_probe, self._watch_child
+        if probe is None or watch_child is None:
+            raise BridgeRefused("stopped")
+        readiness = probe.read(registration)
+        if readiness is Readiness.READY:
+            return
+        if readiness is Readiness.MISMATCH:
+            raise BridgeRefused("stopped")
+        await self.wait_for_final_binding(registration, revoked, probe, watch_child)
+
+    async def wait_for_receipt_exit(self, revoked: asyncio.Future[None]) -> None:
+        self._require_current_receipt(revoked)
+        exit_observed = asyncio.create_task(self.owner.wait_exit(self.cutoff_ns))
+        try:
+            await asyncio.wait(
+                (exit_observed, revoked), return_when=asyncio.FIRST_COMPLETED
+            )
+            self._require_current_receipt(revoked)
+            exit_observed.result()
+        except ChannelError as error:
+            if error.reason is not ChannelFailure.DEADLINE:
+                raise
+            raise BridgeRefused("deadline") from None
+        finally:
+            if not exit_observed.done():
+                await cancel_task(exit_observed)
+            elif not exit_observed.cancelled():
+                exit_observed.exception()
+
+    async def wait_for_final_binding(
+        self,
+        registration: ProcessRegistration,
+        revoked: asyncio.Future[None],
+        probe: DirectChildProbe,
+        watch_child: Callable[[int], ChildWatch],
+    ) -> None:
+        exit_observed = False
+        while True:
+            self._require_current_receipt(revoked)
+            watch = watch_child(registration.process.pid)
+            try:
+                if not exit_observed:
+                    await self.wait_for_receipt_exit(revoked)
+                    exit_observed = True
+                if self._receipt_registration(revoked) != registration:
+                    raise BridgeRefused("stopped")
+                if self._matches_binding(registration, allow_exit=True):
+                    return
+                readiness = probe.read(registration)
+                if readiness is Readiness.READY:
+                    return
+                if readiness is Readiness.MISMATCH:
+                    raise BridgeRefused("stopped")
+                await asyncio.wait(
+                    (watch.changed, revoked), return_when=asyncio.FIRST_COMPLETED
+                )
+                self._require_current_receipt(revoked)
+                watch.changed.result()
+            finally:
+                watch.close()
 
     async def wait_for_terminal_exit(self) -> None:
         probe = self._child_probe
@@ -488,7 +601,11 @@ class PiGate:
 
 @asynccontextmanager
 async def witness(
-    installation: PiInstallation, directory: Path, *, scan_clock: Clock | None = None
+    installation: PiInstallation,
+    directory: Path,
+    *,
+    scan_clock: Clock | None = None,
+    clock: Clock | None = None,
 ) -> AsyncGenerator[PiGate]:
     root = directory.resolve()
     checkout_path = root / "checkout"
@@ -503,7 +620,7 @@ async def witness(
     )
     checkout = BoundCheckout.capture(checkout_path)
     try:
-        owner = PiGate(installation, checkout, home, scan_clock)
+        owner = PiGate(installation, checkout, home, scan_clock, clock)
         try:
             yield owner
         finally:
@@ -774,21 +891,194 @@ async def test_pi_sdk_refuses_unactivated_prompt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("after_exit", [False, True], ids=["live-read", "after-exit"])
 async def test_pi_sdk_refuses_failed_startup(
-    installation: PiInstallation, tmp_path: Path
+    installation: PiInstallation, tmp_path: Path, after_exit: bool
 ) -> None:
     async with model_peer() as peer, witness(installation, tmp_path) as gate:
         files = FixtureFiles(tmp_path)
+        channel = await gate.connect()
+        transport = gate.streams[1].transport
+        assert isinstance(transport, asyncio.Transport)
 
-        with pytest.raises(BridgeRefused) as failure:
-            await gate.start(peer.origin, "fixture-model-not-in-catalog")
+        async def observe_refusal() -> str:
+            with pytest.raises(BridgeRefused) as failure:
+                await channel.initialize(peer.origin, "fixture-model-not-in-catalog")
+            return failure.value.code
+
+        if after_exit:
+            async with asyncio.TaskGroup() as tasks:
+                transport.pause_reading()
+                try:
+                    pending = tasks.create_task(observe_refusal())
+                    await gate.wait_for_terminal_exit()
+                finally:
+                    transport.resume_reading()
+            code = pending.result()
+        else:
+            code = await observe_refusal()
         result = await gate.release(natural=True)
+
         files.assert_unchanged()
 
-    assert failure.value.code == "startup"
+    assert code == "startup"
     assert result == 1
     gate.assert_reaped()
     assert peer.requests == []
+    assert not (tmp_path / "role").exists()
+
+
+class ReceiptWaitClock(SystemClock):
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self._expired = asyncio.Event()
+        self._observed_deadline: int | None = None
+        self._offset_ns = 0
+        self._expire_after_sample = False
+
+    def observe(self, cutoff_ns: int) -> None:
+        self._observed_deadline = cutoff_ns
+
+    def expire(self) -> None:
+        assert self._observed_deadline is not None
+        self._offset_ns = max(0, self._observed_deadline - super().monotonic_ns())
+        self._expired.set()
+
+    def expire_after_next_sample(self) -> None:
+        self._expire_after_sample = True
+
+    def monotonic_ns(self) -> int:
+        current_ns = super().monotonic_ns() + self._offset_ns
+        if self._expire_after_sample:
+            self._expire_after_sample = False
+            self.expire()
+        return current_ns
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        if deadline_ns != self._observed_deadline:
+            await super().sleep_until(deadline_ns)
+            return
+        self.entered.set()
+        try:
+            async with asyncio.timeout((deadline_ns - self.monotonic_ns()) / SECOND):
+                await self._expired.wait()
+        except TimeoutError:
+            return
+
+
+@pytest.mark.asyncio
+async def test_pi_receipt_reports_cutoff_during_checkout_verification(
+    installation: PiInstallation, tmp_path: Path
+) -> None:
+    clock = ReceiptWaitClock()
+    revoked: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    async with witness(installation, tmp_path, clock=clock) as gate:
+        await gate.connect()
+        clock.observe(gate.cutoff_ns)
+        clock.expire_after_next_sample()
+
+        with pytest.raises(BridgeRefused) as failure:
+            await gate.require_final_binding(revoked)
+        await gate.release(natural=False)
+
+    assert failure.value.code == "deadline"
+    gate.assert_reaped()
+
+
+@dataclass
+class ReceiptChildWatch:
+    watch: KernelChildWatch
+    closed: bool = False
+
+    @property
+    def changed(self) -> asyncio.Future[None]:
+        return self.watch.changed
+
+    def close(self) -> None:
+        self.watch.close()
+        self.closed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["natural", "stop", "deadline", "cancel"])
+async def test_pi_receipt_waits_for_original_owned_exit(
+    installation: PiInstallation, tmp_path: Path, ending: str
+) -> None:
+    clock = ReceiptWaitClock()
+    revoked: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    watches: list[ReceiptChildWatch] = []
+    async with (
+        model_peer() as peer,
+        witness(installation, tmp_path, clock=clock) as gate,
+    ):
+        channel = await gate.connect()
+        registration = gate.owner.registration
+        assert registration is not None
+        probe, _ = native_direct_child_wait()
+
+        def watch_original(pid: int) -> ChildWatch:
+            assert pid == registration.process.pid
+            watch = ReceiptChildWatch(KernelChildWatch(pid))
+            watches.append(watch)
+            return watch
+
+        if probe is None:
+            wait_for_binding = gate.wait_for_receipt_exit(revoked)
+        else:
+            assert probe.read(registration) is Readiness.NOT_READY
+            wait_for_binding = gate.wait_for_final_binding(
+                registration, revoked, probe, watch_original
+            )
+        clock.observe(gate.cutoff_ns)
+        pending = asyncio.create_task(wait_for_binding)
+        try:
+            async with asyncio.timeout(5):
+                await clock.entered.wait()
+                gate.require_binding()
+                assert not pending.done()
+                assert len(watches) == int(probe is not None)
+                assert all(not watch.closed for watch in watches)
+
+                if ending == "natural":
+                    with pytest.raises(BridgeRefused) as startup:
+                        await channel.initialize(
+                            peer.origin, "fixture-model-not-in-catalog"
+                        )
+                    await pending
+                    assert startup.value.code == "startup"
+                elif ending == "cancel":
+                    assert all(not watch.changed.done() for watch in watches)
+                    pending.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await pending
+                    gate.require_binding()
+                    assert all(
+                        watch.closed and watch.changed.cancelled() for watch in watches
+                    )
+                else:
+                    if ending == "stop":
+                        revoked.set_result(None)
+                        gate.stop()
+                    else:
+                        clock.expire()
+                    with pytest.raises(BridgeRefused) as failure:
+                        await pending
+                    assert failure.value.code == (
+                        "closed" if ending == "stop" else "deadline"
+                    )
+        finally:
+            if not pending.done():
+                await cancel_task(pending)
+
+        assert gate.owner.registration == registration
+        assert gate.owner.returncode is None
+        assert all(watch.closed and watch.changed.done() for watch in watches)
+        exit_status = await gate.release(natural=ending == "natural")
+
+    if ending == "natural":
+        assert exit_status == 1
+    assert peer.requests == []
+    gate.assert_reaped()
     assert not (tmp_path / "role").exists()
 
 
@@ -907,6 +1197,8 @@ async def prepared_channel(
     clock: StepClock,
     require_binding: Callable[[bool], None] | None = None,
     recheck_installation: Callable[[], Awaitable[None]] | None = None,
+    require_final_binding: Callable[[asyncio.Future[None]], Awaitable[None]]
+    | None = None,
 ) -> AsyncGenerator[tuple[BridgeChannel, asyncio.StreamReader, StdioStreams, str]]:
     socket_end, held = socket.socketpair()
     with socket_end, held:
@@ -921,6 +1213,9 @@ async def prepared_channel(
         async def socket_recheck() -> None:
             socket_live()
 
+        async def socket_final_binding(_revoked: asyncio.Future[None]) -> None:
+            (require_binding or socket_live)(True)
+
         channel = BridgeChannel(
             streams,
             NONCE,
@@ -928,6 +1223,7 @@ async def prepared_channel(
             clock,
             require_binding or socket_live,
             recheck_installation or socket_recheck,
+            require_final_binding or socket_final_binding,
         )
         reader, writer = streams
         peer_reader, peer_writer = peer
@@ -1081,6 +1377,60 @@ async def test_pi_bridge_preserves_stop_cause_for_buffered_reply(
 
     assert duplicate.value.code == "protocol"
     assert stopped.value.code == stop
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["stop", "deadline", "cancel"])
+async def test_pi_bridge_interrupts_pending_final_binding(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, ending: str
+) -> None:
+    clock = StepClock()
+    receipt_started, receipt_settled = asyncio.Event(), asyncio.Event()
+    cutoff_ns = clock.monotonic_ns() + 5 * SECOND
+    async with model_peer() as model, witness(installation, tmp_path) as gate:
+        await gate.start(model.origin)
+
+        async def hold_receipt(revoked: asyncio.Future[None]) -> None:
+            gate.require_binding()
+            receipt_started.set()
+            try:
+                if ending == "deadline":
+                    await clock.sleep_until(cutoff_ns)
+                else:
+                    await asyncio.shield(revoked)
+            finally:
+                receipt_settled.set()
+
+        async with prepared_channel(
+            kora_capture, clock, require_final_binding=hold_receipt
+        ) as (channel, _, peer, _):
+            async with asyncio.timeout(5):
+                pending = asyncio.create_task(channel.prompt(PROMPT))
+                challenge = await control_challenge(peer[0], "prompt")
+                peer[1].write(bridge_reply("terminal", challenge))
+                await peer[1].drain()
+                await receipt_started.wait()
+
+                if ending == "cancel":
+                    pending.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await pending
+                else:
+                    if ending == "deadline":
+                        clock.advance(5 * SECOND)
+                    else:
+                        channel.revoke()
+                    with pytest.raises(BridgeRefused) as failure:
+                        await pending
+                    assert failure.value.code == (
+                        "deadline" if ending == "deadline" else "closed"
+                    )
+                assert await peer[0].read() == b""
+        await gate.release(natural=False)
+
+    assert receipt_settled.is_set()
+    assert model.requests == []
+    gate.assert_reaped()
 
 
 class ReadTimerLoop(asyncio.SelectorEventLoop):
