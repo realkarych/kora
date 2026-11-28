@@ -39,6 +39,7 @@ class BridgeChannel:
         clock: Clock,
         require_binding: Callable[[bool], None],
         recheck_installation: Callable[[], Awaitable[None]],
+        require_final_binding: Callable[[asyncio.Future[None]], Awaitable[None]],
     ) -> None:
         if _NONCE.fullmatch(nonce) is None:
             raise BridgeRefused("protocol")
@@ -49,6 +50,10 @@ class BridgeChannel:
         self._clock = clock
         self._require_binding = require_binding
         self._recheck_installation = recheck_installation
+        self._require_final_binding = require_final_binding
+        self._receipt_revoked: asyncio.Future[None] = (
+            asyncio.get_running_loop().create_future()
+        )
         self._phase: Command | None = "init"
         self._revoked: bool = False
         self._waiting: tuple[int, DescriptorReadiness] | None = None
@@ -66,6 +71,8 @@ class BridgeChannel:
 
     def revoke(self) -> None:
         self._revoked = True
+        if not self._receipt_revoked.done():
+            self._receipt_revoked.set_result(None)
         self._release_waiter()
         self._writer.transport.abort()
 
@@ -178,18 +185,31 @@ class BridgeChannel:
             or frame.pop("challenge", None) != challenge
         ):
             raise BridgeRefused("protocol")
-        self._require_binding(frame.get("kind") in ("failure", "terminal"))
-        self._remaining()
         match frame:
             case {"kind": "failure", "code": str(code)} if (
                 len(frame) == 2 and code in _FAILURES
             ):
+                await self._verify_final_binding()
                 raise BridgeRefused(code)
             case {"kind": "terminal", "text": str(text)} if (
                 len(frame) == 2 and expected == "terminal"
             ):
+                await self._verify_final_binding()
                 return text
             case {"kind": kind} if len(frame) == 1 and kind == expected != "terminal":
+                self._require_binding(False)
+                self._remaining()
                 return ""
             case _:
                 raise BridgeRefused("protocol")
+
+    async def _verify_final_binding(self) -> None:
+        try:
+            async with asyncio.timeout(self._remaining()):
+                await self._require_final_binding(self._receipt_revoked)
+        except TimeoutError:
+            raise BridgeRefused("closed" if self._revoked else "deadline") from None
+        except BridgeRefused:
+            self._remaining()
+            raise
+        self._remaining()
