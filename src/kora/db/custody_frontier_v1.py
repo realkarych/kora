@@ -9,6 +9,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.schema import conv
 
+from kora.db.custody_schema import ISOLATED_FRONTIER_VERSION
 from kora.db.types import POSTGRESQL, SQLITE
 
 TABLE_NAME: str = "custody_frontier"
@@ -44,15 +45,19 @@ def frontier_identity_check(dialect: str) -> CheckConstraint:
     ).ddl_if(dialect=dialect)
 
 
-def custody_frontier_elements_v1(dialect: str | None = None) -> tuple[Element, ...]:
-    if dialect not in (SQLITE, POSTGRESQL, None):
+def custody_frontier_elements_v1(
+    dialect: str | None = None, *, version: int = 1
+) -> tuple[Element, ...]:
+    if dialect not in (SQLITE, POSTGRESQL, None) or (
+        version != 1 and (version != ISOLATED_FRONTIER_VERSION or dialect != SQLITE)
+    ):
         raise RuntimeError("unsupported custody frontier backend")
     common: tuple[Element, ...] = (
         Column("singleton", Integer, primary_key=True, autoincrement=False),
         Column("format_version", Integer, nullable=False),
         *(Column(name, BigInteger, nullable=False) for name in COUNTERS),
         *(Column(name, LargeBinary(16), nullable=False) for name in IDENTIFIERS),
-        check("singleton_version", "singleton = 1 AND format_version = 1"),
+        check("singleton_version", f"singleton = 1 AND format_version = {version}"),
         check(
             "ordered_frontiers",
             "generation > 0 AND commit_sequence > 0 "

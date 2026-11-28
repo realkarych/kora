@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from kora.db.custody_models import MAX_CUSTODY_COUNTER, MAX_CUSTODY_ROW_BYTES
@@ -402,4 +402,33 @@ RELATIONS: Final[tuple[CustodyRelation, ...]] = (
     RECOVERY,
     IMAGE,
     PROVISIONING,
+)
+
+
+ISOLATED_AUTHORITY_VERSION: Final = 1073741826
+ISOLATED_FRONTIER_VERSION: Final = 1073741825
+ISOLATED_FRONTIER_REVISION: Final = "isolated_sqlite_frontier_v1"
+
+
+def isolated_relation(relation: CustodyRelation) -> CustodyRelation:
+    version = ISOLATED_AUTHORITY_VERSION if relation is AUTHORITY else 1
+    columns = {
+        "format_version": integer("format_version", minimum=version, maximum=version),
+        "qualification_digest": CustodyColumn(
+            "qualification_digest", "blob", "0", True
+        ),
+    }
+    return replace(
+        relation,
+        columns=tuple(columns.get(column.name, column) for column in relation.columns),
+        constraints=(*relation.constraints, "metadata_backend = 'sqlite'"),
+    )
+
+
+ISOLATED_AUTHORITY: Final = isolated_relation(AUTHORITY)
+ISOLATED_PROVISIONING: Final = isolated_relation(PROVISIONING)
+ISOLATED_RELATIONS: Final = (
+    *RELATIONS[1:-1],
+    ISOLATED_AUTHORITY,
+    ISOLATED_PROVISIONING,
 )

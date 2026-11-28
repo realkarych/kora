@@ -3,8 +3,9 @@ from __future__ import annotations
 import fcntl
 import os
 import stat
+import sys
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager
 from enum import Enum
 from pathlib import Path
@@ -217,8 +218,18 @@ class CustodyNativeDirectory:
     _files: dict[str, CustodyDescriptor]
 
     def __init__(
-        self, path: Path, platform: CustodyNativePlatform, *, provision: bool
+        self,
+        path: Path,
+        platform: CustodyNativePlatform,
+        *,
+        provision: bool,
+        _isolated_launch: Callable[[], None] | None = None,
     ) -> None:
+        self._isolated_launch = _isolated_launch
+        if _isolated_launch is not None:
+            if not provision or sys.platform != "linux":
+                raise CustodyUnavailable
+            _isolated_launch()
         with custody_native_job(), ExitStack() as cleanup:
             parent_path = path.parent.resolve(strict=True)
             canonical = parent_path / path.name
@@ -294,7 +305,13 @@ class CustodyNativeDirectory:
             self.read_latch()
             cleanup.pop_all()
 
+    def require_isolated(self) -> None:
+        if self._isolated_launch is None or self.read_latch() is not CustodyLatch.ARMED:
+            raise CustodyUnavailable
+
     def require_current(self) -> None:
+        if self._isolated_launch is not None:
+            self._isolated_launch()
         with custody_native_job():
             if self._platform.current_process() != self.process:
                 raise CustodyUnavailable
