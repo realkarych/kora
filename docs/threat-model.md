@@ -393,7 +393,7 @@ These amendments cover TM-01/TM-02 and TM-08/TM-09/TM-10/TM-11, with the existin
 
 ### Pi SDK profile
 
-The [Pi execution profile](../knowledge/specs/pi-execution-profile.md) defines prospective controls for a separate qualified local installation under [ADR-0030](decisions/0030-pi-sdk-candidate-process.md). Source inspection informs the design. Its runtime and installed evidence are pending. The existing local same-user residual, late publication and retention controls apply.
+The [Pi execution profile](../knowledge/specs/pi-execution-profile.md) defines a separate local installation under [ADR-0030](decisions/0030-pi-sdk-candidate-process.md). The tools-disabled witness covers the pinned launch and initial request. The [private Bash qualification](../knowledge/specs/pi-execution-profile.md#private-bash-qualification) exercises the selected tool, model, Policy decision and runtime identity (TM-03, TM-05, TM-11), keeps the key out of shell inputs and model request bodies and keeps the key, arguments, output and raw provider events out of trusted diagnostics (TM-06, TM-07), and checks lost replies, byte bounds and observed process and pipe closure (TM-09, TM-10). Both witnesses use the same pinned installation checks (TM-12). Ordinary installed selection and the remaining qualifications below are pending. The existing local same-user residual, late publication and retention controls apply.
 
 | Threat | Pi control and owning qualification |
 | --- | --- |

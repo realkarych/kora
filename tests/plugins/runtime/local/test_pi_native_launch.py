@@ -1,4 +1,7 @@
 import asyncio
+import fcntl
+import hashlib
+import json
 import os
 import shutil
 import signal
@@ -17,7 +20,12 @@ from typing import Final, cast
 import pytest
 
 from kora.conformance.capture import Capture, captured
-from kora.conformance.common import CONFORMANCE_COMPONENT, INSTANCE_ID, utc_now
+from kora.conformance.common import (
+    CONFORMANCE_COMPONENT,
+    INSTANCE_ID,
+    context_for,
+    utc_now,
+)
 from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import decode_strict_json
 from kora.observability import Level, LoggingSettings
@@ -31,19 +39,36 @@ from kora.plugins.harness.pi.installation import (
     PiInstallation,
     verify_pi_installation,
 )
+from kora.plugins.harness.pi.shell_call import (
+    BashRequest,
+    PiShellCall,
+    ShellCallRefused,
+)
+from kora.plugins.policy.allow_deny import AllowDenyPolicy
 from kora.plugins.runtime.local.bound_checkout import (
     BoundCheckout,
     BoundCheckoutError,
     CheckoutFailure,
 )
+from kora.plugins.runtime.local.reaper import AdoptedReaper
+from kora.plugins.runtime.local.scoped_shell import (
+    BASH_PATH,
+    OUTPUT_BYTES,
+    ScopedShell,
+    ScopedShellAdmission,
+    ScopedShellError,
+)
+from kora.protocols.common import ProtocolContext
 from kora.protocols.lifetime import (
     EnvironmentVariable,
+    OperationId,
     ProcessDomain,
     ProcessLaunch,
     ProcessOutput,
     ProcessRegistration,
     new_operation_id,
 )
+from kora.protocols.policy import PolicyDecision, PolicyLayers, ToolCallRequest
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure, cancel_task, wait_future
 from kora.runner.child_wait import (
@@ -54,12 +79,23 @@ from kora.runner.child_wait import (
     native_direct_child_wait,
 )
 from kora.runner.identity import IdentityState, NativeIdentityReader
+from kora.runner.installed_executable import ExecutablePin, verify_installed_executable
 from kora.runner.native_io import observed
-from kora.runner.process_stdio import StdioStreams
+from kora.runner.process_stdio import GatedStdio, StdioReader, StdioStreams
 from kora.runner.processes import GatedProcess, start_gated
-from tests.plugins.harness.claude.scripted_model import end_stream
+from tests.plugins.harness.claude.scripted_model import end_stream, sse, tool_stream
 from tests.plugins.harness.codex.selected_gated_stdio import native_environment
+from tests.plugins.policy.policy_support import layers, policy, workspace
 from tests.plugins.runtime.local.frames_support import StepClock
+from tests.plugins.runtime.local.test_scoped_shell import (
+    DESCENDANT,
+    assert_gone,
+    current_identity,
+    gate_descriptors,
+    python_command,
+    subreaper,
+)
+from tests.support.local_peers import until
 
 SECOND: Final[int] = 1_000_000_000
 PROCESS_CLEANUP_NS: Final[int] = 6 * SECOND
@@ -67,6 +103,8 @@ MODEL: Final[str] = "claude-sonnet-4-5-20250929"
 FIXTURE_KEY: Final[str] = "pi-sdk-scripted-credential-9f71"
 PROMPT: Final[str] = "Produce the fixed witness value."
 AMBIENT: Final[str] = "PI_DISCOVERY_CANARY_4ccbd"
+MODEL_BYTES: Final[int] = 256 * 1024
+BASH_CALL_ID: Final[str] = "toolu_scripted_0"
 NONCE: Final[str] = "a09178ca09f84c2795d3c48a0679b741"
 
 
@@ -87,6 +125,8 @@ class ModelPeer:
         response_gate: asyncio.Event | None = None,
         reported_model: str = MODEL,
         reported_stop: str = "end_turn",
+        responses: tuple[bytes, ...] = (),
+        key: str = FIXTURE_KEY,
     ) -> None:
         self.hold: bool = hold
         self.redirect: str | None = redirect
@@ -94,7 +134,13 @@ class ModelPeer:
         self.response_gate: asyncio.Event | None = response_gate
         self.reported_model: str = reported_model
         self.reported_stop: str = reported_stop
+        self.responses = responses
+        self.key = key
+        self.connections = 0
+        self.header_count = 0
         self.received: asyncio.Event = asyncio.Event()
+        self.continuing: asyncio.Event = asyncio.Event()
+        self.continuation_gate: asyncio.Event | None = None
         self.requests: list[Request] = []
         self.tasks: set[asyncio.Task[None]] = set()
         self.origin: str = ""
@@ -102,6 +148,7 @@ class ModelPeer:
     def accept(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        self.connections += 1
         if len(self.tasks) >= 2:
             writer.close()
             return
@@ -120,20 +167,24 @@ class ModelPeer:
                     for line in headers[1:-2]
                     for key, value in (line.split(":", 1),)
                 )
+                self.header_count += 1
                 length = int(fields.get("content-length", "0"))
-                if not 0 < length <= MAX_FRAME_BYTES:
+                if not 0 < length <= MODEL_BYTES:
                     return
                 document = decode_strict_json(
-                    await reader.readexactly(length), MAX_FRAME_BYTES, 16
+                    await reader.readexactly(length), MODEL_BYTES, 16
                 )
                 if not isinstance(document, dict):
                     return
+                response_index = len(self.requests)
                 self.requests.append(
-                    Request(
-                        headers[0], fields.get("x-api-key") == FIXTURE_KEY, document
-                    )
+                    Request(headers[0], fields.get("x-api-key") == self.key, document)
                 )
                 self.received.set()
+                if response_index == 1:
+                    self.continuing.set()
+                    if self.continuation_gate is not None:
+                        await self.continuation_gate.wait()
                 if self.response_gate is not None:
                     await self.response_gate.wait()
                 if self.redirect is not None:
@@ -154,6 +205,10 @@ class ModelPeer:
                     body = comment * self.padding_records + end_stream(
                         self.reported_model
                     ).replace(b'"end_turn"', f'"{self.reported_stop}"'.encode())
+                    if self.responses:
+                        if response_index >= len(self.responses):
+                            return
+                        body = self.responses[response_index]
                     headers_out = (
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
                         f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
@@ -171,6 +226,7 @@ class ModelPeer:
                     not self.hold
                     and self.response_gate is None
                     and not self.padding_records
+                    and not self.responses
                 ):
                     raise
 
@@ -184,6 +240,8 @@ async def model_peer(
     response_gate: asyncio.Event | None = None,
     reported_model: str = MODEL,
     reported_stop: str = "end_turn",
+    responses: tuple[bytes, ...] = (),
+    key: str = FIXTURE_KEY,
 ) -> AsyncGenerator[ModelPeer]:
     peer = ModelPeer(
         hold=hold,
@@ -192,6 +250,8 @@ async def model_peer(
         response_gate=response_gate,
         reported_model=reported_model,
         reported_stop=reported_stop,
+        responses=responses,
+        key=key,
     )
     server = await asyncio.start_server(peer.accept, "127.0.0.1", 0, limit=16_384)
     assert server.sockets
@@ -274,6 +334,7 @@ class PiGate:
         home: Path,
         scan_clock: Clock | None,
         clock: Clock | None,
+        reaper: AdoptedReaper | None = None,
     ) -> None:
         self.installation: PiInstallation = installation
         self.checkout: BoundCheckout = checkout
@@ -322,7 +383,9 @@ class PiGate:
             self.clock,
             self.identities,
             stdio_limit=MAX_FRAME_BYTES - 1,
+            wait_owner=reaper,
         )
+        self.shell: PiShellCall | None = None
         self.channel: BridgeChannel | None = None
         self.streams: StdioStreams
         self.pid: int
@@ -357,6 +420,8 @@ class PiGate:
             self.require_binding,
             self.recheck_installation,
             self.require_final_binding,
+            self.shell,
+            self.release_revoked if self.shell is not None else None,
         )
         return self.channel
 
@@ -559,6 +624,9 @@ class PiGate:
             )
         return self._release_task
 
+    def release_revoked(self) -> None:
+        self._begin_release(natural=False)
+
     async def release(self, *, natural: bool) -> int:
         release = self._begin_release(natural=natural)
         cancelled = await observed(release)
@@ -606,6 +674,7 @@ async def witness(
     *,
     scan_clock: Clock | None = None,
     clock: Clock | None = None,
+    reaper: AdoptedReaper | None = None,
 ) -> AsyncGenerator[PiGate]:
     root = directory.resolve()
     checkout_path = root / "checkout"
@@ -620,7 +689,7 @@ async def witness(
     )
     checkout = BoundCheckout.capture(checkout_path)
     try:
-        owner = PiGate(installation, checkout, home, scan_clock, clock)
+        owner = PiGate(installation, checkout, home, scan_clock, clock, reaper)
         try:
             yield owner
         finally:
@@ -1194,17 +1263,23 @@ async def test_pi_sdk_abrupt_exit_leaves_no_fixture_files(
 @asynccontextmanager
 async def prepared_channel(
     capture: Capture,
-    clock: StepClock,
+    clock: Clock,
     require_binding: Callable[[bool], None] | None = None,
     recheck_installation: Callable[[], Awaitable[None]] | None = None,
     require_final_binding: Callable[[asyncio.Future[None]], Awaitable[None]]
     | None = None,
+    shell: PiShellCall | None = None,
 ) -> AsyncGenerator[tuple[BridgeChannel, asyncio.StreamReader, StdioStreams, str]]:
     socket_end, held = socket.socketpair()
     with socket_end, held:
         socket_end.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
-        streams = await asyncio.open_connection(sock=socket_end)
-        peer = await asyncio.open_connection(sock=held)
+        stdio = GatedStdio(socket_end, MAX_FRAME_BYTES - 1)
+        socket_clock = SystemClock()
+        await stdio.prepare(socket_clock.monotonic_ns() + 5 * SECOND, socket_clock)
+        streams = stdio.borrow()
+        peer_stdio = GatedStdio(held, MAX_FRAME_BYTES - 1)
+        await peer_stdio.prepare(socket_clock.monotonic_ns() + 5 * SECOND, socket_clock)
+        peer = peer_stdio.borrow()
 
         def socket_live(_allow_exit: bool = False) -> None:
             if socket_end.fileno() < 0:
@@ -1224,8 +1299,9 @@ async def prepared_channel(
             require_binding or socket_live,
             recheck_installation or socket_recheck,
             require_final_binding or socket_final_binding,
+            shell,
         )
-        reader, writer = streams
+        reader, _ = streams
         peer_reader, peer_writer = peer
         try:
             async with asyncio.timeout(5):
@@ -1247,8 +1323,11 @@ async def prepared_channel(
             yield channel, reader, peer, key_challenge
         finally:
             channel.revoke()
-            peer_writer.close()
-            await asyncio.gather(writer.wait_closed(), peer_writer.wait_closed())
+            cutoff = socket_clock.monotonic_ns() + 5 * SECOND
+            await asyncio.gather(
+                stdio.settle(cutoff, socket_clock),
+                peer_stdio.settle(cutoff, socket_clock),
+            )
 
 
 async def control_challenge(reader: asyncio.StreamReader, kind: str) -> str:
@@ -1749,3 +1828,1359 @@ async def test_pi_sdk_rechecks_staged_authority_before_key(
     assert kora_capture.scope.registered_count() == 0
     assert peer.requests == []
     gate.assert_reaped()
+
+
+class ObservedBashPolicy(AllowDenyPolicy):
+    def __init__(self, release: asyncio.Event | None = None) -> None:
+        super().__init__()
+        self.requests: list[ToolCallRequest] = []
+        self.decisions: list[PolicyDecision] = []
+        self.entered: asyncio.Event = asyncio.Event()
+        self.cancelled: asyncio.Event = asyncio.Event()
+        self.release = release
+
+    async def decide(
+        self,
+        request: ToolCallRequest,
+        layers: PolicyLayers,
+        protected_paths: tuple[str, ...],
+        ctx: ProtocolContext,
+    ) -> PolicyDecision:
+        self.requests.append(request)
+        self.entered.set()
+        try:
+            if self.release is not None:
+                await self.release.wait()
+            decision = await super().decide(request, layers, protected_paths, ctx)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        self.decisions.append(decision)
+        return decision
+
+
+class BashQualification:
+    def __init__(
+        self,
+        gate: PiGate,
+        scoped: ScopedShell,
+        checked_policy: ObservedBashPolicy,
+    ) -> None:
+        self.gate = gate
+        self.scoped = scoped
+        self.policy = checked_policy
+        self.results: list[str] = []
+        self.dispatches: int = 0
+        self.on_admission_check: Callable[[], None] | None = None
+
+    async def dispatch(
+        self,
+        command: str,
+        operation: OperationId,
+        cutoff: int,
+        current: Callable[[], bool],
+    ) -> str:
+        self.dispatches += 1
+
+        def still_admitted() -> bool:
+            if self.on_admission_check is not None:
+                self.on_admission_check()
+            return current()
+
+        try:
+            result = await self.scoped.run(
+                ScopedShellAdmission(command, operation, cutoff, still_admitted)
+            )
+        except ScopedShellError:
+            raise ShellCallRefused() from None
+        encoded = json.dumps(
+            {"exit_code": result.exit_code, "stdout": result.stdout},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.results.append(encoded)
+        return encoded
+
+
+@asynccontextmanager
+async def bash_witness(
+    installation: PiInstallation,
+    directory: Path,
+    capture: Capture,
+    chosen_layers: PolicyLayers | None = None,
+    *,
+    protected: tuple[str, ...] = (),
+    policy_release: asyncio.Event | None = None,
+) -> AsyncGenerator[BashQualification]:
+    reaper = AdoptedReaper(grace_ns=0, interval=0.02)
+    with subreaper():
+        reaper.start()
+        try:
+            async with witness(installation, directory, reaper=reaper) as gate:
+                content = BASH_PATH.read_bytes()
+                pin = ExecutablePin(len(content), hashlib.sha256(content).hexdigest())
+                executable = verify_installed_executable(
+                    BASH_PATH, pin, gate.cutoff_ns, gate.clock
+                )
+                shell_home = directory / "shell-home"
+                shell_tmp = directory / "shell-temp"
+                shell_home.mkdir()
+                shell_tmp.mkdir()
+
+                def sdk_sibling() -> tuple[ProcessRegistration, ...]:
+                    registration = gate.owner.registration
+                    return () if registration is None else (registration,)
+
+                scoped = ScopedShell(
+                    gate.checkout,
+                    executable,
+                    pin,
+                    home=shell_home,
+                    temporary=shell_tmp,
+                    attempt_token=capture.scope.admit(
+                        "pi-qualification-attempt-marker"
+                    ),
+                    secrets=capture.scope,
+                    clock=gate.clock,
+                    reaper=reaper,
+                    siblings=sdk_sibling,
+                )
+                checked_policy = ObservedBashPolicy(policy_release)
+                qualification = BashQualification(gate, scoped, checked_policy)
+                gate.shell = PiShellCall(
+                    checked_policy,
+                    context_for(capture),
+                    chosen_layers or layers(),
+                    protected,
+                    workspace(gate.checkout.path),
+                    "graph.node",
+                    qualification.dispatch,
+                )
+                try:
+                    yield qualification
+                finally:
+                    settled = await scoped.settle(
+                        gate.clock.monotonic_ns() + PROCESS_CLEANUP_NS
+                    )
+                    assert settled, json.dumps(
+                        [
+                            record
+                            for record in capture.reader.records()
+                            if record.get("event")
+                            in (
+                                "runtime.local.command_stop",
+                                "runtime.local.scoped_shell",
+                            )
+                        ],
+                        sort_keys=True,
+                    )
+        finally:
+            await reaper.stop()
+
+
+def requested_bash(command: str) -> bytes:
+    return tool_stream(MODEL, "bash", {"command": command})
+
+
+def leading_block(stream: bytes, block: dict[str, object]) -> bytes:
+    first, rest = stream.split(b"\n\n", 1)
+    shifted = rest.replace(b'"index":0', b'"index":1')
+    return (
+        first
+        + b"\n\n"
+        + sse(
+            [
+                (
+                    "content_block_start",
+                    {"type": "content_block_start", "index": 0, "content_block": block},
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            ]
+        )
+        + shifted
+    )
+
+
+def pad_with_comments(response: bytes, size: int) -> bytes:
+    padding = size - len(response)
+    assert padding >= 4
+    full, tail = divmod(padding, 3000)
+    if tail < 4:
+        full -= 1
+        tail += 3000
+    return (
+        (b": " + b"x" * 2996 + b"\n\n") * full
+        + b": "
+        + b"x" * (tail - 4)
+        + b"\n\n"
+        + response
+    )
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_executes_exact_approved_call_once(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    command = (
+        "printf 'one\\n' >> executions; "
+        "printf 'shell-output-marker'; "
+        "printf 'shell-stderr-marker' >&2; exit 7"
+    )
+    response = pad_with_comments(requested_bash(command), MODEL_BYTES // 2)
+    terminal = pad_with_comments(
+        end_stream(MODEL).replace(b'"done"', b'"provider-event-marker"'),
+        MODEL_BYTES // 2,
+    )
+    assert len(response) + len(terminal) == MODEL_BYTES
+    async with (
+        model_peer(responses=(response, terminal)) as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        continue_response = asyncio.Event()
+        peer.continuation_gate = continue_response
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+        registration = gate.owner.registration
+
+        async with asyncio.TaskGroup() as tasks:
+            pending = tasks.create_task(gate.prompt(PROMPT))
+            try:
+                async with asyncio.timeout(5):
+                    await peer.continuing.wait()
+                gate.require_binding()
+                assert registration is not None
+                assert gate.owner.registration == registration
+            finally:
+                continue_response.set()
+        text = pending.result()
+        exit_code = await gate.release(natural=True)
+
+        assert (text, exit_code) == ("provider-event-marker", 0)
+        gate.assert_reaped()
+        assert not witness_.scoped.occupied
+        assert (gate.checkout.path / "executions").read_text() == "one\n"
+        assert witness_.policy.requests == [
+            ToolCallRequest(
+                harness="pi",
+                tool="Bash",
+                tool_use_id=BASH_CALL_ID,
+                agent_id=None,
+                arguments={"command": command},
+                workspace=workspace(gate.checkout.path),
+                node_path="graph.node",
+            )
+        ]
+        assert witness_.policy.decisions == [PolicyDecision(True, "allowed")]
+        initial, continuation = peer.requests
+        assert initial.authorized
+        assert continuation.authorized
+        assert initial.document["model"] == continuation.document["model"] == MODEL
+        assert initial.document["tools"] == continuation.document["tools"]
+        advertised = initial.document["tools"]
+        assert isinstance(advertised, list)
+        assert len(advertised) == 1
+        tool = advertised[0]
+        assert isinstance(tool, dict)
+        assert tool["name"] == "bash"
+        assert tool["input_schema"] == {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+            "additionalProperties": False,
+        }
+        expected = '{"exit_code":7,"stdout":"shell-output-marker"}'
+        assert witness_.results == [expected]
+        assert witness_.dispatches == 1
+        assert continuation.document["messages"] == [
+            {"role": "user", "content": [{"type": "text", "text": PROMPT}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": BASH_CALL_ID,
+                        "name": "bash",
+                        "input": {"command": command},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": BASH_CALL_ID,
+                        "content": expected,
+                        "is_error": False,
+                    }
+                ],
+            },
+        ]
+        diagnostics = repr(kora_capture.finish())
+        for forbidden in (
+            FIXTURE_KEY,
+            command,
+            "shell-output-marker",
+            "shell-stderr-marker",
+            "provider-event-marker",
+        ):
+            assert forbidden not in diagnostics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["namespace", "file-rule", "protected-path"])
+async def test_pi_bash_namespace_deny_prevents_launch(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, reason: str
+) -> None:
+    command = "touch effect" if reason == "namespace" else "touch apply_patch"
+    namespace = ("Bash(touch *)",) if reason == "namespace" else ("Edit(effect)",)
+    chosen = layers(
+        namespace=policy(deny=() if reason == "protected-path" else namespace),
+        node=policy(allow=("Bash(touch *)",)),
+    )
+    protected = ("effect",) if reason == "protected-path" else ()
+    async with (
+        model_peer(responses=(requested_bash(command),)) as peer,
+        bash_witness(
+            installation, tmp_path, kora_capture, chosen, protected=protected
+        ) as witness_,
+    ):
+        gate = witness_.gate
+        files = FixtureFiles(gate.checkout.path)
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+
+        with pytest.raises(BridgeRefused):
+            await gate.prompt(PROMPT)
+        await gate.release(natural=False)
+
+        assert len(peer.requests) == 1
+        assert len(witness_.policy.requests) == 1
+        assert witness_.policy.decisions == [
+            PolicyDecision(
+                False,
+                "namespace.deny.0" if reason == "namespace" else "argument_invalid",
+            )
+        ]
+        assert witness_.results == []
+        assert witness_.dispatches == 0
+        assert not witness_.scoped.occupied
+        files.assert_unchanged()
+        gate.assert_reaped()
+
+
+def invalid_bash_response(reason: str, command: str) -> bytes:
+    documented = requested_bash(command)
+    parts = documented.split(b"\n\n")[:-1]
+    start, block, delta, close, stopped, terminal = parts
+    match reason:
+        case "duplicate-argument":
+            parts[2] = delta.replace(
+                b'\\"command\\"', b'\\"command\\":\\"touch effect\\",\\"command\\"'
+            )
+        case "repaired-argument":
+            parts[2] = delta.replace(b'}"}', b'"}', 1)
+        case "extra-argument":
+            parts[2] = delta.replace(b'{\\"command', b'{\\"extra\\":true,\\"command')
+        case "duplicate-event-field":
+            parts[2] = delta.replace(b'"index":0', b'"index":0,"index":0')
+        case "wrong-model":
+            parts[0] = start.replace(MODEL.encode(), b"unexpected-model")
+        case "duplicate-call":
+            parts = [
+                start,
+                block,
+                delta,
+                close,
+                *(
+                    part.replace(b'"index":0', b'"index":1')
+                    for part in (block, delta, close)
+                ),
+                stopped,
+                terminal,
+            ]
+        case "dangling-call":
+            parts.remove(close)
+        case "unknown-index":
+            parts[2] = delta.replace(b'"index":0', b'"index":1')
+        case "input-seed":
+            parts[1] = block.replace(
+                b'"input":{}', b'"input":{"command":"touch effect"}'
+            )
+        case "wrong-tool":
+            parts[1] = block.replace(b'"name":"bash"', b'"name":"other"')
+        case "noncanonical-id":
+            parts[1] = block.replace(BASH_CALL_ID.encode(), b"call.with.dot")
+        case "wrong-stop":
+            parts[4] = stopped.replace(b'"tool_use"', b'"end_turn"')
+        case "incomplete-frame":
+            return documented[:-1]
+        case "invalid-utf8":
+            return documented + b":\xff\n\n"
+        case "partial-then-more":
+            return documented + block
+        case "credential-command":
+            return requested_bash(f"touch effect; printf {FIXTURE_KEY}")
+        case _:
+            raise AssertionError(reason)
+    changed = b"\n\n".join(parts) + b"\n\n"
+    assert changed != documented
+    return changed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "duplicate-argument",
+        "repaired-argument",
+        "extra-argument",
+        "duplicate-event-field",
+        "wrong-model",
+        "duplicate-call",
+        "dangling-call",
+        "unknown-index",
+        "input-seed",
+        "wrong-tool",
+        "noncanonical-id",
+        "wrong-stop",
+        "incomplete-frame",
+        "invalid-utf8",
+        "partial-then-more",
+        "credential-command",
+    ],
+)
+async def test_pi_bash_refuses_unbound_or_abandoned_call(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, reason: str
+) -> None:
+    response = invalid_bash_response(reason, "touch effect")
+    async with (
+        model_peer(responses=(response,)) as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        effect = gate.checkout.path / "effect"
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+
+        with pytest.raises(BridgeRefused):
+            await gate.prompt(PROMPT)
+        await gate.release(natural=False)
+
+        assert len(peer.requests) == 1
+        assert peer.connections == 1
+        assert witness_.policy.requests == witness_.results == []
+        assert witness_.dispatches == 0
+        assert not witness_.scoped.occupied
+        assert not effect.exists()
+        gate.assert_reaped()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revocation", ["cancellation", "lost-peer", "stale-allow"])
+async def test_pi_bash_abandons_pending_policy_before_dispatch(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, revocation: str
+) -> None:
+    policy_release = asyncio.Event()
+    response = requested_bash("touch effect")
+    async with (
+        model_peer(responses=(response,)) as peer,
+        bash_witness(
+            installation, tmp_path, kora_capture, policy_release=policy_release
+        ) as witness_,
+    ):
+        gate = witness_.gate
+        effect = gate.checkout.path / "effect"
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+        pending = asyncio.create_task(gate.prompt(PROMPT))
+        try:
+            async with asyncio.timeout(5):
+                await witness_.policy.entered.wait()
+
+            if revocation == "cancellation":
+                pending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+            else:
+                if revocation == "lost-peer":
+                    gate.owner.signal(signal.SIGKILL, gate.cutoff_ns)
+                else:
+                    gate.stop()
+                    policy_release.set()
+                with pytest.raises(BridgeRefused):
+                    await pending
+        finally:
+            policy_release.set()
+            if not pending.done():
+                pending.cancel()
+                await observed(pending)
+        await gate.release(natural=False)
+
+        assert len(peer.requests) == 1
+        assert len(witness_.policy.requests) == 1
+        if revocation == "stale-allow":
+            assert witness_.policy.decisions == [PolicyDecision(True, "allowed")]
+        else:
+            assert witness_.policy.cancelled.is_set()
+        assert witness_.results == []
+        assert witness_.dispatches == 0
+        assert not witness_.scoped.occupied
+        assert not effect.exists()
+        gate.assert_reaped()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "cumulative-overflow",
+        "missing-start",
+        "missing-delimiter",
+        "another-call",
+        "non-string-text-seed",
+        "wrong-model",
+    ],
+)
+async def test_pi_bash_requires_complete_continued_response(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, reason: str
+) -> None:
+    first = requested_bash("printf one >> effects")
+    second = end_stream(MODEL)
+    if reason == "cumulative-overflow":
+        padding = (b": " + b"x" * 2996 + b"\n\n") * 44
+        first, second = padding + first, padding + second
+        assert max(len(first), len(second)) < MODEL_BYTES < len(first) + len(second)
+    elif reason == "missing-start":
+        _, second = second.split(b"\n\n", 1)
+    elif reason == "missing-delimiter":
+        second = second[:-1]
+    elif reason == "another-call":
+        second = first
+    elif reason == "non-string-text-seed":
+        second = second.replace(b'"type":"text","text":""', b'"type":"text","text":123')
+        assert second != end_stream(MODEL)
+    else:
+        second = end_stream("unexpected-model")
+    async with (
+        model_peer(responses=(first, second)) as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+
+        with pytest.raises(BridgeRefused):
+            await gate.prompt(PROMPT)
+        await gate.release(natural=False)
+
+        assert len(peer.requests) == 2
+        assert len(witness_.policy.requests) == len(witness_.results) == 1
+        assert (gate.checkout.path / "effects").read_text() == "one"
+        assert not witness_.scoped.occupied
+        gate.assert_reaped()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["initial", "text", "thinking"])
+async def test_pi_bash_rejects_credential_in_model_request_body(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, location: str
+) -> None:
+    key = MODEL if location == "initial" else 'private-echo-"quoted"-credential'
+    first = requested_bash("printf one >> effects")
+    if location == "text":
+        first = leading_block(first, {"type": "text", "text": key})
+    elif location == "thinking":
+        first = leading_block(
+            first,
+            {"type": "thinking", "thinking": key, "signature": "fixture-signature"},
+        )
+    async with (
+        model_peer(responses=(first,), key=key) as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        await gate.key(kora_capture, key)
+
+        with pytest.raises(BridgeRefused):
+            await gate.prompt(PROMPT)
+        await gate.release(natural=False)
+
+        expected = int(location != "initial")
+        assert peer.connections == peer.header_count == len(peer.requests) == expected
+        assert len(witness_.policy.requests) == len(witness_.results) == expected
+        assert (gate.checkout.path / "effects").exists() == bool(expected)
+        assert not witness_.scoped.occupied
+        if location != "initial":
+            assert key not in repr(kora_capture.finish())
+        gate.assert_reaped()
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_refuses_oversized_outbound_body_before_transfer(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    prompt = "p" * 32_768
+    echo = "t" * (240 * 1024)
+    first = leading_block(
+        requested_bash("printf one >> effects"), {"type": "text", "text": echo}
+    )
+    assert len(first) < MODEL_BYTES < len(echo) + len(prompt)
+    async with (
+        model_peer(responses=(first,)) as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+
+        with pytest.raises(BridgeRefused):
+            await gate.prompt(prompt)
+        await gate.release(natural=False)
+
+        assert peer.connections == peer.header_count == len(peer.requests) == 1
+        assert len(witness_.policy.requests) == len(witness_.results) == 1
+        assert (gate.checkout.path / "effects").read_text() == "one"
+        assert not witness_.scoped.occupied
+        gate.assert_reaped()
+
+
+async def assert_stopped_shell(
+    installation: PiInstallation,
+    path: Path,
+    capture: Capture,
+    lose_sdk: bool,
+) -> None:
+    script = DESCENDANT.replace(
+        "record('ready', 1)", "record('effect', 1)\nrecord('ready', 1)"
+    )
+    async with (
+        model_peer(responses=(requested_bash(python_command(script)),)) as peer,
+        bash_witness(installation, path, capture) as witness_,
+    ):
+        gate = witness_.gate
+        workspace_ = gate.checkout.path
+        await gate.start(peer.origin)
+        await gate.key(capture)
+        registration = gate.owner.registration
+        pending = asyncio.create_task(gate.prompt(PROMPT))
+        try:
+            await until(
+                lambda: (
+                    pending.done()
+                    or (
+                        (workspace_ / "ready").exists()
+                        and (workspace_ / "descendant").exists()
+                    )
+                )
+            )
+            assert not pending.done()
+            assert witness_.scoped.occupied
+            assert (workspace_ / "effect").read_text() == "1"
+            descendant = current_identity(workspace_ / "descendant")
+            leader = current_identity(workspace_ / "leader")
+            native = gate.identities.read(descendant.pid).process
+            assert native is not None
+            assert native.process_group_id != leader.pid
+
+            if lose_sdk:
+                gate.owner.signal(signal.SIGKILL, gate.cutoff_ns)
+                assert not gate.stopped
+            else:
+                gate.stop()
+            with pytest.raises(BridgeRefused) as refused:
+                await pending
+            assert not witness_.scoped.occupied
+            exit_status = await gate.release(natural=False)
+        finally:
+            if not pending.done():
+                pending.cancel()
+                await observed(pending)
+
+        assert refused.value.code == "closed"
+        if lose_sdk:
+            assert exit_status == -signal.SIGKILL
+        else:
+            assert exit_status in (1, -signal.SIGTERM, -signal.SIGKILL)
+        assert gate.owner.registration == registration
+        assert_gone(leader)
+        assert_gone(descendant)
+        assert not witness_.scoped.occupied
+        assert len(witness_.policy.requests) == 1
+        assert witness_.results == []
+        assert len(peer.requests) == 1
+        assert (workspace_ / "effect").read_text() == "1"
+        assert not (workspace_ / "executions").exists()
+        gate.assert_reaped()
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_stop_reaps_descendant_and_closes_io(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    await assert_stopped_shell(installation, tmp_path, kora_capture, lose_sdk=False)
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_lost_result_retains_original_owner(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    await assert_stopped_shell(installation, tmp_path, kora_capture, lose_sdk=True)
+
+
+BASH_IO_PROBE: Final[str] = """
+import os
+import stat
+import sys
+from pathlib import Path
+assert os.read(0, 1) == b''
+assert stat.S_ISCHR(os.fstat(0).st_mode)
+assert stat.S_ISFIFO(os.fstat(1).st_mode)
+assert stat.S_ISFIFO(os.fstat(2).st_mode)
+assert os.fstat(1).st_ino != os.fstat(2).st_ino
+try:
+    os.fstat(int(sys.argv[1]))
+except OSError:
+    pass
+else:
+    raise RuntimeError('unexpected inherited descriptor')
+assert not any('ANTHROPIC' in key or 'PI_' in key for key in os.environ)
+fixture_key = 'pi-sdk-scripted-' + 'credential-9f71'
+assert not any(fixture_key in value for value in os.environ.values())
+assert Path(os.environ['HOME']).name == 'shell-home'
+assert Path(os.environ['TMPDIR']).name == 'shell-temp'
+assert os.environ['PWD'] == os.getcwd()
+assert os.environ['PATH'] == '/usr/bin:/bin'
+assert len(os.environ['KORA_SCOPED_SHELL']) == 32
+print('fixture-stderr-marker', file=sys.stderr)
+os.write(1, Path('output').read_bytes())
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["settled", "raw-overflow", "encoded-overflow"])
+async def test_pi_bash_preserves_scoped_shell_io_bounds(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, outcome: str
+) -> None:
+    async with (
+        model_peer() as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+        assert gate.channel is not None
+        info = cast(socket.socket, gate.streams[1].get_extra_info("socket"))
+        descriptor = fcntl.fcntl(info.fileno(), fcntl.F_DUPFD, 129)
+        private_text = "independent-output-mask"
+        kora_capture.scope.admit(private_text)
+        output = {
+            "settled": private_text.encode() + b"\xff",
+            "raw-overflow": b"x" * (OUTPUT_BYTES + 1),
+            "encoded-overflow": b'"' * (OUTPUT_BYTES // 2),
+        }[outcome]
+        (gate.checkout.path / "output").write_bytes(output)
+        peer.responses = (
+            requested_bash(python_command(BASH_IO_PROBE, str(descriptor))),
+            end_stream(MODEL),
+        )
+        try:
+            if outcome == "settled":
+                assert await gate.prompt(PROMPT) == "done"
+            else:
+                with pytest.raises(BridgeRefused):
+                    await gate.prompt(PROMPT)
+        finally:
+            os.close(descriptor)
+        await gate.release(natural=outcome == "settled")
+
+        if outcome == "settled":
+            assert witness_.results == ['{"exit_code":0,"stdout":"[redacted]�"}']
+            assert len(peer.requests) == 2
+        else:
+            assert witness_.results == []
+            assert len(peer.requests) == 1
+        assert len(witness_.policy.requests) == 1
+        assert not witness_.scoped.occupied
+        assert private_text not in repr(kora_capture.finish())
+        gate.assert_reaped()
+
+
+def bash_call_frame(challenge: str, /, **overrides: str) -> bytes:
+    return (
+        json.dumps(
+            {
+                "kind": "bash_call",
+                "nonce": NONCE,
+                "challenge": challenge,
+                "id": BASH_CALL_ID,
+                "call": "c" * 32,
+                "command": "printf one >> effects",
+            }
+            | overrides,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "wrong_field", ["nonce", "challenge", "call", "id", "terminal"]
+)
+async def test_pi_bash_refuses_wrong_control_binding(
+    installation: PiInstallation,
+    tmp_path: Path,
+    kora_capture: Capture,
+    wrong_field: str,
+) -> None:
+    async with (
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        async with prepared_channel(kora_capture, StepClock(), shell=gate.shell) as (
+            channel,
+            reader,
+            streams,
+            _,
+        ):
+            pending = asyncio.create_task(channel.prompt(PROMPT))
+            async with asyncio.timeout(5):
+                challenge = await control_challenge(streams[0], "prompt")
+
+            if wrong_field == "terminal":
+                frame = bridge_reply("terminal", challenge)
+            else:
+                value = {
+                    "nonce": "a" * 32,
+                    "challenge": "b" * 32,
+                    "call": challenge,
+                    "id": "a.b",
+                }[wrong_field]
+                frame = bash_call_frame(challenge, **{wrong_field: value})
+            reader.feed_data(frame)
+            with pytest.raises(BridgeRefused) as refused:
+                await pending
+
+        assert refused.value.code == "protocol"
+        assert witness_.policy.requests == witness_.results == []
+        assert witness_.dispatches == 0
+        assert not (gate.checkout.path / "effects").exists()
+
+
+class WriteObservationClock(SystemClock):
+    def __init__(self) -> None:
+        self.waiting = asyncio.Event()
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        self.waiting.set()
+        await super().sleep_until(deadline_ns)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revocation", ["duplicate", "stop"])
+async def test_pi_bash_revokes_blocked_result_without_replay(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, revocation: str
+) -> None:
+    clock = WriteObservationClock()
+    async with (
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        async with prepared_channel(kora_capture, clock, shell=gate.shell) as (
+            channel,
+            reader,
+            streams,
+            _,
+        ):
+            peer_reader, peer_writer = streams
+            transport = peer_writer.transport
+            assert isinstance(transport, asyncio.Transport)
+            pending = asyncio.create_task(channel.prompt(PROMPT))
+            async with asyncio.timeout(5):
+                challenge = await control_challenge(peer_reader, "prompt")
+                transport.pause_reading()
+                command = python_command(
+                    "from pathlib import Path; Path('effects').write_text('one'); "
+                    "print('x' * 6000)"
+                )
+                frame = bash_call_frame(challenge, command=command)
+                reader.feed_data(frame)
+                await clock.waiting.wait()
+
+                if revocation == "duplicate":
+                    reader.feed_data(frame)
+                else:
+                    channel.revoke()
+                with pytest.raises(BridgeRefused) as refused:
+                    await pending
+                transport.resume_reading()
+                partial = await peer_reader.read()
+
+        assert refused.value.code == (
+            "protocol" if revocation == "duplicate" else "closed"
+        )
+        assert partial.startswith(b'{"kind":"bash_result"')
+        assert b"\n" not in partial
+        assert len(witness_.policy.requests) == len(witness_.results) == 1
+        assert (gate.checkout.path / "effects").read_text() == "one"
+        assert not witness_.scoped.occupied
+        assert peer.requests == []
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_stop_after_shell_preparation_refuses_activation(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    first = requested_bash("printf marker > effect")
+    async with (
+        model_peer(responses=(first,)) as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+        baseline = gate_descriptors()
+        effect = gate.checkout.path / "effect"
+        checks = 0
+
+        def before_activation() -> None:
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                assert witness_.scoped.occupied
+                assert len(gate_descriptors()) > len(baseline)
+                gate.stop()
+
+        witness_.on_admission_check = before_activation
+
+        with pytest.raises(BridgeRefused):
+            await gate.prompt(PROMPT)
+        await gate.release(natural=False)
+
+        assert checks == 2
+        assert not effect.exists()
+        assert not witness_.scoped.occupied
+        assert len(witness_.policy.requests) == 1
+        assert witness_.results == []
+        assert len(peer.requests) == 1
+        gate.assert_reaped()
+
+
+def control_wire(kind: str, nonce: str, **fields: str) -> bytes:
+    return (
+        json.dumps(
+            {"kind": kind, "nonce": nonce, **fields}, separators=(",", ":")
+        ).encode()
+        + b"\n"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_field", ["id", "call", "challenge", "activation"])
+async def test_pi_bash_sdk_refuses_unbound_result(
+    installation: PiInstallation,
+    tmp_path: Path,
+    kora_capture: Capture,
+    wrong_field: str,
+) -> None:
+    response = requested_bash("touch effect")
+    async with (
+        model_peer(responses=(response,)) as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+        reader, writer = gate.streams
+        challenge = new_operation_id()
+        writer.write(
+            control_wire("prompt", gate.nonce, text=PROMPT)
+            + control_wire("activate", gate.nonce, challenge=challenge)
+        )
+        async with asyncio.timeout(5):
+            request = decode_strict_json(
+                await reader.readuntil(b"\n"), MAX_FRAME_BYTES, 1
+            )
+        assert isinstance(request, dict)
+        assert request["kind"] == "bash_call"
+        assert request["id"] == BASH_CALL_ID
+        assert request["challenge"] == challenge
+        operation = request["call"]
+        assert isinstance(operation, str)
+        result_fields = {
+            "id": BASH_CALL_ID,
+            "call": operation,
+            "challenge": challenge,
+            "result": '{"exit_code":0,"stdout":"fixture"}',
+        }
+        activation = new_operation_id()
+        if wrong_field == "activation":
+            activation = challenge
+        else:
+            result_fields[wrong_field] = new_operation_id()
+
+        writer.write(
+            control_wire("bash_result", gate.nonce, **result_fields)
+            + control_wire("activate", gate.nonce, challenge=activation)
+        )
+        async with asyncio.timeout(5):
+            refused = decode_strict_json(
+                await reader.readuntil(b"\n"), MAX_FRAME_BYTES, 1
+            )
+        exit_status = await gate.release(natural=True)
+
+        assert refused == {
+            "kind": "failure",
+            "code": "protocol",
+            "nonce": gate.nonce,
+            "challenge": challenge,
+        }
+        assert exit_status == 1
+        assert len(peer.requests) == 1
+        assert witness_.policy.requests == witness_.results == []
+        assert witness_.dispatches == 0
+        assert not (gate.checkout.path / "effect").exists()
+        gate.assert_reaped()
+
+
+class ReceiptBoundaryClock(SystemClock):
+    def __init__(self) -> None:
+        self._after_sample: Callable[[], None] | None = None
+
+    def after_next_sample(self, action: Callable[[], None]) -> None:
+        self._after_sample = action
+
+    def monotonic_ns(self) -> int:
+        observed = super().monotonic_ns()
+        action, self._after_sample = self._after_sample, None
+        if action is not None:
+            asyncio.get_running_loop().call_soon(action)
+        return observed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "condition",
+    ["stale-challenge", "revoked-at-consumption", "revoked-before-classification"],
+)
+async def test_pi_bash_requires_current_terminal_authority(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, condition: str
+) -> None:
+    async with (
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        terminal_checked = asyncio.Event()
+        resume_terminal = asyncio.Event()
+        clock = ReceiptBoundaryClock()
+
+        async def final_binding(revoked: asyncio.Future[None]) -> None:
+            await gate.require_final_binding(revoked)
+            terminal_checked.set()
+            await resume_terminal.wait()
+
+        async with prepared_channel(
+            kora_capture,
+            clock,
+            require_binding=gate.require_binding,
+            require_final_binding=final_binding,
+            shell=gate.shell,
+        ) as (channel, reader, streams, _):
+            async with asyncio.timeout(5):
+                pending = asyncio.create_task(channel.prompt(PROMPT))
+                challenge = await control_challenge(streams[0], "prompt")
+                reader.feed_data(bash_call_frame(challenge))
+                result = decode_strict_json(
+                    await streams[0].readline(), MAX_FRAME_BYTES, 1
+                )
+                activation = decode_strict_json(
+                    await streams[0].readline(), MAX_FRAME_BYTES, 1
+                )
+                assert result == {
+                    "kind": "bash_result",
+                    "nonce": NONCE,
+                    "challenge": challenge,
+                    "call": "c" * 32,
+                    "id": BASH_CALL_ID,
+                    "result": '{"exit_code":0,"stdout":""}',
+                }
+                assert isinstance(activation, dict)
+                terminal_challenge = activation["challenge"]
+                assert isinstance(terminal_challenge, str)
+                assert terminal_challenge not in (challenge, NONCE, "c" * 32)
+
+                observed_challenge = (
+                    challenge if condition == "stale-challenge" else terminal_challenge
+                )
+                if condition == "revoked-before-classification":
+                    clock.after_next_sample(channel.revoke)
+                    reader.feed_data(
+                        control_wire("terminal", NONCE, challenge=observed_challenge)
+                    )
+                else:
+                    reader.feed_data(bridge_reply("terminal", observed_challenge))
+                if condition == "revoked-at-consumption":
+                    await terminal_checked.wait()
+                    channel.revoke()
+                resume_terminal.set()
+                with pytest.raises(BridgeRefused) as refused:
+                    await pending
+
+        assert refused.value.code == (
+            "protocol" if condition == "stale-challenge" else "closed"
+        )
+        assert terminal_checked.is_set() == (condition == "revoked-at-consumption")
+        assert witness_.dispatches == 1
+        assert (gate.checkout.path / "effects").read_text() == "one"
+        assert not witness_.scoped.occupied
+        assert peer.requests == []
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_native_cutoff_refuses_late_continuation(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    command = "printf one >> effects"
+    response = requested_bash(command)
+    async with (
+        model_peer(responses=(response, end_stream(MODEL))) as peer,
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        await gate.key(kora_capture)
+        reader, writer = gate.streams
+        challenge = new_operation_id()
+        writer.write(
+            control_wire("prompt", gate.nonce, text=PROMPT)
+            + control_wire("activate", gate.nonce, challenge=challenge)
+        )
+        async with asyncio.timeout(5):
+            request = decode_strict_json(
+                await reader.readuntil(b"\n"), MAX_FRAME_BYTES, 1
+            )
+        assert isinstance(request, dict)
+        assert request["kind"] == "bash_call"
+        assert request["nonce"] == gate.nonce
+        assert request["id"] == BASH_CALL_ID
+        assert request["command"] == command
+        assert request["challenge"] == challenge
+        operation = request["call"]
+        assert isinstance(operation, str)
+        assert gate.shell is not None
+        result = await gate.shell.run(
+            BashRequest(BASH_CALL_ID, operation, command),
+            gate.cutoff_ns,
+            lambda: not gate.stopped,
+        )
+        assert not witness_.scoped.occupied
+        terminal_challenge = new_operation_id()
+        writer.write(
+            control_wire(
+                "bash_result",
+                gate.nonce,
+                id=BASH_CALL_ID,
+                call=operation,
+                challenge=challenge,
+                result=result,
+            )
+        )
+        await writer.drain()
+        await gate.clock.sleep_until(gate.cutoff_ns)
+
+        writer.write(control_wire("activate", gate.nonce, challenge=terminal_challenge))
+        async with asyncio.timeout(5):
+            refused = decode_strict_json(
+                await reader.readuntil(b"\n"), MAX_FRAME_BYTES, 1
+            )
+        exit_status = await gate.release(natural=True)
+
+        assert refused == {
+            "kind": "failure",
+            "code": "prompt",
+            "nonce": gate.nonce,
+            "challenge": terminal_challenge,
+        }
+        assert exit_status == 1
+        assert peer.connections == peer.header_count == len(peer.requests) == 1
+        assert witness_.dispatches == 1
+        assert (gate.checkout.path / "effects").read_text() == "one"
+        assert not witness_.scoped.occupied
+        gate.assert_reaped()
+
+
+def write_peer(writer: asyncio.StreamWriter, content: bytes) -> None:
+    endpoint = cast(socket.socket, writer.get_extra_info("socket"))
+    assert os.write(endpoint.fileno(), content) == len(content)
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_refuses_input_delivered_with_the_call(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with (
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+
+        async with prepared_channel(kora_capture, SystemClock(), shell=gate.shell) as (
+            channel,
+            _,
+            socket_peer,
+            _,
+        ):
+            async with asyncio.timeout(5):
+                pending = asyncio.create_task(channel.prompt(PROMPT))
+                challenge = await control_challenge(socket_peer[0], "prompt")
+                write_peer(socket_peer[1], bash_call_frame(challenge) + b"{")
+                with pytest.raises(BridgeRefused) as refused:
+                    await pending
+
+        assert refused.value.code == "protocol"
+        assert witness_.policy.requests == []
+        assert witness_.dispatches == 0
+        assert not (gate.checkout.path / "effects").exists()
+        assert not witness_.scoped.occupied
+        assert peer.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival", ["partial-frame", "eof"])
+async def test_pi_bash_fences_allow_against_delivered_pending_input(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture, arrival: str
+) -> None:
+    policy_release = asyncio.Event()
+    async with (
+        bash_witness(
+            installation, tmp_path, kora_capture, policy_release=policy_release
+        ) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+
+        async with prepared_channel(kora_capture, SystemClock(), shell=gate.shell) as (
+            channel,
+            _,
+            socket_peer,
+            _,
+        ):
+            async with asyncio.timeout(5):
+                pending = asyncio.create_task(channel.prompt(PROMPT))
+                challenge = await control_challenge(socket_peer[0], "prompt")
+                write_peer(socket_peer[1], bash_call_frame(challenge))
+                await witness_.policy.entered.wait()
+
+                asyncio.get_running_loop().call_soon(policy_release.set)
+                if arrival == "partial-frame":
+                    write_peer(socket_peer[1], b"{")
+                else:
+                    socket_peer[1].write_eof()
+                with pytest.raises(BridgeRefused) as refused:
+                    await pending
+
+        assert refused.value.code == (
+            "protocol" if arrival == "partial-frame" else "closed"
+        )
+        assert witness_.policy.decisions == [PolicyDecision(True, "allowed")]
+        assert witness_.dispatches == 0
+        assert not (gate.checkout.path / "effects").exists()
+        assert not witness_.scoped.occupied
+        assert peer.requests == []
+
+
+@pytest.mark.asyncio
+async def test_pi_bash_fences_resumed_result_against_delivered_pending_input(
+    installation: PiInstallation, tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = WriteObservationClock()
+    recheck_entered = asyncio.Event()
+    recheck_release = asyncio.Event()
+
+    async def hold_recheck() -> None:
+        recheck_entered.set()
+        await recheck_release.wait()
+
+    async with (
+        bash_witness(installation, tmp_path, kora_capture) as witness_,
+        model_peer() as peer,
+    ):
+        gate = witness_.gate
+        await gate.start(peer.origin)
+        command = python_command(
+            "from pathlib import Path; Path('effects').write_text('one'); "
+            "print('x' * 6000)"
+        )
+
+        async with prepared_channel(
+            kora_capture,
+            clock,
+            recheck_installation=hold_recheck,
+            shell=gate.shell,
+        ) as (channel, _, socket_peer, _):
+            peer_reader, peer_writer = socket_peer
+            assert isinstance(peer_reader, StdioReader)
+            transport = peer_writer.transport
+            assert isinstance(transport, asyncio.Transport)
+            async with asyncio.timeout(5):
+                pending = asyncio.create_task(channel.prompt(PROMPT))
+                challenge = await control_challenge(peer_reader, "prompt")
+                transport.pause_reading()
+                write_peer(peer_writer, bash_call_frame(challenge, command=command))
+                await clock.waiting.wait()
+                transport.resume_reading()
+                prefix = await peer_reader.readexactly(1024)
+                await recheck_entered.wait()
+                physically_written = peer_reader.received
+
+                asyncio.get_running_loop().call_soon(recheck_release.set)
+                write_peer(peer_writer, b"{")
+                with pytest.raises(BridgeRefused) as refused:
+                    await pending
+                remainder = await peer_reader.read()
+
+        assert refused.value.code == "protocol"
+        assert prefix.startswith(b'{"kind":"bash_result"')
+        assert b"\n" not in prefix + remainder
+        assert peer_reader.received == physically_written
+        assert witness_.dispatches == 1
+        assert len(witness_.results) == 1
+        assert (gate.checkout.path / "effects").read_text() == "one"
+        assert not witness_.scoped.occupied
+        assert peer.requests == []
+
+
+@pytest.mark.asyncio
+async def test_pi_gated_stdio_observes_eof_with_unconsumed_input() -> None:
+    endpoint, peer = socket.socketpair()
+    clock = SystemClock()
+    content = b"buffered-input"
+    with endpoint, peer:
+        peer.setblocking(False)
+        owner = GatedStdio(endpoint, MAX_FRAME_BYTES - 1)
+        await owner.prepare(clock.monotonic_ns() + SECOND, clock)
+        reader, _ = owner.borrow()
+        assert isinstance(reader, StdioReader)
+        try:
+            await asyncio.get_running_loop().sock_sendall(peer, content)
+            peer.shutdown(socket.SHUT_WR)
+            await until(lambda: reader.input_closed)
+
+            assert reader.received == len(content)
+            assert not reader.at_eof()
+            assert await reader.readexactly(len(content)) == content
+            assert reader.at_eof()
+        finally:
+            await owner.settle(clock.monotonic_ns() + SECOND, clock)
+    assert owner.closed

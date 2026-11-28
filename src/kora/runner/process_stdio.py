@@ -1,10 +1,45 @@
 import asyncio
 import socket
+from collections.abc import Iterable, Sized
+from typing import Final, SupportsIndex
 
 from kora.protocols.time import Clock
 from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 
 StdioStreams = tuple[asyncio.StreamReader, asyncio.StreamWriter]
+
+_MAX_RECEIVE_POSITION: Final[int] = (1 << 63) - 1
+
+
+class StdioReader(asyncio.StreamReader):
+    def __init__(self, limit: int) -> None:
+        super().__init__(limit=limit)
+        self._received: int = 0
+        self._input_closed: bool = False
+
+    @property
+    def received(self) -> int:
+        return self._received
+
+    @property
+    def input_closed(self) -> bool:
+        return self._input_closed
+
+    def feed_data(self, data: Iterable[SupportsIndex]) -> None:
+        self._received = (
+            min(self._received + len(data), _MAX_RECEIVE_POSITION)
+            if isinstance(data, Sized)
+            else _MAX_RECEIVE_POSITION
+        )
+        super().feed_data(data)
+
+    def feed_eof(self) -> None:
+        self._input_closed = True
+        super().feed_eof()
+
+    def set_exception(self, exc: Exception) -> None:
+        self._input_closed = True
+        super().set_exception(exc)
 
 
 class GatedStdio:
@@ -29,15 +64,19 @@ class GatedStdio:
         if self._closing:
             self._endpoint.close()
             return
+        reader = StdioReader(self._limit)
+        protocol = asyncio.StreamReaderProtocol(reader)
+        loop = asyncio.get_running_loop()
         try:
-            self._streams = await asyncio.open_connection(
-                sock=self._endpoint, limit=self._limit
+            transport, _ = await loop.create_connection(
+                lambda: protocol, sock=self._endpoint
             )
         except OSError:
             self._endpoint.close()
             return
+        self._streams = reader, asyncio.StreamWriter(transport, protocol, reader, loop)
         if self._closing:
-            self._streams[1].transport.abort()
+            transport.abort()
 
     async def prepare(self, deadline_ns: int, clock: Clock) -> None:
         if self._closing:

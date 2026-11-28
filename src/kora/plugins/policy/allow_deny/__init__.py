@@ -387,6 +387,7 @@ class AllowDenyPolicy:
         ready = (
             self.configuration(layers, protected_paths)
             if request.harness in FILE_EDIT_TOOLS
+            and (request.harness != "pi" or request.tool == SHELL_TOOL)
             else "policy_harness_unsupported"
         )
         if isinstance(ready, str):
