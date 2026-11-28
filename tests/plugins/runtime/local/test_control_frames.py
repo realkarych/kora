@@ -557,6 +557,44 @@ async def test_frame_reservation_never_exceeds_the_frame_cap() -> None:
         assert refused.value.reason is ChannelFailure.CAPACITY
 
 
+@pytest.mark.parametrize(
+    ("declared", "selected"),
+    [
+        (MAX_TYPED_FRAME_BYTES + 1, MAX_TYPED_FRAME_BYTES + 1),
+        (0, MAX_TYPED_FRAME_BYTES + 1),
+        (0, -1),
+    ],
+    ids=["wire-length", "selected-above-ceiling", "selected-below-zero"],
+)
+async def test_typed_frame_rechecks_bounds_at_header_lookup(
+    declared: int, selected: int
+) -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    reservations: dict[int, int] = {FrameType.JSON: MAX_TYPED_FRAME_BYTES}
+    first_byte = asyncio.Event()
+    wire = struct.pack("!IB", declared, FrameType.JSON)
+
+    def received() -> None:
+        reservations[FrameType.JSON] = selected
+        first_byte.set()
+
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        await send_raw(pair.raw, wire[:1])
+        reader = asyncio.create_task(
+            pair.receiver.read_typed_frame(cutoff, reservations, received=received)
+        )
+        await first_byte.wait()
+        assert not reader.done()
+        await send_raw(pair.raw, wire[1:])
+        with pytest.raises(ChannelError) as refused:
+            await reader
+        eof = await asyncio.get_running_loop().sock_recv(pair.raw, 1)
+
+    assert refused.value.reason is ChannelFailure.CAPACITY
+    assert eof == b""
+
+
 async def test_truncated_frame_closes_the_connection() -> None:
     async with channel_pair(SystemClock()) as pair:
         await send_raw(pair.raw, struct.pack("!IB", 100, FrameType.JSON) + b"x" * 50)

@@ -1,6 +1,8 @@
 import asyncio
+import errno
 import os
 import signal
+import stat
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -129,6 +131,21 @@ async def collect(owner: GatedProcess, cutoff: int, pid: int, status: int) -> No
     assert not owner.gate_close_failed
     with pytest.raises(ChildProcessError):
         os.waitpid(pid, os.WNOHANG)
+
+
+def open_socket_descriptors() -> set[int]:
+    descriptors: set[int] = set()
+    for entry in os.listdir("/dev/fd"):
+        descriptor = int(entry)
+        try:
+            mode = os.fstat(descriptor).st_mode
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            if stat.S_ISSOCK(mode):
+                descriptors.add(descriptor)
+    return descriptors
 
 
 @pytest.mark.asyncio
@@ -291,12 +308,15 @@ async def test_gated_raw_channel_is_released_after_failed_activation(
     tmp_path: Path, phase: Literal["prepare", "acknowledge"]
 ) -> None:
     baseline = open_descriptors()
+    existing_sockets = open_socket_descriptors()
     clock = StepClock()
     cutoff = clock.monotonic_ns() + WINDOW_NS
     reaper = AdoptedReaper()
     async with framed_gate(tmp_path, ECHO, clock, cutoff, reaper) as owner:
         original = owner.registration
         assert original is not None
+        owned_sockets = open_socket_descriptors() - existing_sockets
+        assert len(owned_sockets) == 2
         if phase == "prepare":
             clock.advance(WINDOW_NS)
             with pytest.raises(ChannelError) as expired:
@@ -306,6 +326,12 @@ async def test_gated_raw_channel_is_released_after_failed_activation(
             with pytest.raises(ProcessError) as unprepared:
                 await owner.acknowledge()
             assert unprepared.value.condition is ProcessCondition.UNKNOWN
+
+        assert owner.returncode is None
+        for descriptor in owned_sockets:
+            with pytest.raises(OSError, match=os.strerror(errno.EBADF)) as closed:
+                os.fstat(descriptor)
+            assert closed.value.errno == errno.EBADF
 
         with pytest.raises(ChannelError) as refused:
             owner.borrow_channel(original)

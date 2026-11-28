@@ -251,11 +251,13 @@ class BoundedChannel:
     ) -> tuple[int, int]:
         header = await self._read_exact(TYPED_HEADER.size, deadline_ns, received)
         length = int.from_bytes(header[:4], "big")
+        if length > MAX_TYPED_FRAME_BYTES:
+            raise ChannelError(ChannelFailure.CAPACITY)
         kind = header[4]
         reservation = reservations.get(kind)
         if reservation is None:
             raise ChannelError(ChannelFailure.MALFORMED)
-        if length > reservation:
+        if not length <= reservation <= MAX_TYPED_FRAME_BYTES:
             raise ChannelError(ChannelFailure.CAPACITY)
         return kind, length
 
