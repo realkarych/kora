@@ -4,6 +4,7 @@ from contextlib import AsyncExitStack, closing, contextmanager
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 from traceback import format_exception, walk_tb
 
 import pytest
@@ -11,7 +12,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.util import await_
 
-from kora.db.connection import SQLITE_READERS, Database, Dialect
+from kora.db.connection import SQLITE_READERS, Database, DatabaseSettings, Dialect
 from kora.db.graph_preparation_reads import GraphPreparationBinding
 from kora.db.graph_stage_promotion_intent_reads import GraphStagePromotionIntentScalars
 from kora.db.graph_stage_promotion_snapshot import (
@@ -34,6 +35,7 @@ from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
     REFUSAL_DEADLINE_SECONDS,
     ConnectionLedger,
+    WriterCutoffLoop,
     narrow_database,
     sqlite_contender,
     until,
@@ -473,16 +475,14 @@ async def test_promotion_snapshot_deadline_ends_wait_before_a_native_slot_is_fre
     assert ledger.outstanding == narrow.units_in_flight() == 0
 
 
-@pytest.mark.asyncio
-async def test_promotion_snapshot_expiry_releases_a_borrowed_unit(
-    database: Database,
+async def check_promotion_snapshot_cutoff_while_borrowed(
+    database: Database, loop: WriterCutoffLoop
 ) -> None:
     binding, _ = await seed_documents(database)
     ledger = ConnectionLedger(database)
     projected = asyncio.Event()
     hold = asyncio.Event()
     engine = database.reader_engine.sync_engine
-    deadline = asyncio.get_running_loop().time() + REFUSAL_DEADLINE_SECONDS
 
     def after_projection(
         connection: object, cursor: object, statement: str, *arguments: object
@@ -493,17 +493,35 @@ async def test_promotion_snapshot_expiry_releases_a_borrowed_unit(
 
     event.listen(engine, "after_cursor_execute", after_projection)
     try:
-        with pytest.raises(GraphStagePromotionSnapshotRejected) as refused:
-            await asyncio.wait_for(
-                read_graph_stage_promotion_snapshot(
-                    database,
-                    binding,
-                    max_stages=3,
-                    max_document_bytes=DOCUMENT_BYTES,
-                    deadline=deadline,
-                ),
-                CONDITION_DEADLINE_SECONDS,
+        watchdog = monotonic() + CONDITION_DEADLINE_SECONDS
+        deadline = loop.time() + CONDITION_DEADLINE_SECONDS + REFUSAL_DEADLINE_SECONDS
+        task = asyncio.create_task(
+            read_graph_stage_promotion_snapshot(
+                database,
+                binding,
+                max_stages=3,
+                max_document_bytes=DOCUMENT_BYTES,
+                deadline=deadline,
             )
+        )
+        try:
+            await asyncio.wait_for(projected.wait(), watchdog - monotonic())
+            assert not task.done()
+            assert (
+                ledger.checkouts
+                == ledger.outstanding
+                == database.units_in_flight()
+                == 1
+            )
+            assert loop.time() < deadline
+            loop.advance_to(deadline)
+            with pytest.raises(GraphStagePromotionSnapshotRejected) as refused:
+                await asyncio.wait_for(asyncio.shield(task), watchdog - monotonic())
+        finally:
+            hold.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     finally:
         event.remove(engine, "after_cursor_execute", after_projection)
     checked_in = ledger.outstanding
@@ -518,6 +536,22 @@ async def test_promotion_snapshot_expiry_releases_a_borrowed_unit(
     )
     assert ledger.checkouts == 2
     assert len(after.documents) == 3
+
+
+def test_promotion_snapshot_expiry_releases_a_borrowed_unit(
+    database_settings: DatabaseSettings,
+) -> None:
+    loop = WriterCutoffLoop()
+
+    async def exercise() -> None:
+        database = Database(database_settings)
+        try:
+            await check_promotion_snapshot_cutoff_while_borrowed(database, loop)
+        finally:
+            await database.close()
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        runner.run(exercise())
 
 
 @pytest.mark.asyncio
