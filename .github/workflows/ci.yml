@@ -113,6 +113,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Stage the exact run-event migration predecessor
+        if: ${{ matrix.lane != 'static-checks' }}
+        run: bash scripts/ci/setup_run_event_predecessor.sh
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
         with:
           path: ${{ runner.temp }}/kora-acquisitions
@@ -186,6 +189,11 @@ jobs:
           SECONDS=0
           sudo --preserve-env=RUNNER_TEMP scripts/ci/prepare-local-runtime-fixtures.sh prepare
           printf 'Host fixture preparation took %s s\n' "$SECONDS"
+      - name: Verify installed SQLite and native PostgreSQL maintenance
+        if: ${{ matrix.lane == 'storage' && matrix.python == '3.11.17' }}
+        run: >-
+          uv run --no-sync pytest -q tests/db/run_event_maintenance_installed_fixture.py
+          tests/db/run_event_postgres_qualification_fixture.py
       - name: Collect and execute the exact test lane
         id: tests
         if: ${{ matrix.lane != 'static-checks' }}
@@ -275,6 +283,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Stage the exact run-event migration predecessor
+        if: ${{ matrix.lane != 'static-checks' }}
+        run: bash scripts/ci/setup_run_event_predecessor.sh
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
         with:
           path: ${{ runner.temp }}/kora-acquisitions
@@ -335,6 +346,9 @@ jobs:
           SECONDS=0
           sudo --preserve-env=RUNNER_TEMP scripts/ci/prepare-local-runtime-fixtures.sh prepare
           printf 'Host fixture preparation took %s s\n' "$SECONDS"
+      - name: Verify installed managed SQLite transition
+        if: ${{ matrix.lane == 'storage' && matrix.python == '3.11.17' }}
+        run: uv run --no-sync pytest -q tests/db/run_event_maintenance_installed_fixture.py
       - name: Collect and execute the exact test lane
         id: tests
         if: ${{ matrix.lane != 'static-checks' }}
@@ -420,6 +434,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Stage the exact run-event migration predecessor
+        if: ${{ matrix.lane != 'static-checks' }}
+        run: bash scripts/ci/setup_run_event_predecessor.sh
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
         with:
           path: ${{ runner.temp }}/kora-acquisitions
@@ -539,7 +556,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
         if: ${{ github.event_name == 'pull_request' }}
         with:

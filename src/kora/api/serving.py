@@ -14,6 +14,7 @@ from ssl import PROTOCOL_TLS_SERVER, SSLContext
 from types import FrameType
 from typing import Protocol
 
+from sqlalchemy import Connection
 from sqlalchemy.exc import DBAPIError
 from starlette.types import ASGIApp
 from uvicorn import Config, Server
@@ -23,15 +24,20 @@ from uvicorn.protocols.http.h11_impl import H11Protocol
 from kora.api.exchange import COMPONENT
 from kora.api.graph_deployment_worker import DeploymentPreparer
 from kora.cel_eval.binding import BindingUnavailable
+from kora.db import run_event_maintenance_admission as maintenance
 from kora.db.connection import (
     DEFAULT_CLOSE_DEADLINE_SECONDS,
     Database,
     DatabaseConfigurationError,
     DatabaseSettings,
 )
-from kora.db.migrations import database_is_at_head
-from kora.db.run_event_page_v1 import sqlite_run_event_page_available
+from kora.db.migrations import is_current_revision
+from kora.db.run_event_page_v1 import SQLITE_EVENT_SCHEMA
+from kora.db.run_event_position_reads import read_position_transition_sync
+from kora.db.run_event_position_schema import position_schema_available
+from kora.db.run_event_position_v1 import RunEventPositionRejected
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.scheduler_lifecycle import SchedulerFailure
 
 LOOPBACK: str = "127.0.0.1"
@@ -692,10 +698,40 @@ async def settle_serving(
     return not unfinished
 
 
-async def sqlite_schema_ready_for_serving(database: Database) -> bool:
-    return await database_is_at_head(database) and await database.read(
-        sqlite_run_event_page_available
-    )
+def sqlite_serving_admit(
+    settings: DatabaseSettings, acl: maintenance.RequireACL | None
+) -> maintenance.Admission:
+    path = settings.sqlite_path.absolute()
+    original = maintenance.sqlite_main_admit(path)
+    descriptor = -1
+
+    def capture(native: int, empty: int) -> bool:
+        nonlocal descriptor
+        descriptor = native
+        return original(native, empty)
+
+    def inspect(connection: Connection) -> maintenance.Admission:
+        if not is_current_revision(connection) or not connection.scalar(
+            SQLITE_EVENT_SCHEMA
+        ):
+            raise RunEventPositionRejected
+        if not position_schema_available(connection):
+            raise RunEventPositionRejected
+        state = read_position_transition_sync(connection)
+        if not state.ready:
+            raise RunEventPositionRejected
+        if state.operation is None and state.proof is None:
+            return original
+        if acl is None or state.operation is None or state.proof is None:
+            raise RunEventPositionRejected
+        admit = maintenance.require_position_release(
+            (state.operation, state.proof), path, acl
+        )
+        if descriptor < 0 or not admit(descriptor, 0):
+            raise RunEventPositionRejected
+        return admit
+
+    return maintenance.sqlite_snapshot(path.resolve(strict=True), capture, inspect)
 
 
 async def serve_on_loop(
@@ -708,22 +744,28 @@ async def serve_on_loop(
     worker_startup: bool = False,
     make_scheduler: Callable[[Database], ServingScheduler] | None = None,
     tls_context: SSLContext | None = None,
+    maintenance_acl: maintenance.RequireACL | None = None,
 ) -> int:
     try:
-        database = Database(settings, observe_sqlite_serving=True)
-    except DatabaseConfigurationError:
+        admission = await asyncio.to_thread(
+            sqlite_serving_admit, settings, maintenance_acl
+        )
+        database = Database(
+            settings, observe_sqlite_serving=True, sqlite_admit=admission
+        )
+    except (
+        DatabaseConfigurationError,
+        DBAPIError,
+        RunEventPositionRejected,
+        KoraProtocolError,
+        OSError,
+    ):
         return refuse(log, ServingRefusal.SQLITE_UNPREPARED, 78)
     domain: AsyncExitStack | None = None
     server: ApiServer | None = None
     failure: ServingRefusal | None = None
     try:
-        try:
-            ready = await sqlite_schema_ready_for_serving(database)
-        except DBAPIError:
-            ready = False
-        if not ready:
-            failure = ServingRefusal.SQLITE_UNPREPARED
-        elif signals.received is None:
+        if signals.received is None:
             if preparer is not None:
                 domain = AsyncExitStack()
                 try:
@@ -792,6 +834,7 @@ def serve_sqlite(
     worker_startup: bool = False,
     make_scheduler: Callable[[Database], ServingScheduler] | None = None,
     tls_context: SSLContext | None = None,
+    maintenance_acl: maintenance.RequireACL | None = None,
 ) -> int:
     if not settings.sqlite_path.is_file():
         return refuse(log, ServingRefusal.SQLITE_UNPREPARED, 78)
@@ -815,5 +858,6 @@ def serve_sqlite(
                 worker_startup,
                 make_scheduler,
                 tls_context,
+                maintenance_acl,
             )
         )

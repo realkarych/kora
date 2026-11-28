@@ -10,6 +10,7 @@ from kora.db.identifiers import Clock, IdentifierGenerator, is_identifier
 from kora.db.tables import event, graph, graph_version, node_instance, run
 from kora.db.types import as_json_value, normalise_timestamp
 from kora.engine.locks import COMPONENT, Scope, ScopeKind, TransitionLocks
+from kora.engine.run_event_positions import append_run_event
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 from kora.protocols.authentication import Principal
 from kora.protocols.identity_records import Identifier
@@ -160,7 +161,10 @@ async def cancel_pending_run(
             needs_scheduling=True,
         )
     )
-    await connection.execute(
+    await append_run_event(
+        connection,
+        locks,
+        run_id,
         insert(event).values(
             id=event_id,
             namespace_id=namespace_id,
@@ -181,7 +185,7 @@ async def cancel_pending_run(
             at=now,
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
     wake_required = not state.needs_scheduling
     diagnostics = current_diagnostics()

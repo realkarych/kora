@@ -65,7 +65,8 @@ from kora.db.cost_reads import (
     read_usage_page,
     read_usage_source,
 )
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
+from kora.db.run_event_page_v1 import RUN_EVENT_REVISION
 from kora.db.tables import (
     approval_request,
     attempt,
@@ -82,6 +83,7 @@ from tests.db.closing import (
     narrow_settings,
     until,
 )
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import START, seed_pricing_measurement_history
 from tests.db.test_pricing_migration import (
     close_before_migration,
@@ -1084,7 +1086,9 @@ async def pricing_ledger_pages(database: Database, report: Report) -> None:
 
 async def pricing_session_restored(database: Database) -> None:
     if database.dialect is Dialect.SQLITE:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(
+            target=RUN_EVENT_REVISION
+        ) as connection:
             assert (
                 await connection.exec_driver_sql("PRAGMA foreign_keys")
             ).scalar_one() == 1
@@ -1092,7 +1096,7 @@ async def pricing_session_restored(database: Database) -> None:
     async with database.transaction() as connection:
         await connection.exec_driver_sql("SET lock_timeout = '17s'")
         backend = await connection.scalar(text("SELECT pg_backend_pid()"))
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target=RUN_EVENT_REVISION) as connection:
         await connection.rollback()
         await connection.execution_options(isolation_level="AUTOCOMMIT")
         await connection.exec_driver_sql("SELECT 1")
@@ -1269,7 +1273,7 @@ async def pricing_failure_recovery(settings: DatabaseSettings, report: Report) -
         watch = PricingMigrationWatch(report, kind, settings, "refused")
         await watch.prepare()
         with pytest.raises(DBAPIError):
-            await upgrade_database(settings, watch.open)
+            await upgrade_to_run_event_metadata(settings, watch.open)
         await watch.finish()
         await pricing_storage(database, report, "failed")
         async with database.transaction() as connection:
@@ -1301,11 +1305,11 @@ async def pricing_failure_recovery(settings: DatabaseSettings, report: Report) -
         repaired = PricingMigrationWatch(report, kind, settings, "recovered")
         await repaired.prepare()
         assert (
-            await upgrade_database(settings, repaired.open)
+            await upgrade_to_run_event_metadata(settings, repaired.open)
         ).steps == PRICING_MIGRATION_STEPS
         await repaired.finish()
         await pricing_storage(database, report, "recovered")
-        assert (await upgrade_database(settings)).steps == 0
+        assert (await upgrade_to_run_event_metadata(settings)).steps == 0
     finally:
         await database.close()
     pricing_storage_released(
@@ -1338,7 +1342,7 @@ async def pricing_interruption(settings: DatabaseSettings, report: Report) -> No
                     "(model)"
                 )
             with pytest.raises(RuntimeError, match="incompatible schema"):
-                await upgrade_database(settings)
+                await upgrade_to_run_event_metadata(settings)
             async with database.transaction() as connection:
                 await connection.exec_driver_sql(
                     "DROP INDEX ix_price_table_default_effective"
@@ -1347,7 +1351,9 @@ async def pricing_interruption(settings: DatabaseSettings, report: Report) -> No
             await holder.exec_driver_sql(
                 "UPDATE price_table SET model = model WHERE id = 'old-price'"
             )
-            first = asyncio.create_task(upgrade_database(settings, open_contender))
+            first = asyncio.create_task(
+                upgrade_to_run_event_metadata(settings, open_contender)
+            )
             if kind is DatabaseKind.POSTGRESQL:
                 invalid = await wait_for_index(database)
             else:
@@ -1355,7 +1361,9 @@ async def pricing_interruption(settings: DatabaseSettings, report: Report) -> No
                     lambda: bool(contenders) and contenders[0].units_in_flight() == 1
                 )
                 invalid = 0
-            second = asyncio.create_task(upgrade_database(settings, open_contender))
+            second = asyncio.create_task(
+                upgrade_to_run_event_metadata(settings, open_contender)
+            )
             await until(
                 lambda: len(contenders) == 2 and contenders[1].units_in_flight() == 1
             )
@@ -1406,12 +1414,12 @@ async def pricing_interruption(settings: DatabaseSettings, report: Report) -> No
         watch = PricingMigrationWatch(report, kind, settings, "interruption_repair")
         await watch.prepare()
         assert (
-            await upgrade_database(settings, watch.open)
+            await upgrade_to_run_event_metadata(settings, watch.open)
         ).steps == PRICING_MIGRATION_STEPS
         await watch.finish()
         await pricing_storage(database, report, "interruption_repaired")
         await pricing_session_restored(database)
-        assert (await upgrade_database(settings)).steps == 0
+        assert (await upgrade_to_run_event_metadata(settings)).steps == 0
     finally:
         await database.close()
         for contender in contenders:
@@ -1438,7 +1446,9 @@ async def pricing_close_recovery(settings: DatabaseSettings, report: Report) -> 
         try:
             async with observer.read_transaction() as connection:
                 assert await connection.run_sync(current_revision) == "0001"
-            assert (await upgrade_database(settings)).steps == PRICING_MIGRATION_STEPS
+            assert (
+                await upgrade_to_run_event_metadata(settings)
+            ).steps == PRICING_MIGRATION_STEPS
             await pricing_session_restored(observer)
         finally:
             await observer.close()
@@ -1463,7 +1473,7 @@ async def pricing_native_run(
     watch = PricingMigrationWatch(report, kind, settings[0], "populated")
     await watch.prepare()
     assert (
-        await upgrade_database(settings[0], watch.open)
+        await upgrade_to_run_event_metadata(settings[0], watch.open)
     ).steps == PRICING_MIGRATION_STEPS
     await watch.finish()
     del watch
@@ -1762,7 +1772,9 @@ async def pricing_lease_outcomes(settings: DatabaseSettings, report: Report) -> 
             )
 
             async def operation(outcome: str = outcome) -> None:
-                async with database.migration_connection() as connection:
+                async with database.migration_connection(
+                    target=RUN_EVENT_REVISION
+                ) as connection:
                     if kind is DatabaseKind.POSTGRESQL:
                         await connection.rollback()
                         await connection.execution_options(isolation_level="AUTOCOMMIT")

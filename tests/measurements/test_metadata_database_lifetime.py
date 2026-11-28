@@ -259,7 +259,7 @@ async def migration_cycles(
     leftovers: list[str] = []
     no_op_steps: list[int] = []
     for _ in range(MIGRATION_CYCLES):
-        settings = await factory.empty()
+        settings = await factory.empty(fresh=True)
         started = time.perf_counter()
         first = await upgrade_database(settings)
         durations.append(time.perf_counter() - started)
@@ -267,7 +267,7 @@ async def migration_cycles(
         no_op_steps.append(second.steps)
         leftovers.extend(factory.temporary_files(settings))
         await factory.discard(settings)
-        assert first.steps == 34
+        assert first.steps == 35
     gate(report, "migration_rerun_is_a_no_op", kind, all(s == 0 for s in no_op_steps))
     gate(report, "migration_leaves_no_temporary_files", kind, leftovers == [])
     record(

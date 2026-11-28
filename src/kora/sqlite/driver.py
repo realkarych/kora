@@ -18,7 +18,7 @@ from sqlite3 import SQLITE_LOCKED as SQLITE_LOCKED
 from sqlite3 import Error as Error
 from sqlite3 import NotSupportedError, OperationalError, ProgrammingError
 from threading import Lock
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 from weakref import WeakSet
 
 Parameters: TypeAlias = Sequence[object] | Mapping[str, object]
@@ -72,10 +72,16 @@ class Connection:
         custody: bool = False,
         authority_journal: bool = False,
         _marker: IsolatedMarker | None = None,
+        snapshot: Literal["immutable", "live", "exclusive"] | None = None,
     ) -> None:
+        selected = str(path)
+        uri = snapshot in ("immutable", "live")
+        if uri:
+            options = "immutable=1" if snapshot == "immutable" else "readonly_shm=1"
+            selected = f"{path.as_uri()}?mode=ro&{options}"
         self.native.open(
             self.handle,
-            str(path),
+            selected,
             readonly,
             timeout_ms,
             admit,
@@ -87,6 +93,8 @@ class Connection:
             custody,
             authority_journal,
             0 if _marker is None else int(_marker),
+            uri,
+            snapshot == "exclusive",
         )
         self._opened = True
 

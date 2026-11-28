@@ -54,7 +54,7 @@ from tests.api.deployment_cases import (
     skeleton_ir,
 )
 from tests.db.closing import ConnectionLedger, narrow_database, until
-from tests.db.seed import START, FakeClock, Seeder
+from tests.db.seed import START, FakeClock, Seeder, seed_run_position_state
 from tests.engine.promotion_support import READ_LIMITS
 from tests.engine.test_admission_initialization import initializer, rates
 from tests.engine.test_claim_sources import (
@@ -145,6 +145,7 @@ async def _seed(
         )
         await writer.execute(insert(run).values(**values))
         run_id = str(values["id"])
+        await seed_run_position_state(writer, namespace_id, (run_id,))
         await writer.execute(
             insert(run_inputs).values(run_id=run_id, params=b"{}", cel_projection=b"{}")
         )

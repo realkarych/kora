@@ -283,7 +283,7 @@ def core_wheel_artifact(output: Path, pattern: str) -> Path:
     return artifacts[0]
 
 
-def build_core_wheel(output: Path) -> Path:
+def build_core_wheel(output: Path, *, source: Path = REPOSITORY) -> Path:
     deadline = time.monotonic() + CORE_WHEEL_BUILD_SECONDS
     with core_wheel_build_stop() as stop:
         temporary = output / "temporary"
@@ -300,7 +300,7 @@ def build_core_wheel(output: Path) -> Path:
             str(output),
         ]
         run_core_wheel_build(
-            [*arguments, "--sdist", str(REPOSITORY)], output, variables, deadline, stop
+            [*arguments, "--sdist", str(source)], output, variables, deadline, stop
         )
         archive = core_wheel_artifact(output, "kora-*.tar.gz")
         run_core_wheel_build(

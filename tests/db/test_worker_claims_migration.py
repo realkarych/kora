@@ -4,11 +4,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import Database, DatabaseSettings
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt, attempt_dispatcher
 from tests.db.closing import ConnectionLedger
-from tests.db.test_migrations import differences_ignoring_expression_indexes
+from tests.db.predecessor import (
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+)
 from tests.engine.test_grant_history import legacy, seed
 
 
@@ -27,7 +30,7 @@ async def test_worker_claim_migration_preserves_legacy_grants_and_recovers(
         if field.name not in ("claim_id", "claim_digest")
     )
     try:
-        async with database.migration_connection() as migrator:
+        async with database.migration_connection(target="0030") as migrator:
             await migrator.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), "0030")
             )
@@ -47,13 +50,13 @@ async def test_worker_claim_migration_preserves_legacy_grants_and_recovers(
         with pytest.raises(
             (RuntimeError, DBAPIError), match="conflicts|already exists"
         ):
-            await upgrade_database(empty_database_settings)
+            await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.transaction() as writer:
             assert await writer.run_sync(current_revision) == "0030"
             await writer.exec_driver_sql("DROP INDEX ix_attempt_worker_open")
 
-        report = await upgrade_database(empty_database_settings)
-        repeated = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
+        repeated = await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.read_transaction() as reader:
             after_attempt = (await reader.execute(select(*old_attempt))).all()
             after_dispatchers = (
@@ -71,7 +74,7 @@ async def test_worker_claim_migration_preserves_legacy_grants_and_recovers(
                     )
                 )
             ).all()
-            differences = await reader.run_sync(differences_ignoring_expression_indexes)
+            differences = await reader.run_sync(historical_schema_differences)
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0030",

@@ -20,6 +20,7 @@ from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_snapshot import acquire_graph_snapshot
 from kora.engine.locks import COMPONENT, TransitionLocks
 from kora.engine.promotion_admission import record_manual_promotion_admission
+from kora.engine.run_event_positions import append_run_event
 from kora.engine.run_promotion_read import INPUT_SENTINEL
 from kora.engine.start_capacity import (
     CapacityOutcome,
@@ -453,9 +454,15 @@ async def _accept(
         )
     else:
         await connection.execute(insert(inbound_event).values(**receipt_values))
-    await connection.execute(
-        insert(event).values(**_timeline(acceptance, response, trigger, event_id))
+    timeline = insert(event).values(
+        **_timeline(acceptance, response, trigger, event_id)
     )
+    if isinstance(response, AcceptedStart):
+        await append_run_event(
+            connection, locks, acceptance.run_id, timeline, new_run=True
+        )
+    else:
+        await connection.execute(timeline)
     outcome = (
         AcceptanceOutcome.ACCEPTED
         if isinstance(response, AcceptedStart)

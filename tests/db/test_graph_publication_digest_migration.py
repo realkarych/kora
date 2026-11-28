@@ -18,7 +18,7 @@ from kora.db.graph_publication_digest_v1 import (
     SQLITE_VALID,
     VALID_COLUMNS,
 )
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import (
     MigrationReport,
     alembic_config,
@@ -28,6 +28,7 @@ from kora.db.tables import graph_version
 from kora.engine.locks import SQLITE_DIGEST_MATCH
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import DIGEST, Seeder
 from tests.db.test_graph_read_admission import executed_queries, sqlite_instructions
 from tests.engine.lock_support import DEADLINE
@@ -66,7 +67,7 @@ async def upgrade_digest(
 ) -> MigrationReport:
     database = open_database(settings)
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=REVISION) as connection:
             return await connection.run_sync(upgrade_digest_revision)
     finally:
         await database.close()
@@ -75,7 +76,7 @@ async def upgrade_digest(
 async def seed_predecessor(
     database: Database, *, wide: bool = False
 ) -> tuple[GraphPreparationBinding, str, str]:
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target=PREDECESSOR) as connection:
         await connection.run_sync(upgrade_predecessor)
     binding, selected = await seed_target(database)
     async with database.transaction() as writer:
@@ -106,7 +107,7 @@ async def test_graph_digest_locator_migration_preserves_history(
         report = await upgrade_digest(empty_database_settings)
         repeated = await upgrade_digest(empty_database_settings)
         with pytest.raises(RuntimeError, match="digest migration cannot be downgraded"):
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(target=PREDECESSOR) as connection:
                 await connection.run_sync(downgrade_locator)
         after = await history(database)
         found = await read_digest(database, binding, selected)
@@ -195,7 +196,7 @@ async def test_migrated_sqlite_digest_lookup_never_loads_base_values(
         async with database.transaction() as writer:
             await insert_legacy_anomalies(writer, selected, width_fitting_nul)
 
-        await upgrade_database(settings)
+        await upgrade_to_run_event_metadata(settings)
         async with database.read_transaction() as connection:
             parameters = {"graph_id": selected, "deployment_digest": DIGEST}
             with executed_queries(connection) as statements:

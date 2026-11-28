@@ -70,10 +70,10 @@ def isolated_head() -> str:
         "version_locations", f"{MIGRATIONS_DIRECTORY / 'versions'}\n{private}"
     )
     graph = ScriptDirectory.from_config(config)
-    head = graph.get_current_head()
-    if head != ISOLATED_FRONTIER_REVISION:
+    expected_heads = {"run_event_position_0035", ISOLATED_FRONTIER_REVISION}
+    if set(graph.get_heads()) != expected_heads:
         raise CustodyUnavailable
-    script = graph.get_revision(head)
+    script = graph.get_revision(ISOLATED_FRONTIER_REVISION)
     if script.down_revision != "run_event_metadata_0034" or Path(script.path) != Path(
         PRIVATE_REVISION_PATH
     ):
@@ -86,7 +86,7 @@ def isolated_head() -> str:
     ]
     if versions != ["singleton = 1 AND format_version = 1073741825"]:
         raise CustodyUnavailable
-    return head
+    return ISOLATED_FRONTIER_REVISION
 
 
 def verify_writable(launch: ProtectedRead, parent: int) -> None:

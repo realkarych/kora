@@ -7,12 +7,12 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, Dialect
-from kora.db.migrations import upgrade_database
 from kora.db.sqlite_graph_version_layout import (
     SQLiteGraphVersionLayout,
     read_sqlite_graph_version_layout,
 )
 from tests.db.closing import CONDITION_DEADLINE_SECONDS, ConnectionLedger
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.test_graph_read_admission import executed_queries
 from tests.db.test_graph_value_migration import encoding_predecessor
 from tests.db.test_sqlite_writer_entry import writer_driver
@@ -83,7 +83,7 @@ async def test_sqlite_graph_layout_observes_native_page_geometry_after_migration
     try:
         if populated:
             await encoding_predecessor(database)
-        migrated = await upgrade_database(settings)
+        migrated = await upgrade_to_run_event_metadata(settings)
         async with database.transaction() as writer:
             layout = await read_sqlite_graph_version_layout(writer)
     finally:

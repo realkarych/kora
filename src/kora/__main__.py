@@ -167,7 +167,90 @@ def new_instance_id() -> str:
     return uuid.uuid4().hex
 
 
+async def prepare_position_maintenance(
+    settings: "DatabaseSettings", proof_path: Path
+) -> str:
+    from sqlalchemy import Connection
+
+    from kora.db import run_event_maintenance_admission as maintenance
+    from kora.db.connection import Database, complete
+    from kora.db.migrations import environment as migration
+    from kora.db.run_event_position_v1 import POSITION_REVISION
+    from kora.engine.run_event_position_maintenance import (
+        prepare_run_event_positions as backfill,
+    )
+    from kora.plugins.storage.native import validate_acl
+    from kora.sqlite.driver import NativeRetirement
+
+    with maintenance.hold_position_control(proof_path, validate_acl) as (proof, verify):
+        identity = proof.database
+        if settings.dialect != identity.backend:
+            raise maintenance.PositionMaintenanceRefused
+        path, admit = None, None
+        if isinstance(identity, maintenance.SQLiteIdentity):
+            path = settings.sqlite_path.absolute()
+            admit = maintenance.qualified_sqlite_main(path, identity, validate_acl)
+        binding = proof.binding()
+        database = Database(settings, sqlite_admit=admit)
+
+        async def check() -> None:
+            verify()
+            if path is not None:
+                await database.writer_engine.dispose()
+                if not NativeRetirement.drain(path):
+                    raise maintenance.PositionMaintenanceRefused
+
+        def require_role(connection: Connection, inventory: bool = False) -> None:
+            verify()
+            if isinstance(identity, maintenance.PostgreSQLIdentity):
+                maintenance.require_postgresql_fence(
+                    connection, identity, inventory=inventory
+                )
+
+        def inspect(connection: Connection) -> None:
+            revision = migration.current_revision(connection)
+            if maintenance.predecessor_shape(connection):
+                if revision == maintenance.PREDECESSOR_REVISION:
+                    return
+                if (
+                    revision == POSITION_REVISION
+                    and migration.prepared_position_catalog(connection, binding)
+                ):
+                    return
+            raise maintenance.PositionMaintenanceRefused
+
+        try:
+            if path is not None and admit is not None:
+                maintenance.sqlite_snapshot(path, admit, inspect)
+            async with database.migration_connection(sqlite_admit=admit) as connection:
+                await connection.run_sync(require_role, inventory=True)
+                await connection.run_sync(inspect)
+                managed = binding, require_role
+                await connection.run_sync(migration.upgrade_to_head, managed=managed)
+                verify()
+            await backfill(
+                database,
+                *binding,
+                check,
+                verify_writer=lambda c: c.run_sync(require_role),
+            )
+        finally:
+            try:
+                await complete(database.close())
+            finally:
+                if path is not None and not NativeRetirement.drain(path):
+                    raise maintenance.PositionMaintenanceRefused
+        verify()
+    return POSITION_REVISION
+
+
 def build_database_app(environment: Mapping[str, str]) -> typer.Typer:
+    from kora.db import POSITION_MAINTENANCE
+    from kora.db.connection import DatabaseConfigurationError, read_database_settings
+    from kora.db.migrations import migration_logger
+    from kora.db.run_event_position_v1 import RunEventPositionRejected
+    from kora.protocols.errors import KoraProtocolError
+
     database_app = typer.Typer(
         name=DATABASE_GROUP,
         help="Metadata database operations.",
@@ -182,12 +265,10 @@ def build_database_app(environment: Mapping[str, str]) -> typer.Typer:
             write_usage(context.get_usage(), MISSING_COMMAND)
             raise typer.Exit(EXIT_USAGE)
 
-    @database_app.command(help="Apply every pending migration.")
+    @database_app.command(
+        help="Apply migrations allowed by ordinary database admission."
+    )
     def upgrade() -> None:
-        from kora.db.connection import (
-            DatabaseConfigurationError,
-            read_database_settings,
-        )
         from kora.db.migrations import upgrade_database
 
         try:
@@ -197,8 +278,29 @@ def build_database_app(environment: Mapping[str, str]) -> typer.Typer:
                 f"{DATABASE_CONFIGURATION_PREFIX}: {error.variable}: {error.reason}\n"
             )
             raise typer.Exit(EXIT_CONFIGURATION) from None
-        report = asyncio.run(upgrade_database(settings))
+        try:
+            report = asyncio.run(upgrade_database(settings))
+        except RunEventPositionRejected:
+            raise typer.Exit(EXIT_CONFIGURATION) from None
         typer.echo(report.to_revision)
+
+    @database_app.command()
+    def prepare_run_event_positions(proof: Annotated[Path, typer.Option()]) -> None:
+        log = migration_logger()
+        try:
+            settings = read_database_settings(environment)
+            revision = asyncio.run(prepare_position_maintenance(settings, proof))
+        except (
+            DatabaseConfigurationError,
+            RunEventPositionRejected,
+            KoraProtocolError,
+        ):
+            if log is not None:
+                log.emit(POSITION_MAINTENANCE, outcome="refused")
+            raise typer.Exit(EXIT_CONFIGURATION) from None
+        if log is not None:
+            log.emit(POSITION_MAINTENANCE, outcome="prepared")
+        typer.echo(revision)
 
     return database_app
 
@@ -919,6 +1021,7 @@ def serve_sqlite_api(
         credential_digest,
     )
     from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
+    from kora.plugins.storage.native import validate_acl
     from kora.protocols.errors import KoraProtocolError
     from kora.protocols.loading import load_provider
     from kora.protocols.metadata import ProtocolName
@@ -1044,6 +1147,7 @@ def serve_sqlite_api(
         worker_startup=worker is not None,
         make_scheduler=scheduler if scheduler_enabled else None,
         tls_context=tls_context,
+        maintenance_acl=validate_acl,
     )
 
 

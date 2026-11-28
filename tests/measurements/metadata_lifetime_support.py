@@ -50,12 +50,14 @@ class DatabaseFactory:
         self._counter += 1
         return f"kora_measure_{os.getpid()}_{self._counter}"
 
-    async def empty(self) -> DatabaseSettings:
+    async def empty(self, *, fresh: bool = False) -> DatabaseSettings:
         if self.server is None:
             return sqlite_settings(self.directory / f"{self._next_name()}.db")
         name = self._next_name()
         await self.server.create_database_in_loop(name, EMPTY_TEMPLATE)
         self.created.append(name)
+        if fresh:
+            return await self.server.prepare_fresh_database(name)
         return self.server.settings_for(name)
 
     async def migrated(self) -> DatabaseSettings:

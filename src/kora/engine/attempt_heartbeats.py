@@ -33,6 +33,7 @@ from kora.engine.heartbeat_evidence import (
     accept_heartbeat_evidence,
 )
 from kora.engine.locks import COMPONENT
+from kora.engine.run_event_positions import append_run_event
 from kora.engine.usage_acceptance import UsageRejected, changed_coverage
 from kora.engine.worker_history import HistoryAccessRejected
 from kora.engine.writer_mode import writable_postgres_transaction
@@ -362,7 +363,10 @@ async def _apply_heartbeat(
             )
         )
     for kind, payload in events:
-        await connection.execute(
+        await append_run_event(
+            connection,
+            authority.locks,
+            run_id,
             insert(event).values(
                 id=authority.identifiers.new(),
                 namespace_id=context.run.namespace_id,
@@ -375,7 +379,7 @@ async def _apply_heartbeat(
                 at=now,
                 created_at=now,
                 updated_at=now,
-            )
+            ),
         )
     if events or "recovery_required" in values:
         await connection.execute(

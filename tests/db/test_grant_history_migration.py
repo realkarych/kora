@@ -5,11 +5,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.grant_history_v1 import ACK_FIELDS, TIP_FIELDS
-from kora.db.migrations import upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt, attempt_dispatcher
+from tests.db.predecessor import (
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+)
 from tests.db.seed import START, Seeder
-from tests.db.test_migrations import differences_ignoring_expression_indexes
 from tests.engine.test_grant_history import legacy, seed
 
 
@@ -38,7 +40,7 @@ async def test_grant_history_migration_preserves_active_legacy_rows(
         not in ("process", "prefix_count", "prefix_digest", "claim_id", "claim_digest")
     )
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target="0028") as connection:
             await connection.run_sync(predecessor)
         async with database.transaction() as writer:
             seed = Seeder(writer)
@@ -79,7 +81,7 @@ async def test_grant_history_migration_preserves_active_legacy_rows(
             before_dispatcher = (await writer.execute(select(*old_dispatcher))).one()
 
         await database.close()
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as reader:
             after_attempt = (await reader.execute(select(*old_attempt))).one()
@@ -98,7 +100,7 @@ async def test_grant_history_migration_preserves_active_legacy_rows(
                     select(*(attempt.c[name] for name in (*TIP_FIELDS, *ACK_FIELDS)))
                 )
             ).one()
-            differences = await reader.run_sync(differences_ignoring_expression_indexes)
+            differences = await reader.run_sync(historical_schema_differences)
         async with database.transaction() as writer:
             values.update(
                 id=Seeder(writer).new_id(),
@@ -107,7 +109,7 @@ async def test_grant_history_migration_preserves_active_legacy_rows(
                 incarnation_id="i" * 256,
             )
             await writer.execute(insert(attempt_dispatcher).values(**values))
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target="0028") as connection:
             with pytest.raises(
                 RuntimeError,
                 match="^restore a compatible backup to downgrade event metadata$",
@@ -136,7 +138,7 @@ async def test_grant_history_upgrade_resumes_after_second_index_failure(
 ) -> None:
     database = Database(empty_database_settings)
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target="0028") as connection:
             await connection.run_sync(predecessor)
         async with database.transaction() as writer:
             await writer.exec_driver_sql(
@@ -145,7 +147,7 @@ async def test_grant_history_upgrade_resumes_after_second_index_failure(
         await database.close()
 
         with pytest.raises(SQLAlchemyError):
-            await upgrade_database(empty_database_settings)
+            await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as reader:
             columns = await reader.run_sync(
@@ -158,7 +160,7 @@ async def test_grant_history_upgrade_resumes_after_second_index_failure(
             await legacy(database, scope, range(1, 3))
             async with database.transaction() as writer:
                 await writer.exec_driver_sql("DROP INDEX ix_dispatcher_verified_prefix")
-            async with database.migration_connection() as migrator:
+            async with database.migration_connection(target="0028") as migrator:
                 await migrator.rollback()
                 await migrator.execution_options(isolation_level="AUTOCOMMIT")
                 with pytest.raises(SQLAlchemyError):
@@ -175,10 +177,10 @@ async def test_grant_history_upgrade_resumes_after_second_index_failure(
                     )
                 ).scalar_one() is False
         await database.close()
-        recovered = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as reader:
-            differences = await reader.run_sync(differences_ignoring_expression_indexes)
+            differences = await reader.run_sync(historical_schema_differences)
 
         assert ("prefix_count" in {column["name"] for column in columns}) == (
             database.dialect is Dialect.POSTGRESQL

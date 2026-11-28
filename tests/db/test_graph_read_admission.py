@@ -17,7 +17,7 @@ from kora.db.graph_read_admission import (
     read_graph_version_admission,
 )
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.reads import graph_version_by_number
 from kora.db.tables import (
@@ -28,6 +28,7 @@ from kora.db.tables import (
 )
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import CONDITION_DEADLINE_SECONDS, ConnectionLedger
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import DIGEST, Seeder
 
 ADMISSION = GraphVersionReadAdmission(101, 53)
@@ -533,7 +534,7 @@ async def test_graph_admission_binds_scope_and_witness_to_original_relations(
 
 
 async def upgrade_predecessor(database: Database) -> None:
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target="0008") as connection:
         await connection.run_sync(
             lambda sync: command.upgrade(alembic_config(sync), "0008")
         )
@@ -598,7 +599,9 @@ async def test_graph_admission_migration_recovers_without_rewriting_history(
         with pytest.raises(
             AdmissionMigrationRefused, match="late graph admission stamp"
         ):
-            await upgrade_database(empty_database_settings, interruption.open)
+            await upgrade_to_run_event_metadata(
+                empty_database_settings, interruption.open
+            )
         async with database.read_transaction() as connection:
             rolled_back = await connection.run_sync(current_revision)
             absent = await connection.run_sync(
@@ -611,7 +614,7 @@ async def test_graph_admission_migration_recovers_without_rewriting_history(
                 (await connection.execute(preparation_query)).mappings().one()
             )
         locks = await migration_lock_count(database)
-        recovered = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.read_snapshot() as connection:
             after = (await connection.execute(select(graph_version))).all()
             recovered_preparation = (

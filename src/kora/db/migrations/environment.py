@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -25,7 +25,19 @@ from kora.db.graph_publication_ordinal_v1 import (
     ORDINAL_INVALID_INDEX,
     ORDINAL_VALID_INDEX,
 )
+from kora.db.run_event_maintenance_admission import (
+    POSITION_AUTHORITY,
+    POSITION_TARGET,
+    PREDECESSOR_REVISION,
+    PositionMaintenanceRefused,
+    PositionMigrationAuthority,
+    earlier_position_target,
+    fresh_position_authority,
+)
 from kora.db.run_event_page_v1 import SQLITE_EVENT_PAGE_INDEX
+from kora.db.run_event_position_reads import read_position_transition_sync
+from kora.db.run_event_position_schema import position_schema_available
+from kora.db.run_event_position_v1 import POSITION_REVISION
 from kora.db.run_input_locator_v1 import (
     SQLITE_RUN_INPUT_LOCATOR_INDEX,
     SQLITE_RUN_LOCATOR_INDEX,
@@ -66,6 +78,15 @@ def current_revision(connection: Connection) -> str | None:
     return MigrationContext.configure(connection).get_current_revision()
 
 
+def prepared_position_catalog(
+    connection: Connection, binding: tuple[str, str] | None = None
+) -> bool:
+    if not position_schema_available(connection):
+        return False
+    state = read_position_transition_sync(connection)
+    return state.ready if binding is None else binding == (state.operation, state.proof)
+
+
 def pending_steps(config: Config, from_revision: str | None, head: str) -> int:
     script = ScriptDirectory.from_config(config)
     lower = from_revision if from_revision is not None else "base"
@@ -80,17 +101,48 @@ def bound_lock_waits(connection: Connection) -> None:
         )
 
 
-def upgrade_to_head(connection: Connection) -> MigrationReport:
+ManagedPosition = tuple[tuple[str, str], Callable[[Connection], None]]
+
+
+def upgrade_to_head(
+    connection: Connection,
+    target: str = HEAD,
+    managed: ManagedPosition | None = None,
+) -> MigrationReport:
     bound_lock_waits(connection)
     config = alembic_config(connection)
-    head = head_revision(config)
+    head = head_revision(config) if target == HEAD else target
     from_revision = current_revision(connection)
+    positioned = not earlier_position_target(target)
+    if positioned:
+        if connection.info.get(POSITION_TARGET) != target:
+            raise PositionMaintenanceRefused
+        if managed is not None:
+            managed[1](connection)
+        binding = None if managed is None else managed[0]
+        if from_revision == POSITION_REVISION and prepared_position_catalog(
+            connection, binding
+        ):
+            return MigrationReport(connection.dialect.name, from_revision, head, 0)
+        if managed is None and from_revision is None:
+            authority = fresh_position_authority(connection)
+        elif managed is not None and from_revision == PREDECESSOR_REVISION:
+            authority = PositionMigrationAuthority(connection, managed[1], managed[0])
+        else:
+            raise PositionMaintenanceRefused
+        connection.info[POSITION_AUTHORITY] = authority
     steps = pending_steps(config, from_revision, head)
-    if connection.info.get(MIGRATION_LEASE):
-        connection.commit()
-    elif connection.dialect.name == POSTGRESQL and steps:
-        raise RuntimeError("PostgreSQL upgrades require a dedicated migration lease")
-    command.upgrade(config, HEAD)
+    try:
+        if connection.info.get(MIGRATION_LEASE):
+            connection.commit()
+        elif connection.dialect.name == POSTGRESQL and steps:
+            raise RuntimeError(
+                "PostgreSQL upgrades require a dedicated migration lease"
+            )
+        command.upgrade(config, target)
+    finally:
+        if positioned:
+            connection.info.pop(POSITION_AUTHORITY, None)
     return MigrationReport(
         dialect=connection.dialect.name,
         from_revision=from_revision,

@@ -14,13 +14,15 @@ from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect, parse_database_url
 from kora.db.migrations import current_revision, upgrade_database
+from kora.db.run_event_page_v1 import RUN_EVENT_REVISION
+from kora.db.run_event_position_v1 import POSITION_REVISION
 from kora.db.tables import namespace, price_table
 from tests.db.closing import legacy_preparation
+from tests.db.predecessor import PredecessorDbUpgrade
 from tests.db.seed import START, Seeder, seed_predecessor
 from tests.db.test_pricing_migration import price_check, retained_index_progress
 from tests.observability.conftest import ProcessResult, run_kora
 
-HEAD_REVISION: str = "run_event_metadata_0034"
 HIDDEN_MARKER: str = "PASSWORD-MARKER-4471"
 USER_MARKER: str = "usermarker4472"
 HOST_MARKER: str = "hostmarker4473.invalid"
@@ -55,8 +57,8 @@ def test_db_upgrade_succeeds_and_reruns_as_a_no_op(tmp_path: Path) -> None:
     first = upgrade(environment)
     second = upgrade(environment)
 
-    assert (first.code, first.stdout) == (0, f"{HEAD_REVISION}\n".encode())
-    assert (second.code, second.stdout) == (0, f"{HEAD_REVISION}\n".encode())
+    assert (first.code, first.stdout) == (0, f"{POSITION_REVISION}\n".encode())
+    assert (second.code, second.stdout) == (0, f"{POSITION_REVISION}\n".encode())
     assert "db.migration.started" in events(first)
     assert "db.migration.finished" in events(first)
     first_finished = [
@@ -69,14 +71,14 @@ def test_db_upgrade_succeeds_and_reruns_as_a_no_op(tmp_path: Path) -> None:
         for record in records(second)
         if record["event"] == "db.migration.finished"
     ]
-    assert first_finished[0]["steps"] == 34
+    assert first_finished[0]["steps"] == 35
     assert second_finished[0]["steps"] == 0
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     with closing(sqlite3.connect(path)) as connection:
         version = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchall()
-    assert version == [(HEAD_REVISION,)]
+    assert version == [(POSITION_REVISION,)]
 
 
 @pytest.mark.parametrize(
@@ -185,6 +187,7 @@ async def companion_modes_during_a_write(path: Path) -> dict[str, int]:
 @pytest.mark.asyncio
 async def test_db_upgrade_partial_failure_is_content_free(
     empty_database_settings: DatabaseSettings,
+    predecessor_db_upgrade: PredecessorDbUpgrade,
 ) -> None:
     database = Database(empty_database_settings)
     marker = "PRIVATE-ACCOUNTING-MARKER"
@@ -224,7 +227,7 @@ async def test_db_upgrade_partial_failure_is_content_free(
             )
         }
 
-        failed = await asyncio.to_thread(upgrade, environment)
+        failed = await asyncio.to_thread(predecessor_db_upgrade, environment)
         database = Database(empty_database_settings)
         async with database.transaction() as connection:
             revision = await connection.run_sync(current_revision)
@@ -235,7 +238,7 @@ async def test_db_upgrade_partial_failure_is_content_free(
             else:
                 await connection.exec_driver_sql("DROP TABLE pricing_blocker")
         await database.close()
-        recovered = await asyncio.to_thread(upgrade, environment)
+        recovered = await asyncio.to_thread(predecessor_db_upgrade, environment)
 
         assert revision == "0001"
         assert failed.code == 70
@@ -254,6 +257,7 @@ async def test_db_upgrade_partial_failure_is_content_free(
 @pytest.mark.asyncio
 async def test_db_upgrade_index_failure_is_content_free_and_recoverable(
     empty_database_settings: DatabaseSettings,
+    predecessor_db_upgrade: PredecessorDbUpgrade,
 ) -> None:
     marker = "PRIVATE-INDEX-SCOPE-213"
     index_name = "ix_price_table_namespace_effective"
@@ -299,7 +303,7 @@ async def test_db_upgrade_index_failure_is_content_free_and_recoverable(
         }
 
         with pytest.raises(DBAPIError) as server_failure:
-            await upgrade_database(empty_database_settings)
+            await upgrade_database(empty_database_settings, target=RUN_EVENT_REVISION)
         server_details: list[str] = []
         cause: BaseException | None = server_failure.value
         while cause is not None:
@@ -307,7 +311,7 @@ async def test_db_upgrade_index_failure_is_content_free_and_recoverable(
             if isinstance(detail, str):
                 server_details.append(detail)
             cause = cause.__cause__
-        failed = await asyncio.to_thread(upgrade, environment)
+        failed = await asyncio.to_thread(predecessor_db_upgrade, environment)
         database = Database(empty_database_settings)
         async with database.transaction() as connection:
             failed_revision = await connection.run_sync(current_revision)
@@ -336,7 +340,7 @@ async def test_db_upgrade_index_failure_is_content_free_and_recoverable(
                     "DROP INDEX ix_price_table_namespace_effective"
                 )
         await database.close()
-        recovered = await asyncio.to_thread(upgrade, environment)
+        recovered = await asyncio.to_thread(predecessor_db_upgrade, environment)
         database = Database(empty_database_settings)
         async with database.transaction() as connection:
             recovered_revision = await connection.run_sync(current_revision)

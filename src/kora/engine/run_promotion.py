@@ -13,6 +13,7 @@ from kora.db.types import POSTGRESQL, normalise_timestamp
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.graph_version_identity import GraphVersionPin
 from kora.engine.locks import COMPONENT, Scope, ScopeKind, TransitionLocks
+from kora.engine.run_event_positions import append_run_event
 from kora.engine.run_materialization import (
     PreparedRunMaterialization,
     prepare_initial_node_rows,
@@ -110,7 +111,10 @@ async def _promote(
         .where(run.c.id == run_id)
         .values(status="running", started_at=now, updated_at=now, needs_scheduling=True)
     )
-    await connection.execute(
+    await append_run_event(
+        connection,
+        locks,
+        run_id,
         insert(event).values(
             id=event_id,
             namespace_id=scope.namespace_id,
@@ -127,7 +131,7 @@ async def _promote(
             at=now,
             created_at=now,
             updated_at=now,
-        )
+        ),
     )
     return PromotionOutcome.APPLIED
 

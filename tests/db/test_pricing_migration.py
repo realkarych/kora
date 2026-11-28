@@ -18,11 +18,15 @@ from kora.db.migrations import (
     upgrade_database,
     upgrade_to_head,
 )
+from kora.db.run_event_page_v1 import RUN_EVENT_REVISION
 from kora.db.tables import metadata, price_table, usage_record
 from tests.db.closing import legacy_preparation, until
-from tests.db.predecessor import upgraded_predecessor
+from tests.db.predecessor import (
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+    upgraded_predecessor,
+)
 from tests.db.seed import START, predecessor_snapshot, seed_predecessor
-from tests.db.test_migrations import differences_ignoring_expression_indexes
 
 
 @pytest.mark.asyncio
@@ -58,7 +62,9 @@ async def test_price_schema_upgrade_preserves_history(
             before = await connection.run_sync(seed_predecessor)
 
         await database.close()
-        report = await upgrade_database(empty_database_settings, open_migration)
+        report = await upgrade_to_run_event_metadata(
+            empty_database_settings, open_migration
+        )
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
@@ -85,13 +91,11 @@ async def test_price_schema_upgrade_preserves_history(
                     )
                 )
                 assert all(value is None for row in results for value in row)
-            differences = await connection.run_sync(
-                differences_ignoring_expression_indexes
-            )
+            differences = await connection.run_sync(historical_schema_differences)
             references = await connection.run_sync(
                 lambda sync: inspect(sync).get_foreign_keys("attempt")
             )
-        retry = await upgrade_database(empty_database_settings)
+        retry = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert report.to_revision == revision == "run_event_metadata_0034"
         assert after == before
@@ -161,7 +165,7 @@ async def test_pricing_migration_refuses_altered_column_defaults(
 
         if empty_database_settings.dialect is Dialect.POSTGRESQL:
             with pytest.raises(RuntimeError, match="incompatible schema"):
-                await upgrade_database(empty_database_settings)
+                await upgrade_to_run_event_metadata(empty_database_settings)
             database = Database(empty_database_settings)
             async with database.transaction() as connection:
                 revision = await connection.run_sync(current_revision)
@@ -183,7 +187,7 @@ async def test_pricing_migration_refuses_altered_column_defaults(
                     f"ALTER TABLE {table_name} ALTER COLUMN {column_name} DROP DEFAULT"
                 )
             await database.close()
-        recovered = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.transaction() as connection:
             after = await connection.run_sync(
@@ -262,7 +266,7 @@ async def test_pricing_migration_recovers_after_failure(
         await database.close()
 
         with pytest.raises(DBAPIError):
-            await upgrade_database(empty_database_settings)
+            await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.transaction() as connection:
             revision = await connection.run_sync(current_revision)
@@ -299,8 +303,8 @@ async def test_pricing_migration_recovers_after_failure(
         assert after == before
         await database.close()
 
-        recovered = await upgrade_database(empty_database_settings)
-        again = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
+        again = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert recovered.to_revision == "run_event_metadata_0034"
         assert recovered.steps == 33
@@ -318,7 +322,7 @@ async def retained_index_progress(settings: DatabaseSettings) -> None:
                 "CREATE INDEX ix_price_table_default_effective ON price_table (model)"
             )
         with pytest.raises(RuntimeError, match="incompatible schema"):
-            await upgrade_database(settings)
+            await upgrade_to_run_event_metadata(settings)
         async with database.transaction() as connection:
             assert await connection.run_sync(current_revision) == "0001"
             valid = (
@@ -365,7 +369,7 @@ async def test_pricing_migration_recovers_after_index_interruption(
     if empty_database_settings.dialect is Dialect.SQLITE:
         database = Database(empty_database_settings)
         try:
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(target="0001") as connection:
                 await connection.run_sync(seed_predecessor)
             async with database.transaction() as holder:
                 await holder.exec_driver_sql("UPDATE price_table SET model = model")
@@ -377,7 +381,9 @@ async def test_pricing_migration_recovers_after_index_interruption(
                     return contender
 
                 task = asyncio.create_task(
-                    upgrade_database(empty_database_settings, open_contender)
+                    upgrade_to_run_event_metadata(
+                        empty_database_settings, open_contender
+                    )
                 )
                 if cancel:
                     await until(
@@ -389,7 +395,7 @@ async def test_pricing_migration_recovers_after_index_interruption(
                 else:
                     with pytest.raises((DBAPIError, sqlite3.OperationalError)):
                         await task
-            recovered = await upgrade_database(empty_database_settings)
+            recovered = await upgrade_to_run_event_metadata(empty_database_settings)
             assert recovered.to_revision == "run_event_metadata_0034"
         finally:
             await database.close()
@@ -401,7 +407,9 @@ async def test_pricing_migration_recovers_after_index_interruption(
             await holder.exec_driver_sql(
                 "UPDATE price_table SET model = model WHERE id = 'old-price'"
             )
-            task = asyncio.create_task(upgrade_database(empty_database_settings))
+            task = asyncio.create_task(
+                upgrade_to_run_event_metadata(empty_database_settings)
+            )
             invalid_oid = await wait_for_index(database)
             if cancel:
                 task.cancel()
@@ -428,8 +436,8 @@ async def test_pricing_migration_recovers_after_index_interruption(
                 )
             ).scalar_one()
 
-        recovered = await upgrade_database(empty_database_settings)
-        again = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
+        again = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert revision == "0001"
         assert old_index is False
@@ -446,8 +454,8 @@ async def test_concurrent_pricing_upgrades_are_serialized(
 ) -> None:
     if empty_database_settings.dialect is Dialect.SQLITE:
         results = await asyncio.gather(
-            upgrade_database(empty_database_settings),
-            upgrade_database(empty_database_settings),
+            upgrade_to_run_event_metadata(empty_database_settings),
+            upgrade_to_run_event_metadata(empty_database_settings),
             return_exceptions=True,
         )
         completed = [
@@ -459,7 +467,7 @@ async def test_concurrent_pricing_upgrades_are_serialized(
             isinstance(error, (DBAPIError, sqlite3.OperationalError))
             for error in refused
         )
-        assert (await upgrade_database(empty_database_settings)).steps == 0
+        assert (await upgrade_to_run_event_metadata(empty_database_settings)).steps == 0
         return
     await retained_index_progress(empty_database_settings)
     database = Database(empty_database_settings)
@@ -468,9 +476,13 @@ async def test_concurrent_pricing_upgrades_are_serialized(
             await holder.exec_driver_sql(
                 "UPDATE price_table SET model = model WHERE id = 'old-price'"
             )
-            first = asyncio.create_task(upgrade_database(empty_database_settings))
+            first = asyncio.create_task(
+                upgrade_to_run_event_metadata(empty_database_settings)
+            )
             original_oid = await wait_for_index(database)
-            second = asyncio.create_task(upgrade_database(empty_database_settings))
+            second = asyncio.create_task(
+                upgrade_to_run_event_metadata(empty_database_settings)
+            )
             async with asyncio.timeout(4):
                 waiting = 0
                 while not waiting:
@@ -490,7 +502,7 @@ async def test_concurrent_pricing_upgrades_are_serialized(
             with pytest.raises(asyncio.CancelledError):
                 await first
         finished = await second
-        again = await upgrade_database(empty_database_settings)
+        again = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert finished.to_revision == "run_event_metadata_0034"
         assert again.steps == 0
@@ -607,7 +619,9 @@ async def test_migration_lease_restores_session_and_releases_lock(
     database: Database,
 ) -> None:
     if database.dialect is Dialect.SQLITE:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(
+            target=RUN_EVENT_REVISION
+        ) as connection:
             assert database.units_in_flight() == 1
             assert (
                 await connection.exec_driver_sql("PRAGMA foreign_keys")
@@ -674,7 +688,7 @@ async def test_competing_migration_lock_wait_is_bounded(database: Database) -> N
 
 
 async def close_before_migration(database: Database) -> None:
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target=RUN_EVENT_REVISION) as connection:
         assert database.units_in_flight() == 1
         await database.close(deadline_seconds=0)
-        await connection.run_sync(upgrade_to_head)
+        await connection.run_sync(upgrade_to_head, RUN_EVENT_REVISION)

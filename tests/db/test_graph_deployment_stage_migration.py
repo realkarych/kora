@@ -396,7 +396,7 @@ async def test_stage_migration_preserves_preparation_graph_and_fence_allocator(
 ) -> None:
     before = Database(empty_database_settings)
     try:
-        async with before.migration_connection() as connection:
+        async with before.migration_connection(target=PREDECESSOR) as connection:
             await connection.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), PREDECESSOR)
             )
@@ -428,9 +428,9 @@ async def test_stage_migration_preserves_preparation_graph_and_fence_allocator(
 
     after = Database(empty_database_settings)
     try:
-        async with after.migration_connection() as connection:
+        async with after.migration_connection(target=REVISION) as connection:
             report = await connection.run_sync(upgrade_stage_revision)
-        async with after.migration_connection() as connection:
+        async with after.migration_connection(target=REVISION) as connection:
             repeated = await connection.run_sync(upgrade_stage_revision)
         async with after.transaction() as connection:
             initial_stage = (await connection.execute(select(stage))).all()
@@ -439,7 +439,7 @@ async def test_stage_migration_preserves_preparation_graph_and_fence_allocator(
             await connection.execute(stage.insert().values(**expected_stage))
             await connection.execute(occurrence.insert().values(**expected_binding))
         with pytest.raises(RuntimeError, match="graph deployment stage history"):
-            async with after.migration_connection() as connection:
+            async with after.migration_connection(target=PREDECESSOR) as connection:
                 await connection.run_sync(
                     lambda sync: command.downgrade(alembic_config(sync), PREDECESSOR)
                 )

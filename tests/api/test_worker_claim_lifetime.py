@@ -261,7 +261,7 @@ async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
     limits = profile.limits
     database = Database(empty_database_settings)
     try:
-        async with database.migration_connection() as migration:
+        async with database.migration_connection(target="0032") as migration:
             await migration.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), "0032")
             )
@@ -289,7 +289,7 @@ async def test_predecessor_claim_route_keeps_legacy_replay_after_upgrade(
         await database.close()
     database = Database(empty_database_settings)
     try:
-        async with database.migration_connection() as migration:
+        async with database.migration_connection(target=successor) as migration:
             assert await migration.run_sync(current_revision) == "0032"
             await migration.commit()
             await migration.run_sync(

@@ -8,14 +8,17 @@ from kora.db.claim_sources_v1 import SQLITE_KEY
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.deadline_discovery_v1 import PG_CANCEL
 from kora.db.grant_history_v1 import ACK_FIELDS, TIP_FIELDS
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt, attempt_claim_read_admission
 from kora.db.worker_claim_poll_v1 import CANDIDATE_INDEX, CANDIDATE_ROWS
 from kora.db.worker_claims_v1 import OPEN_ROWS, UNKNOWN_ROWS
 from tests.db.cancel_cause_support import attempt_schema_objects
+from tests.db.predecessor import (
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+)
 from tests.db.seed import Seeder
-from tests.db.test_migrations import differences_ignoring_expression_indexes
 
 
 def worker_slot_index(name: str, predicate: str, dialect: Dialect) -> dict[str, object]:
@@ -102,12 +105,12 @@ async def test_claim_source_revision_refuses_downgrade(
 ) -> None:
     database = Database(empty_database_settings)
     try:
-        async with database.migration_connection() as writer:
+        async with database.migration_connection(target="0027") as writer:
             await writer.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), "0027")
             )
 
-        async with database.migration_connection() as writer:
+        async with database.migration_connection(target="0026") as writer:
             with pytest.raises(
                 RuntimeError, match="claim sources cannot be downgraded"
             ):
@@ -140,7 +143,7 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
         )
     )
     try:
-        async with database.migration_connection() as writer:
+        async with database.migration_connection(target=predecessor) as writer:
             await writer.run_sync(install_predecessor, predecessor)
         async with database.transaction() as writer:
             seeder = Seeder(writer)
@@ -154,7 +157,7 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
             schema_before = await writer.run_sync(attempt_schema_objects)
 
         await database.close()
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as reader:
             after = (await reader.execute(select(*selected))).one()
@@ -162,9 +165,9 @@ async def test_claim_source_migration_preserves_legacy_without_admission(
             admitted = (
                 await reader.execute(select(attempt_claim_read_admission))
             ).all()
-            differences = await reader.run_sync(differences_ignoring_expression_indexes)
+            differences = await reader.run_sync(historical_schema_differences)
             schema_after = await reader.run_sync(attempt_schema_objects)
-        async with database.migration_connection() as writer:
+        async with database.migration_connection(target="0026") as writer:
             with pytest.raises(
                 RuntimeError,
                 match="^restore a compatible backup to downgrade event metadata$",

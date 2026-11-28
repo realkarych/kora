@@ -7,20 +7,22 @@ from sqlalchemy.exc import DBAPIError
 
 from kora.db.admission_wait_v1 import INDEXES, wait_index_dialect
 from kora.db.connection import Database, DatabaseSettings, Dialect
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import wait
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
+from tests.db.predecessor import PredecessorWrite, upgrade_to_run_event_metadata
 from tests.db.seed import START, Seeder
 from tests.db.test_graph_publication_digest_migration import wait_for_invalid_index
-from tests.engine.admission_wait_support import admission_case
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retained_index", ["invalid", "valid"])
 async def test_admission_wait_migration_preserves_history_and_recovers_indexes(
-    empty_database_settings: DatabaseSettings, retained_index: str
+    predecessor_write: PredecessorWrite,
+    empty_database_settings: DatabaseSettings,
+    retained_index: str,
 ) -> None:
     database = Database(empty_database_settings)
     ledger = ConnectionLedger(database)
@@ -30,18 +32,18 @@ async def test_admission_wait_migration_preserves_history_and_recovers_indexes(
         else "ix_wait_open_owner"
     )
     try:
-        async with database.migration_connection() as migrator:
+        async with database.migration_connection(target="0027") as migrator:
             await migrator.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), "0027")
             )
-        case = await admission_case(database)
+        node_id = await predecessor_write(empty_database_settings, "admission")
         async with database.transaction() as writer:
             seed = Seeder(writer)
             for status in ("open", "cancelled"):
                 await writer.execute(
                     insert(wait).values(
                         id=seed.new_id(),
-                        node_instance_id=case.binding.node_id,
+                        node_instance_id=node_id,
                         kind="admission",
                         status=status,
                         wake_at=START,
@@ -59,7 +61,7 @@ async def test_admission_wait_migration_preserves_history_and_recovers_indexes(
         with pytest.raises(
             (RuntimeError, DBAPIError), match="conflicts|already exists"
         ):
-            await upgrade_database(empty_database_settings)
+            await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.transaction() as writer:
             assert await writer.run_sync(current_revision) == "0027"
             await writer.exec_driver_sql(f"DROP INDEX {owned_index}")
@@ -68,7 +70,7 @@ async def test_admission_wait_migration_preserves_history_and_recovers_indexes(
                 async with database.transaction() as writer:
                     await writer.exec_driver_sql("UPDATE wait SET status = status")
                     task = asyncio.create_task(
-                        upgrade_database(empty_database_settings)
+                        upgrade_to_run_event_metadata(empty_database_settings)
                     )
                     try:
                         await wait_for_invalid_index(database, owned_index)
@@ -91,8 +93,8 @@ async def test_admission_wait_migration_preserves_history_and_recovers_indexes(
         await database.close()
         assert ledger.opened == ledger.closed
 
-        report = await upgrade_database(empty_database_settings)
-        repeated = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
+        repeated = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         ledger = ConnectionLedger(database)
         async with database.read_transaction() as reader:

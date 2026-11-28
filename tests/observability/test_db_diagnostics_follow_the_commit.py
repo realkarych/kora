@@ -25,6 +25,7 @@ from kora.engine.locks import (
 )
 from kora.observability import Level, LoggingSettings
 from tests.db.closing import ConnectionLedger, narrow_database, until
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import Seeder, seed_predecessor
 from tests.db.test_graph_preparation_reads import seed_preparation
 from tests.db.test_pricing_migration import retained_index_progress, wait_for_index
@@ -78,22 +79,22 @@ def db_events(pipe: Pipe) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_a_refused_commit_records_failure_and_never_finished(
-    configure: Configure, pipe: Pipe, empty_database_settings: DatabaseSettings
+    configure: Configure, pipe: Pipe, fresh_database_settings: DatabaseSettings
 ) -> None:
-    if empty_database_settings.dialect is Dialect.SQLITE:
-        encoded_sqlite_settings(empty_database_settings.sqlite_path, "UTF-8")
+    if fresh_database_settings.dialect is Dialect.SQLITE:
+        encoded_sqlite_settings(fresh_database_settings.sqlite_path, "UTF-8")
     diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
-    probe = Database(empty_database_settings)
+    probe = Database(fresh_database_settings)
     event.listen(probe.writer_engine.sync_engine, "commit", refuse_commit)
 
     with pytest.raises(CommitRefused):
         async with probe.transaction() as connection:
             await connection.run_sync(lambda sync: None)
     await probe.close()
-    report = await upgrade_database(empty_database_settings)
+    report = await upgrade_database(fresh_database_settings)
     finished_output(diagnostics, pipe)
 
-    assert report.steps == 34
+    assert report.steps == 35
     assert db_events(pipe) == [
         "db.transaction.failed",
         "db.migration.started",
@@ -103,12 +104,12 @@ async def test_a_refused_commit_records_failure_and_never_finished(
 
 @pytest.mark.asyncio
 async def test_a_refused_migration_commit_leaves_no_finished_record(
-    configure: Configure, pipe: Pipe, empty_database_settings: DatabaseSettings
+    configure: Configure, pipe: Pipe, fresh_database_settings: DatabaseSettings
 ) -> None:
     diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
 
     with pytest.raises(CommitRefused):
-        await upgrade_refusing_commit(empty_database_settings)
+        await upgrade_refusing_commit(fresh_database_settings)
     finished_output(diagnostics, pipe)
 
     assert db_events(pipe) == [
@@ -520,7 +521,7 @@ async def test_cancelled_pricing_upgrade_keeps_diagnostics_content_free(
     else:
         initial = Database(empty_database_settings)
         try:
-            async with initial.migration_connection() as connection:
+            async with initial.migration_connection(target="0001") as connection:
                 await connection.run_sync(seed_predecessor)
         finally:
             await initial.close()
@@ -539,7 +540,7 @@ async def test_cancelled_pricing_upgrade_keeps_diagnostics_content_free(
                 "UPDATE price_table SET model = model WHERE id = 'old-price'"
             )
             task = asyncio.create_task(
-                upgrade_database(empty_database_settings, open_upgrade)
+                upgrade_to_run_event_metadata(empty_database_settings, open_upgrade)
             )
             if database.dialect is Dialect.POSTGRESQL:
                 await wait_for_index(database)

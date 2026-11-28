@@ -208,7 +208,7 @@ async def test_fence_migration_preserves_history_and_committed_incarnation(
 ) -> None:
     before = Database(empty_database_settings)
     try:
-        async with before.migration_connection() as connection:
+        async with before.migration_connection(target=PREDECESSOR) as connection:
             await connection.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), PREDECESSOR)
             )
@@ -238,7 +238,7 @@ async def test_fence_migration_preserves_history_and_committed_incarnation(
 
     first = Database(empty_database_settings)
     try:
-        async with first.migration_connection() as connection:
+        async with first.migration_connection(target=REVISION) as connection:
             await connection.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), REVISION)
             )
@@ -248,14 +248,14 @@ async def test_fence_migration_preserves_history_and_committed_incarnation(
             await connection.execute(
                 fence.delete().where(fence.c.fence_incarnation == old)
             )
-        async with first.migration_connection() as connection:
+        async with first.migration_connection(target=REVISION) as connection:
             await connection.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), REVISION)
             )
         with pytest.raises(
             RuntimeError, match="storage address fence history cannot be downgraded"
         ):
-            async with first.migration_connection() as connection:
+            async with first.migration_connection(target=PREDECESSOR) as connection:
                 await connection.run_sync(
                     lambda sync: command.downgrade(alembic_config(sync), PREDECESSOR)
                 )

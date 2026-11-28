@@ -19,6 +19,7 @@ from kora.db.transactions import raise_private_metadata_error
 from kora.db.types import POSTGRESQL, JsonObject, canonical_json
 from kora.engine.graph_resource_references import GraphResourceScope
 from kora.engine.locks import COMPONENT, Scope, ScopeKind, TransitionLocks
+from kora.engine.run_event_positions import append_run_event
 from kora.engine.run_promotion_read import PromotionReadLimits
 from kora.engine.writer_mode import writable_postgres_transaction
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
@@ -118,7 +119,10 @@ class ExpiryContext:
         node_id: str | None = None,
         attempt_id: str | None = None,
     ) -> None:
-        await self.connection.execute(
+        await append_run_event(
+            self.connection,
+            self.locks,
+            self.run_id,
             insert(event).values(
                 id=self.identifiers.new(),
                 namespace_id=self.scope.namespace_id,
@@ -131,7 +135,7 @@ class ExpiryContext:
                 at=now,
                 created_at=now,
                 updated_at=now,
-            )
+            ),
         )
 
 

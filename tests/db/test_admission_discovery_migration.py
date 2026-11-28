@@ -6,14 +6,14 @@ from sqlalchemy import select
 
 from kora.db.admission_discovery_v1 import CANDIDATE_ROWS, INDEX_NAME
 from kora.db.connection import Database, DatabaseSettings, Dialect
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import node_instance
 from kora.engine.admission_discovery import AdmissionSweep
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
+from tests.db.predecessor import PredecessorWrite, upgrade_to_run_event_metadata
 from tests.db.test_graph_publication_digest_migration import wait_for_invalid_index
-from tests.engine.promotion_support import promotion_case
 
 
 class InterruptedIndexBuild(RuntimeError):
@@ -23,17 +23,18 @@ class InterruptedIndexBuild(RuntimeError):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interrupted", [False, True])
 async def test_admission_discovery_migration_preserves_history_and_resumes(
-    empty_database_settings: DatabaseSettings, interrupted: bool
+    predecessor_write: PredecessorWrite,
+    empty_database_settings: DatabaseSettings,
+    interrupted: bool,
 ) -> None:
     database = Database(empty_database_settings)
     ledger = ConnectionLedger(database)
     try:
-        async with database.migration_connection() as migrator:
+        async with database.migration_connection(target="0029") as migrator:
             await migrator.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), "0029")
             )
-        case = await promotion_case(database)
-        await case.promote(database)
+        await predecessor_write(empty_database_settings, "promotion")
         async with database.read_transaction() as reader:
             with await reader.execute(
                 select(node_instance).order_by(node_instance.c.id)
@@ -49,7 +50,7 @@ async def test_admission_discovery_migration_preserves_history_and_resumes(
                         "UPDATE node_instance SET status = status"
                     )
                     task = asyncio.create_task(
-                        upgrade_database(empty_database_settings)
+                        upgrade_to_run_event_metadata(empty_database_settings)
                     )
                     try:
                         await wait_for_invalid_index(database, INDEX_NAME)
@@ -70,8 +71,8 @@ async def test_admission_discovery_migration_preserves_history_and_resumes(
             with pytest.raises(InterruptedIndexBuild):
                 await rolled_back()
 
-        upgraded = await upgrade_database(empty_database_settings)
-        repeated = await upgrade_database(empty_database_settings)
+        upgraded = await upgrade_to_run_event_metadata(empty_database_settings)
+        repeated = await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.read_transaction() as reader:
             with await reader.execute(
                 select(node_instance).order_by(node_instance.c.id)

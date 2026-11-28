@@ -23,12 +23,13 @@ from kora.db.migrations import (
     upgrade_to_head,
 )
 from kora.db.migrations import environment as environment_module
+from kora.db.run_event_position_v1 import POSITION_REVISION
 from kora.db.tables import metadata
 from kora.db.types import OutcomePayloadText
 from kora.db.usage_source import UsageSourceText
 from tests.support.warning_filters import expression_index_warnings_ignored
 
-HEAD_REVISION: str = "run_event_metadata_0034"
+HEAD_REVISION: str = POSITION_REVISION
 
 
 def differences_ignoring_expression_indexes(connection: Connection) -> list[str]:
@@ -48,11 +49,11 @@ def server_defaults(connection: Connection) -> list[tuple[str, str]]:
 
 @pytest.mark.asyncio
 async def test_migration_reaches_head_and_matches_the_tables(
-    empty_database_settings: DatabaseSettings,
+    fresh_database_settings: DatabaseSettings,
 ) -> None:
-    report = await upgrade_database(empty_database_settings)
+    report = await upgrade_database(fresh_database_settings)
 
-    database = Database(empty_database_settings)
+    database = Database(fresh_database_settings)
     try:
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
@@ -64,12 +65,12 @@ async def test_migration_reaches_head_and_matches_the_tables(
             )
     finally:
         await database.close()
-    rerun = await upgrade_database(empty_database_settings)
+    rerun = await upgrade_database(fresh_database_settings)
 
     assert (report.from_revision, report.to_revision, report.steps) == (
         None,
         HEAD_REVISION,
-        34,
+        35,
     )
     assert (rerun.from_revision, rerun.to_revision, rerun.steps) == (
         HEAD_REVISION,
@@ -94,8 +95,7 @@ async def test_server_defaults_match_cursor_writer_compatibility(
 @pytest.mark.asyncio
 async def test_migration_lock_wait_is_bounded(database: Database) -> None:
     if database.dialect is not Dialect.POSTGRESQL:
-        async with database.transaction() as connection:
-            report = await connection.run_sync(upgrade_to_head)
+        report = await upgrade_database(database.settings)
         assert report.steps == 0
         return
     async with database.transaction() as holder:
@@ -107,7 +107,7 @@ async def test_migration_lock_wait_is_bounded(database: Database) -> None:
         with pytest.raises(DBAPIError, match="lock timeout"):
             await locked_run
 
-    async with database.transaction() as connection:
+    async with database.migration_connection() as connection:
         report = await connection.run_sync(upgrade_to_head)
         revision = (
             await connection.execute(
@@ -120,7 +120,7 @@ async def test_migration_lock_wait_is_bounded(database: Database) -> None:
 
 
 async def run_upgrade(database: Database) -> None:
-    async with database.transaction() as connection:
+    async with database.migration_connection() as connection:
         await connection.run_sync(upgrade_to_head)
 
 
@@ -192,7 +192,7 @@ def render_custom_types_probe(connection: Connection) -> tuple[str, frozenset[st
 async def test_generated_custom_types_have_their_constructors_and_imports(
     database: Database,
 ) -> None:
-    async with database.migration_connection() as connection:
+    async with database.read_transaction() as connection:
         rendered, imports = await connection.run_sync(render_custom_types_probe)
 
     assert "kora.db.types.OutcomePayloadText()" in rendered

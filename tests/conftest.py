@@ -1,3 +1,4 @@
+import asyncio
 import itertools
 import os
 from collections.abc import AsyncIterator, Iterator
@@ -91,6 +92,20 @@ def empty_database_settings(
         yield server.settings_for(name)
     finally:
         server.drop_database(name)
+
+
+@pytest.fixture
+def fresh_database_settings(
+    database_kind: DatabaseKind,
+    request: pytest.FixtureRequest,
+    empty_database_settings: DatabaseSettings,
+) -> DatabaseSettings:
+    if database_kind is DatabaseKind.SQLITE:
+        return empty_database_settings
+    server: PostgresServer = request.getfixturevalue("postgres_server")
+    name = empty_database_settings.url.database
+    assert name is not None
+    return asyncio.run(server.prepare_fresh_database(name))
 
 
 @pytest_asyncio.fixture

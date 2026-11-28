@@ -243,7 +243,7 @@ async def test_resource_owner_refuses_invalid_native_rows(database: Database) ->
 
 async def seed_retained_history(database: Database) -> str:
     await populate_predecessor(database)
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target=PREDECESSOR) as connection:
         await connection.run_sync(upgrade_capacity_revision)
     file = resource("assets/é.sh")
     physical: JsonObject = {
@@ -305,16 +305,16 @@ async def test_resource_owner_upgrade_preserves_history_without_backfill(
         version_id = await seed_retained_history(database)
         before = await retained_predecessor_rows(database)
 
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=REVISION) as connection:
             with executed_queries(connection) as observed:
                 report = await connection.run_sync(upgrade_owner_revision)
         async with database.transaction() as connection:
             initially_empty = (await connection.execute(select(owner))).all()
             await connection.execute(owner.insert().values(**owner_values(version_id)))
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=REVISION) as connection:
             repeated = await connection.run_sync(upgrade_owner_revision)
         with pytest.raises(RuntimeError, match="owner history cannot be downgraded"):
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(target=PREDECESSOR) as connection:
                 await connection.run_sync(
                     lambda sync: command.downgrade(alembic_config(sync), PREDECESSOR)
                 )

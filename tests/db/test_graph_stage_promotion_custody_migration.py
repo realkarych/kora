@@ -11,7 +11,7 @@ from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.graph_stage_promotion_custody_v1 import (
     MAX_PROMOTION_DOCUMENT_BYTES_V1,
 )
-from kora.db.migrations import MigrationReport, current_revision, upgrade_database
+from kora.db.migrations import MigrationReport, current_revision
 from kora.db.migrations.environment import (
     alembic_config,
     bound_lock_waits,
@@ -35,6 +35,7 @@ from kora.db.tables import (
 from kora.protocols.identity_records import MAX_COUNT
 from kora.protocols.storage_models import MAX_STORAGE_METADATA
 from tests.db.closing import ConnectionLedger
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import Seeder
 from tests.db.test_graph_deployment_stage_migration import (
     ADDRESS_DIGEST,
@@ -308,13 +309,13 @@ async def test_promotion_custody_migration_rolls_back_collision_and_preserves_hi
     async def upgrade_custody() -> MigrationReport:
         owner = open_observed(empty_database_settings)
         try:
-            async with owner.migration_connection() as connection:
+            async with owner.migration_connection(target=REVISION) as connection:
                 return await connection.run_sync(upgrade_custody_revision)
         finally:
             await owner.close()
 
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=PREDECESSOR) as connection:
             await connection.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), PREDECESSOR)
             )
@@ -326,7 +327,7 @@ async def test_promotion_custody_migration_rolls_back_collision_and_preserves_hi
             await connection.execute(COLLISION_INSERT)
 
         with pytest.raises(DBAPIError, match="already exists"):
-            await upgrade_database(empty_database_settings, open_observed)
+            await upgrade_to_run_event_metadata(empty_database_settings, open_observed)
         async with database.read_transaction() as connection:
             refused_revision = await connection.run_sync(current_revision)
             refused_relations = await connection.run_sync(
@@ -353,7 +354,7 @@ async def test_promotion_custody_migration_rolls_back_collision_and_preserves_hi
         with pytest.raises(
             RuntimeError, match="graph stage promotion custody cannot be downgraded"
         ):
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(target=PREDECESSOR) as connection:
                 await connection.run_sync(
                     lambda sync: command.downgrade(alembic_config(sync), PREDECESSOR)
                 )

@@ -9,7 +9,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.util import await_
 
 from kora.db.connection import Database, DatabaseClosedError, DatabaseSettings, Dialect
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import graph_version
 from tests.db.cancel_cause_support import (
@@ -18,14 +18,17 @@ from tests.db.cancel_cause_support import (
     migration_lock_count,
 )
 from tests.db.closing import ConnectionLedger, legacy_preparation
+from tests.db.predecessor import (
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+)
 from tests.db.seed import predecessor_snapshot, seed_predecessor
-from tests.db.test_migrations import differences_ignoring_expression_indexes
 
 
 async def encoding_predecessor(database: Database) -> CausePredecessor:
     async with legacy_preparation(database) as connection:
         await connection.run_sync(seed_predecessor)
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target="0006") as connection:
         await connection.run_sync(
             lambda sync: command.upgrade(alembic_config(sync), "0006")
         )
@@ -56,7 +59,7 @@ async def test_graph_version_value_encoding_migration(
         before = await encoding_predecessor(database)
         await database.close()
 
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             after = await connection.run_sync(
@@ -74,10 +77,8 @@ async def test_graph_version_value_encoding_migration(
             columns = await connection.run_sync(
                 lambda sync: inspect(sync).get_columns("graph_version")
             )
-            differences = await connection.run_sync(
-                differences_ignoring_expression_indexes
-            )
-        repeated = await upgrade_database(empty_database_settings)
+            differences = await connection.run_sync(historical_schema_differences)
+        repeated = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0006",
@@ -107,7 +108,7 @@ async def test_graph_value_downgrade_always_refuses_before_mutation(
     try:
         if state != "empty":
             await encoding_predecessor(database)
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target="0007") as connection:
             await connection.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), "0007")
             )
@@ -129,7 +130,7 @@ async def test_graph_value_downgrade_always_refuses_before_mutation(
                 "restore a compatible backup$"
             ),
         ):
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(target="0006") as connection:
                 await connection.run_sync(
                     lambda sync: command.downgrade(alembic_config(sync), "0006")
                 )
@@ -209,7 +210,7 @@ async def test_graph_value_migration_recovery_releases_resources(
             schema_before = await connection.run_sync(encoding_schema)
 
         task = asyncio.create_task(
-            upgrade_database(empty_database_settings, stage.open)
+            upgrade_to_run_event_metadata(empty_database_settings, stage.open)
         )
         try:
             await asyncio.wait_for(stage.entered.wait(), 4)
@@ -236,11 +237,9 @@ async def test_graph_value_migration_recovery_releases_resources(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
         locks = await migration_lock_count(database)
-        recovered = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.read_transaction() as connection:
-            differences = await connection.run_sync(
-                differences_ignoring_expression_indexes
-            )
+            differences = await connection.run_sync(historical_schema_differences)
 
         assert revision == "0006"
         assert schema_after == schema_before
@@ -278,7 +277,7 @@ async def test_graph_value_migration_failure_preserves_history_and_recovers(
             schema_before = await connection.run_sync(encoding_schema)
 
         with pytest.raises((RuntimeError, DBAPIError)):
-            await upgrade_database(empty_database_settings, observed.open)
+            await upgrade_to_run_event_metadata(empty_database_settings, observed.open)
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
             schema_after = await connection.run_sync(encoding_schema)
@@ -290,7 +289,7 @@ async def test_graph_value_migration_failure_preserves_history_and_recovers(
             await connection.exec_driver_sql(
                 "ALTER TABLE graph_version DROP COLUMN value_encoding_version"
             )
-        recovered = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert revision == "0006"
         assert schema_after == schema_before
@@ -330,15 +329,13 @@ async def test_graph_value_migration_handles_prepared_schema(
                     )
         await database.close()
 
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             after = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
-            differences = await connection.run_sync(
-                differences_ignoring_expression_indexes
-            )
+            differences = await connection.run_sync(historical_schema_differences)
 
         assert report.to_revision == "run_event_metadata_0034"
         assert after == before.history

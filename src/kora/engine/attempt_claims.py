@@ -66,6 +66,7 @@ from kora.engine.lease_recovery import (
     recover_expired_lease,
 )
 from kora.engine.locks import COMPONENT
+from kora.engine.run_event_positions import append_run_event
 from kora.engine.writer_mode import postgres_transaction_is_writable
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 from kora.protocols.authentication import Principal
@@ -410,7 +411,10 @@ async def _grant(
         except ClaimSourcesRejected:
             raise_safe(ClaimWriterFailed())
     if first:
-        await connection.execute(
+        await append_run_event(
+            connection,
+            context.locks,
+            target.run.id,
             insert(event).values(
                 id=context.identifiers.new(),
                 namespace_id=target.run.namespace_id,
@@ -431,7 +435,7 @@ async def _grant(
                 at=now,
                 created_at=now,
                 updated_at=now,
-            )
+            ),
         )
         if first_expires:
             await record_attempt_expiry(context, saved.id, now)

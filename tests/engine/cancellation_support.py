@@ -10,7 +10,7 @@ from kora.db.tables import event, inbound_event, run
 from kora.engine.cancellation import CancellationResult, cancel_pending_run
 from kora.engine.locks import Scope, ScopeKind, TransitionLocks
 from kora.protocols.authentication import NamespaceGrant, Principal
-from tests.db.seed import FakeClock, Seeder, fixed_randomness
+from tests.db.seed import FakeClock, Seeder, fixed_randomness, seed_run_position_state
 
 PRIVATE_TRIGGER: str = "private-trigger-never-in-diagnostics"
 PRIVATE_PARAMS: str = "private-params-never-in-diagnostics"
@@ -117,6 +117,7 @@ async def pending_cancellation(
         )
         await connection.execute(insert(run).values(**values))
         run_id = str(values["id"])
+        await seed_run_position_state(connection, namespace_id, (run_id,))
         principal = Principal(
             token_id=seed.new_id(),
             kind="user",

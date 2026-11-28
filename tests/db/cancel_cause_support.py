@@ -14,10 +14,10 @@ from kora.db.connection import (
     DatabaseSettings,
     Dialect,
 )
-from kora.db.migrations import upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import attempt
 from tests.db.closing import ConnectionLedger, legacy_preparation
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import (
     START,
     PredecessorHistory,
@@ -103,7 +103,7 @@ async def seed_cause_predecessor(
     if rich:
         async with legacy_preparation(database) as connection:
             await connection.run_sync(seed_predecessor)
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target="0003") as connection:
         await connection.run_sync(
             lambda sync: command.upgrade(alembic_config(sync), "0003")
         )
@@ -222,7 +222,7 @@ async def wait_for_validation(database: Database, statement: str) -> None:
 async def interrupt_upgrade(
     database: Database, settings: DatabaseSettings, stage: UpgradeStage, ending: str
 ) -> None:
-    task = asyncio.create_task(upgrade_database(settings, stage.open))
+    task = asyncio.create_task(upgrade_to_run_event_metadata(settings, stage.open))
     try:
         await asyncio.wait_for(stage.entered.wait(), 4)
         if database.dialect is Dialect.POSTGRESQL and ending != "prepared-cancel":

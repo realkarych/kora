@@ -23,6 +23,7 @@ from kora.db.migrations import (
     upgrade_with_diagnostics,
 )
 from kora.db.migrations.environment import alembic_config, head_revision
+from kora.db.run_event_page_v1 import RUN_EVENT_REVISION
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import (
     CONDITION_DEADLINE_SECONDS,
@@ -204,7 +205,9 @@ async def test_migration_autocommit_checks_before_concurrent_index_dispatch(
             async with database.read_transaction() as reader:
                 accepted = tuple((await reader.execute(READ_STATE)).one())
         else:
-            async with database.migration_connection() as writer:
+            async with database.migration_connection(
+                target=RUN_EVENT_REVISION
+            ) as writer:
                 await writer.exec_driver_sql(
                     "CREATE INDEX migration_wal_probe_index ON migration_wal_probe (id)"
                 )
@@ -269,13 +272,13 @@ async def current_and_head(connection: AsyncConnection) -> tuple[str | None, str
 
 @pytest.mark.asyncio
 async def test_opted_in_migration_upgrades_the_existing_history(
-    empty_database_settings: DatabaseSettings,
+    fresh_database_settings: DatabaseSettings,
 ) -> None:
     report = await upgrade_database(
-        empty_database_settings, open_database=guarded_database
+        fresh_database_settings, open_database=guarded_database
     )
 
-    async with owned_database(empty_database_settings) as database:
+    async with owned_database(fresh_database_settings) as database:
         async with database.read_transaction() as connection:
             current, expected = await current_and_head(connection)
 
@@ -286,7 +289,7 @@ async def test_opted_in_migration_upgrades_the_existing_history(
 
 @pytest.mark.asyncio
 async def test_migration_dispatches_exact_native_lease_operations(
-    empty_database_settings: DatabaseSettings,
+    fresh_database_settings: DatabaseSettings,
 ) -> None:
     dispatches: list[tuple[str, object]] = []
     key = {"key": MIGRATION_LOCK_ID}
@@ -304,7 +307,7 @@ async def test_migration_dispatches_exact_native_lease_operations(
         ):
             dispatches.append((statement, parameters))
 
-    async with owned_database(empty_database_settings, guarded=False) as database:
+    async with owned_database(fresh_database_settings, guarded=False) as database:
         if database.dialect is Dialect.SQLITE:
             async with database.migration_connection() as writer:
                 report = await writer.run_sync(upgrade_with_diagnostics)
@@ -397,7 +400,7 @@ async def ddl_after_close(database: Database) -> None:
                 await_(database.close(deadline_seconds=0))
                 connection.exec_driver_sql(CREATE_INDEX)
 
-    async with database.migration_connection() as writer:
+    async with database.migration_connection(target=RUN_EVENT_REVISION) as writer:
         if database.dialect is Dialect.POSTGRESQL:
             await writer.run_sync(attempt)
         else:

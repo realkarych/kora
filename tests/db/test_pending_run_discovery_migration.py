@@ -6,11 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import run, run_promotion_admission
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.test_graph_publication_digest_migration import wait_for_invalid_index
 from tests.engine.test_run_queue import queue_case
 
@@ -23,7 +24,7 @@ async def test_pending_discovery_migration_recovers_without_backfill(
     database = Database(empty_database_settings)
     ledger = ConnectionLedger(database)
     try:
-        async with database.migration_connection() as migrator:
+        async with database.migration_connection(target="0021") as migrator:
             await migrator.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), "0021")
             )
@@ -38,7 +39,7 @@ async def test_pending_discovery_migration_recovers_without_backfill(
         with pytest.raises(
             (RuntimeError, DBAPIError), match="conflicts|already exists"
         ):
-            await upgrade_database(empty_database_settings)
+            await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.transaction() as writer:
             assert await writer.run_sync(current_revision) == "0021"
             await writer.exec_driver_sql("DROP INDEX ix_run_status_id")
@@ -47,7 +48,7 @@ async def test_pending_discovery_migration_recovers_without_backfill(
                 async with database.transaction() as writer:
                     await writer.exec_driver_sql("UPDATE run SET status = status")
                     task = asyncio.create_task(
-                        upgrade_database(empty_database_settings)
+                        upgrade_to_run_event_metadata(empty_database_settings)
                     )
                     try:
                         await wait_for_invalid_index(database, "ix_run_status_id")
@@ -61,8 +62,8 @@ async def test_pending_discovery_migration_recovers_without_backfill(
                         "CREATE INDEX ix_run_status_id ON run (status, id)"
                     )
 
-        report = await upgrade_database(empty_database_settings)
-        repeated = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
+        repeated = await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.read_transaction() as reader:
             with await reader.execute(select(run).order_by(run.c.id)) as rows:
                 after = [dict(row) for row in rows.mappings()]

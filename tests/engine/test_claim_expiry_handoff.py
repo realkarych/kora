@@ -40,7 +40,7 @@ from tests.db.closing import (
     narrow_database,
     narrow_settings,
 )
-from tests.db.seed import START, Seeder
+from tests.db.seed import START, Seeder, seed_run_position_state
 from tests.db.test_sqlite_writer_entry import writer_driver
 from tests.engine.claim_support import SOURCE_LIMITS, ClaimCase, claim_case, state
 from tests.engine.heartbeat_support import heartbeat, heartbeat_body
@@ -552,6 +552,7 @@ async def latch_legacy_wait(
                 }
             )
         )
+        await seed_run_position_state(writer, binding.namespace_id, (run_id,))
     legacy = replace(
         case, binding=replace(case.binding, run=replace(binding, run_id=run_id))
     )
@@ -779,6 +780,9 @@ async def test_claim_startup_resumes_interrupted_expiry_without_worker_traffic(
             for _ in range(100)
         ]
         await writer.execute(insert(run), earlier_runs)
+        await seed_run_position_state(
+            writer, scope.namespace_id, [str(row["id"]) for row in earlier_runs]
+        )
     legacy_run, legacy_wait = await latch_legacy_wait(database, case, cutoff)
     pending = await state(database)
     recovered_database = Database(

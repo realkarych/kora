@@ -62,6 +62,7 @@ def build_sites() -> list[tuple[str, str]]:
 
 def test_core_wheel_is_built_once_per_session_and_installed_per_module() -> None:
     root = functions("tests/conftest.py")
+    predecessor = functions("tests/db/conftest.py")["predecessor_installation"]
     wheelhouse = functions("tests/cli/conftest.py")["provider_tooling_wheelhouse"]
     installed = functions("tests/support/configured_conformance.py")[
         "installed_conformance"
@@ -69,8 +70,12 @@ def test_core_wheel_is_built_once_per_session_and_installed_per_module() -> None
 
     sites = build_sites()
 
-    assert sites == [("tests/conftest.py", "core_wheel")]
+    assert sites == [
+        ("tests/conftest.py", "core_wheel"),
+        ("tests/db/conftest.py", "predecessor_installation"),
+    ]
     assert fixture_scope(root["core_wheel"]) == "session"
+    assert fixture_scope(predecessor) == "session"
     assert fixture_scope(wheelhouse) == "session"
     assert fixture_scope(installed) == "module"
     for consumer in (wheelhouse, installed):
@@ -82,6 +87,7 @@ def test_core_wheel_is_built_once_per_session_and_installed_per_module() -> None
 def test_core_wheel_uses_the_private_archive_and_tooling_remains_direct() -> None:
     tooling = functions("tests/support/provider_tooling.py")
     fixture = functions("tests/conftest.py")["core_wheel"]
+    predecessor = functions("tests/db/conftest.py")["predecessor_installation"]
     core = tooling["build_core_wheel"]
 
     builds = [
@@ -103,9 +109,28 @@ def test_core_wheel_uses_the_private_archive_and_tooling_remains_direct() -> Non
 
     shared_inputs = ("output", "variables", "deadline", "stop")
     assert builds == [
-        ("[*arguments, '--sdist', str(REPOSITORY)]", *shared_inputs),
+        ("[*arguments, '--sdist', str(source)]", *shared_inputs),
         ("[*arguments, '--wheel', str(archive)]", *shared_inputs),
     ]
+    assert [argument.arg for argument in core.args.kwonlyargs] == ["source"]
+    assert [ast.unparse(value) for value in core.args.kw_defaults if value] == [
+        "REPOSITORY"
+    ]
+    for owner, expected in (
+        (fixture, "build_core_wheel(output)"),
+        (predecessor, "build_core_wheel(root, source=source)"),
+    ):
+        call = next(
+            node
+            for node in ast.walk(owner)
+            if isinstance(node, ast.Call) and call_name(node) == BUILD
+        )
+        assert ast.unparse(call) == expected
+    assert "source = archive_predecessor(root)" in {
+        ast.unparse(node)
+        for node in ast.walk(predecessor)
+        if isinstance(node, ast.Assign)
+    }
     build_prefix = (
         "['uv', 'build', '--offline', '--no-build-isolation', "
         "'--python', sys.executable"
