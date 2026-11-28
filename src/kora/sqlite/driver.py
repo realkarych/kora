@@ -9,6 +9,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import contextmanager
+from enum import IntEnum
 from functools import cache
 from itertools import islice
 from pathlib import Path
@@ -27,6 +28,12 @@ Authorizer: TypeAlias = Callable[
     [int, str | None, str | None, str | None, str | None], int
 ]
 RetiredAction: TypeAlias = Callable[[], None]
+
+
+class IsolatedMarker(IntEnum):
+    METADATA = 1
+    JOURNAL = 2
+    JOURNAL_REOPEN = 3
 
 
 @cache
@@ -64,6 +71,7 @@ class Connection:
         reuse_only: bool = False,
         custody: bool = False,
         authority_journal: bool = False,
+        _marker: IsolatedMarker | None = None,
     ) -> None:
         self.native.open(
             self.handle,
@@ -78,8 +86,12 @@ class Connection:
             reuse_only,
             custody,
             authority_journal,
+            0 if _marker is None else int(_marker),
         )
         self._opened = True
+
+    def commit_isolated_marker(self) -> None:
+        self.native.commit_marker(self.handle)
 
     def reused_main(self) -> bool:
         return self.native.reused_main(self.handle)

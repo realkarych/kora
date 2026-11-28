@@ -33,6 +33,10 @@ struct KoraFd {
   ino_t sidecarInode;
 };
 
+enum {
+  KORA_MARKER_NONE, KORA_MARKER_METADATA, KORA_MARKER_JOURNAL, KORA_MARKER_JOURNAL_REOPEN
+};
+
 typedef struct {
   KoraFd **owner;
   int (*admit)(void *, int, int);
@@ -45,6 +49,9 @@ typedef struct {
   int reused;
   int custody;
   int authorityJournal;
+  int marker;
+  int markerPending;
+  int markerSync;
 } KoraOpen;
 
 static _Thread_local KoraOpen *koraOpen;

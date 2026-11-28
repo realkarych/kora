@@ -21,11 +21,12 @@ static int koraOpenMain(const char *path, int flags, mode_t mode) {
 }
 
 static const char *koraJournalName(const KoraOpen *scope) {
+  if (scope->marker == KORA_MARKER_METADATA) return "main.db-journal";
   return scope->authorityJournal ? "authority.sqlite3-journal" : "control.sqlite-journal";
 }
 
 static int koraOpenJournalFile(const KoraOpen *scope, const char *path, int flags, mode_t mode) {
-  if (!scope->authorityJournal) return koraOpenFile(path, flags, mode);
+  if (!scope->authorityJournal && !scope->marker) return koraOpenFile(path, flags, mode);
   int fd;
   do {
     fd = openat(scope->directory, koraJournalName(scope),
@@ -217,7 +218,7 @@ static int koraInspectJournal(KoraOpen *scope, int empty) {
   if (fstatat(scope->directory, koraJournalName(scope), &hint, AT_SYMLINK_NOFOLLOW))
     return errno == ENOENT ? SQLITE_OK : SQLITE_CANTOPEN;
   unixEnterMutex();
-  int blocked = empty || koraBlockedIdentity(&hint);
+  int blocked = empty || scope->marker || koraBlockedIdentity(&hint);
   unixLeaveMutex();
   if (blocked) return SQLITE_CANTOPEN;
   KoraFd *main = *scope->owner, *probe = koraNewFd();
@@ -271,7 +272,11 @@ static int koraSelectMain(unixFile *file, int fd, const char *path) {
       kind = KORA_MAIN_UNCERTAIN;
   }
   result = SQLITE_NOTADB;
-  if (kind == KORA_MAIN_EMPTY || kind == KORA_MAIN_ORDINARY) {
+  int marker = koraOpen->marker;
+  int expected = marker == KORA_MARKER_JOURNAL_REOPEN ? kind == KORA_MAIN_JOURNAL_TEST
+    : marker ? kind == KORA_MAIN_EMPTY
+    : kind == KORA_MAIN_EMPTY || kind == KORA_MAIN_ORDINARY;
+  if (expected) {
     int accepted = koraOpen->admit(koraOpen->context, fd, kind == KORA_MAIN_EMPTY);
     if (accepted) accepted = koraInspectJournal(koraOpen, kind == KORA_MAIN_EMPTY) == SQLITE_OK;
     unixEnterMutex();
