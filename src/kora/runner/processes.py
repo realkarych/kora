@@ -967,6 +967,8 @@ class GatedProcess:
             raise ChannelError(ChannelFailure.CLOSED)
         if self._clock.monotonic_ns() >= self._deadline:
             raise ChannelError(ChannelFailure.DEADLINE)
+        if stdio.closed or stdio.close_failed:
+            raise ChannelError(ChannelFailure.CLOSED)
         if registration is not self._registered():
             raise ProcessError(ProcessCondition.MISMATCH)
         if self._raw_borrowed:

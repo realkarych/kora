@@ -5,8 +5,10 @@ import json
 import os
 import socket
 import struct
+from array import array
 from collections.abc import Generator
 from contextlib import contextmanager
+from typing import Literal
 
 import pytest
 
@@ -336,6 +338,185 @@ async def test_typed_frame_rechecks_the_cutoff_inside_the_send_guard() -> None:
     assert refused.value.reason is ChannelFailure.DEADLINE
     assert notified == []
     assert eof == b""
+
+
+@pytest.mark.parametrize(
+    ("phase", "error_type"),
+    [
+        ("enter", BlockingIOError),
+        ("exit", BlockingIOError),
+        ("sent", BlockingIOError),
+        ("sent", RuntimeError),
+        ("suppressed", BlockingIOError),
+    ],
+)
+async def test_typed_write_preserves_callback_failure_without_a_second_send(
+    phase: Literal["enter", "exit", "sent", "suppressed"],
+    error_type: type[Exception],
+) -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    failure = error_type("guard or observer failure")
+    attempts: list[str] = []
+
+    @contextmanager
+    def guard() -> Generator[bool]:
+        first = not attempts
+        attempts.append("guard")
+        if first and phase == "enter":
+            raise failure
+        if phase == "suppressed":
+            try:
+                yield True
+            except BlockingIOError:
+                return
+        else:
+            yield True
+        if first and phase == "exit":
+            raise failure
+
+    def sent() -> None:
+        attempts.append("sent")
+        if phase in ("sent", "suppressed") and attempts.count("sent") == 1:
+            raise failure
+
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        with pytest.raises(error_type) as stopped:
+            await pair.receiver.write_typed_frame(
+                FrameType.JSON, b"", cutoff, guard=guard, sent=sent
+            )
+        actual = bytearray()
+        while chunk := await asyncio.get_running_loop().sock_recv(pair.raw, 16):
+            actual.extend(chunk)
+        assert pair.receiver.closed
+
+    assert stopped.value is failure
+    assert attempts == (["guard"] if phase == "enter" else ["guard", "sent"])
+    assert actual == (b"" if phase == "enter" else frame(FrameType.JSON, b""))
+
+
+async def test_typed_read_closes_and_preserves_first_byte_observer_failure() -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    failure = RuntimeError("first-byte observer failure")
+
+    def received() -> None:
+        raise failure
+
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        await send_raw(pair.raw, b"\x00")
+        with pytest.raises(RuntimeError) as stopped:
+            await pair.receiver.read_typed_frame(
+                cutoff, {FrameType.JSON: 1}, received=received
+            )
+        eof = await asyncio.get_running_loop().sock_recv(pair.raw, 1)
+
+    assert stopped.value is failure
+    assert eof == b""
+
+
+async def test_typed_write_counts_bytes_of_a_contiguous_multidimensional_view() -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    words = array("I", [1, 2, 3, 4])
+    view = memoryview(words).cast("B").cast("I", shape=(2, 2))
+    notified: list[bool] = []
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        await pair.receiver.write_typed_frame(
+            FrameType.JSON, view, cutoff, sent=lambda: notified.append(True)
+        )
+        peer = BoundedChannel(pair.raw, clock)
+        result = await peer.read_typed_frame(cutoff, {FrameType.JSON: view.nbytes})
+        pair.receiver.close()
+        await peer.expect_eof(cutoff)
+
+    assert result == (FrameType.JSON, words.tobytes())
+    assert notified == [True]
+
+
+async def test_typed_read_into_counts_buffer_and_partial_progress_in_bytes() -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    target = array("I", [0, 0])
+    view = memoryview(target)
+    payload = b"abcdef"
+    wire = frame(FrameType.BYTES, payload)
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        await send_raw(pair.raw, wire[:8])
+        reader = asyncio.create_task(
+            pair.receiver.read_typed_frame_into(cutoff, FrameType.BYTES, view)
+        )
+        await clock.waiting.wait()
+        assert target.tobytes() == b"abc" + bytes(view.nbytes - 3)
+        await send_raw(pair.raw, wire[8:])
+        received = await reader
+        pair.raw.shutdown(socket.SHUT_WR)
+        await pair.receiver.expect_eof(cutoff)
+
+    assert received == len(payload)
+    assert target.tobytes() == payload + bytes(view.nbytes - len(payload))
+
+
+@pytest.mark.parametrize("operation", ["read", "write"])
+async def test_typed_frame_checks_actual_view_capacity_before_io(
+    operation: Literal["read", "write"],
+) -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    element = array("I", [0])
+    target = memoryview(element * (MAX_TYPED_FRAME_BYTES // element.itemsize + 1))
+    payload = b"valid"
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        if operation == "read":
+            await send_raw(pair.raw, frame(FrameType.BYTES, payload))
+            with pytest.raises(ChannelError) as refused:
+                await pair.receiver.read_typed_frame_into(
+                    cutoff, FrameType.BYTES, target
+                )
+            result = await pair.receiver.read_typed_frame(
+                cutoff, {FrameType.BYTES: len(payload)}
+            )
+        else:
+            with pytest.raises(ChannelError) as refused:
+                await pair.receiver.write_typed_frame(FrameType.BYTES, target, cutoff)
+            with pytest.raises(BlockingIOError):
+                pair.raw.recv(1)
+            await pair.receiver.write_typed_frame(FrameType.BYTES, payload, cutoff)
+            peer = BoundedChannel(pair.raw, clock)
+            result = await peer.read_typed_frame(
+                cutoff, {FrameType.BYTES: len(payload)}
+            )
+
+    assert refused.value.reason is ChannelFailure.CAPACITY
+    assert result == (FrameType.BYTES, payload)
+
+
+async def test_typed_frame_refuses_unsupported_views_before_the_header() -> None:
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    strided = memoryview(bytearray(8))[::2]
+    released = memoryview(bytes(8))
+    released.release()
+    payload = b"valid"
+    async with channel_pair(clock) as pair, asyncio.timeout(5):
+        for view in (strided, released):
+            with pytest.raises(ChannelError) as write:
+                await pair.receiver.write_typed_frame(FrameType.BYTES, view, cutoff)
+            assert write.value.reason is ChannelFailure.MALFORMED
+        with pytest.raises(BlockingIOError):
+            pair.raw.recv(1)
+
+        await send_raw(pair.raw, frame(FrameType.BYTES, payload))
+        for view in (strided, released, memoryview(bytes(8))):
+            with pytest.raises(ChannelError) as read:
+                await pair.receiver.read_typed_frame_into(cutoff, FrameType.BYTES, view)
+            assert read.value.reason is ChannelFailure.MALFORMED
+
+        result = await pair.receiver.read_typed_frame(
+            cutoff, {FrameType.BYTES: len(payload)}
+        )
+
+    assert result == (FrameType.BYTES, payload)
 
 
 @pytest.mark.parametrize(

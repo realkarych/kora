@@ -224,6 +224,68 @@ async def test_gated_raw_channel_uses_inherited_cutoff_for_later_frame_deadline(
 
 
 @pytest.mark.asyncio
+async def test_gated_stop_revokes_the_active_raw_channel_and_collects_original(
+    tmp_path: Path,
+) -> None:
+    baseline = open_descriptors()
+    clock = StepClock()
+    cutoff = clock.monotonic_ns() + WINDOW_NS
+    first = asyncio.Event()
+    reaper = AdoptedReaper()
+    async with framed_gate(tmp_path, PARTIAL, clock, cutoff, reaper) as owner:
+        original = await owner.prepare()
+        await owner.acknowledge()
+        channel = owner.borrow_channel(original)
+
+        def received() -> None:
+            clock.waiting.clear()
+            first.set()
+
+        async with asyncio.timeout(10):
+            reader = asyncio.create_task(
+                channel.read_typed_frame(cutoff, {REPLY: 1}, received=received)
+            )
+            await first.wait()
+            await clock.waiting.wait()
+            assert not reader.done()
+            assert not channel.closed
+
+            stopped = owner.signal(signal.SIGTERM, cutoff)
+            closed_at_signal = channel.closed
+            with pytest.raises(ChannelError) as revoked:
+                await reader
+            await collect(owner, cutoff, original.process.pid, -signal.SIGTERM)
+
+        assert stopped is SignalResult.SENT
+        assert closed_at_signal
+        assert revoked.value.reason is ChannelFailure.CLOSED
+        assert not any(not waiter.done() for _, waiter in clock.sleepers)
+    assert open_descriptors() == baseline
+
+
+@pytest.mark.asyncio
+async def test_gated_raw_channel_cannot_be_borrowed_after_settlement_before_reap(
+    tmp_path: Path,
+) -> None:
+    baseline = open_descriptors()
+    clock = SystemClock()
+    cutoff = clock.monotonic_ns() + WINDOW_NS
+    reaper = AdoptedReaper()
+    async with framed_gate(tmp_path, "pass", clock, cutoff, reaper) as owner:
+        original = await owner.prepare()
+        await owner.acknowledge()
+        await owner.settle(cutoff)
+
+        assert owner.returncode is None
+        with pytest.raises(ChannelError) as refused:
+            owner.borrow_channel(original)
+        await collect(owner, cutoff, original.process.pid, 0)
+
+        assert refused.value.reason is ChannelFailure.CLOSED
+    assert open_descriptors() == baseline
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prepare", "acknowledge"])
 async def test_gated_raw_channel_is_released_after_failed_activation(
     tmp_path: Path, phase: Literal["prepare", "acknowledge"]
