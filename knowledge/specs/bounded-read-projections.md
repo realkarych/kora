@@ -67,6 +67,7 @@ Aliases in this table expand only for readability: `R=/namespaces/{ns}/runs/{run
 
 | Route | Metadata projection and separately selected data |
 |---|---|
+| `GET /namespaces/{ns}/graphs` | [Bounded namespace catalogue](graph-list.md), including exact request-time rank, active-version fields, run categories and usage for the namespace accounting day. |
 | `GET /namespaces/{ns}/runs` | Scalar run identity, pinned graph/version, status/timing, target/binding origin, rerun parent, cost completeness and bounded state summary. Add `holding=true` and `target_deferred=true` with `target=`, and `worker=<id>&worker_attempts=held\|recovery` for all runs containing the exact namespace-visible predicate counted by `/workers`. Held enumeration includes healthy live work, and recovery enumeration includes historical/superseded attempts; no recovery-only filter substitutes for held. Preserve existing graph/status/rerun/recovery filters. No embedded node list, parameters or history. |
 | `GET R` | Run scalars, admission/recovery counts/samples, current wait result, refs to nodes/reruns/events/artifacts/attempts and selected params/trigger/limits/retention. Replace `reruns[]` and `nodes[]`. `wait` unchanged except that its ordinary view uses these bounded projections. |
 | `GET R/nodes` | New paginated instance collection: identity/path/kind/status/subgraph attempt/current attempt/count, wait and compact reason; closed filters top-level, parent instance, element index, status, recovery-required and declared-node identity. No request, body, error text or history expansion. |
@@ -174,6 +175,7 @@ All collection modes accept `limit/cursor` and CLI `--limit/--cursor`. Content m
 
 | Public read | Exact CLI form, excluding common options | MCP tool and mode |
 |---|---|---|
+| graph catalogue | [`kora graphs --q Q --limit N --cursor C`](graph-list.md#5-shared-consumers-and-console-activation) | `kora_reference(kind=graphs,namespace=…,q=…,limit=…,cursor=…)` |
 | runs collection | `kora runs [--graph …] [--status …] [--rerun-of r] [--target …] [--holding true\|false] [--target-deferred true\|false] [--recovery-required true\|false] [--worker w --worker-attempts held\|recovery]` | `kora_runs(mode=list)` with identical snake_case filters |
 | run metadata/wait | `kora run r [--wait …] [--wait-timeout …]` | `kora_runs(mode=run,run_id=r,wait,wait_timeout)` |
 | run selected content | `kora run r --content params\|trigger\|limits\|retention` | `kora_runs(mode=run,run_id=r,content=…)` |

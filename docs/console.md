@@ -30,12 +30,12 @@ The entry is the list of the namespace's graphs, one row per graph with aligned 
 
 - a traffic light over the graph's active runs, counting only stop states: runs waiting for a person, runs that failed, runs that are running; zeros are hidden; a routine failed sub-graph attempt is not red, and a run in `failed` counts as failed until it is retried or cancelled;
 - the graph's name, with its one-line description from the graph document under it, truncated to the row with the full text on hover;
-- the number of declared nodes of the latest version (a fan-out and a sub-graph count as one node each);
+- the number of declared nodes of the latest active version (a fan-out and a sub-graph count as one node each), with an explicit absence when there is no active version;
 - the tokens spent today by the graph's attempts (the window of the namespace's daily soft limit), with the USD estimate beside it when the billing class allows one.
 
-The traffic light is the first column so that one glance down the list finds the graphs that wait for a person; the list puts those graphs first, then the graphs with a failed run, then the rest by name, and a search field filters the list by name. Each segment of the light is a link: "1 waiting for you" opens the graph page with the newest run waiting for a person selected, "1 failed" with the newest failed run, and the rest of the row opens the page on the newest run. Rows rather than cards because graphs are comparable records: aligned columns let a person compare the lights and the spend of every graph at once and hold hundreds of graphs without a change of layout.
+The [graph catalogue](../knowledge/specs/graph-list.md) puts graphs waiting for a person first, then graphs with a failed run, then the rest. Names are ordered within each group, and search covers the whole namespace. Each segment opens that graph's newest run in the selected category. The rest of the row opens the graph page with its newest run selected when one exists. Aligned columns make state and spend comparable across a page. Refresh starts a new traversal when a change in priority moves a graph between pages.
 
-Triggers and their pause state, the last run, the version and its deploy date are not in the row: none of them changes the decision to jump in. They are on the graph page. A namespace with one graph opens that graph's page directly.
+Triggers and their pause state, the last run, the version and its deploy date are not in the row: none of them changes the decision to jump in. They are on the graph page. An initial unfiltered catalogue that confirms a single graph opens its page directly once that destination is available. A single search result stays on the list. The Graphs entry is pending its installed Console delivery.
 
 ## The graph page
 
