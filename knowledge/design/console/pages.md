@@ -42,18 +42,18 @@ Earlier events replaces the page when the server supplies a continuation. Reload
 
 ## Graphs (the entry)
 
-One row per graph of the namespace, the columns in the order of the table; the rows are ordered with the graphs that have a run waiting for a person first, then the graphs with a failed run, then the rest by name; a search field above the list filters by name; a namespace with one graph opens its page directly.
+The [namespace graph catalogue](../../specs/graph-list.md) supplies one bounded page. The server orders graphs waiting for a person first, then graphs with a failed run, then the remaining graphs. Names are ordered within each group. Search applies to the whole authorized namespace. Request the next page explicitly and replace the displayed page. Refresh begins again if an observation changes the order between pages. The first complete unfiltered page with exactly one item and no continuation opens that graph directly when the destination is available. Search, stale results and continuation pages do not establish single-graph entry.
 
 | element | content | route |
 |---|---|---|
-| traffic light | first column; over the graph's runs in `running` or `failed`: runs whose only live work waits for a person; runs in `failed`; runs running otherwise; zeros hidden; each segment links to the graph page with the newest run in that state selected | the graphs list summary (ADR-0015) |
-| name and description | `graph.name`; under it the one-line `description` of the latest active version's document, truncated to the row, the full text on hover | `GET /namespaces/{ns}/graphs` |
-| node count | declared top-level nodes of the latest active version; a `fan_out` or `subgraph` node counts once | the graphs list summary (ADR-0015) |
-| tokens today | the sum of `usage_record` tokens over the graph's attempts started today in the namespace's timezone; the USD estimate beside it unless the billing class is `subscription` | the graphs list summary (ADR-0015) |
-| search | a text field filtering the rows by graph name | client-side over the list |
-| click | the graph page | |
+| traffic light | exact waiting-for-person, failed and other running counts. Hide zero segments. Each link opens the graph page with the run identified by that category's newest run ID. | catalogue run summary |
+| name and description | graph name and the latest active version's description as inert text. Show the description under the name, clipped to the row, with the full text on hover. | catalogue graph and active version |
+| node count | declared top-level nodes of the latest active version, with explicit absence when none is active. A `fan_out` or `subgraph` node counts once. | catalogue active version |
+| tokens today | recorded tokens and USD for attempts started on the namespace accounting date. Mark a known subtotal partial when appropriate, show unavailable separately from zero and omit subscription-only USD. | catalogue day and coverage |
+| search | a text field for a literal graph-name substring. Omit an empty search and start afresh when the search changes. | catalogue `q` selector |
+| row entry | the scoped graph page with its newest run selected when available | graph address |
 
-Not in the row: triggers and pause state, the last run, the version and its deploy date.
+Not in the row: triggers and pause state, the last run, the version and its deploy date. The installed entry waits for the current-session list ingress, namespace bootstrap and working graph and run destinations. Accept a response only in its current namespace, search and page-request generation. Refresh and continuation use distinct generations even at the same address. Back refetches under current rights with one bounded in-memory anchor. If that anchor is unavailable, start from the search in the address. A stale response cannot paint or navigate.
 
 ## Graph page
 

@@ -12,6 +12,8 @@ Bounded-read amendment dated 2026-10-23: the project owner approved the contract
 
 The project owner reviewed and accepted the installed browser amendment line by line on 2026-11-26. [Owner approval](https://github.com/realkarych/kora/issues/1896#issuecomment-7198632426).
 
+The project owner reviewed and accepted the graph catalogue wording line by line on 2026-11-28. [Owner approval](https://github.com/realkarych/kora/pull/2014#issuecomment-7239750503).
+
 ## Context
 
 Requirements decision 21 made the web console a full console in the MVP, held to the reference-grade bar of NFR-13.1, and the roadmap put its design before its implementation. The architecture critique of 2026-10-16 asked the design to settle the entities and the failure states before the screens: an attention queue, a target page, a review-revision page, the run graph with instances, attempts and superseded outputs apart, attempt comparison, and two product-acceptance scenarios (an engineer without database access explains a run; an operator resolves a lost worker and an ambiguous publish through the public surface). [ADR-0014](0014-target-identity.md) gave the target page its footing.
@@ -30,7 +32,7 @@ The design itself, page by page, is recorded in [docs/console.md](../console.md)
 
 **What the API exposes for the console** (all read projections over existing rows, computed at request time, except the two recorded fields below):
 
-- the graphs list carries a per-graph summary: the latest active version's declared top-level node count; the counts of the graph's runs in `running` or `failed` split into runs whose only live work waits for a person, runs in `failed` and runs running otherwise; the tokens and USD estimate of the graph's attempts started today in the namespace's timezone, with the weakest completeness;
+- the [namespace graph catalogue](../../knowledge/specs/graph-list.md) carries the latest active version's description and declared top-level node count, exact counts and newest run references in the three run categories, and the graph's recorded tokens and USD estimate for its namespace's accounting day. Search and priority order cover the authorized namespace. The catalogue is a planned public read shared by the Console, CLI and MCP;
 - the node view carries the instance's current wait when it has one: `kind`, `wake_at`, the subscription's event name or poll spec, and for an `admission` wait the `reason` that the admission pass now records on the wait row: `concurrency_limit` with its scope, `daily_budget`, or `target_held` with the holding run;
 - the attempt view carries `worker_id`, `lease_until`, `last_heartbeat_at`, `desired_state` and `infrastructure_retries`, a new field counting the resubmissions under the runtime's `infrastructure_retry` policy that preceded the attempt;
 - the approvals list accepts `status=` with any request status, `pending` by default, so that the history of responses can be listed; its rows carry the run's `target_key` and the wait's `wake_at` as the deadline;
@@ -63,7 +65,7 @@ Public reads offer a complete compact state projection for one declared topology
 - `api-and-agent-surface.md` section 6 describes the sections, pages and four actions; sections 2, 3 and 4 gain the summary, the wait, the attempt fields and the approvals status filter; the parity checklist includes every added public read and selection in the bounded-read contract.
 - `data-model.md` gains `wait.reason`, `attempt.infrastructure_retries` and the event `vcs.publish_repeated`; `scheduler.md` records the admission reason and writes the repeated-publish event.
 - The graph is laid out left to right by the ELK layered algorithm through its JavaScript build, with fan-out and sub-graph frames as compound nodes; the dependency and its reason are recorded in the [stack reference](../../knowledge/architecture/detailed.md#stack-per-component).
-- The per-graph summary retains its existing query contract. Run pages carry bounded state summaries and selected graph scopes are complete compact observations; their implementing change measures query work and resource release at hundreds of runs and the required graph sizes.
+- Each graph catalogue page uses one public request and one short read snapshot. Bounded indexed batches supply the exact summaries and order without a query per graph. This replaces the earlier one-query-per-list rule. Membership and priority can change between pages. Run pages carry bounded state summaries and selected graph scopes are complete compact observations; their implementing change measures query work and resource release at hundreds of runs and the required graph sizes.
 - The console's pages are reviewed against NFR-13.1 in both themes before release; the design review covers the five colours in light and dark.
 - `knowledge/design/` is a new folder for the detailed design of a user-facing surface behind a page in `docs/`; it holds element lists and scenarios, never decisions.
 
