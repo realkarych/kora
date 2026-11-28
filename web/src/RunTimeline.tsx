@@ -30,10 +30,29 @@ function displayText(value: string): string {
     ? '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0') : character).join('')
 }
 
+const timeFormat: Intl.DateTimeFormatOptions = {
+  year: 'numeric',
+  month: 'short',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+  timeZoneName: 'shortOffset',
+}
+const localTime = new Intl.DateTimeFormat('en-GB', timeFormat)
+const localTimeWithEra = new Intl.DateTimeFormat('en-GB', { ...timeFormat, era: 'short' })
+
+function HistoryTime({ timestamp }: { timestamp: string }) {
+  const instant = new Date(timestamp.slice(0, 23) + 'Z')
+  const formatter = instant.getFullYear() < 1 ? localTimeWithEra : localTime
+  return <time dateTime={timestamp}>{formatter.format(instant)}</time>
+}
+
 function EventRow({ event }: { event: RunEvent }) {
   const { actor } = event
   return <li>
-    <time dateTime={event.at}>{event.at}</time>
+    <HistoryTime timestamp={event.at} />
     <div>
       <strong><bdi>{displayText(event.kind)}</bdi></strong>
       <code>{event.id}</code>
@@ -112,7 +131,7 @@ function History({ namespace, run, signOut }: Scope & { signOut: () => void }) {
     </div>}
     {busy && page !== undefined && view.label && <p role="status">{view.label}</p>}
     {page !== undefined ? <>
-      <p className="timeline-observed">Newest first. Observed <time dateTime={page.observed_at}>{page.observed_at}</time></p>
+      <p className="timeline-observed">Newest first. Observed <HistoryTime timestamp={page.observed_at} /></p>
       {page.items.length === 0
         ? <p role="status">No events yet.</p>
         : <ol aria-busy={busy} role="list">{page.items.map(event => <EventRow key={event.id} event={event} />)}</ol>}

@@ -36,7 +36,7 @@ Every page has a browser address with the namespace in its path; the console roo
 
 ## Installed known-run history
 
-The first installed view shows one finite page of committed run history for a known namespace and run ID. The title and identifiers frame an ordered list of the API's event kinds, timestamps, event IDs and saved attribution. Optional node and attempt identifiers remain metadata. It preserves server order and treats every returned value as text.
+The first installed view shows one finite page of committed run history for a known namespace and run ID. The title and identifiers frame an ordered list of the API's event kinds, timestamps, event IDs and saved attribution. Optional node and attempt identifiers remain metadata. It preserves server order and treats every returned value as text. Event and page observation timestamps display an absolute date, time and UTC offset in the browser's time zone. Each time element retains the exact API timestamp in its datetime attribute.
 
 Earlier events replaces the page when the server supplies a continuation. Reload latest makes a fresh first-page read. The address contains no credential or cursor. The view distinguishes a malformed link, loading, empty history, missing run, denied scope, expired or revoked session and unavailable service. Sign-out ends the browser session. A changed page identity, expired authority or sign-out discards obsolete protected data and settles pending reads. The address remains a scoped link when the graph view lands, with live follow, graph state and payload selection on their existing activation paths.
 

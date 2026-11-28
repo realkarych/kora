@@ -6,12 +6,13 @@ import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
-import type { BrowserContext, Page, Request, Response } from 'playwright'
+import type { Browser, BrowserContext, Locator, Page, Request, Response } from 'playwright'
 import { ArtifactLimit } from './artifacts.ts'
 import { checkCleanup, childEnvironment, closeOwners, Ownership } from './ownership.ts'
 
 type Document = Record<string, unknown>
 type Theme = 'light' | 'dark'
+type HistoryTimeZone = 'UTC' | 'Europe/Moscow'
 type RouteClass = 'timeline' | 'asset' | 'event' | 'canonical' | 'signIn' | 'signOut'
 type SignInStep = 'start' | 'open-page' | 'navigate' | 'redemption' | 'redirect-headers'
   | 'fetch-metadata' | 'document-headers' | 'cookies' | 'cookie-visibility'
@@ -24,6 +25,11 @@ type PaginationStep = 'start' | 'focus-reload' | 'tab-sign-out' | 'tab-earlier'
   | `${PageSelection}-${'enter' | 'response' | 'headers' | 'selector' | 'dom'}`
 
 const browserTimeoutMs = 10000
+const fixtureTime = '2026-10-20T22:30:00.123456Z'
+const eventLabels = {
+  UTC: '20 Oct 2026, 22:30:00 GMT',
+  'Europe/Moscow': '21 Oct 2026, 01:30:00 GMT+3',
+} satisfies Record<HistoryTimeZone, string>
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 const lines = input[Symbol.asyncIterator]()
 
@@ -365,7 +371,13 @@ async function assertPageResponse(response: Response, cursor: string | null): Pr
   assert.deepEqual(query.getAll('cursor'), cursor === null ? [] : [cursor])
 }
 
-async function assertPageRows(page: Page, expected: Document[]): Promise<void> {
+async function assertTime(time: Locator, datetime: string, label: string): Promise<void> {
+  assert(await time.isVisible())
+  assert.equal(await time.getAttribute('datetime'), datetime)
+  assert.equal(string(await time.textContent()).replace(/ GMT\+0$/u, ' GMT'), label)
+}
+
+async function assertPageRows(page: Page, expected: Document[], timeZone: HistoryTimeZone): Promise<void> {
   const first = expected[0]
   if (first !== undefined) {
     await rows(page).first().getByText(string(first.id), { exact: true }).waitFor({ state: 'visible' })
@@ -374,10 +386,8 @@ async function assertPageRows(page: Page, expected: Document[]): Promise<void> {
   for (const [index, event] of expected.entries()) {
     const row = rows(page).nth(index)
     const actor = object(event.actor)
-    const time = row.locator(':scope > time')
-    assert(await time.isVisible())
-    assert.equal(await time.getAttribute('datetime'), event.at)
-    assert.equal(await time.textContent(), event.at)
+    assert.equal(event.at, fixtureTime)
+    await assertTime(row.locator(':scope > time'), fixtureTime, eventLabels[timeZone])
     const details = row.locator(':scope > div').first()
     assert.equal(await details.locator(':scope > strong').textContent(), event.kind)
     const identities = [event.id, event.node_instance_id, event.attempt_id]
@@ -395,27 +405,42 @@ async function assertPageRows(page: Page, expected: Document[]): Promise<void> {
   }
 }
 
-async function assertRenderedPage(page: Page, expected: Document[], began: number): Promise<void> {
-  await page.locator('.run-timeline ol[aria-busy=false]').waitFor({ state: 'visible' })
-  await assertPageRows(page, expected)
-  const observation = page.locator('.timeline-observed time')
-  await observation.waitFor({ state: 'visible' })
-  const [datetime, text] = await observation.evaluate(element =>
-    [element.getAttribute('datetime'), element.textContent])
-  assert.equal(datetime, text)
-  const observed = Date.parse(string(datetime))
-  assert(began <= observed && observed <= Date.now())
+function observationLabel(observed: number, timeZone: HistoryTimeZone): string {
+  const date = new Date(observed)
+  const day = date.toLocaleDateString('en-GB', { timeZone, day: '2-digit', month: 'short', year: 'numeric' })
+  const clock = date.toLocaleTimeString('en-GB', {
+    timeZone, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  })
+  return `${day}, ${clock} ${timeZone === 'UTC' ? 'GMT' : 'GMT+3'}`
 }
 
-async function latest(page: Page, response: Response, began: number): Promise<void> {
+async function assertRenderedPage(
+  page: Page, response: Response, expected: Document[], began: number, timeZone: HistoryTimeZone = 'UTC',
+): Promise<void> {
+  const body: unknown = await response.json()
+  const events = pageItems(object(body))
+  assert.deepEqual(events.map(event => event.at), expected.map(event => event.at))
+  await page.locator('.run-timeline ol[aria-busy=false]').waitFor({ state: 'visible' })
+  await assertPageRows(page, expected, timeZone)
+  const datetime = string(object(body).observed_at)
+  const observed = Date.parse(datetime)
+  assert(began <= observed && observed <= Date.now())
+  const observation = page.locator('.timeline-observed time')
+  await observation.waitFor({ state: 'visible' })
+  await assertTime(observation, datetime, observationLabel(observed, timeZone))
+}
+
+async function latest(page: Page, response: Response, began: number, timeZone: HistoryTimeZone = 'UTC'): Promise<void> {
   await assertPageResponse(response, null)
   signInStep('latest-dom')
   paginationStep('latest-dom')
-  await assertRenderedPage(page, canonicalRows, began)
+  await assertRenderedPage(page, response, canonicalRows, began, timeZone)
   assert(await earlier(page).isVisible())
 }
 
-async function signIn(page: Page, context: BrowserContext, url: string): Promise<void> {
+async function signIn(
+  page: Page, context: BrowserContext, url: string, timeZone: HistoryTimeZone,
+): Promise<void> {
   assert.equal(new URL(url).origin, origin)
   assert.match(new URL(url).pathname, /^\/api\/v1\/auth\/session\/[0-9a-f]{64}$/u)
   await checkPageRead(page, async (observed, began) => {
@@ -456,7 +481,7 @@ async function signIn(page: Page, context: BrowserContext, url: string): Promise
     assert.equal(await page.evaluate(() => document.cookie.includes('__Host-kora_session=')), false)
     signInStep('event-response')
     const events = await observed
-    await latest(page, events, began)
+    await latest(page, events, began, timeZone)
     signInStep('clean-page')
     const rendered = await page.locator('body').innerText()
     assert(![url, new URL(url).pathname, session.value, csrf.value].some(marker => rendered.includes(marker)))
@@ -514,7 +539,7 @@ async function paginate(page: Page): Promise<void> {
     const response = await observed
     await assertPageResponse(response, canonicalCursor)
     paginationStep('earlier-dom')
-    await assertRenderedPage(page, canonicalEarlierRows, began)
+    await assertRenderedPage(page, response, canonicalEarlierRows, began)
     assert.equal(await earlier(page).count(), 0)
     paginationStep('restored-focus')
     assert(await refresh(page).evaluate(element => element === document.activeElement))
@@ -662,13 +687,18 @@ async function loseAuthority(page: Page): Promise<void> {
   validatedReads.add(refused.request())
 }
 
+async function historyContext(browser: Browser, timezoneId: HistoryTimeZone): Promise<BrowserContext> {
+  const context = await browser.newContext({ serviceWorkers: 'block', locale: 'en-GB', timezoneId })
+  context.setDefaultTimeout(browserTimeoutMs)
+  context.setDefaultNavigationTimeout(browserTimeoutMs)
+  return context
+}
+
 async function trustedJourney(): Promise<void> {
   const owner = await profile('trusted-chromium', true)
   try {
     const browser = await owner.startBrowser()
-    const context = await browser.newContext({ serviceWorkers: 'block' })
-    context.setDefaultTimeout(browserTimeoutMs)
-    context.setDefaultNavigationTimeout(browserTimeoutMs)
+    const context = await historyContext(browser, 'UTC')
     try {
       const outside = await context.newPage()
       await checkSecondAuthority(outside, owner)
@@ -678,7 +708,8 @@ async function trustedJourney(): Promise<void> {
       const page = await context.newPage()
       watchSafeDiagnostics(page)
       const signInUrl = string(bootstrap.url)
-      await signIn(page, context, signInUrl)
+      await signIn(page, context, signInUrl, 'UTC')
+      evidence.checks.push('utc-timestamps')
       signInStep('open-replay')
       const replay = await context.newPage()
       try {
@@ -753,22 +784,28 @@ async function trustedJourney(): Promise<void> {
         await background.close()
       }
       stage('expired-authority')
-      const relogin = await context.newPage()
       await page.close()
-      watchSafeDiagnostics(relogin)
-      send({ type: 'relogin' })
-      await signIn(relogin, context, string((await receive()).url))
-      send({ type: 'expire' })
-      const successor = string((await receive()).url)
-      await loseAuthority(relogin)
-      stage('revoked-authority')
-      const another = await context.newPage()
-      await relogin.close()
-      watchSafeDiagnostics(another)
-      await signIn(another, context, successor)
-      send({ type: 'revoke' })
-      assert.equal((await receive()).revoked, true)
-      await loseAuthority(another)
+      const localContext = await historyContext(browser, 'Europe/Moscow')
+      try {
+        const relogin = await localContext.newPage()
+        watchSafeDiagnostics(relogin)
+        send({ type: 'relogin' })
+        await signIn(relogin, localContext, string((await receive()).url), 'Europe/Moscow')
+        evidence.checks.push('moscow-timestamps')
+        send({ type: 'expire' })
+        const successor = string((await receive()).url)
+        await loseAuthority(relogin)
+        stage('revoked-authority')
+        const another = await localContext.newPage()
+        await relogin.close()
+        watchSafeDiagnostics(another)
+        await signIn(another, localContext, successor, 'Europe/Moscow')
+        send({ type: 'revoke' })
+        assert.equal((await receive()).revoked, true)
+        await loseAuthority(another)
+      } finally {
+        await localContext.close()
+      }
       checkDiagnostics()
       send({ type: 'finish' })
     } catch (error) {
