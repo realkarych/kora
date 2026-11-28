@@ -60,7 +60,7 @@ from kora.ir.graph_json import ObjectReader, TextBudget, render_object
 from kora.ir.json import JsonObject
 from kora.protocols.worker_claim_policy import prepare_node_policy
 from kora.protocols.worker_claim_wire import MAX_IMMUTABLE_BYTES, MAX_NODE_POLICY_BYTES
-from tests.db.seed import Seeder
+from tests.db.seed import Seeder, seed_run_position_state
 from tests.engine.attempt_admission_support import (
     SELECTION,
     AttemptAdmissionCase,
@@ -220,6 +220,7 @@ async def save_graph_and_run(
             started_at=None,
         )
         await writer.execute(insert(run).values(**values))
+        await seed_run_position_state(writer, scope.namespace_id, (run_id,))
         await writer.execute(
             insert(run_inputs).values(run_id=run_id, params=b"{}", cel_projection=b"{}")
         )

@@ -8,7 +8,7 @@ The authority specification's governing decisions, uncertainty rules and resourc
 
 ## Private SQLite writer
 
-Issue #1981 exercises the existing token revocation through the original aiosqlite writer and the guarded SQLite engine. The private composition uses a disposable fixture with the v1 frontier. The installed metadata revision remains `run_event_metadata_0034`, and the installed CLI, API and ordinary database configuration expose no selector for the private composition.
+Issue #1981 exercises the existing token revocation through the original aiosqlite writer and the guarded SQLite engine. The private composition uses a disposable fixture with the v1 frontier rooted at `run_event_metadata_0034`. The installed CLI, API and ordinary database configuration expose no selector for the private composition.
 
 The original J owner admits the actual writable `authority.sqlite3` main through the same native engine as ordinary installed metadata and storage. The main classifier runs before SQL, recovery and sidecar access. The journal's anchored rollback sidecar is `authority.sqlite3-journal`. An explicit disposable initializer checks a zero-length main with positional EOF and no companions. Existing-journal opens require the existing main and its saved identity. J retains the exact attempted native receipt through refusal and actual retirement.
 

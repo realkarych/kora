@@ -35,6 +35,7 @@ POSTGRES_DIGEST: str = (
 POSTGRES_IMAGE: str = f"{POSTGRES_TAG}@{POSTGRES_DIGEST}"
 POSTGRES_PORT: int = 5432
 POSTGRES_USER: str = "kora"
+POSTGRES_FRESH_OWNER: str = "kora_fresh_owner"
 TEMPLATE_DATABASE: str = "kora_template"
 ADMIN_DATABASE: str = "postgres"
 EMPTY_TEMPLATE: str = "template1"
@@ -117,6 +118,7 @@ class PostgresServer:
     host: str
     port: int
     password: str = field(repr=False)
+    fresh_password: str = field(repr=False)
 
     def url_for(self, database: str) -> URL:
         return URL.create(
@@ -169,6 +171,30 @@ class PostgresServer:
         quoted_template = quote(valid_database_name(template))
         await self._execute_admin(
             f"CREATE DATABASE {quoted_name} TEMPLATE {quoted_template}"
+        )
+
+    async def prepare_fresh_database(self, name: str) -> DatabaseSettings:
+        target = quote(valid_database_name(name))
+        await self._execute_admin(
+            f"ALTER DATABASE {target} OWNER TO {quote(POSTGRES_FRESH_OWNER)}"
+        )
+        await self._execute_admin(f"ALTER DATABASE {target} CONNECTION LIMIT 1")
+        return DatabaseSettings(
+            url=self.url_for(name).set(
+                username=POSTGRES_FRESH_OWNER, password=self.fresh_password
+            ),
+            dialect=Dialect.POSTGRESQL,
+        )
+
+    async def prepare_template(self) -> None:
+        await self._execute_admin(
+            f"CREATE ROLE {quote(POSTGRES_FRESH_OWNER)} LOGIN "
+            f"PASSWORD '{self.fresh_password}'"
+        )
+        settings = await self.prepare_fresh_database(TEMPLATE_DATABASE)
+        await upgrade_database(settings)
+        await self._execute_admin(
+            f"ALTER DATABASE {quote(TEMPLATE_DATABASE)} CONNECTION LIMIT -1"
         )
 
     async def drop_database_in_loop(self, name: str) -> None:
@@ -227,10 +253,11 @@ def start_postgres(
             host=container.get_container_host_ip(),
             port=container.get_exposed_port(POSTGRES_PORT),
             password=password,
+            fresh_password=secrets.token_urlsafe(24),
         )
         server.wait_ready()
         if disabled_wal_setting is None:
-            asyncio.run(upgrade_database(server.settings_for(TEMPLATE_DATABASE)))
+            asyncio.run(server.prepare_template())
         yield server
     finally:
         container.stop()

@@ -52,6 +52,7 @@ typedef struct {
   int marker;
   int markerPending;
   int markerSync;
+  int snapshotOnly;
 } KoraOpen;
 
 static _Thread_local KoraOpen *koraOpen;

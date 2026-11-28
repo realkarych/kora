@@ -320,11 +320,18 @@ class ReadObservations:
                 time.sleep(0.001)
 
 
-async def check_schema(database: Database, require_live: Callable[[], None]) -> bool:
-    from kora.api.serving import sqlite_schema_ready_for_serving
+async def guarded_schema_ready(database: Database) -> bool:
+    from kora.db.migrations import database_is_at_head
+    from kora.db.run_event_page_v1 import sqlite_run_event_page_available
 
+    return await database_is_at_head(database) and await database.read(
+        sqlite_run_event_page_available
+    )
+
+
+async def check_schema(database: Database, require_live: Callable[[], None]) -> bool:
     try:
-        ready = await sqlite_schema_ready_for_serving(database)
+        ready = await guarded_schema_ready(database)
     finally:
         await database.close_sqlite_serving()
     if ready:
@@ -366,7 +373,6 @@ async def check_withdrawal(
 ) -> None:
     from sqlalchemy import text
 
-    from kora.api.serving import sqlite_schema_ready_for_serving
     from kora.db.connection import DatabaseClosedError, SqliteDriverConnection
 
     loop = asyncio.get_running_loop()
@@ -403,7 +409,7 @@ async def check_withdrawal(
             await asyncio.to_thread(withdraw)
             assert not read.done()
             try:
-                await sqlite_schema_ready_for_serving(database)
+                await guarded_schema_ready(database)
             except (DatabaseClosedError, WitnessScopeClosed):
                 pass
             else:
@@ -488,9 +494,11 @@ async def run_child(supplied_fd: int, lifetime_fd: int, case: WitnessCase) -> No
     verified_path: Path | None = None
     try:
         if case in {WitnessCase.SCHEMA, WitnessCase.INEXACT}:
-            from kora.api.serving import sqlite_schema_ready_for_serving
+            from kora.db.migrations import database_is_at_head
+            from kora.db.run_event_page_v1 import sqlite_run_event_page_available
 
-            assert callable(sqlite_schema_ready_for_serving)
+            assert callable(database_is_at_head)
+            assert callable(sqlite_run_event_page_available)
         with consume_binding(supplied_fd, lifetime_fd, case) as scope:
             verified_path = scope.main
             await run_protected_case(scope, case, attempts)

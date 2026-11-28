@@ -57,7 +57,7 @@ def legacy_preparation(
     database: Database,
 ) -> AbstractAsyncContextManager[AsyncConnection]:
     if database.dialect is Dialect.SQLITE:
-        return database.migration_connection()
+        return database.migration_connection(target="0001")
     return database.transaction()
 
 

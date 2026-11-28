@@ -7,14 +7,17 @@ from sqlalchemy import Connection, MetaData, Table, insert, inspect, select
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.reads import retention_snapshot_by_run_id, run_by_id
 from kora.db.retention import UnversionedRetention
 from kora.db.types import JsonValue
 from tests.db.closing import legacy_preparation
+from tests.db.predecessor import (
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+)
 from tests.db.seed import PredecessorHistory, predecessor_snapshot, seed_predecessor
-from tests.db.test_migrations import differences_ignoring_expression_indexes
 
 
 @dataclass(frozen=True)
@@ -72,7 +75,7 @@ def seed_retention_rows(
 async def seed_retention_predecessor(database: Database) -> RetentionPredecessor:
     async with legacy_preparation(database) as connection:
         original = await connection.run_sync(seed_predecessor)
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target="0002") as connection:
         await connection.run_sync(
             lambda sync: command.upgrade(alembic_config(sync), "0002")
         )
@@ -91,7 +94,7 @@ async def test_retention_snapshot_migration_preserves_legacy_rows(
         before = await seed_retention_predecessor(database)
         await database.close()
 
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
 
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
@@ -99,9 +102,7 @@ async def test_retention_snapshot_migration_preserves_legacy_rows(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
             revision = await connection.run_sync(current_revision)
-            differences = await connection.run_sync(
-                differences_ignoring_expression_indexes
-            )
+            differences = await connection.run_sync(historical_schema_differences)
             foreign_keys = await connection.run_sync(run_foreign_keys)
             columns = await connection.run_sync(
                 lambda sync: inspect(sync).get_columns("run")
@@ -135,7 +136,7 @@ async def test_retention_snapshot_migration_preserves_legacy_rows(
             old_writer_row = await run_by_id(
                 connection, "old-namespace", str(before.old_insert["id"])
             )
-        retry = await upgrade_database(empty_database_settings)
+        retry = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0002",
@@ -186,16 +187,14 @@ async def test_retention_snapshot_migration_recovers_compatible_schema(
                     )
         await database.close()
 
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
 
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             after = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
-            differences = await connection.run_sync(
-                differences_ignoring_expression_indexes
-            )
+            differences = await connection.run_sync(historical_schema_differences)
             snapshot = await retention_snapshot_by_run_id(
                 connection, "old-namespace", "old-run"
             )
@@ -247,7 +246,7 @@ async def test_retention_snapshot_migration_refuses_incompatible_schema(
         )
 
         with pytest.raises(error_type, match=error_pattern):
-            await upgrade_database(empty_database_settings)
+            await upgrade_to_run_event_metadata(empty_database_settings)
 
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:

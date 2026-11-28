@@ -11,14 +11,18 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.util.concurrency import await_
 
 from kora.db.connection import Database, DatabaseClosedError, DatabaseSettings, Dialect
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import run, run_inputs
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
+from tests.db.predecessor import (
+    PredecessorDbUpgrade,
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+)
 from tests.db.seed import Seeder
-from tests.db.test_db_upgrade_process import events, records, upgrade
-from tests.db.test_migrations import differences_ignoring_expression_indexes
+from tests.db.test_db_upgrade_process import events, records
 from tests.support.databases import sqlite_settings
 
 PREDECESSOR = "0019"
@@ -32,7 +36,7 @@ PARAMETERS = '{"n":-0.0,"é":"\\u0000"}'.encode()
 
 
 async def seed_predecessor(database: Database) -> tuple[str, str]:
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target=PREDECESSOR) as connection:
         await connection.run_sync(
             lambda sync: command.upgrade(alembic_config(sync), PREDECESSOR)
         )
@@ -174,16 +178,16 @@ async def test_run_input_migration_adds_only_empty_native_storage(
         async with database.read_transaction() as reader:
             columns_before = await reader.run_sync(parent_columns)
 
-        report = await upgrade_database(empty_database_settings, observation.open)
-        repeated = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(
+            empty_database_settings, observation.open
+        )
+        repeated = await upgrade_to_run_event_metadata(empty_database_settings)
         after = await legacy_rows(database)
         storage_after = await parent_storage_identity(database)
         async with database.read_transaction() as reader:
             columns_after = await reader.run_sync(parent_columns)
             await reader.run_sync(assert_native_shape)
-            schema_differences = await reader.run_sync(
-                differences_ignoring_expression_indexes
-            )
+            schema_differences = await reader.run_sync(historical_schema_differences)
             tags = (
                 (await reader.execute(select(run.c.input_encoding_version)))
                 .scalars()
@@ -257,7 +261,7 @@ async def test_run_input_migration_preserves_native_bytes_and_refuses_downgrade(
     downgrade = UpgradeObservation()
     try:
         _, run_id = await seed_predecessor(database)
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=REVISION) as connection:
             await connection.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), REVISION)
             )
@@ -295,7 +299,9 @@ async def test_run_input_migration_preserves_native_bytes_and_refuses_downgrade(
                     "restore a compatible backup$"
                 ),
             ):
-                async with migrator.migration_connection() as connection:
+                async with migrator.migration_connection(
+                    target=PREDECESSOR
+                ) as connection:
                     await connection.run_sync(
                         lambda sync: command.downgrade(
                             alembic_config(sync), PREDECESSOR
@@ -333,7 +339,7 @@ async def test_sqlite_run_input_storage_refuses_text_in_each_binary_column(
     database = Database(settings)
     try:
         _, run_id = await seed_predecessor(database)
-        await upgrade_database(settings)
+        await upgrade_to_run_event_metadata(settings)
 
         for projection, params in (("{}", b"{}"), (b"{}", "{}")):
             with pytest.raises(IntegrityError, match="ck_run_inputs_binary_storage"):
@@ -365,6 +371,7 @@ def input_schema(connection: Connection) -> tuple[tuple[str, ...], tuple[str, ..
 @pytest.mark.asyncio
 async def test_run_input_migration_conflict_is_atomic_and_content_free(
     empty_database_settings: DatabaseSettings,
+    predecessor_db_upgrade: PredecessorDbUpgrade,
 ) -> None:
     database = Database(empty_database_settings)
     marker = "PRIVATE-RUN-INPUT-MIGRATION-CANARY"
@@ -388,8 +395,10 @@ async def test_run_input_migration_conflict_is_atomic_and_content_free(
         }
 
         with pytest.raises(DBAPIError, match="already exists"):
-            await upgrade_database(empty_database_settings, observation.open)
-        failed = await asyncio.to_thread(upgrade, environment)
+            await upgrade_to_run_event_metadata(
+                empty_database_settings, observation.open
+            )
+        failed = await asyncio.to_thread(predecessor_db_upgrade, environment)
         after = await legacy_rows(database)
         locks = await migration_lock_count(database)
         async with database.transaction() as independent_writer:
@@ -399,7 +408,7 @@ async def test_run_input_migration_conflict_is_atomic_and_content_free(
                 text("SELECT conflict_marker FROM run_inputs")
             )
             await independent_writer.exec_driver_sql("DROP TABLE run_inputs")
-        recovered = await asyncio.to_thread(upgrade, environment)
+        recovered = await asyncio.to_thread(predecessor_db_upgrade, environment)
         async with database.read_transaction() as reader:
             await reader.run_sync(assert_native_shape)
             recovered_revision = await reader.run_sync(current_revision)
@@ -462,7 +471,7 @@ async def test_run_input_migration_interruption_releases_native_resources(
             schema_before = await reader.run_sync(input_schema)
 
         task = asyncio.create_task(
-            upgrade_database(empty_database_settings, observation.open)
+            upgrade_to_run_event_metadata(empty_database_settings, observation.open)
         )
         try:
             await asyncio.wait_for(observation.entered.wait(), 4)
@@ -488,7 +497,7 @@ async def test_run_input_migration_interruption_releases_native_resources(
             revision = await independent_writer.run_sync(current_revision)
             schema_after = await independent_writer.run_sync(input_schema)
             await Seeder(independent_writer).namespace("migration-writer-probe")
-        recovered = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert revision == PREDECESSOR
         assert schema_before == schema_after

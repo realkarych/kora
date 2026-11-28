@@ -124,16 +124,24 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   PyObject *capsule, *admit, *journal;
   const char *path;
   int readOnly, timeout, directory, prepare, reuseOnly, custody, authorityJournal, marker;
+  int snapshot = 0, exclusive = 0;
   unsigned long long pool;
-  if (!PyArg_ParseTuple(args, "OspiOOipKpppi", &capsule, &path, &readOnly, &timeout,
+  if (!PyArg_ParseTuple(args, "OspiOOipKpppi|pp", &capsule, &path, &readOnly, &timeout,
                         &admit, &journal, &directory, &prepare, &pool, &reuseOnly,
-                        &custody, &authorityJournal, &marker)) {
+                        &custody, &authorityJournal, &marker, &snapshot, &exclusive)) {
     return NULL;
   }
   NativeDb *db = nativePointer(capsule, dbCapsuleName);
   if (!db) return NULL;
+  const char *options = snapshot ? strchr(path, '?') : NULL;
+  int readonlyWal = options && !strcmp(options, "?mode=ro&readonly_shm=1");
   if (db->connection || db->main->state != KORA_FD_ABSENT || koraOpen ||
-      path[0] != '/' || !PyCallable_Check(admit) ||
+      (!snapshot && path[0] != '/') || !PyCallable_Check(admit) ||
+      (snapshot && (!readOnly || journal != Py_None || directory >= 0 || prepare ||
+        pool || reuseOnly || custody || strncmp(path, "file:///", 8) || strchr(path, '#') ||
+        !options || (!readonlyWal && strcmp(options, "?mode=ro&immutable=1")))) ||
+      (exclusive && (snapshot || readOnly || journal != Py_None || prepare || pool ||
+                     reuseOnly || custody)) ||
       (journal != Py_None && !PyCallable_Check(journal)) ||
       (custody && (pool || prepare || reuseOnly)) ||
       (authorityJournal && (!custody || journal == Py_None || directory < 0 || readOnly)) ||
@@ -144,17 +152,26 @@ static PyObject *openDatabaseOwner(PyObject *module, PyObject *args) {
   }
   int flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) |
               SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_EXRESCODE;
+  if (snapshot) flags |= SQLITE_OPEN_URI | SQLITE_OPEN_NOFOLLOW;
+  if (exclusive) flags |= SQLITE_OPEN_NOFOLLOW;
   if (journal != Py_None) flags |= SQLITE_OPEN_NOFOLLOW;
   db->opener = pthread_self();
   db->open = (KoraOpen){&db->main, approveMain, admit,
                        journal == Py_None ? NULL : Py_NewRef(journal), directory,
-                       prepare ? path : NULL, pool, reuseOnly, 0, custody, authorityJournal, marker, 0, 0};
+                       prepare ? path : NULL, pool, reuseOnly, 0, custody,
+                       authorityJournal, marker, 0, 0, readonlyWal};
   int result;
   Py_BEGIN_ALLOW_THREADS
   koraOpen = &db->open;
   result = sqlite3_open_v2(path, &db->connection, flags, NULL);
   koraOpen = NULL;
   db->open.preparePath = NULL;
+  if (result == SQLITE_OK && exclusive) {
+    sqlite3_file *main = NULL;
+    result = sqlite3_file_control(db->connection, "main", SQLITE_FCNTL_FILE_POINTER, &main);
+    if (result == SQLITE_OK) result = main->pMethods->xLock(main, SQLITE_LOCK_SHARED);
+    if (result == SQLITE_OK) result = main->pMethods->xLock(main, SQLITE_LOCK_EXCLUSIVE);
+  }
   if (result == SQLITE_OK) result = sqlite3_busy_timeout(db->connection, timeout);
   if (result == SQLITE_OK) {
     unixEnterMutex();

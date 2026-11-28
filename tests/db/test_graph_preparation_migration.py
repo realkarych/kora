@@ -13,7 +13,7 @@ from kora.db.graph_preparation_reads import (
     GraphPreparationSettlement,
     read_graph_preparation_settlement,
 )
-from kora.db.migrations import current_revision, schema_differences, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import (
     graph,
@@ -24,9 +24,12 @@ from kora.db.tables import (
 )
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
+from tests.db.predecessor import (
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+)
 from tests.db.seed import DIGEST, START, Seeder
 from tests.support.databases import encoded_sqlite_settings
-from tests.support.warning_filters import expression_index_warnings_ignored
 
 RELATION: str = "graph_deployment_preparation"
 PREDECESSOR: str = "0007"
@@ -176,7 +179,7 @@ async def test_preparation_native_checks_refuse_invalid_scope_and_shape(
 
 
 async def upgrade_predecessor(database: Database) -> None:
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target=PREDECESSOR) as connection:
         await connection.run_sync(
             lambda sync: command.upgrade(alembic_config(sync), PREDECESSOR)
         )
@@ -200,7 +203,7 @@ async def test_preparation_migrates_native_sqlite_utf16_and_refuses_bad_text(
         )
         invalid = ("valid\0suffix", "valid\ud800")
 
-        report = await upgrade_database(settings)
+        report = await upgrade_to_run_event_metadata(settings)
         for bad_name in invalid:
             encoded = bad_name.encode(encoding, errors="surrogatepass")
             with pytest.raises(IntegrityError):
@@ -299,8 +302,7 @@ def relation_schema(connection: Connection) -> tuple[set[str], set[str], list[st
     inspector = inspect(connection)
     columns = {str(column["name"]) for column in inspector.get_columns(RELATION)}
     checks = {str(check["name"]) for check in inspector.get_check_constraints(RELATION)}
-    with expression_index_warnings_ignored():
-        differences = list(schema_differences(connection))
+    differences = historical_schema_differences(connection)
     return columns, checks, differences
 
 
@@ -315,7 +317,9 @@ async def test_preparation_migration_rolls_back_stamp_and_releases_writer(
         before = await history(database)
 
         with pytest.raises(StampFailure, match="refused preparation migration"):
-            await upgrade_database(empty_database_settings, interruption.open)
+            await upgrade_to_run_event_metadata(
+                empty_database_settings, interruption.open
+            )
         async with database.read_transaction() as connection:
             rolled_back = await connection.run_sync(current_revision)
             absent = await connection.run_sync(
@@ -332,8 +336,8 @@ async def test_preparation_migration_rolls_back_stamp_and_releases_writer(
                 )
         finally:
             await fresh.close()
-        recovered = await upgrade_database(empty_database_settings)
-        repeated = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
+        repeated = await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.read_transaction() as connection:
             columns, checks, differences = await connection.run_sync(relation_schema)
             stored = (
@@ -404,7 +408,7 @@ async def test_preparation_migration_refuses_incompatible_existing_relation(
             )
 
         with pytest.raises(DBAPIError):
-            await upgrade_database(empty_database_settings)
+            await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
             columns = await connection.run_sync(
@@ -423,7 +427,7 @@ async def test_preparation_migration_downgrade_preserves_unsettled_row(
 ) -> None:
     database = Database(empty_database_settings)
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=REVISION) as connection:
             await connection.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), REVISION)
             )
@@ -442,7 +446,7 @@ async def test_preparation_migration_downgrade_preserves_unsettled_row(
         with pytest.raises(
             RuntimeError, match="preparation history cannot be downgraded"
         ):
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(target=PREDECESSOR) as connection:
                 await connection.run_sync(
                     lambda sync: command.downgrade(alembic_config(sync), PREDECESSOR)
                 )

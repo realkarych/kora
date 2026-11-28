@@ -31,7 +31,7 @@ from kora.engine.start_records import (
     start_receipt_document,
 )
 from kora.ir.json import JsonObject
-from tests.db.seed import FakeClock, Seeder
+from tests.db.seed import FakeClock, Seeder, seed_run_position_state
 from tests.engine.graph_output_cases import child
 from tests.engine.test_graph_execution_contract import (
     LIMITS,
@@ -162,6 +162,7 @@ async def promotion_case(
             started_at=None,
         )
         await writer.execute(insert(run).values(**values))
+        await seed_run_position_state(writer, scope.namespace_id, (run_id,))
         await writer.execute(
             insert(run_inputs).values(run_id=run_id, params=b"{}", cel_projection=b"{}")
         )
@@ -239,6 +240,7 @@ async def insert_pending(
         needs_scheduling=False,
     )
     await writer.execute(insert(run).values(**values))
+    await seed_run_position_state(writer, previous.scope.namespace_id, (run_id,))
     await writer.execute(
         insert(run_inputs).values(run_id=run_id, params=b"{}", cel_projection=b"{}")
     )

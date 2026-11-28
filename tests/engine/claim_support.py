@@ -45,7 +45,7 @@ from kora.protocols.authentication import NamespaceGrant, Principal
 from kora.protocols.identity import ProcessIdentity
 from tests.api.worker_support import CAPABILITIES
 from tests.db.closing import until
-from tests.db.seed import START, FakeClock, Seeder
+from tests.db.seed import START, FakeClock, Seeder, seed_run_position_state
 from tests.engine.promotion_support import READ_LIMITS
 from tests.engine.test_claim_snapshot import LIMITS as SNAPSHOT_LIMITS
 from tests.engine.test_claim_snapshot import (
@@ -330,6 +330,7 @@ async def another_run(database: Database, case: ClaimCase) -> ClaimCase:
         )
         await writer.execute(insert(run).values(**values))
         run_id = str(values["id"])
+        await seed_run_position_state(writer, case.binding.run.namespace_id, (run_id,))
         await writer.execute(
             insert(run_inputs).values(run_id=run_id, params=b"{}", cel_projection=b"{}")
         )

@@ -30,7 +30,7 @@ SIGNED_MAX: int = (1 << 63) - 1
 
 
 async def upgrade_to_predecessor(database: Database) -> None:
-    async with database.migration_connection() as migrator:
+    async with database.migration_connection(target="0032") as migrator:
         await migrator.run_sync(
             lambda sync: command.upgrade(alembic_config(sync), "0032")
         )
@@ -85,7 +85,7 @@ async def test_first_claim_basis_upgrade_preserves_receipt_and_refuses_downgrade
             predecessor = await first_claim_basis_available(reader)
             original = (await reader.execute(select(attempt_dispatcher))).one()
 
-        async with database.migration_connection() as migrator:
+        async with database.migration_connection(target="0033") as migrator:
             await migrator.run_sync(
                 lambda sync: command.upgrade(alembic_config(sync), "0033")
             )
@@ -94,7 +94,7 @@ async def test_first_claim_basis_upgrade_preserves_receipt_and_refuses_downgrade
             retained = (await reader.execute(select(attempt_dispatcher))).one()
             absent = await read_first_claim_basis(reader, DISPATCHER_ID)
         with pytest.raises(RuntimeError, match="restore a compatible backup"):
-            async with database.migration_connection() as migrator:
+            async with database.migration_connection(target="0032") as migrator:
                 await migrator.run_sync(
                     lambda sync: command.downgrade(alembic_config(sync), "0032")
                 )

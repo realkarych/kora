@@ -17,6 +17,8 @@ def open(
     custody: bool,
     authority_journal: bool,
     marker: int,
+    snapshot: bool = False,
+    exclusive: bool = False,
     /,
 ) -> None: ...
 def commit_marker(handle: object, /) -> None: ...

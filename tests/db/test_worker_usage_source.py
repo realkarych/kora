@@ -17,11 +17,11 @@ from sqlalchemy import (
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.cost_reads import CostReadRefused, read_usage_source
-from kora.db.migrations import upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import usage_record
 from kora.db.types import TIMESTAMP_TEXT_FORMAT, JsonValue
 from kora.db.usage_source import source_text
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import START, Seeder
 from tests.ir.test_cost_models import TOKENS
 
@@ -125,7 +125,7 @@ async def test_usage_migration_preserves_source_and_available_floor(
     originals: dict[str, JsonValue] = {}
     token_fields: list[JsonValue] = list(TOKENS)
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target="0023") as connection:
             previous = await connection.run_sync(predecessor)
         async with database.transaction() as connection:
             seed = Seeder(connection)
@@ -187,7 +187,7 @@ async def test_usage_migration_preserves_source_and_available_floor(
                 )
         await database.close()
 
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             rows = (
@@ -208,7 +208,7 @@ async def test_usage_migration_preserves_source_and_available_floor(
                 usage_id: await read_usage_source(connection, namespace_id, usage_id)
                 for usage_id in originals
             }
-        repeat = await upgrade_database(empty_database_settings)
+        repeat = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert report.from_revision == "0023"
         assert report.to_revision == "run_event_metadata_0034"

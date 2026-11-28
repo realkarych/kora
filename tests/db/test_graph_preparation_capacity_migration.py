@@ -141,7 +141,7 @@ async def retained_history(
 
 
 async def populate_predecessor(database: Database) -> None:
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target=PREDECESSOR) as connection:
         await connection.run_sync(
             lambda sync: command.upgrade(alembic_config(sync), PREDECESSOR)
         )
@@ -194,13 +194,13 @@ async def test_capacity_migration_preserves_populated_history_and_creates_no_wit
         await populate_predecessor(database)
         history = await retained_history(database)
 
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=REVISION) as connection:
             with executed_queries(connection) as observed:
                 report = await connection.run_sync(upgrade_capacity_revision)
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=REVISION) as connection:
             repeated = await connection.run_sync(upgrade_capacity_revision)
         with pytest.raises(RuntimeError, match="capacity cannot be downgraded"):
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(target=PREDECESSOR) as connection:
                 await connection.run_sync(
                     lambda sync: command.downgrade(alembic_config(sync), PREDECESSOR)
                 )

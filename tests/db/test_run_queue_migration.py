@@ -7,7 +7,7 @@ from sqlalchemy import Connection, String, literal_column, select, text
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.run_queue_index_v1 import (
     POSTGRES_QUEUE_INDEX,
@@ -19,6 +19,7 @@ from kora.db.tables import run
 from kora.engine.run_queue import QueueState
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import ConnectionLedger
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.test_graph_publication_digest_migration import wait_for_invalid_index
 from tests.db.test_graph_read_admission import executed_queries, sqlite_instructions
 from tests.engine.test_run_queue import acquire, queue_case
@@ -60,7 +61,7 @@ async def test_queue_index_upgrade_recovers_and_preserves_existing_history(
         return migrator
 
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=PREDECESSOR) as connection:
             await connection.run_sync(_predecessor)
         case = await queue_case(database)
         before = await _history(database)
@@ -70,7 +71,7 @@ async def test_queue_index_upgrade_recovers_and_preserves_existing_history(
         with pytest.raises(
             (RuntimeError, DBAPIError), match="incompatible|already exists"
         ):
-            await upgrade_database(empty_database_settings, open_migrator)
+            await upgrade_to_run_event_metadata(empty_database_settings, open_migrator)
         async with database.transaction() as writer:
             refused_revision = await writer.run_sync(current_revision)
             await writer.exec_driver_sql(f"DROP INDEX {index}")
@@ -79,7 +80,9 @@ async def test_queue_index_upgrade_recovers_and_preserves_existing_history(
             async with database.transaction() as writer:
                 await writer.exec_driver_sql("UPDATE run SET status = status")
                 task = asyncio.create_task(
-                    upgrade_database(empty_database_settings, open_migrator)
+                    upgrade_to_run_event_metadata(
+                        empty_database_settings, open_migrator
+                    )
                 )
                 try:
                     invalid_oid = await wait_for_invalid_index(database, index)
@@ -92,7 +95,9 @@ async def test_queue_index_upgrade_recovers_and_preserves_existing_history(
                     text("SELECT indisvalid FROM pg_index WHERE indexrelid = :oid"),
                     {"oid": invalid_oid},
                 )
-        report = await upgrade_database(empty_database_settings, open_migrator)
+        report = await upgrade_to_run_event_metadata(
+            empty_database_settings, open_migrator
+        )
         after = await _history(database)
         async with database.transaction() as writer:
             state = await case.observe(writer, await acquire(writer, case))
@@ -124,7 +129,7 @@ async def test_sqlite_queue_index_keeps_wide_legacy_ids_out_of_the_ordered_key(
     settings = encoded_sqlite_settings(tmp_path / "queue.db", encoding)
     database = Database(settings)
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=PREDECESSOR) as connection:
             await connection.run_sync(_predecessor)
         case = await queue_case(database)
         wide_text = "0" * (WIDE if encoding == "UTF-8" else WIDE // 2)
@@ -150,7 +155,7 @@ async def test_sqlite_queue_index_keeps_wide_legacy_ids_out_of_the_ordered_key(
         )
         parameters = {"namespace": case.namespace, "graph": case.graph}
 
-        await upgrade_database(settings)
+        await upgrade_to_run_event_metadata(settings)
         async with database.transaction() as writer:
             state = await case.observe(writer, await acquire(writer, case))
             with executed_queries(writer) as statements:

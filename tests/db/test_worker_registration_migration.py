@@ -4,7 +4,6 @@ from sqlalchemy import Connection, delete, insert, select
 from sqlalchemy.exc import IntegrityError
 
 from kora.db.connection import Database, DatabaseSettings
-from kora.db.migrations import upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import (
     event,
@@ -12,6 +11,7 @@ from kora.db.tables import (
     notification_subscription,
     worker,
 )
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import START, Seeder
 from tests.plugins.authentication.support import seed_case
 
@@ -31,7 +31,7 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
         if field.name not in ("claim_cursor", "claim_cursor_generation")
     )
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target="0022") as connection:
             await connection.run_sync(predecessor)
         case = await seed_case(database, "worker", "service")
         async with database.transaction() as connection:
@@ -84,7 +84,7 @@ async def test_worker_registration_migration_preserves_existing_workers_and_even
             )
 
         await database.close()
-        result = await upgrade_database(empty_database_settings)
+        result = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             after_worker = (

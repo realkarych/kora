@@ -5,7 +5,7 @@ from sqlalchemy import insert, inspect, select, update
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.tables import attempt
 from tests.db.cancel_cause_support import (
     UpgradeStage,
@@ -16,10 +16,14 @@ from tests.db.cancel_cause_support import (
     seed_attempts,
     seed_cause_predecessor,
 )
+from tests.db.predecessor import (
+    PredecessorDbUpgrade,
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+)
 from tests.db.seed import predecessor_snapshot
 from tests.db.test_claim_source_migration import assert_attempt_schema_extension
-from tests.db.test_db_upgrade_process import events, upgrade
-from tests.db.test_migrations import differences_ignoring_expression_indexes
+from tests.db.test_db_upgrade_process import events
 
 CAUSES: tuple[str | None, ...] = (
     None,
@@ -40,7 +44,7 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
         before = await seed_cause_predecessor(database, rich=True)
         await database.close()
 
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             after = await connection.run_sync(
@@ -55,9 +59,7 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
                 .scalars()
                 .all()
             )
-            differences = await connection.run_sync(
-                differences_ignoring_expression_indexes
-            )
+            differences = await connection.run_sync(historical_schema_differences)
         async with database.transaction() as connection:
             await connection.execute(
                 insert(before.attempt_table).values(**before.old_insert)
@@ -70,7 +72,7 @@ async def test_attempt_cancel_cause_upgrade_preserves_history(
                     )
                 )
             ).scalar_one()
-        rerun = await upgrade_database(empty_database_settings)
+        rerun = await upgrade_to_run_event_metadata(empty_database_settings)
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0003",
@@ -159,12 +161,10 @@ async def test_attempt_cancel_cause_upgrade_recovers_compatible_partial_schema(
                 ).scalar_one()
         locks = await migration_lock_count(database)
         await database.close()
-        recovered = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
-            differences = await connection.run_sync(
-                differences_ignoring_expression_indexes
-            )
+            differences = await connection.run_sync(historical_schema_differences)
             resumed = await connection.run_sync(
                 lambda sync: predecessor_snapshot(sync, before.history.columns)
             )
@@ -225,7 +225,7 @@ async def test_attempt_cancel_cause_upgrade_refuses_incompatible_schema(
             before = await connection.run_sync(capture_cause_predecessor)
 
         with pytest.raises((DBAPIError, RuntimeError)):
-            await upgrade_database(empty_database_settings)
+            await upgrade_to_run_event_metadata(empty_database_settings)
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
             after = await connection.run_sync(
@@ -243,6 +243,7 @@ async def test_attempt_cancel_cause_upgrade_refuses_incompatible_schema(
 @pytest.mark.asyncio
 async def test_attempt_cancel_cause_upgrade_refusal_is_content_free(
     empty_database_settings: DatabaseSettings,
+    predecessor_db_upgrade: PredecessorDbUpgrade,
 ) -> None:
     marker = "PRIVATE-CANCEL-CAUSE-572"
     database = Database(empty_database_settings)
@@ -271,7 +272,7 @@ async def test_attempt_cancel_cause_upgrade_refusal_is_content_free(
             )
         }
 
-        refused = await asyncio.to_thread(upgrade, environment)
+        refused = await asyncio.to_thread(predecessor_db_upgrade, environment)
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
             retained = (

@@ -6,6 +6,7 @@ import fcntl
 import math
 import os
 import sqlite3
+import stat
 import sys
 from collections import OrderedDict
 from collections.abc import (
@@ -74,6 +75,18 @@ from kora.db.maintenance import (
     sqlite_checkout_worker,
 )
 from kora.db.maintenance import PostgreSQLDurabilityError as PostgreSQLDurabilityError
+from kora.db.run_event_maintenance_admission import (
+    POSITION_AUTHORITY,
+    POSITION_TARGET,
+    POSITION_VERIFYING,
+    SQLITE_FRESH_EMPTY,
+    Admission,
+    PositionMaintenanceRefused,
+    earlier_position_target,
+    position_migration_authority,
+    sqlite_has_sidecars,
+    sqlite_snapshot,
+)
 from kora.db.transactions import (
     WriterTransactionError,
     managed_writer,
@@ -108,6 +121,9 @@ SQLITE_BUSY_TIMEOUT_SECONDS: float = 5.0
 SQLITE_PREPARATION: ContextVar[Path | None] = ContextVar(
     "sqlite_preparation", default=None
 )
+SQLITE_MIGRATION_ADMISSION: ContextVar[
+    tuple[Callable[[int, int], bool], bool] | None
+] = ContextVar("sqlite_migration_admission", default=None)
 SQLITE_READERS: int = 4
 AIOSQLITE_ITER_CHUNK_SIZE: int = 64
 DEFAULT_POOL_SIZE: int = 5
@@ -624,6 +640,7 @@ def open_sqlite_file(
     *,
     guarded_reader: _GuardedSqliteReader | None = None,
     custody: SQLitePhysicalWriter | None = None,
+    sqlite_admit: Admission | None = None,
 ) -> NativeConnection:
     driver_version()
     if guarded_reader is not None:
@@ -656,6 +673,11 @@ def open_sqlite_file(
             guarded_reader.require_live()
         if custody is not None:
             return custody.admit(descriptor, empty)
+        migration = SQLITE_MIGRATION_ADMISSION.get()
+        if migration is not None:
+            return migration[0](descriptor, empty)
+        if sqlite_admit is not None:
+            return sqlite_admit(descriptor, empty)
         return not empty or sqlite_empty_admitted(path, descriptor)
 
     try:
@@ -670,18 +692,34 @@ def open_sqlite_file(
         lifetime.opened()
     try:
         prepare = custody is None and reserved and SQLITE_PREPARATION.get() == path
+        migration = SQLITE_MIGRATION_ADMISSION.get()
+        exclusive = migration is not None and migration[1]
+        native_path = path.resolve(strict=True) if exclusive else path
         if prepare:
             path.parent.mkdir(parents=True, exist_ok=True)
         connection.open(
-            path,
+            native_path,
             guarded_reader is not None,
             int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000),
             admit,
             prepare=prepare,
-            pool=id(slots) if guarded_reader is None and custody is None else 0,
+            pool=id(slots)
+            if guarded_reader is None and custody is None and not exclusive
+            else 0,
             reuse_only=not reserved,
             custody=custody is not None,
+            snapshot="exclusive" if exclusive else None,
         )
+        if exclusive and (
+            sqlite_has_sidecars(path)
+            or not sqlite_snapshot(
+                path,
+                admit,
+                lambda native: bool(native.scalar(SQLITE_FRESH_EMPTY)),
+                owner=connection,
+            )
+        ):
+            raise PositionMaintenanceRefused
         if reserved and connection.reused_main():
             reserved = False
             release()
@@ -698,6 +736,7 @@ def sqlite_connector(
     *,
     guarded_reader: _GuardedSqliteReader | None = None,
     custody: SQLitePhysicalWriter | None = None,
+    sqlite_admit: Admission | None = None,
 ) -> Callable[[], Awaitable[aiosqlite.Connection]]:
     slots = BoundedSemaphore(capacity)
     if custody is not None:
@@ -706,7 +745,12 @@ def sqlite_connector(
     async def connect() -> aiosqlite.Connection:
         async def acquire() -> _GuardedSqliteDriverConnection:
             opened = await asyncio.to_thread(
-                open_sqlite_file, path, slots, lifetime, guarded_reader=guarded_reader
+                open_sqlite_file,
+                path,
+                slots,
+                lifetime,
+                guarded_reader=guarded_reader,
+                sqlite_admit=sqlite_admit,
             )
             driver = _GuardedSqliteDriverConnection(opened)
             try:
@@ -740,6 +784,7 @@ def sqlite_engine(
     serving_lifetime: _SqliteServingLifetime | None = None,
     guarded_reader: _GuardedSqliteReader | None = None,
     custody: SQLitePhysicalWriter | None = None,
+    sqlite_admit: Admission | None = None,
 ) -> AsyncEngine:
     capacity = 1 if writer or guarded_reader is not None else SQLITE_READERS
     connector = sqlite_connector(
@@ -748,6 +793,7 @@ def sqlite_engine(
         serving_lifetime,
         guarded_reader=guarded_reader,
         custody=custody,
+        sqlite_admit=sqlite_admit,
     )
     module = sqlite_driver_module()
     if writer:
@@ -1072,6 +1118,7 @@ class Database:
         observe_sqlite_serving: bool = False,
         _guarded_reader: _GuardedSqliteReader | None = None,
         _local_sqlite_writer: LocalSQLiteWriterScope | None = None,
+        sqlite_admit: Admission | None = None,
     ) -> None:
         if _local_sqlite_writer is not None and (
             settings.dialect is not Dialect.SQLITE
@@ -1123,6 +1170,7 @@ class Database:
                 writer=True,
                 require_full_sync=require_sqlite_full_sync,
                 serving_lifetime=self._sqlite_serving,
+                sqlite_admit=sqlite_admit,
                 custody=None
                 if _local_sqlite_writer is None
                 else _local_sqlite_writer.physical,
@@ -1132,6 +1180,7 @@ class Database:
                 writer=False,
                 require_full_sync=require_sqlite_full_sync,
                 serving_lifetime=self._sqlite_serving,
+                sqlite_admit=sqlite_admit,
             )
             reader_capacity = SQLITE_READERS
         else:
@@ -1567,36 +1616,75 @@ class Database:
         raise_private_metadata_error(DatabaseWriterRejected(reason))
 
     @asynccontextmanager
-    async def migration_connection(self) -> AsyncGenerator[AsyncConnection, None]:
-        if self.dialect is Dialect.SQLITE:
-            preparation = SQLITE_PREPARATION.set(self.settings.sqlite_path.absolute())
+    async def migration_connection(
+        self,
+        *,
+        target: str = "head",
+        sqlite_admit: Callable[[int, int], bool] | None = None,
+        sqlite_existing_empty: bool = False,
+    ) -> AsyncGenerator[AsyncConnection, None]:
+        if self.writer_engine.dialect.name == SQLITE:
+            path = self.settings.sqlite_path.absolute()
+            positioned = not earlier_position_target(target)
+            opened = False
+
+            def admit(descriptor: int, empty: int) -> bool:
+                nonlocal opened
+                opened = (
+                    bool(empty) and sqlite_empty_admitted(path, descriptor)
+                    if sqlite_admit is None
+                    else sqlite_admit(descriptor, empty)
+                )
+                return opened
+
+            if positioned and sqlite_admit is None:
+                try:
+                    existing = path.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    if existing.st_size or not stat.S_ISREG(existing.st_mode):
+                        raise PositionMaintenanceRefused
+            preparation = SQLITE_PREPARATION.set(path if sqlite_admit is None else None)
+            admission = SQLITE_MIGRATION_ADMISSION.set(
+                (admit, sqlite_existing_empty) if positioned else None
+            )
             try:
                 async with self.transaction() as connection:
-                    yield connection
+                    if positioned and not opened:
+                        raise PositionMaintenanceRefused
+                    connection.info[POSITION_TARGET] = target
+                    try:
+                        yield connection
+                    finally:
+                        connection.info.pop(POSITION_TARGET, None)
             finally:
+                SQLITE_MIGRATION_ADMISSION.reset(admission)
                 SQLITE_PREPARATION.reset(preparation)
             return
         async with self._lease(transactional=False) as connection:
             previous_timeout = str(await connection.scalar(text("SHOW lock_timeout")))
             connection.info[MIGRATION_LEASE] = True
+            connection.info[POSITION_TARGET] = target
             native = connection.sync_connection
             event.listen(native, "commit", self._migration_commit)
-            if self._require_postgresql_wal_settings:
-                event.listen(native, "before_cursor_execute", self._migration_dispatch)
+            event.listen(native, "before_cursor_execute", self._migration_dispatch)
             try:
                 await complete(self._lock_migration(connection))
                 yield connection
             finally:
-                if self._require_postgresql_wal_settings:
-                    event.remove(
-                        native, "before_cursor_execute", self._migration_dispatch
-                    )
+                connection.info.pop(POSITION_TARGET, None)
+                event.remove(native, "before_cursor_execute", self._migration_dispatch)
                 event.remove(native, "commit", self._migration_commit)
                 await complete(self._release_migration(connection, previous_timeout))
 
     def _migration_commit(self, connection: Connection) -> None:
         try:
             self._refuse_when_closed()
+            if POSITION_AUTHORITY in connection.info and postgresql_transaction_active(
+                connection
+            ):
+                position_migration_authority(connection)
             if (
                 self._require_postgresql_wal_settings
                 and not postgresql_autocommit(connection)
@@ -1622,7 +1710,11 @@ class Database:
             raise
 
     def _migration_dispatch(self, connection: Connection, *arguments: object) -> None:
-        if postgresql_autocommit(connection):
+        if POSITION_VERIFYING in connection.info:
+            return
+        if POSITION_AUTHORITY in connection.info:
+            position_migration_authority(connection)
+        if self._require_postgresql_wal_settings and postgresql_autocommit(connection):
             self._refuse_when_closed()
             with closing(connection.connection.cursor()) as cursor:
                 verify_postgresql_wal_cursor(cursor)

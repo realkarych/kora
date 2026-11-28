@@ -8,12 +8,13 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.util.concurrency import await_
 
 from kora.db.connection import Database, DatabaseSettings, Dialect, Lifecycle
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.reads import run_by_id, target_holders
 from kora.db.tables import run
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import CONDITION_DEADLINE_SECONDS, ConnectionLedger
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import START, Seeder
 
 PREDECESSOR = "0017"
@@ -84,7 +85,7 @@ async def add_run(database: Database, scope: RunScope, key: str) -> str:
 
 
 async def seed(database: Database) -> tuple[RunScope, str]:
-    async with database.migration_connection() as migration:
+    async with database.migration_connection(target=PREDECESSOR) as migration:
         await migration.run_sync(prepare)
     async with database.transaction() as writer:
         seeder = Seeder(writer)
@@ -143,10 +144,10 @@ async def test_target_width_migration_preserves_order_and_existing_keys(
         scope, original_id = await seed(database)
         before = await state(database, scope, original_id)
 
-        async with database.migration_connection() as migration:
+        async with database.migration_connection(target=REVISION) as migration:
             await migration.run_sync(upgrade_width)
         widened = await state(database, scope, original_id)
-        async with database.migration_connection() as migration:
+        async with database.migration_connection(target=PREDECESSOR) as migration:
             with pytest.raises(
                 RuntimeError,
                 match=(
@@ -155,7 +156,7 @@ async def test_target_width_migration_preserves_order_and_existing_keys(
                 ),
             ):
                 await migration.run_sync(downgrade)
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(empty_database_settings)
         upgraded = await state(database, scope, original_id)
         lower_id = await add_run(database, scope, LOWER)
         upper_id = await add_run(database, scope, UPPER)
@@ -169,7 +170,7 @@ async def test_target_width_migration_preserves_order_and_existing_keys(
         else:
             overflow_state = None
         after = await state(database, scope, original_id)
-        repeated = await upgrade_database(empty_database_settings)
+        repeated = await upgrade_to_run_event_metadata(empty_database_settings)
     finally:
         await database.close()
 
@@ -255,7 +256,7 @@ async def test_target_width_migration_cancellation_rolls_back_and_releases(
         before = await state(database, scope, original_id)
 
         pending = asyncio.create_task(
-            upgrade_database(empty_database_settings, pause.open)
+            upgrade_to_run_event_metadata(empty_database_settings, pause.open)
         )
         try:
             await asyncio.wait_for(pause.entered.wait(), CONDITION_DEADLINE_SECONDS)
@@ -269,7 +270,7 @@ async def test_target_width_migration_cancellation_rolls_back_and_releases(
                 await asyncio.gather(pending, return_exceptions=True)
         after = await state(database, scope, original_id)
         locks = await migration_lock_count(database)
-        recovered = await upgrade_database(empty_database_settings)
+        recovered = await upgrade_to_run_event_metadata(empty_database_settings)
         await add_run(database, scope, UPPER)
         ready = await state(database, scope, original_id)
     finally:

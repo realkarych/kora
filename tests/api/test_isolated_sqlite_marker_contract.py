@@ -11,6 +11,6 @@ def test_private_frontier_graph_does_not_change_installed_head() -> None:
     config.set_main_option("script_location", str(MIGRATIONS_DIRECTORY))
     assert (
         ScriptDirectory.from_config(config).get_current_head()
-        == "run_event_metadata_0034"
+        == "run_event_position_0035"
     )
     assert isolated_head() == ISOLATED_FRONTIER_REVISION

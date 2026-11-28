@@ -8,7 +8,6 @@ import pytest
 from sqlalchemy import Engine, event
 from sqlalchemy.exc import OperationalError
 
-from kora.api.serving import sqlite_schema_ready_for_serving
 from kora.db.connection import Database, DatabaseClosedError
 from kora.db.run_event_page_v1 import SQLITE_EVENT_PAGE_INDEX
 from tests.api.guarded_sqlite_prebind_child import (
@@ -16,6 +15,7 @@ from tests.api.guarded_sqlite_prebind_child import (
     ReadObservations,
     check_schema,
     check_withdrawal,
+    guarded_schema_ready,
     refused_writer,
 )
 from tests.support.databases import copy_sqlite_template
@@ -155,7 +155,7 @@ async def test_guarded_sqlite_api_prebind_cancellation_retires_the_dispatched_op
     observations.attach(database)
 
     async with asyncio.timeout(WITNESS_TIMEOUT):
-        starting = asyncio.create_task(sqlite_schema_ready_for_serving(database))
+        starting = asyncio.create_task(guarded_schema_ready(database))
         try:
             await entered.wait()
             starting.cancel()

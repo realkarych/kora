@@ -19,6 +19,9 @@ from kora.db.run_event_page_v1 import (
     RUN_EVENT_REVISION,
     sqlite_run_event_page_available,
 )
+from kora.db.run_event_position_reads import read_position_transition
+from kora.db.run_event_position_schema import position_schema_available
+from kora.db.run_event_position_v1 import POSITION_REVISION, RunEventPositionRejected
 from kora.db.tables import attempt_first_claim_basis as basis
 from kora.db.tables import event
 from kora.db.transactions import writer_transaction
@@ -28,11 +31,11 @@ from kora.db.worker_claim_poll_v1 import CANDIDATE_INDEX, CANDIDATE_ROWS
 SQLITE_DDL: str = str(CreateTable(basis).compile(dialect=sqlite_dialect())).strip()
 MIGRATION_REVISION = {
     SQLITE: text("""
-        SELECT CASE WHEN version_num IN ('0032', '0033', :run_events)
+        SELECT CASE WHEN version_num IN ('0032', '0033', :run_events, :positioned)
                     THEN version_num END FROM main.alembic_version LIMIT 2
         """),
     POSTGRESQL: text("""
-        SELECT CASE WHEN version_num IN ('0032', '0033', :run_events)
+        SELECT CASE WHEN version_num IN ('0032', '0033', :run_events, :positioned)
                     THEN version_num END FROM alembic_version LIMIT 2
         """),
 }
@@ -253,6 +256,19 @@ class FirstClaimBasis:
     harness_selection_revision: int | None
 
 
+async def read_position_revision(connection: AsyncConnection) -> str:
+    query = MIGRATION_REVISION.get(connection.dialect.name)
+    if query is None:
+        raise RunEventPositionRejected()
+    with await connection.execute(
+        query, {"run_events": RUN_EVENT_REVISION, "positioned": POSITION_REVISION}
+    ) as result:
+        observed: list[object] = list(result.scalars())
+    if len(observed) != 1 or not isinstance(observed[0], str):
+        raise RunEventPositionRejected()
+    return observed[0]
+
+
 async def first_claim_basis_available(connection: AsyncConnection) -> bool:
     root = connection.get_transaction()
     backend = connection.dialect.name
@@ -264,7 +280,8 @@ async def first_claim_basis_available(connection: AsyncConnection) -> bool:
         raise ClaimSourcesRejected()
     revision = (
         await connection.scalars(
-            MIGRATION_REVISION[backend], {"run_events": RUN_EVENT_REVISION}
+            MIGRATION_REVISION[backend],
+            {"run_events": RUN_EVENT_REVISION, "positioned": POSITION_REVISION},
         )
     ).all()
     if backend == SQLITE:
@@ -288,7 +305,7 @@ async def first_claim_basis_available(connection: AsyncConnection) -> bool:
         in (True, 1)
     )
     current = revision == ["0033"] and matched
-    if revision == [RUN_EVENT_REVISION] and matched:
+    if revision in ([RUN_EVENT_REVISION], [POSITION_REVISION]) and matched:
         current = (
             await sqlite_run_event_page_available(connection)
             if backend == SQLITE
@@ -298,6 +315,14 @@ async def first_claim_basis_available(connection: AsyncConnection) -> bool:
                 )
             )
         )
+    if revision == [POSITION_REVISION] and current:
+        try:
+            current = (
+                await connection.run_sync(position_schema_available)
+                and (await read_position_transition(connection)).ready
+            )
+        except RunEventPositionRejected:
+            raise ClaimSourcesRejected from None
     if (
         not root.is_active
         or connection.get_transaction() is not root

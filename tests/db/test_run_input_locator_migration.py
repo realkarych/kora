@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.identifiers import encode
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.run_input_locator_v1 import (
     SQLITE_RUN_INPUT_KEY,
@@ -18,9 +18,12 @@ from kora.db.run_input_locator_v1 import (
 )
 from kora.db.tables import run, run_inputs
 from tests.db.cancel_cause_support import migration_lock_count
+from tests.db.predecessor import (
+    historical_schema_differences,
+    upgrade_to_run_event_metadata,
+)
 from tests.db.seed import Seeder
 from tests.db.test_graph_publication_digest_migration import assert_sqlite_index
-from tests.db.test_migrations import differences_ignoring_expression_indexes
 from tests.db.test_run_input_storage_migration import SENTINEL, UpgradeObservation
 from tests.support.databases import encoded_sqlite_settings, sqlite_settings
 
@@ -58,7 +61,7 @@ def downgrade_to_predecessor(connection: Connection) -> None:
 async def seed_runs(
     database: Database, historical_keys: tuple[str | bytes, ...] = ()
 ) -> tuple[str, str]:
-    async with database.migration_connection() as connection:
+    async with database.migration_connection(target=PREDECESSOR) as connection:
         await connection.run_sync(install_predecessor)
     selected, without_input = encode(30), encode(31)
     async with database.transaction() as writer:
@@ -163,7 +166,7 @@ async def test_run_input_locators_exclude_noncanonical_historical_keys(
         keys = (selected, without_input, missing, *bad_keys)
         before = await saved_rows(database)
 
-        report = await upgrade_database(settings)
+        report = await upgrade_to_run_event_metadata(settings)
         after = await saved_rows(database)
         async with database.read_transaction() as reader:
             observed_encoding: object = await reader.scalar(text("PRAGMA encoding"))
@@ -217,16 +220,18 @@ async def test_run_input_locator_migration_preserves_existing_schema_and_values(
         async with database.read_transaction() as reader:
             before_indexes = await native_indexes(reader)
 
-        report = await upgrade_database(empty_database_settings, observation.open)
-        repeat = await upgrade_database(empty_database_settings)
+        report = await upgrade_to_run_event_metadata(
+            empty_database_settings, observation.open
+        )
+        repeat = await upgrade_to_run_event_metadata(empty_database_settings)
         with pytest.raises(RuntimeError, match="restore a compatible backup"):
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(target=PREDECESSOR) as connection:
                 await connection.run_sync(downgrade_to_predecessor)
         after = await saved_rows(database)
         async with database.read_transaction() as reader:
             after_indexes = await native_indexes(reader)
             revision = await reader.run_sync(current_revision)
-            differences = await reader.run_sync(differences_ignoring_expression_indexes)
+            differences = await reader.run_sync(historical_schema_differences)
         locks = await migration_lock_count(database)
 
         assert (report.from_revision, report.to_revision, report.steps) == (
@@ -292,12 +297,12 @@ async def test_run_input_locator_conflict_rolls_back_first_index_and_revision(
             original_indexes = await native_indexes(writer)
 
         with pytest.raises(OperationalError, match="already exists"):
-            await upgrade_database(settings, observation.open)
+            await upgrade_to_run_event_metadata(settings, observation.open)
         async with database.transaction() as writer:
             refused_revision = await writer.run_sync(current_revision)
             refused_indexes = await native_indexes(writer)
             await writer.exec_driver_sql("DROP INDEX ix_run_inputs_locator")
-        recovered = await upgrade_database(settings)
+        recovered = await upgrade_to_run_event_metadata(settings)
         after = await saved_rows(database)
         async with database.read_transaction() as reader:
             recovered_indexes = await native_indexes(reader)

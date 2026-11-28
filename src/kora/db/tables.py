@@ -87,6 +87,14 @@ from kora.db.run_event_page_v1 import (
     SQLITE_EVENT_PAGE_INDEX,
     SQLITE_EVENT_SCOPE,
 )
+from kora.db.run_event_position_v1 import (
+    POSITION_TABLE,
+    POSITION_TRANSITION,
+    RUN_POSITION_STATE,
+    position_elements,
+    position_state_elements,
+    position_transition_elements,
+)
 from kora.db.run_input_locator_v1 import (
     SQLITE_RUN_INPUT_KEY,
     SQLITE_RUN_INPUT_LOCATOR_INDEX,
@@ -936,6 +944,14 @@ Index(
     *(literal_column(key, String()) for key in SQLITE_EVENT_KEYS),
     sqlite_where=literal_column(SQLITE_EVENT_SCOPE),
 ).ddl_if(dialect="sqlite")
+
+run_event_position: Table = Table(POSITION_TABLE, metadata, *position_elements())
+run_event_position_state: Table = Table(
+    RUN_POSITION_STATE, metadata, *position_state_elements()
+)
+run_event_position_transition: Table = Table(
+    POSITION_TRANSITION, metadata, *position_transition_elements()
+)
 
 provider_pause: Table = Table(
     "provider_pause",

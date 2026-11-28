@@ -371,6 +371,12 @@ For TM-06 and TM-07 only the short-lived one-time URL passes to the trusted OS a
 
 The project owner reviewed and accepted the installed browser amendment line by line on 2026-11-26. [Owner approval](https://github.com/realkarych/kora/issues/1896#issuecomment-7198632426).
 
+### Managed run-event position maintenance
+
+[ADR-0031](decisions/0031-run-event-position-maintenance.md) applies TM-09, TM-10, TM-11 and TM-12 to the initial transition on an existing ordinary installation. A trusted deployment operator closes ingress, prevents old restart and reconnection, and observes settlement of the original transactions and affected external work. The operator verifies a matching metadata and artifact restore image after settlement and before changing the schema. SQLite closure covers the main file and sidecars on Linux and macOS. An already open file descriptor retains access across a change of file ownership, so the operator verifies original handle closure before transferring ownership. PostgreSQL closure covers the intended writable primary, original roles, live sessions and prepared work. The operator controls privileged paths that can bypass ordinary database or OS admission.
+
+The maintenance command checks the bounded operator proof against the installed successor, native database and durable transition state. The fixed host profile and operator's control directory protect the proof and release evidence. The successor can read the release evidence; the operator alone can publish it. Keep the fence through completion or verified restoration. Publishing release outside the restore set makes the handoff irreversible before admitting successor production writes or external effects. For TM-06 and TM-07, command diagnostics use fixed outcomes and exclude proof values, database URLs, artifact and backup identifiers, private paths and native error text. [Managed transition](../knowledge/specs/run-event-follow.md#legacy-prefix-and-activation).
+
 ### API failures, streams and installation metrics
 
 The #135 contract extends existing threats without creating execution authority from error output. For TM-01/TM-02, uniform API009 credential refusal, API005 principal/namespace/flag checks and complete handler/mount classification follow [API conventions](../knowledge/specs/api-and-agent-surface.md#error-codes-and-statuses). Accepted idempotency receipts and current authority survive lost responses; TM-09 recovery never assumes an unknown mutation had no effect or replays a cached credential.

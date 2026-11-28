@@ -15,17 +15,13 @@ from kora.db.graph_publication_ordinal_v1 import (
     SQLITE_ORDINAL_INVALID,
     SQLITE_ORDINAL_VALID,
 )
-from kora.db.migrations import (
-    MigrationReport,
-    current_revision,
-    upgrade_database,
-    upgrade_to_head,
-)
+from kora.db.migrations import MigrationReport, current_revision, upgrade_to_head
 from kora.db.migrations.environment import (
     alembic_config,
     bound_lock_waits,
     pending_steps,
 )
+from kora.db.run_event_page_v1 import RUN_EVENT_REVISION
 from kora.db.tables import (
     graph_deployment_stage_promotion_intent,
     graph_deployment_stage_promotion_settlement,
@@ -33,6 +29,7 @@ from kora.db.tables import (
 )
 from kora.engine.locks import SQLITE_ORDINAL_OBSERVATION
 from tests.db.closing import ConnectionLedger
+from tests.db.predecessor import upgrade_to_run_event_metadata
 from tests.db.seed import Seeder
 from tests.db.test_graph_deployment_stage_migration import insert_fence
 from tests.db.test_graph_publication_digest_migration import (
@@ -90,7 +87,7 @@ def upgrade_ordinal_revision(connection: Connection) -> MigrationReport:
 async def upgrade_ordinal(settings: DatabaseSettings) -> MigrationReport:
     owner = Database(settings)
     try:
-        async with owner.migration_connection() as connection:
+        async with owner.migration_connection(target=REVISION) as connection:
             return await connection.run_sync(upgrade_ordinal_revision)
     finally:
         await owner.close()
@@ -200,7 +197,7 @@ async def test_graph_ordinal_migration_preserves_rows_and_unique_identity(
 ) -> None:
     database = Database(empty_database_settings)
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=PREDECESSOR) as connection:
             await connection.run_sync(upgrade_predecessor)
         binding, selected = await seed_target(database)
         async with database.transaction() as writer:
@@ -214,7 +211,7 @@ async def test_graph_ordinal_migration_preserves_rows_and_unique_identity(
         with pytest.raises(
             RuntimeError, match="ordinal migration cannot be downgraded"
         ):
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(target=PREDECESSOR) as connection:
                 await connection.run_sync(downgrade_to_predecessor)
         after = await history(database)
         observed = await read_ordinal(database, binding, selected)
@@ -257,7 +254,7 @@ async def test_migrated_sqlite_ordinal_indexes_exclude_wide_number_payloads(
     settings = encoded_sqlite_settings(tmp_path / "ordinal.db", encoding)
     database = Database(settings)
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=PREDECESSOR) as connection:
             await connection.run_sync(upgrade_predecessor)
         binding, selected = await seed_target(database)
         async with database.transaction() as writer:
@@ -276,7 +273,7 @@ async def test_migrated_sqlite_ordinal_indexes_exclude_wide_number_payloads(
             await replace_with_blob(writer, small_version, SMALL_BLOB)
             await replace_with_blob(writer, large_version, WIDE_BLOB)
 
-        await upgrade_database(settings)
+        await upgrade_to_run_event_metadata(settings)
         async with database.read_transaction() as reader:
             initial, statements = await native_observations(
                 reader, (selected, small, large, low, empty)
@@ -334,7 +331,7 @@ async def test_sqlite_ordinal_migration_rolls_back_first_index_on_second_conflic
     database = Database(settings)
     ledger = ConnectionLedger(database)
     try:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(target=PREDECESSOR) as connection:
             await connection.run_sync(upgrade_predecessor)
         binding, selected = await seed_target(database)
         async with database.transaction() as writer:
@@ -349,10 +346,12 @@ async def test_sqlite_ordinal_migration_rolls_back_first_index_on_second_conflic
         statements: list[tuple[str, tuple[object, ...]]] = []
 
         async def upgrade_conflicting_indexes() -> None:
-            async with database.migration_connection() as connection:
+            async with database.migration_connection(
+                target=RUN_EVENT_REVISION
+            ) as connection:
                 with executed_queries(connection) as captured:
                     try:
-                        await connection.run_sync(upgrade_to_head)
+                        await connection.run_sync(upgrade_to_head, RUN_EVENT_REVISION)
                     finally:
                         statements.extend(captured)
 
@@ -364,7 +363,7 @@ async def test_sqlite_ordinal_migration_rolls_back_first_index_on_second_conflic
             retained_indexes = await writer.run_sync(reflected_indexes)
             failed_custody = await custody_rows(writer)
             await writer.exec_driver_sql(f"DROP INDEX {ORDINAL_INVALID_INDEX}")
-        recovered = await upgrade_database(settings)
+        recovered = await upgrade_to_run_event_metadata(settings)
         after = await history(database)
         observed = await read_ordinal(database, binding, selected)
         async with database.read_transaction() as reader:

@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -25,8 +25,9 @@ from sqlalchemy.sql.elements import ColumnClause
 from kora.db.connection import Database
 from kora.db.graph_values import EncodedGraphValues
 from kora.db.identifiers import IdentifierGenerator
-from kora.db.migrations.environment import alembic_config
+from kora.db.migrations.environment import alembic_config, current_revision
 from kora.db.reads import GraphVersionRow, graph_version_by_number
+from kora.db.run_event_position_v1 import POSITION_REVISION
 from kora.db.tables import (
     api_token,
     attempt,
@@ -36,6 +37,7 @@ from kora.db.tables import (
     namespace,
     node_instance,
     run,
+    run_event_position_state,
     usage_record,
     worker,
 )
@@ -68,6 +70,24 @@ SHARED_CLOCK: FakeClock = FakeClock()
 SHARED_GENERATOR: IdentifierGenerator = IdentifierGenerator(
     SHARED_CLOCK.now, fixed_randomness(1)
 )
+
+
+async def seed_run_position_state(
+    connection: AsyncConnection, namespace_id: str, run_ids: Sequence[str]
+) -> None:
+    if run_ids and await connection.run_sync(current_revision) == POSITION_REVISION:
+        await connection.execute(
+            insert(run_event_position_state),
+            [
+                {
+                    "run_id": run_id,
+                    "namespace_id": namespace_id,
+                    "high_water": 0,
+                    "ready": True,
+                }
+                for run_id in run_ids
+            ],
+        )
 
 
 @dataclass
@@ -205,7 +225,9 @@ class Seeder:
             target_held_since,
         )
         await self.connection.execute(insert(run).values(**values))
-        return str(values["id"])
+        run_id = str(values["id"])
+        await seed_run_position_state(self.connection, namespace_id, (run_id,))
+        return run_id
 
     async def runs(
         self,
@@ -222,7 +244,9 @@ class Seeder:
             for _ in range(count)
         ]
         await self.connection.execute(insert(run), rows)
-        return [str(row["id"]) for row in rows]
+        run_ids = [str(row["id"]) for row in rows]
+        await seed_run_position_state(self.connection, namespace_id, run_ids)
+        return run_ids
 
     def node_values(
         self, run_id: str, node_path: str, status: str, top_level: bool

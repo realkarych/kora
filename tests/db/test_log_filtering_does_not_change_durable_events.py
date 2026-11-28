@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import Connection, inspect, text
 
 from kora.db.connection import Database, DatabaseSettings
+from kora.db.run_event_position_v1 import POSITION_REVISION
 from tests.db.test_db_upgrade_process import records
 from tests.observability.conftest import ProcessResult, run_kora
 from tests.support.databases import (
@@ -67,15 +68,17 @@ def test_log_filtering_does_not_change_durable_events(
     if database_kind is DatabaseKind.POSTGRESQL:
         server = request.getfixturevalue("postgres_server")
     settings_by_level: dict[str, DatabaseSettings] = {}
-    for level in LEVELS:
-        if server is None:
-            settings_by_level[level] = sqlite_settings(tmp_path / f"{level}.db")
-        else:
-            name = f"kora_filtering_{level.lower()}_{id(request) & 0xFFFF:04x}"
-            server.create_database(name, EMPTY_TEMPLATE)
-            created.append(name)
-            settings_by_level[level] = server.settings_for(name)
     try:
+        for level in LEVELS:
+            if server is None:
+                settings_by_level[level] = sqlite_settings(tmp_path / f"{level}.db")
+            else:
+                name = f"kora_filtering_{level.lower()}_{id(request) & 0xFFFF:04x}"
+                server.create_database(name, EMPTY_TEMPLATE)
+                created.append(name)
+                settings_by_level[level] = asyncio.run(
+                    server.prepare_fresh_database(name)
+                )
         results = {
             level: upgrade_process(settings, level)
             for level, settings in settings_by_level.items()
@@ -91,11 +94,11 @@ def test_log_filtering_does_not_change_durable_events(
 
     assert [result.code for result in results.values()] == [0, 0]
     assert [result.stdout for result in results.values()] == [
-        b"run_event_metadata_0034\n",
-        b"run_event_metadata_0034\n",
+        f"{POSITION_REVISION}\n".encode(),
+        f"{POSITION_REVISION}\n".encode(),
     ]
     assert snapshots["ERROR"] == snapshots["DEBUG"]
-    assert snapshots["ERROR"]["version"] == [("run_event_metadata_0034",)]
+    assert snapshots["ERROR"]["version"] == [(POSITION_REVISION,)]
     assert len(records(results["ERROR"])) < len(records(results["DEBUG"]))
     debug_events = [str(record["event"]) for record in records(results["DEBUG"])]
     assert debug_events.index("db.migration.started") < debug_events.index(

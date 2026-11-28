@@ -193,3 +193,35 @@
 @@ -47480 +47600 @@
 -    sqlite3_free(p->pPreallocatedUnused);
 +    koraFreeUnused(p->pPreallocatedUnused);
+--- a/sqlite3.c
++++ b/sqlite3.c
+@@ -45670,0 +45671,6 @@
++  if( pShmNode && !pShmNode->isReadonly
++      && sqlite3_uri_boolean(pDbFd->zPath, "readonly_shm", 0) ){
++    unixLeaveMutex();
++    sqlite3_free(p);
++    return SQLITE_READONLY_CANTINIT;
++  }
+@@ -45760 +45766,2 @@
+-                             KORA_SHM, sStat.st_mode&0777);
++                             KORA_SHM, pDbFd->koraAuthority->snapshotOnly
++                               ? 0 : sStat.st_mode&0777);
+@@ -45765 +45772,3 @@
+-      robustFchown(pShmNode->hShm, sStat.st_uid, sStat.st_gid);
++      if( !sqlite3_uri_boolean(pDbFd->zPath, "readonly_shm", 0) ){
++        robustFchown(pShmNode->hShm, sStat.st_uid, sStat.st_gid);
++      }
+@@ -47423,0 +47433,6 @@
++    }
++    if( koraSidecar && koraAuthority->snapshotOnly ){
++      flags = (flags & ~(SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)) | SQLITE_OPEN_READONLY;
++      openFlags = O_RDONLY | O_NOFOLLOW | O_LARGEFILE | O_BINARY;
++      isReadonly = 1;
++      isReadWrite = isCreate = isNewJrnl = 0;
+@@ -47471 +47486,2 @@
+-                             fd, eType, providerJournal && !created ? 0 : openMode);
++                             fd, eType, koraAuthority->snapshotOnly ||
++                             (providerJournal && !created) ? 0 : openMode);
+@@ -47493 +47509 @@
+-    if( openMode && (flags & (SQLITE_OPEN_WAL|SQLITE_OPEN_MAIN_JOURNAL))!=0 ){
++    if( openMode && koraSidecar && !koraAuthority->snapshotOnly ){

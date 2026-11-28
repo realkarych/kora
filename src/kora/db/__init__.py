@@ -51,6 +51,15 @@ MIGRATION_FAILED: EventSpec = CATALOG.register(
         fields={"dialect": FieldKind.STRING, "exception": FieldKind.EXCEPTION},
     )
 )
+POSITION_MAINTENANCE: EventSpec = CATALOG.register(
+    EventSpec(
+        "db.run_event_positions.maintenance",
+        DB_COMPONENT,
+        Level.INFO,
+        "run event position maintenance outcome",
+        {"outcome": FieldKind.STRING},
+    )
+)
 TRANSACTION_FAILED: EventSpec = CATALOG.register(
     EventSpec(
         name="db.transaction.failed",
