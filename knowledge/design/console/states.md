@@ -93,7 +93,7 @@ A target identity conflict stays red `failed` with class `config_error`; its pan
 
 ## Runs
 
-The run's colour and word in the header, on the runs list and in the traffic light are derived: red `failed`; green `succeeded`; gray `cancelled`; amber `waiting for you` when the run is `running` and its only live node instances wait for a person; otherwise blue `running`. The [namespace catalogue](../../specs/graph-list.md#2-response-and-run-categories) supplies this classification for the traffic light from the current work frontier, including live descendants and retained work. The traffic light groups saved running and failed runs. A recovery overlay elsewhere always names retained holds on a terminal run and unknown/blocked execution on a live run without changing the API state word (`pending` is shown as `running` with "scheduling").
+The run header, runs list and traffic light share the state vocabulary. Failed runs are red, succeeded green and cancelled gray. For a saved running run, amber `waiting for you` requires the human-only current frontier defined by the [namespace catalogue](../../specs/graph-list.md#2-response-and-run-categories), including live descendants and retained work. The catalogue supplies that classification for the traffic light over saved running and failed runs. A run view may show amber when its own current observation proves that same condition. A top-level count alone leaves a running run blue. A recovery overlay names retained holds on a terminal run and unknown or blocked execution on a live run without changing the API state word. Pending appears as `running` with "scheduling".
 
 ## Approval requests
 
