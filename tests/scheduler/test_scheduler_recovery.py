@@ -443,11 +443,17 @@ async def test_scheduler_rotates_past_future_wait_and_recovers_terminal_parent(
         try:
             await asyncio.wait_for(settled_waits.wait(), BOUND)
         except TimeoutError as error:
+            pending_at_handler_entry = pending_inserts
             cutoff = len(evidence.marks) if evidence is not None else 0
             owner.stop()
             await task
+            pending_after_join = pending_inserts
             failure = AssertionError(
-                (pending_inserts, await admitted_waits(database, accepted))
+                (pending_after_join, await admitted_waits(database, accepted))
+            )
+            failure.add_note(
+                "Pending Scheduler wait inserts at timeout handler entry="
+                f"{pending_at_handler_entry}, after join={pending_after_join}."
             )
             observers.close()
             if evidence is not None:
