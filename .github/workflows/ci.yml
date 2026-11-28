@@ -1030,13 +1030,12 @@ jobs:
           cache_dependency_path: web/pnpm-lock.yaml
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Prepare browser tools
-        run: |
-          test -f /etc/apt/apt-mirrors.txt
-          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          pnpm --dir web install --frozen-lockfile
+        run: pnpm --dir web install --frozen-lockfile
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Verify browser package attempt ownership
         run: python3 -m tests.architecture.browser_system_packages_witness
+        env:
+          KORA_BROWSER_PNPM_BIN: ${{ steps.browser_pnpm.outputs.bin_dest }}
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Install browser system packages
         run: python3 -m scripts.ci.acquire browser-system-packages 120

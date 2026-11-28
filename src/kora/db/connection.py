@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import fcntl
 import math
 import os
 import sqlite3
@@ -82,10 +83,11 @@ from kora.db.transactions import (
 from kora.db.types import POSTGRESQL, SQLITE, SQLITE_SYNCHRONOUS_FULL
 from kora.observability import ComponentLogger, current_diagnostics
 from kora.sqlite.driver import Connection as NativeConnection
-from kora.sqlite.driver import NativeRetirement, driver_version
+from kora.sqlite.driver import IsolatedMarker, NativeRetirement, driver_version
 
 if TYPE_CHECKING:
     from kora.db.custody_journal import CustodyJournalLease, CustodySQLiteInstallation
+    from kora.db.custody_models import CustodyFileAnchor
     from kora.db.custody_sqlite import SQLiteWorkerOriginal
     from kora.db.custody_transaction import OriginalCustodyTransaction
     from kora.db.custody_writer import (
@@ -452,6 +454,82 @@ class _GuardedSqliteDriverConnection(SqliteDriverConnection):
         finally:
             if self._thread.ident is not None:
                 await asyncio.to_thread(self._thread.join)
+
+
+@dataclass(frozen=True)
+class IsolatedMetadataMain:
+    path: Path
+    anchor: CustodyFileAnchor
+    directory: int
+    require_live: Callable[[], None]
+
+    def admit_main(self, descriptor: int, empty: int) -> bool:
+        from kora.db.custody_native import file_anchor, require_native_file
+
+        self.require_live()
+        info = require_native_file(descriptor, directory=False)
+        if (
+            not empty
+            or info.st_size
+            or file_anchor(info, self.path) != self.anchor
+            or fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDWR
+        ):
+            raise CustodyUnavailable
+        for suffix in ("-journal", "-wal", "-shm"):
+            try:
+                os.stat(
+                    self.path.name + suffix,
+                    dir_fd=self.directory,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                continue
+            raise CustodyUnavailable
+        return True
+
+    def admit_journal(self, descriptor: int) -> bool:
+        from kora.db.custody_native import require_native_file
+
+        self.require_live()
+        name = self.path.name + "-journal"
+        info = require_native_file(
+            descriptor, directory=False, device=os.fstat(self.directory).st_dev
+        )
+        named = os.stat(name, dir_fd=self.directory, follow_symlinks=False)
+        if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
+            raise CustodyUnavailable
+        return True
+
+    def open(self, attempt: NativeConnection) -> NativeConnection:
+        self.require_live()
+        if self.path.name != "main.db":
+            raise CustodyUnavailable
+        try:
+            attempt.open(
+                self.path,
+                False,
+                0,
+                self.admit_main,
+                custody=True,
+                directory=self.directory,
+                journal=self.admit_journal,
+                _marker=IsolatedMarker.METADATA,
+            )
+        except BaseException:
+            attempt.close()
+            raise
+        return attempt
+
+    def mark(self, attempt: NativeConnection) -> None:
+        self.require_live()
+        for statement in (
+            "PRAGMA page_size=4096",
+            "PRAGMA journal_mode=DELETE",
+            "PRAGMA synchronous=EXTRA",
+        ):
+            attempt.execute(statement).close()
+        self.require_live()
+        attempt.commit_isolated_marker()
 
 
 @dataclass(frozen=True)

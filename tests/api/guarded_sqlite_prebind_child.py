@@ -48,6 +48,7 @@ FileIdentity = tuple[int, int]
 class WitnessCase(StrEnum):
     SCHEMA = "schema"
     INEXACT = "inexact"
+    CANCELLED = "cancelled"
     ABSENT = "absent"
     FOREIGN = "foreign"
     MISSING_FILE = "missing_file"
@@ -167,7 +168,7 @@ class ProtectedRead:
     parent_fd: int
     lifetime_fd: int
 
-    def require_live(self) -> None:
+    def require_launcher(self) -> None:
         poll = select.poll()
         poll.register(self.parent_fd, select.POLLIN)
         poll.register(self.lifetime_fd, select.POLLIN)
@@ -181,6 +182,10 @@ class ProtectedRead:
             and mount_namespace() == expected.namespace,
             "the original SQLite read scope was withdrawn",
         )
+
+    def require_live(self) -> None:
+        self.require_launcher()
+        expected = self.binding
         current = self.main.lstat()
         parents = tuple(path.lstat() for path in protected_directories(self.domain))
         require(
@@ -544,7 +549,7 @@ def command(*args: str, env: dict[str, str] | None = None) -> str:
     ).stdout
 
 
-def unprivileged(uid: int, *args: str) -> tuple[str, ...]:
+def unprivileged(uid: int, *args: str, module: str = WITNESS_MODULE) -> tuple[str, ...]:
     return (
         "/usr/bin/setpriv",
         f"--reuid={uid}",
@@ -557,7 +562,7 @@ def unprivileged(uid: int, *args: str) -> tuple[str, ...]:
         sys.executable,
         "-B",
         "-m",
-        WITNESS_MODULE,
+        module,
         *args,
     )
 
@@ -623,7 +628,9 @@ class BoundChild:
 
 
 @contextmanager
-def start_bound_child(case: WitnessCase) -> Generator[BoundChild, None, None]:
+def start_bound_child(
+    case: WitnessCase, *, module: str = WITNESS_MODULE
+) -> Generator[BoundChild, None, None]:
     with ExitStack() as owned:
         startup_read, startup_write = os.pipe()
         owned.callback(os.close, startup_read)
@@ -634,10 +641,17 @@ def start_bound_child(case: WitnessCase) -> Generator[BoundChild, None, None]:
         child = owned.enter_context(
             subprocess.Popen(
                 unprivileged(
-                    API_UID, "child", str(startup_read), str(scope_read), case.value
+                    API_UID,
+                    "child",
+                    str(startup_read),
+                    str(scope_read),
+                    case.value,
+                    module=module,
                 ),
                 env=fixture_environment(),
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL
+                if module == WITNESS_MODULE
+                else subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 pass_fds=(startup_read, scope_read),
             )
@@ -756,7 +770,11 @@ def release_loop(device: str, indicator: Path, image: Path) -> None:
     image.unlink()
 
 
-def run_launcher(base: Path, outer_namespace: int) -> None:
+def run_launcher(
+    base: Path,
+    outer_namespace: int,
+    writable: Callable[[Path, str], None] | None = None,
+) -> None:
     require_owned_guest()
     require(
         mount_namespace() != outer_namespace, "a private mount namespace is required"
@@ -792,15 +810,18 @@ def run_launcher(base: Path, outer_namespace: int) -> None:
         readable, _, _ = select.select([sys.stdin.buffer], [], [], WITNESS_TIMEOUT)
         assert readable
         assert sys.stdin.buffer.read(1) == b"1"
-        ordinary = witness_bound_image(domain, device, None)
-        witness_bound_image(domain, device, ordinary)
+        if writable is None:
+            ordinary = witness_bound_image(domain, device, None)
+            witness_bound_image(domain, device, ordinary)
+        else:
+            writable(domain, device)
     assert not image.exists()
     scoped_paths = {str(domain), str(domain / "service" / "api" / "main.db")}
     assert scoped_paths.isdisjoint(row[4] for row in mount_entries())
     fixture_message("RELEASE bound_mounts=0 devices=0 image=0")
 
 
-def run_owned_guest() -> None:
+def run_owned_guest(module: str = WITNESS_MODULE, *case: str) -> None:
     require_owned_guest()
     version = ".".join(map(str, sys.version_info[:3]))
     fixture_message(
@@ -809,7 +830,7 @@ def run_owned_guest() -> None:
     )
     base = Path(tempfile.mkdtemp(prefix="kora-1882-", dir="/run"))
     os.chown(base, 0, API_UID)
-    base.chmod(0o710)
+    base.chmod(0o710 if module == WITNESS_MODULE else 0o750)
     (base / "media").mkdir(mode=0o700)
     domain = base / "fs"
     domain.mkdir(mode=0o700)
@@ -822,10 +843,11 @@ def run_owned_guest() -> None:
             sys.executable,
             "-B",
             "-m",
-            WITNESS_MODULE,
+            module,
             "launcher",
             str(base),
             str(mount_namespace()),
+            *case,
         ),
         env=fixture_environment(),
         stdin=subprocess.PIPE,

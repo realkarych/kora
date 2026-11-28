@@ -115,7 +115,7 @@ class ObservedPlatform(NativeCustodyPlatform):
         if worker.startswith("kora-custody_"):
             self.ordinary_worker_visits += 1
             returning = self.before_ordinary_return
-            if returning is not None and platform_caller() == "_perform":
+            if returning is not None and platform_caller() == "_commit":
                 self.before_ordinary_return = None
                 returning.pause()
         return identity
