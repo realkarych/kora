@@ -53,7 +53,7 @@ The [namespace graph catalogue](../../specs/graph-list.md) supplies one bounded 
 | search | a text field for a literal graph-name substring. Omit an empty search and start afresh when the search changes. | catalogue `q` selector |
 | row entry | the scoped graph page with its newest run selected when available | graph address |
 
-Not in the row: triggers and pause state, the last run, the version and its deploy date. The installed entry waits for the current-session list ingress, namespace bootstrap and working graph and run destinations. Responses bind their namespace and navigation generation and stale responses cannot navigate.
+Not in the row: triggers and pause state, the last run, the version and its deploy date. The installed entry waits for the current-session list ingress, namespace bootstrap and working graph and run destinations. Accept a response only in its current namespace, search and page-request generation. Refresh and continuation use distinct generations even at the same address. Back refetches under current rights with one bounded in-memory anchor. If that anchor is unavailable, start from the search in the address. A stale response cannot paint or navigate.
 
 ## Graph page
 
