@@ -56,6 +56,7 @@ class Connection:
         self.isolation_level: str | None = None
         self._retire = retire
         self._opened = False
+        self._migrating = False
 
     def open(
         self,
@@ -92,6 +93,16 @@ class Connection:
 
     def commit_isolated_marker(self) -> None:
         self.native.commit_marker(self.handle)
+
+    def begin_isolated_migration(self, observer: Callable[[int, int], bool]) -> None:
+        self.native.begin_migration(self.handle, observer)
+        self._migrating = True
+
+    def checkpoint_isolated_migration(self, committed: bool) -> None:
+        self.native.checkpoint_migration(self.handle, committed)
+
+    def retire_isolated_migration_names(self) -> bool:
+        return self.native.retire_migration_names(self.handle)
 
     def reused_main(self) -> bool:
         return self.native.reused_main(self.handle)
@@ -136,7 +147,9 @@ class Connection:
         return self.cursor().executemany(query, parameters)
 
     def commit(self) -> None:
-        if self.in_transaction:
+        if self._migrating:
+            self.native.commit_migration(self.handle)
+        elif self.in_transaction:
             self.execute("COMMIT").close()
 
     def rollback(self) -> None:

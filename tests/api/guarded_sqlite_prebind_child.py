@@ -47,6 +47,16 @@ FileIdentity = tuple[int, int]
 
 class WitnessCase(StrEnum):
     SCHEMA = "schema"
+    MIGRATION = "migration"
+    MIGRATION_CANCELLED = "migration_cancelled"
+    MIGRATION_PRE_CANCEL = "migration_pre_cancel"
+    MIGRATION_BLOCKED = "migration_blocked"
+    MIGRATION_UNSETTLED = "migration_unsettled"
+    MIGRATION_PARTIAL_SHM = "migration_partial_shm"
+    MIGRATION_UNMAP_UNKNOWN = "migration_unmap_unknown"
+    MIGRATION_ACQUIRE_FAILED = "migration_acquire_failed"
+    MIGRATION_JOURNAL_UNKNOWN = "migration_journal_unknown"
+    MIGRATION_JOURNAL_WITHDRAWN = "migration_journal_withdrawn"
     INEXACT = "inexact"
     CANCELLED = "cancelled"
     ABSENT = "absent"

@@ -94,6 +94,7 @@ static int koraConflict(KoraFd *owner, int precheck) {
     KoraFd *other = *link;
     if (other != owner && koraSameFile(owner, other)) {
       if (!other->main && koraTryClose(link)) continue;
+      if (other->migration || owner->migration) return 1;
       if (other->state == KORA_FD_RETAINED || other->state == KORA_FD_UNRESOLVED) return 1;
       if (!precheck && (other->lockPin || owner->role == KORA_SHM ||
           owner->role != other->role ||
@@ -210,6 +211,141 @@ static int koraSelectSidecar(KoraFd *owner, KoraFd *main, int fd, int role, mode
   if (result == SQLITE_OK && mode && info.st_size == 0 &&
       (info.st_mode & 0777) != mode) osFchmod(fd, mode);
   return result;
+}
+
+static int full_fsync(int fd, int fullSync, int dataOnly);
+
+static int koraReserveMigration(KoraOpen *scope) {
+  KoraFd *main = *scope->owner;
+  unixEnterMutex();
+  main->migration = 1;
+  int admitted = !koraConflict(main, 0);
+  if (!admitted) main->migration = 0;
+  unixLeaveMutex();
+  return admitted;
+}
+
+static const char *koraMigrationName(int role) {
+  if (role == SQLITE_OPEN_WAL) return "main.db-wal";
+  if (role == KORA_SHM) return "main.db-shm";
+  return "main.db-journal";
+}
+
+static KoraFd **koraMigrationReceipt(KoraOpen *scope, int role) {
+  if (role == SQLITE_OPEN_WAL) return &scope->wal;
+  if (role == KORA_SHM) return &scope->shm;
+  return &scope->rollback;
+}
+
+static int koraMigrationRole(const char *path) {
+  const char *name = strrchr(path, '/');
+  name = name ? name + 1 : path;
+  if (!strcmp(name, "main.db-wal")) return SQLITE_OPEN_WAL;
+  if (!strcmp(name, "main.db-shm")) return KORA_SHM;
+  if (!strcmp(name, "main.db-journal")) return SQLITE_OPEN_MAIN_JOURNAL;
+  return 0;
+}
+
+static int koraNamedFile(KoraOpen *scope, const char *name, KoraFd *owner) {
+  struct stat info;
+  if (fstatat(scope->directory, name, &info, AT_SYMLINK_NOFOLLOW))
+    return errno == ENOENT ? 0 : -1;
+  return owner && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+         info.st_dev == owner->device && info.st_ino == owner->inode ? 1 : -1;
+}
+
+static int koraMigrationOpen(KoraOpen *scope, KoraFd *child, int role) {
+  KoraFd **receipt = koraMigrationReceipt(scope, role);
+  KoraFd *main = *scope->owner;
+  if (*receipt || main->state != KORA_FD_LIVE ||
+      koraNamedFile(scope, "main.db", main) != 1) return -1;
+  int fd;
+  do {
+    fd = openat(scope->directory, koraMigrationName(role),
+                O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600);
+  } while (fd < 0 && errno == EINTR);
+  if (fd < 0) return -1;
+  *receipt = koraRetainFd(child);
+  struct stat opened;
+  if (koraCapture(child, fd, role, main, &opened) == SQLITE_OK &&
+      opened.st_uid == geteuid() && (opened.st_mode & 0777) == 0600 &&
+      koraNamedFile(scope, koraMigrationName(role), child) == 1) return fd;
+  if (role == KORA_SHM) child->unmap = 1;
+  koraCloseSidecar(child, main);
+  return -1;
+}
+
+static int koraMigrationAccess(KoraOpen *scope, int role, int *exists) {
+  KoraFd *receipt = *koraMigrationReceipt(scope, role);
+  int named = koraNamedFile(scope, koraMigrationName(role), receipt);
+  if (named < 0 || (!named && receipt && receipt->state == KORA_FD_LIVE))
+    return SQLITE_IOERR_ACCESS;
+  struct stat info;
+  if (named && fstatat(scope->directory, koraMigrationName(role), &info,
+                      AT_SYMLINK_NOFOLLOW)) return SQLITE_IOERR_ACCESS;
+  *exists = named && info.st_size > 0;
+  return SQLITE_OK;
+}
+
+static int koraMigrationDelete(KoraOpen *scope, int role, int sync) {
+  KoraFd *owner = *koraMigrationReceipt(scope, role);
+  const char *name = koraMigrationName(role);
+  int found = koraNamedFile(scope, name, owner);
+  if (found < 0 || (found && (!owner || owner->state != KORA_FD_RETIRED)))
+    return SQLITE_IOERR_DELETE;
+  if (found) {
+    if (!owner || unlinkat(scope->directory, name, 0)) return SQLITE_IOERR_DELETE;
+    owner->unlinked = 1;
+  }
+  if ((owner && !owner->unlinked) || koraNamedFile(scope, name, NULL) != 0)
+    return SQLITE_IOERR_DELETE;
+  return sync && full_fsync(scope->directory, 0, 0) ? SQLITE_IOERR_DIR_FSYNC : SQLITE_OK;
+}
+
+static int koraMigrationCurrent(KoraOpen *scope, KoraFd *child, int role, int fd) {
+  struct stat info;
+  return child && child == *koraMigrationReceipt(scope, role) &&
+         child->state == KORA_FD_LIVE && child->descriptor == fd &&
+         child->role == role && child->main == *scope->owner &&
+         !osFstat(fd, &info) && info.st_dev == child->device && info.st_ino == child->inode &&
+         koraNamedFile(scope, koraMigrationName(role), child) == 1;
+}
+
+static int koraMigrationFileCurrent(unixFile *file) {
+  KoraOpen *scope = file->koraAuthority;
+  if (!scope || !scope->migration) return 1;
+  KoraFd *owner = file->pPreallocatedUnused->koraOwner;
+  return owner->role == SQLITE_OPEN_MAIN_DB ||
+         koraMigrationCurrent(scope, owner, owner->role, file->h);
+}
+
+static void koraMigrationEmptyWal(KoraOpen *scope) {
+  KoraFd *wal = scope->wal;
+  struct stat info;
+  if (!scope->checkpoint && !scope->migrationCommit && wal &&
+      koraMigrationCurrent(scope, wal, SQLITE_OPEN_WAL, wal->descriptor) &&
+      !osFstat(wal->descriptor, &info) && info.st_size == 0 &&
+      (!scope->rollback || scope->rollback->unlinked) &&
+      koraNamedFile(scope, "main.db-journal", NULL) == 0)
+    scope->checkpoint = 1;
+}
+
+static int koraMigrationSettled(KoraOpen *scope) {
+  if (!scope->migration || scope->checkpoint == 2) return 1;
+  if (((scope->wal || scope->shm) && !scope->checkpoint) ||
+      (scope->shm && scope->shm->unmap != 1) ||
+      (scope->rollback && !scope->rollback->unlinked) ||
+      koraNamedFile(scope, koraMigrationName(SQLITE_OPEN_MAIN_JOURNAL), NULL) != 0)
+    return 0;
+  if (scope->shm && !scope->admit(scope->observeMigration, -1, KORA_SHM_UNMAPPED)) {
+    scope->shm->unmap = -1;
+    return 0;
+  }
+  if (koraMigrationDelete(scope, SQLITE_OPEN_WAL, 0) ||
+      koraMigrationDelete(scope, KORA_SHM, 0) ||
+      full_fsync(scope->directory, 0, 0)) return 0;
+  scope->checkpoint = 2;
+  return 1;
 }
 
 static int koraInspectJournal(KoraOpen *scope, int empty) {

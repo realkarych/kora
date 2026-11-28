@@ -3,6 +3,8 @@ import os
 import secrets
 from collections.abc import Callable
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
+from pathlib import Path
 
 from kora.db import CUSTODY_UNFINISHED, custody_log
 from kora.db.completion import complete
@@ -12,9 +14,15 @@ from kora.db.connection import (
     IsolatedMetadataMain,
     LocalSQLiteWriterEntry,
 )
-from kora.db.custody_journal import NativeRow, journal_lease
+from kora.db.custody_journal import (
+    CustodyJournalLease,
+    NativeRow,
+    complete_native_journal_job,
+    open_isolated_journal_lease,
+)
 from kora.db.custody_models import (
     CustodyFileAnchor,
+    CustodyNativeOutcome,
     CustodyParticipantRegistration,
     CustodyProcessIdentity,
     CustodyUnavailable,
@@ -22,6 +30,7 @@ from kora.db.custody_models import (
 from kora.db.custody_native import (
     CustodyLifetimeLease,
     CustodyNativeDirectory,
+    custody_native_job,
     file_anchor,
     register_custody_fork,
 )
@@ -56,7 +65,7 @@ def local_sqlite_writer(
     ), scope.entry
 
 
-_isolated_incomplete: tuple[AsyncExitStack, AsyncExitStack] | None = None
+_isolated_incomplete: AsyncExitStack | None = None
 
 
 def isolated_marker_owner_retained() -> bool:
@@ -130,11 +139,23 @@ def _isolated_initial_rows(
     return authority, provisioning
 
 
+@dataclass(frozen=True)
+class IsolatedSchema:
+    scripts: Path
+    checkpoint: Callable[[], None]
+    metadata_retired: Callable[[], None]
+    journal_dispatch: Callable[[], None]
+    journal_committed: Callable[[], None]
+    journal_retired: Callable[[], None]
+
+
 async def isolated_marker_checkpoints(
     main: IsolatedMetadataMain,
     revision: str,
     journal_checkpoint: Callable[[], None],
     metadata_checkpoint: Callable[[], None],
+    *,
+    schema: IsolatedSchema | None = None,
 ) -> int:
     global _isolated_incomplete
     if _isolated_incomplete is not None or revision != ISOLATED_FRONTIER_REVISION:
@@ -147,7 +168,6 @@ async def isolated_marker_checkpoints(
             raise CustodyUnavailable
     provider_root = file_anchor(provider_stat, provider_path)
     scopes = AsyncExitStack()
-    journal_scope = AsyncExitStack()
     provider = LocalArtifactStorage(
         LocalStorageConfiguration(
             root=str(provider_path), limits=StorageLimits(version=1)
@@ -155,11 +175,18 @@ async def isolated_marker_checkpoints(
     )
     scopes.push_async_callback(provider.aclose)
     driver: CustodyDriverConnection | None = None
-    _isolated_incomplete = (scopes, journal_scope)
+    journal: CustodyJournalLease | None = None
+    schema_dispatched = False
+    _isolated_incomplete = scopes
 
     async def finish_owner() -> None:
         global _isolated_incomplete
-        await journal_scope.aclose()
+        if journal is not None:
+            if journal.last_outcome is not CustodyNativeOutcome.UNKNOWN:
+                released = asyncio.Event()
+                if journal.defer_sqlite_checkout(released.set):
+                    await released.wait()
+            await journal.close()
         await scopes.aclose()
         _isolated_incomplete = None
 
@@ -171,12 +198,12 @@ async def isolated_marker_checkpoints(
             _isolated_launch=main.require_live,
         )
         scopes.callback(root.close)
-        scopes.enter_context(root.acquire("recovery.lock"))
-        scopes.enter_context(root.acquire("lifetime.lock"))
+        scopes.callback(root.lock("recovery.lock").close)
+        scopes.callback(root.lock("lifetime.lock").close)
         authority, provisioning = _isolated_initial_rows(
             root, main, provider, provider_root, revision
         )
-        lease = await journal_scope.enter_async_context(journal_lease(root))
+        lease = journal = open_isolated_journal_lease(root)
         await lease.initialize_isolated(authority, provisioning, journal_checkpoint)
 
         def retain(candidate: Connection) -> None:
@@ -193,12 +220,71 @@ async def isolated_marker_checkpoints(
         driver = driver_owner
         driver_owner.native_candidate = attempt
         scopes.push_async_callback(require_metadata_retired)
+
+        async def finish_schema(selected: IsolatedSchema, sequence: int) -> None:
+            root.require_isolated()
+            selected.metadata_retired()
+            try:
+                await lease.complete_isolated_schema(
+                    authority,
+                    provisioning,
+                    sequence,
+                    selected.journal_dispatch,
+                    selected.journal_committed,
+                )
+            except (OSError, Error, CustodyUnavailable):
+                if lease.last_outcome is not CustodyNativeOutcome.UNKNOWN:
+                    await finish_owner()
+                raise
+            selected.journal_retired()
+            await finish_owner()
+
+        async def run_schema(selected: IsolatedSchema, sequence: int) -> None:
+            migrated = False
+
+            def retire_names() -> bool:
+                with custody_native_job():
+                    return attempt.retire_isolated_migration_names()
+
+            try:
+                await main.migrate(
+                    driver_owner, attempt, selected.scripts, selected.checkpoint
+                )
+                migrated = True
+            finally:
+                try:
+                    if not driver_owner.joined:
+                        await driver_owner.close()
+                finally:
+                    if not driver_owner.retired:
+                        custody_log(CUSTODY_UNFINISHED, "native_turn")
+                        retired = asyncio.Event()
+                        driver_owner.after_retirement(retired.set)
+                        await retired.wait()
+                    if not await asyncio.to_thread(retire_names):
+                        raise CustodyUnavailable
+                    if migrated:
+                        await finish_schema(selected, sequence)
+                    else:
+                        await finish_owner()
+
         try:
             await complete(driver_owner)
             sequence = next(LOCAL_SQLITE_NATIVE_SEQUENCE)
             await lease.bind_isolated(authority, provisioning, sequence)
             await complete(driver_owner.custody_worker(lambda: main.mark(attempt)))
             metadata_checkpoint()
+            if schema is not None:
+                caller = asyncio.current_task()
+                if caller is None or caller.cancelling():
+                    raise asyncio.CancelledError
+                schema_dispatched = True
+                try:
+                    await complete_native_journal_job(run_schema(schema, sequence))
+                except (OSError, Error, CustodyUnavailable):
+                    if isolated_marker_owner_retained():
+                        custody_log(CUSTODY_UNFINISHED, "native_turn")
+                    raise
         finally:
 
             async def retire_after_j() -> None:
@@ -212,15 +298,18 @@ async def isolated_marker_checkpoints(
             def resume_retirement() -> None:
                 asyncio.create_task(retire_after_j())
 
-            if not lease.defer_sqlite_checkout(resume_retirement):
+            if not schema_dispatched and not lease.defer_sqlite_checkout(
+                resume_retirement
+            ):
                 await driver_owner.close()
         if not driver_owner.retired:
             raise CustodyUnavailable
-        root.require_isolated()
+        if not schema_dispatched:
+            root.require_isolated()
         return sequence
     finally:
-        if driver is None or driver.retired:
-            await complete(finish_owner())
+        if not schema_dispatched and (driver is None or driver.retired):
+            await complete_native_journal_job(finish_owner())
 
 
 class NativeCustodyPlatform:

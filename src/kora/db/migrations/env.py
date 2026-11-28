@@ -7,6 +7,8 @@ from sqlalchemy import Connection
 
 from kora.db.migrations.environment import (
     CONNECTION_ATTRIBUTE,
+    ISOLATED_ANCESTRY,
+    IsolatedAncestry,
     column_types_differ,
     include_schema_object,
 )
@@ -59,6 +61,7 @@ def render_item(
 
 def run_migrations() -> None:
     connection: Connection = context.config.attributes[CONNECTION_ATTRIBUTE]
+    proof: object = context.config.attributes.get(ISOLATED_ANCESTRY)
     context.configure(
         connection=connection,
         target_metadata=metadata,
@@ -66,6 +69,7 @@ def run_migrations() -> None:
         include_object=partial(include_schema_object, connection.dialect.name),
         render_item=render_item,
         transaction_per_migration=connection.dialect.name == "postgresql",
+        on_version_apply=proof.observe if isinstance(proof, IsolatedAncestry) else None,
     )
     with context.begin_transaction():
         context.run_migrations()
