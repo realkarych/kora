@@ -95,8 +95,7 @@ async def test_server_defaults_match_cursor_writer_compatibility(
 @pytest.mark.asyncio
 async def test_migration_lock_wait_is_bounded(database: Database) -> None:
     if database.dialect is not Dialect.POSTGRESQL:
-        async with database.transaction() as connection:
-            report = await connection.run_sync(upgrade_to_head)
+        report = await upgrade_database(database.settings)
         assert report.steps == 0
         return
     async with database.transaction() as holder:
@@ -108,7 +107,7 @@ async def test_migration_lock_wait_is_bounded(database: Database) -> None:
         with pytest.raises(DBAPIError, match="lock timeout"):
             await locked_run
 
-    async with database.transaction() as connection:
+    async with database.migration_connection() as connection:
         report = await connection.run_sync(upgrade_to_head)
         revision = (
             await connection.execute(
@@ -121,7 +120,7 @@ async def test_migration_lock_wait_is_bounded(database: Database) -> None:
 
 
 async def run_upgrade(database: Database) -> None:
-    async with database.transaction() as connection:
+    async with database.migration_connection() as connection:
         await connection.run_sync(upgrade_to_head)
 
 

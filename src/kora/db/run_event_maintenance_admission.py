@@ -236,7 +236,7 @@ def require_postgresql_fence(
     inventory: bool = False,
 ) -> None:
     if inventory:
-        connection.exec_driver_sql("SET LOCAL statement_timeout = '5s'").close()
+        connection.execute(text("SET LOCAL statement_timeout = '5s'")).close()
     if not connection.scalar(POSTGRESQL_MANAGED_OWNER, identity.model_dump()):
         raise PositionMaintenanceRefused
     if inventory:
@@ -329,7 +329,7 @@ def sqlite_snapshot(
                 "sqlite://", creator=lambda: native, poolclass=NullPool
             )
             with engine.connect() as connection:
-                connection.exec_driver_sql("BEGIN").close()
+                connection.execute(text("BEGIN")).close()
                 return inspect(connection)
     except (OSError, NativeSQLiteError, SQLAlchemyError):
         raise PositionMaintenanceRefused from None
@@ -555,4 +555,5 @@ def hold_position_control(
                 ):
                     raise PositionMaintenanceRefused
 
+        verify()
         yield proof, verify

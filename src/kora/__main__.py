@@ -201,6 +201,7 @@ async def prepare_position_maintenance(
                     raise maintenance.PositionMaintenanceRefused
 
         def require_role(connection: Connection, inventory: bool = False) -> None:
+            verify()
             if isinstance(identity, maintenance.PostgreSQLIdentity):
                 maintenance.require_postgresql_fence(
                     connection, identity, inventory=inventory
@@ -226,6 +227,7 @@ async def prepare_position_maintenance(
                 await connection.run_sync(inspect)
                 managed = binding, require_role
                 await connection.run_sync(migration.upgrade_to_head, managed=managed)
+                verify()
             await backfill(
                 database,
                 *binding,
@@ -238,6 +240,7 @@ async def prepare_position_maintenance(
             finally:
                 if path is not None and not NativeRetirement.drain(path):
                     raise maintenance.PositionMaintenanceRefused
+        verify()
     return POSITION_REVISION
 
 

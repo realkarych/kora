@@ -619,7 +619,9 @@ async def test_migration_lease_restores_session_and_releases_lock(
     database: Database,
 ) -> None:
     if database.dialect is Dialect.SQLITE:
-        async with database.migration_connection() as connection:
+        async with database.migration_connection(
+            target=RUN_EVENT_REVISION
+        ) as connection:
             assert database.units_in_flight() == 1
             assert (
                 await connection.exec_driver_sql("PRAGMA foreign_keys")
