@@ -12,6 +12,8 @@ Bounded-read amendment dated 2026-10-23: the project owner approved the contract
 
 The project owner reviewed and accepted the installed browser amendment line by line on 2026-11-26. [Owner approval](https://github.com/realkarych/kora/issues/1896#issuecomment-7198632426).
 
+The project owner reviewed and accepted the graph catalogue wording line by line on 2026-11-28. [Owner approval](https://github.com/realkarych/kora/pull/2014#issuecomment-7239750503).
+
 ## Context
 
 Requirements decision 21 made the web console a full console in the MVP, held to the reference-grade bar of NFR-13.1, and the roadmap put its design before its implementation. The architecture critique of 2026-10-16 asked the design to settle the entities and the failure states before the screens: an attention queue, a target page, a review-revision page, the run graph with instances, attempts and superseded outputs apart, attempt comparison, and two product-acceptance scenarios (an engineer without database access explains a run; an operator resolves a lost worker and an ambiguous publish through the public surface). [ADR-0014](0014-target-identity.md) gave the target page its footing.

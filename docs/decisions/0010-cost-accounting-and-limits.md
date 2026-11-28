@@ -9,6 +9,8 @@
 - Absorbs: DD-31, the cost-model requirements in FR section 9 and NFR section 8, the usage-completeness part of requirements decision 11, the `reasoning_tokens` item of DD-37
 - Related: [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0007](0007-attempt-model-and-retries.md), [ADR-0008](0008-content-bound-approvals.md), [ADR-0011](0011-namespaces-and-personal-tokens.md), [ADR-0012](0012-no-transform-node.md)
 
+The project owner reviewed and accepted the graph catalogue wording line by line on 2026-11-28. [Owner approval](https://github.com/realkarych/kora/pull/2014#issuecomment-7239750503).
+
 ## Context
 
 A run of a kora graph can hold many agent sessions, retries and fan-out losers, each consuming model tokens on an organisation's account. The platform team needs to know what a run cost, stop runaway spend, and later derive cost per accepted change (NFR-8.3). The harnesses make this hard: Claude Code reports per-model usage with a cost basis on its final result; Codex reports usage separately from turn completion, and a killed turn can leave an unreported interval; a subscription session has no USD price at all. Prices and gateway contracts differ per organisation and change over time. The production-readiness lens of the design review of 2026-10-15 (first cycle) found no spend guard above the per-run budget and no way to attribute a mid-run price change to the attempts it affected.

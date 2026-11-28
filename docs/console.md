@@ -16,6 +16,8 @@ Consistency amendment dated 2026-10-18: scope approved under [issue #95](https:/
 
 The project owner reviewed and accepted the installed browser amendment line by line on 2026-11-26. [Owner approval](https://github.com/realkarych/kora/issues/1896#issuecomment-7198632426).
 
+The project owner reviewed and accepted the graph catalogue wording line by line on 2026-11-28. [Owner approval](https://github.com/realkarych/kora/pull/2014#issuecomment-7239750503).
+
 ## Who it is for
 
 The console is designed for the engineer who owns targets: the person who triggers a run, waits for it, approves the change it produces and handles the errors on the way. Those are the three human touchpoints of the canonical use case in [positioning.md](positioning.md), and they are the three things the console lets a person do. The platform team has its own section, System, which is never the entry screen.
