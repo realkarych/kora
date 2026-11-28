@@ -17,8 +17,11 @@ SUDO = "/usr/bin/sudo"
 SYSTEMCTL = "/usr/bin/systemctl"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 PYTHON = "/usr/bin/python3"
-DPKG = "/usr/bin/dpkg"
-APT_GET = "/usr/bin/apt-get"
+UBUNTU_APT = ROOT / "scripts/ci/browser_ubuntu_apt.py"
+BROWSER_APT_RUNTIME = Path("/var/lib/kora-browser-apt")
+PLAYWRIGHT_WORK = frozenset(
+    ("install", "refusal-witness", "unavailable-adapter-witness")
+)
 SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 MANAGER_ENV = {"PATH": SYSTEM_PATH, "LANG": "C.UTF-8", "SYSTEMD_COLORS": "0"}
 START_SECONDS = 5.0
@@ -42,7 +45,6 @@ LIFETIME_PROPERTIES = {
     "KillMode": "control-group",
     "Restart": "no",
     "Delegate": "no",
-    "JobRunningTimeoutUSec": "5s",
 }
 INVOCATION = re.compile(r"[0-9a-f]{32}")
 SERVICE_PATH = re.compile(r"/system.slice/kora-browser-packages-[0-9a-f]{32}\.service")
@@ -50,6 +52,25 @@ SERVICE_PATH = re.compile(r"/system.slice/kora-browser-packages-[0-9a-f]{32}\.se
 
 class BrowserPackagesRefused(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class AttemptLimits:
+    start: float
+    work: float
+    stop_phase: float
+    proof: float
+    join: float
+
+    @property
+    def settle(self) -> float:
+        return self.start + self.work + 2 * self.stop_phase
+
+
+PACKAGE_LIMITS = AttemptLimits(
+    START_SECONDS, WORK_SECONDS, STOP_PHASE_SECONDS, PROOF_SECONDS, RETURN_SECONDS
+)
+CLEANUP_LIMITS = AttemptLimits(1.0, 1.0, 0.5, 1.0, 0.75)
 
 
 @dataclass(frozen=True)
@@ -62,21 +83,32 @@ class AttemptWindow:
 
     @classmethod
     def allocate(
-        cls, allowance: float, latest_settlement: float | None = None
+        cls,
+        allowance: float,
+        latest_settlement: float | None = None,
+        *,
+        limits: AttemptLimits = PACKAGE_LIMITS,
     ) -> AttemptWindow:
         now = time.monotonic()
         settled = now + allowance
         if latest_settlement is not None:
             settled = min(settled, latest_settlement)
-        work = min(WORK_SECONDS, settled - (now + START_SECONDS + STOP_SECONDS))
+        work = min(limits.work, settled - (now + limits.start + 2 * limits.stop_phase))
         if work <= 0:
             raise BrowserPackagesRefused("Insufficient time to own a package attempt.")
         return cls(
-            now + START_SECONDS,
+            now + limits.start,
             work,
             settled,
-            settled + PROOF_SECONDS,
-            settled + PROOF_SECONDS + RETURN_SECONDS,
+            settled + limits.proof,
+            settled + limits.proof + limits.join,
+        )
+
+    @classmethod
+    def for_cleanup(cls, deadline: float) -> AttemptWindow:
+        limits = CLEANUP_LIMITS
+        return cls.allocate(
+            limits.settle, deadline - limits.proof - limits.join, limits=limits
         )
 
 
@@ -107,6 +139,17 @@ class Programs:
             )
         return node, pnpm
 
+    def playwright(self) -> tuple[Path, Path]:
+        node, _ = self.paths()
+        modules = ROOT / "web/node_modules"
+        cli = modules / "playwright/cli.js"
+        if (
+            not cli.resolve(strict=True).is_relative_to(modules / ".pnpm")
+            or not cli.is_file()
+        ):
+            raise BrowserPackagesRefused("The locked Playwright CLI is unavailable.")
+        return node, cli
+
     @classmethod
     def workflow(cls) -> Programs:
         tool_cache = Path(os.environ.get("RUNNER_TOOL_CACHE", ""))
@@ -132,11 +175,12 @@ class Programs:
 class Service:
     name: str
     cgroup: str
+    limits: AttemptLimits = PACKAGE_LIMITS
 
     @classmethod
-    def new(cls) -> Service:
+    def new(cls, limits: AttemptLimits = PACKAGE_LIMITS) -> Service:
         name = f"kora-browser-packages-{uuid.uuid4().hex}.service"
-        return cls(name, f"/system.slice/{name}")
+        return cls(name, f"/system.slice/{name}", limits)
 
     async def show(self, deadline: float) -> dict[str, str]:
         code, output = await self.control(
@@ -199,9 +243,9 @@ class Service:
                 "--property=KillMode=control-group",
                 "--property=Restart=no",
                 "--property=Delegate=no",
-                f"--property=JobRunningTimeoutSec={START_SECONDS:g}s",
-                f"--property=TimeoutStartSec={START_SECONDS:g}s",
-                f"--property=TimeoutStopSec={STOP_PHASE_SECONDS}s",
+                f"--property=JobRunningTimeoutSec={self.limits.start:g}s",
+                f"--property=TimeoutStartSec={self.limits.start:g}s",
+                f"--property=TimeoutStopSec={self.limits.stop_phase:g}s",
                 f"--property=RuntimeMaxSec={window.work:.6f}s",
                 PYTHON,
                 "-I",
@@ -243,7 +287,9 @@ class Service:
                     raise BrowserPackagesRefused(
                         "Package service launch identity did not match."
                     )
-                if any(
+                if status.get(
+                    "JobRunningTimeoutUSec"
+                ) != f"{self.limits.start:g}s" or any(
                     status.get(key) != value
                     for key, value in LIFETIME_PROPERTIES.items()
                 ):
@@ -335,7 +381,9 @@ class OriginalService:
         ):
             raise BrowserPackagesRefused("Original package service identity was lost.")
 
-    async def settle(self, deadline: float) -> None:
+    async def settle(
+        self, deadline: float, *, stage_cleanup_deadline: float | None = None
+    ) -> None:
         status = await self.service.show(deadline)
         self.require_identity(status)
         if status.get("ActiveState") not in {"failed", "inactive"}:
@@ -355,6 +403,8 @@ class OriginalService:
                 )
             if status.get("Job") == "" and self.empty():
                 if inactive:
+                    if stage_cleanup_deadline is not None:
+                        await self.remove_stage(stage_cleanup_deadline)
                     return
                 if status.get("ActiveState") == "failed":
                     code, _ = await self.service.control(
@@ -365,6 +415,26 @@ class OriginalService:
                             "Original package service did not settle."
                         )
             await poll_until(deadline)
+
+    async def remove_stage(self, deadline: float) -> None:
+        original = os.fstat(self.directory)
+        window = AttemptWindow.for_cleanup(deadline)
+        removed = await service_attempt(
+            (
+                "stage-cleanup",
+                self.service.name,
+                self.invocation,
+                str(original.st_dev),
+                str(original.st_ino),
+            ),
+            Service.new(CLEANUP_LIMITS),
+            window,
+            stage_cleanup=False,
+        )
+        if not removed:
+            raise BrowserPackagesRefused(
+                "Original Ubuntu package stage did not settle."
+            )
 
 
 async def poll_until(deadline: float) -> None:
@@ -403,6 +473,22 @@ async def package_attempt(
     if not (SYSTEM_CGROUP / "cgroup.controllers").is_file():
         raise BrowserPackagesRefused("Browser packages require cgroup v2 ownership.")
     service = Service.new() if service is None else service
+    stage_cleanup = len(work) == 3 and (
+        work[0] in PLAYWRIGHT_WORK or (work[0] == "witness" and work[2] == "stage-hold")
+    )
+    succeeded = await service_attempt(
+        work, service, window, stage_cleanup=stage_cleanup
+    )
+    return None if succeeded else "original package service failed after settlement"
+
+
+async def service_attempt(
+    work: Sequence[str],
+    service: Service,
+    window: AttemptWindow,
+    *,
+    stage_cleanup: bool,
+) -> bool:
     client = None
     owned = None
     try:
@@ -421,7 +507,10 @@ async def package_attempt(
                 client.stdin.close()
             try:
                 if owned is not None:
-                    await owned.settle(window.prove)
+                    await owned.settle(
+                        window.prove,
+                        stage_cleanup_deadline=window.join if stage_cleanup else None,
+                    )
                 async with asyncio.timeout_at(window.join):
                     await client.wait()
             except (OSError, TimeoutError):
@@ -433,7 +522,7 @@ async def package_attempt(
                     os.close(owned.directory)
                 if client.returncode is None:
                     stop_client(client)
-    return None if succeeded else "original package service failed after settlement"
+    return succeeded
 
 
 def accepted(deadline: str) -> bool:
@@ -470,14 +559,25 @@ async def run_child(command: Sequence[str], environment: dict[str, str]) -> int:
 
 
 async def worker(arguments: Sequence[str]) -> int:
-    if len(arguments) != 4 or os.geteuid() != 0:
+    if len(arguments) not in {4, 6} or os.geteuid() != 0:
         return 78
-    deadline, operation, first, second = arguments
+    deadline, operation, *operands = arguments
     invocation = os.environ.get("INVOCATION_ID", "")
     if not INVOCATION.fullmatch(invocation):
         return 78
+    service = Path(Path("/proc/self/cgroup").read_text(encoding="ascii").strip()).name
     sys.stdout.buffer.write(f"{invocation}\n".encode("ascii"))
     sys.stdout.buffer.flush()
+    if operation == "stage-cleanup":
+        if len(operands) != 4 or not accepted(deadline):
+            return 78
+        acknowledge_admission()
+        return await run_child(
+            (PYTHON, "-I", str(UBUNTU_APT), "cleanup", *operands), MANAGER_ENV
+        )
+    if len(operands) != 2:
+        return 78
+    first, second = operands
     if operation == "witness":
         witness = ROOT / "tests/architecture/browser_system_packages_witness.py"
         administrative = Path(first)
@@ -485,48 +585,50 @@ async def worker(arguments: Sequence[str]) -> int:
             not administrative.is_absolute()
             or not re.fullmatch(r"kora-browser-dpkg-[a-z0-9_]{8}", administrative.name)
             or not accepted(deadline)
-            or second not in {"hold", "configure"}
+            or second not in {"hold", "configure", "stage-hold"}
         ):
             return 78
         acknowledge_admission()
+        if second == "stage-hold":
+            prepared = await run_child(
+                (PYTHON, "-I", str(UBUNTU_APT), "prepare", service, invocation),
+                MANAGER_ENV,
+            )
+            if prepared:
+                return prepared
+            return await run_child(
+                (
+                    PYTHON,
+                    "-I",
+                    str(witness),
+                    first,
+                    "hold",
+                    str(BROWSER_APT_RUNTIME / service),
+                ),
+                MANAGER_ENV,
+            )
         return await run_child((PYTHON, "-I", str(witness), first, second), MANAGER_ENV)
-    if operation != "install":
+    if operation not in PLAYWRIGHT_WORK:
         return 78
     try:
-        node, pnpm = Programs(Path(first), Path(second)).paths()
+        node, cli = Programs(Path(first), Path(second)).playwright()
     except (BrowserPackagesRefused, OSError):
         return 78
-    environment = {"PATH": f"{pnpm.parent}:{node.parent}:{SYSTEM_PATH}"}
     if not accepted(deadline):
         return 78
     acknowledge_admission()
-    recovery = await run_child((DPKG, "--configure", "-a"), MANAGER_ENV)
-    if recovery:
-        return recovery
-    dependency_result = await run_child(
-        (
-            str(pnpm),
-            "--dir",
-            "web",
-            "exec",
-            "playwright",
-            "install-deps",
-            "chromium-headless-shell",
-        ),
-        environment,
-    )
-    if dependency_result:
-        return dependency_result
     return await run_child(
         (
-            APT_GET,
-            "-y",
-            "--no-install-recommends",
-            "install",
-            "libnss3-tools",
-            "xdg-utils",
+            PYTHON,
+            "-I",
+            str(UBUNTU_APT),
+            operation,
+            service,
+            invocation,
+            str(node),
+            str(cli),
         ),
-        {**MANAGER_ENV, "DEBIAN_FRONTEND": "noninteractive"},
+        MANAGER_ENV,
     )
 
 
