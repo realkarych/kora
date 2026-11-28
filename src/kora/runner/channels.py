@@ -2,8 +2,9 @@ import asyncio
 import os
 import socket
 import struct
+import sys
 from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from enum import StrEnum
 from typing import TypeVar
 
@@ -29,6 +30,13 @@ class ChannelError(Exception):
     def __init__(self, reason: ChannelFailure) -> None:
         self.reason = reason
         super().__init__(reason.value)
+
+
+def _byte_view(value: memoryview) -> memoryview:
+    try:
+        return value.cast("B")
+    except (TypeError, ValueError):
+        raise ChannelError(ChannelFailure.MALFORMED) from None
 
 
 async def cancel_task(task: asyncio.Task[T]) -> None:
@@ -84,10 +92,13 @@ class DescriptorReadiness:
 
 
 class BoundedChannel:
-    def __init__(self, endpoint: socket.socket, clock: Clock) -> None:
+    def __init__(
+        self, endpoint: socket.socket, clock: Clock, *, cutoff_ns: int | None = None
+    ) -> None:
         endpoint.setblocking(False)
         self._endpoint = endpoint
         self._clock = clock
+        self._cutoff_ns = cutoff_ns
         self._reading = False
         self._writing = False
         self._revoked = False
@@ -132,6 +143,13 @@ class BoundedChannel:
         except OSError:
             return
 
+    def _bounded_deadline(self, deadline_ns: int) -> int:
+        return (
+            deadline_ns
+            if self._cutoff_ns is None
+            else min(self._cutoff_ns, deadline_ns)
+        )
+
     async def _wait(self, deadline_ns: int | None, *, writing: bool) -> None:
         waiter = DescriptorReadiness(self._endpoint.fileno(), writing=writing)
         if writing:
@@ -167,16 +185,24 @@ class BoundedChannel:
         try:
             if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
-            await self._wait(None, writing=False)
+            await self._wait(self._cutoff_ns, writing=False)
             if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
+            if (
+                self._cutoff_ns is not None
+                and self._clock.monotonic_ns() >= self._cutoff_ns
+            ):
+                raise ChannelError(ChannelFailure.DEADLINE)
         except (ChannelError, asyncio.CancelledError, OSError):
             self._close_after_failure()
             raise
         finally:
             self._reading = False
 
-    async def _read_exact(self, size: int, deadline_ns: int) -> bytes:
+    async def _read_exact(
+        self, size: int, deadline_ns: int, received: Callable[[], None] | None = None
+    ) -> bytes:
+        deadline_ns = self._bounded_deadline(deadline_ns)
         result = bytearray()
         while len(result) < size:
             if self._revoked:
@@ -192,10 +218,14 @@ class BoundedChannel:
                 raise ChannelError(ChannelFailure.CLOSED) from error
             if not chunk:
                 raise ChannelError(ChannelFailure.CLOSED)
+            if received is not None:
+                received()
+                received = None
             result.extend(chunk)
         return bytes(result)
 
     async def _read_into(self, target: memoryview, deadline_ns: int) -> None:
+        deadline_ns = self._bounded_deadline(deadline_ns)
         offset = 0
         while offset < len(target):
             if self._revoked:
@@ -214,38 +244,54 @@ class BoundedChannel:
             offset += received
 
     async def _read_typed_header(
-        self, deadline_ns: int, reservations: Mapping[int, int]
+        self,
+        deadline_ns: int,
+        reservations: Mapping[int, int],
+        received: Callable[[], None] | None = None,
     ) -> tuple[int, int]:
-        header = await self._read_exact(TYPED_HEADER.size, deadline_ns)
+        header = await self._read_exact(TYPED_HEADER.size, deadline_ns, received)
         length = int.from_bytes(header[:4], "big")
+        if length > MAX_TYPED_FRAME_BYTES:
+            raise ChannelError(ChannelFailure.CAPACITY)
         kind = header[4]
         reservation = reservations.get(kind)
         if reservation is None:
             raise ChannelError(ChannelFailure.MALFORMED)
-        if length > reservation:
+        if not length <= reservation <= MAX_TYPED_FRAME_BYTES:
             raise ChannelError(ChannelFailure.CAPACITY)
         return kind, length
 
     async def read_typed_frame(
-        self, deadline_ns: int, reservations: Mapping[int, int]
+        self,
+        deadline_ns: int,
+        reservations: Mapping[int, int],
+        *,
+        received: Callable[[], None] | None = None,
     ) -> tuple[int, bytes]:
         if not all(0 <= cap <= MAX_TYPED_FRAME_BYTES for cap in reservations.values()):
             raise ChannelError(ChannelFailure.CAPACITY)
         if self._reading:
             raise ChannelError(ChannelFailure.BUSY)
         self._reading = True
+        completed = False
         try:
-            kind, length = await self._read_typed_header(deadline_ns, reservations)
-            return kind, await self._read_exact(length, deadline_ns)
-        except (ChannelError, asyncio.CancelledError, OSError):
-            self._close_after_failure()
-            raise
+            kind, length = await self._read_typed_header(
+                deadline_ns, reservations, received
+            )
+            payload = await self._read_exact(length, deadline_ns)
+            completed = True
+            return kind, payload
         finally:
+            if not completed:
+                self._close_after_failure()
             self._reading = False
 
     async def read_typed_frame_into(
         self, deadline_ns: int, kind: int, target: memoryview
     ) -> int:
+        target = _byte_view(target)
+        if target.readonly:
+            raise ChannelError(ChannelFailure.MALFORMED)
         if not 0 < len(target) <= MAX_TYPED_FRAME_BYTES:
             raise ChannelError(ChannelFailure.CAPACITY)
         if self._reading:
@@ -264,6 +310,7 @@ class BoundedChannel:
             self._reading = False
 
     async def expect_eof(self, deadline_ns: int) -> None:
+        deadline_ns = self._bounded_deadline(deadline_ns)
         if self._reading:
             raise ChannelError(ChannelFailure.BUSY)
         self._reading = True
@@ -289,33 +336,58 @@ class BoundedChannel:
         finally:
             self._reading = False
 
-    def _send(self, value: memoryview, guard: SendGuard | None) -> int:
-        if guard is None:
+    def _send_socket(self, value: memoryview) -> int | None:
+        try:
             return self._endpoint.send(value)
-        with guard() as allowed:
-            if not allowed:
-                raise ChannelError(ChannelFailure.CLOSED)
-            return self._endpoint.send(value)
+        except BlockingIOError:
+            return None
+        except (BrokenPipeError, ConnectionResetError) as error:
+            raise ChannelError(ChannelFailure.CLOSED) from error
+
+    def _send(
+        self,
+        value: memoryview,
+        deadline_ns: int,
+        guard: SendGuard | None,
+        sent: Callable[[], None] | None,
+    ) -> int | None:
+        if guard is None and sent is None:
+            return self._send_socket(value)
+        failure: BaseException | None = None
+        with nullcontext(True) if guard is None else guard() as allowed:
+            try:
+                if not allowed or self._revoked:
+                    raise ChannelError(ChannelFailure.CLOSED)
+                if self._clock.monotonic_ns() >= deadline_ns:
+                    raise ChannelError(ChannelFailure.DEADLINE)
+                count = self._send_socket(value)
+                if sent is not None and count == len(value):
+                    sent()
+                return count
+            finally:
+                failure = sys.exception()
+        if failure is not None:
+            raise failure
+        raise ChannelError(ChannelFailure.CLOSED)
 
     async def _write(
         self,
         value: bytes | memoryview,
         deadline_ns: int,
         guard: SendGuard | None = None,
+        sent: Callable[[], None] | None = None,
     ) -> None:
+        deadline_ns = self._bounded_deadline(deadline_ns)
         remaining = memoryview(value)
         while remaining:
             if self._revoked:
                 raise ChannelError(ChannelFailure.CLOSED)
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)
-            try:
-                written = self._send(remaining, guard)
-            except BlockingIOError:
+            written = self._send(remaining, deadline_ns, guard, sent)
+            if written is None:
                 await self._wait(deadline_ns, writing=True)
                 continue
-            except (BrokenPipeError, ConnectionResetError) as error:
-                raise ChannelError(ChannelFailure.CLOSED) from error
             if written == 0:
                 raise ChannelError(ChannelFailure.CLOSED)
             remaining = remaining[written:]
@@ -366,19 +438,23 @@ class BoundedChannel:
         deadline_ns: int,
         *,
         guard: SendGuard | None = None,
+        sent: Callable[[], None] | None = None,
     ) -> None:
-        if len(value) > MAX_TYPED_FRAME_BYTES:
+        payload = _byte_view(value) if isinstance(value, memoryview) else value
+        if len(payload) > MAX_TYPED_FRAME_BYTES:
             raise ChannelError(ChannelFailure.CAPACITY)
         if self._writing:
             raise ChannelError(ChannelFailure.BUSY)
+        header = TYPED_HEADER.pack(len(payload), kind)
         self._writing = True
+        completed = False
         try:
-            await self._write(TYPED_HEADER.pack(len(value), kind), deadline_ns, guard)
-            await self._write(value, deadline_ns, guard)
-        except (ChannelError, asyncio.CancelledError, OSError):
-            self._close_after_failure()
-            raise
+            await self._write(header, deadline_ns, guard, None if payload else sent)
+            await self._write(payload, deadline_ns, guard, sent)
+            completed = True
         finally:
+            if not completed:
+                self._close_after_failure()
             self._writing = False
 
     async def read_record(self, deadline_ns: int, reservation: int) -> bytes:
