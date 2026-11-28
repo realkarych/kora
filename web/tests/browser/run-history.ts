@@ -6,13 +6,14 @@ import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
-import type { Browser, BrowserContext, Locator, Page, Request, Response } from 'playwright'
+import type { Browser, BrowserContext, CDPSession, Locator, Page, Request, Response } from 'playwright'
 import { ArtifactLimit } from './artifacts.ts'
 import { checkCleanup, childEnvironment, closeOwners, Ownership } from './ownership.ts'
 
 type Document = Record<string, unknown>
 type Theme = 'light' | 'dark'
 type HistoryTimeZone = 'UTC' | 'Europe/Moscow'
+type PageRead = { response: Response; body: Document }
 type RouteClass = 'timeline' | 'asset' | 'event' | 'canonical' | 'signIn' | 'signOut'
 type SignInStep = 'start' | 'open-page' | 'navigate' | 'redemption' | 'redirect-headers'
   | 'fetch-metadata' | 'document-headers' | 'cookies' | 'cookie-visibility'
@@ -25,6 +26,7 @@ type PaginationStep = 'start' | 'focus-reload' | 'tab-sign-out' | 'tab-earlier'
   | `${PageSelection}-${'enter' | 'response' | 'headers' | 'selector' | 'dom'}`
 
 const browserTimeoutMs = 10000
+const pageByteLimit = 1024 * 1024
 const fixtureTime = '2026-10-20T22:30:00.123456Z'
 const eventLabels = {
   UTC: '20 Oct 2026, 22:30:00 GMT',
@@ -325,11 +327,32 @@ function waitEventPage(page: Page, path = eventPath): Promise<Response> {
   return page.waitForResponse(response => isPageRead(response.request(), path))
 }
 
+async function observePageBody(devtools: CDPSession): Promise<{ url: string; body: Document }> {
+  const paused = new Promise<{ requestId: string; url: string; length: number }>((resolve, reject) => {
+    devtools.once('Fetch.requestPaused', event => {
+      const length = Number(event.responseHeaders?.find(header => header.name.toLowerCase() === 'content-length')?.value)
+      if (event.responseStatusCode !== 200 || !Number.isSafeInteger(length) || length < 1 || length > pageByteLimit) {
+        reject(new Error('Unexpected event response metadata'))
+      } else resolve({ requestId: event.requestId, url: event.request.url, length })
+    })
+  })
+  const timeout = AbortSignal.timeout(browserTimeoutMs)
+  const { requestId, url, length } = await Promise.race([paused, once(timeout, 'abort').then(() => {
+    throw new Error('Event response capture deadline')
+  })])
+  const wire = await devtools.send('Fetch.getResponseBody', { requestId })
+  await devtools.send('Fetch.continueResponse', { requestId })
+  const bytes = Buffer.from(wire.body, wire.base64Encoded ? 'base64' : 'utf8')
+  assert.equal(bytes.length, length)
+  const document: unknown = JSON.parse(bytes.toString('utf8'))
+  return { url, body: object(document) }
+}
+
 async function checkPageRead(
-  page: Page, exercise: (response: Promise<Response>, began: number) => Promise<Response>,
+  page: Page, exercise: (response: Promise<PageRead>, began: number) => Promise<Response>,
 ): Promise<void> {
+  const devtools = await page.context().newCDPSession(page)
   const pending = pendingReads.get(page)
-  assert(pending !== undefined && pending.size === 0)
   const starts: { request: Request | null; repeated: boolean } = { request: null, repeated: false }
   const record = (request: Request) => {
     if (!isPageRead(request, eventPath)) return
@@ -338,7 +361,17 @@ async function checkPageRead(
   }
   page.on('request', record)
   try {
-    const observed = page.waitForResponse(response => response.request() === starts.request)
+    assert(pending !== undefined && pending.size === 0)
+    await devtools.send('Fetch.enable', {
+      patterns: [{ urlPattern: origin + eventPath + '*', requestStage: 'Response' }],
+    })
+    const observed = Promise.all([
+      page.waitForResponse(response => response.request() === starts.request),
+      observePageBody(devtools),
+    ]).then(([response, captured]) => {
+      assert.equal(response.url(), captured.url)
+      return { response, body: captured.body }
+    })
     void observed.catch(() => undefined)
     const response = await exercise(observed, Date.now())
     const request = response.request()
@@ -350,6 +383,7 @@ async function checkPageRead(
     validatedReads.add(request)
   } finally {
     page.off('request', record)
+    await devtools.detach()
   }
 }
 
@@ -415,14 +449,13 @@ function observationLabel(observed: number, timeZone: HistoryTimeZone): string {
 }
 
 async function assertRenderedPage(
-  page: Page, response: Response, expected: Document[], began: number, timeZone: HistoryTimeZone = 'UTC',
+  page: Page, body: Document, expected: Document[], began: number, timeZone: HistoryTimeZone = 'UTC',
 ): Promise<void> {
-  const body: unknown = await response.json()
-  const events = pageItems(object(body))
+  const events = pageItems(body)
   assert.deepEqual(events.map(event => event.at), expected.map(event => event.at))
   await page.locator('.run-timeline ol[aria-busy=false]').waitFor({ state: 'visible' })
   await assertPageRows(page, expected, timeZone)
-  const datetime = string(object(body).observed_at)
+  const datetime = string(body.observed_at)
   const observed = Date.parse(datetime)
   assert(began <= observed && observed <= Date.now())
   const observation = page.locator('.timeline-observed time')
@@ -430,11 +463,13 @@ async function assertRenderedPage(
   await assertTime(observation, datetime, observationLabel(observed, timeZone))
 }
 
-async function latest(page: Page, response: Response, began: number, timeZone: HistoryTimeZone = 'UTC'): Promise<void> {
+async function latest(
+  page: Page, { response, body }: PageRead, began: number, timeZone: HistoryTimeZone = 'UTC',
+): Promise<void> {
   await assertPageResponse(response, null)
   signInStep('latest-dom')
   paginationStep('latest-dom')
-  await assertRenderedPage(page, response, canonicalRows, began, timeZone)
+  await assertRenderedPage(page, body, canonicalRows, began, timeZone)
   assert(await earlier(page).isVisible())
 }
 
@@ -480,12 +515,12 @@ async function signIn(
     signInStep('cookie-visibility')
     assert.equal(await page.evaluate(() => document.cookie.includes('__Host-kora_session=')), false)
     signInStep('event-response')
-    const events = await observed
-    await latest(page, events, began, timeZone)
+    const read = await observed
+    await latest(page, read, began, timeZone)
     signInStep('clean-page')
     const rendered = await page.locator('body').innerText()
     assert(![url, new URL(url).pathname, session.value, csrf.value].some(marker => rendered.includes(marker)))
-    return events
+    return read.response
   })
 }
 
@@ -536,10 +571,10 @@ async function paginate(page: Page): Promise<void> {
     paginationStep('earlier-enter')
     await page.keyboard.press('Enter')
     paginationStep('earlier-response')
-    const response = await observed
+    const { response, body } = await observed
     await assertPageResponse(response, canonicalCursor)
     paginationStep('earlier-dom')
-    await assertRenderedPage(page, response, canonicalEarlierRows, began)
+    await assertRenderedPage(page, body, canonicalEarlierRows, began)
     assert.equal(await earlier(page).count(), 0)
     paginationStep('restored-focus')
     assert(await refresh(page).evaluate(element => element === document.activeElement))
@@ -554,9 +589,9 @@ async function paginate(page: Page): Promise<void> {
     paginationStep('latest-enter')
     await page.keyboard.press('Enter')
     paginationStep('latest-response')
-    const response = await observed
-    await latest(page, response, began)
-    return response
+    const read = await observed
+    await latest(page, read, began)
+    return read.response
   })
   paginationStep('complete')
 }
@@ -663,9 +698,9 @@ async function checkRefusal(page: Page, ns: string, runId: string, status: numbe
 async function navigateLatest(page: Page, navigate: () => Promise<Response | null>): Promise<void> {
   await checkPageRead(page, async (observed, began) => {
     assert.equal((await navigate())?.status(), 200)
-    const response = await observed
-    await latest(page, response, began)
-    return response
+    const read = await observed
+    await latest(page, read, began)
+    return read.response
   })
 }
 
