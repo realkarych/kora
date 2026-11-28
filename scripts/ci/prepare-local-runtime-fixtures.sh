@@ -33,7 +33,7 @@ prepare_linux() {
     rm -f "$fixtures/userns.previous"
   fi
   touch "$fixtures/user-namespaces"
-  bash "$(dirname "$0")/apt_install.sh" nfs-kernel-server
+  bash "$(dirname "$0")/apt_install.sh" "$@" nfs-kernel-server
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/nfs-export"
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/nfs-export/state"
   install -d -o 0 -g 0 -m 0755 /etc/exports.d
@@ -129,10 +129,16 @@ teardown_darwin() {
 
 main() {
   require_root
+  local operation="${1:-}"
+  test "$#" -gt 0
+  shift
   local platform
   platform="$(uname -s)"
-  case "$1:$platform" in
-    prepare:Linux) prepare_common; prepare_linux ;;
+  if [[ "$#" != 0 && ( "$operation:$platform" != prepare:Linux || "$#" != 1 || "$1" != --runner-ubuntu-apt ) ]]; then
+    exit 1
+  fi
+  case "$operation:$platform" in
+    prepare:Linux) prepare_common; prepare_linux "$@" ;;
     prepare:Darwin) prepare_common; prepare_darwin ;;
     teardown:Linux) if test -f "$fixtures/prepared"; then teardown_linux; rm -rf "$fixtures"; fi ;;
     teardown:Darwin) if test -f "$fixtures/prepared"; then teardown_darwin; rm -rf "$fixtures"; fi ;;

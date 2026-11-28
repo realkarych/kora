@@ -173,6 +173,7 @@ jobs:
         id: unit_collisions
         if: ${{ matrix.lane == 'local-runtime' && runner.os == 'Linux' }}
         run: |
+          printf 'KORA_RUNNER_UBUNTU_APT_NONCE=%s\n' "$(/usr/bin/python3 -I -B -c 'import secrets; print(secrets.token_hex(16))')" >> "$GITHUB_ENV"
           sudo bash scripts/ci/check-local-runtime-unit-collisions.sh root
           bash scripts/ci/check-local-runtime-unit-collisions.sh user
       - name: Stage the locked Pi SDK witness
@@ -184,7 +185,7 @@ jobs:
         if: ${{ matrix.lane == 'local-runtime' }}
         run: |
           SECONDS=0
-          sudo --preserve-env=RUNNER_TEMP scripts/ci/prepare-local-runtime-fixtures.sh prepare
+          sudo --preserve-env=RUNNER_TEMP,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,KORA_RUNNER_UBUNTU_APT_NONCE scripts/ci/prepare-local-runtime-fixtures.sh prepare --runner-ubuntu-apt
           printf 'Host fixture preparation took %s s\n' "$SECONDS"
       - name: Collect and execute the exact test lane
         id: tests
@@ -204,7 +205,13 @@ jobs:
       - name: Remove local runtime host fixtures
         id: teardown
         if: ${{ always() && matrix.lane == 'local-runtime' }}
-        run: sudo scripts/ci/prepare-local-runtime-fixtures.sh teardown
+        run: |
+          status=0
+          if [[ -n "${KORA_RUNNER_UBUNTU_APT_NONCE:-}" ]]; then
+            sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,KORA_RUNNER_UBUNTU_APT_NONCE /usr/bin/python3 -I -B scripts/ci/ubuntu_nfs_apt.py --cleanup-nfs || status=1
+          fi
+          sudo scripts/ci/prepare-local-runtime-fixtures.sh teardown || status=1
+          exit "$status"
       - name: Build isolated distributions offline
         id: distributions
         if: ${{ matrix.lane == 'local-runtime' }}

@@ -109,6 +109,8 @@ PRIVILEGED_ACQUISITIONS = (
     "apt_install.sh",
 )
 BUDGET_PRESERVING_SUDO = "sudo --preserve-env=RUNNER_TEMP "
+NFS_JOB_ENV = "GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,KORA_RUNNER_UBUNTU_APT_NONCE"
+NFS_PREPARATION_SUDO = f"sudo --preserve-env=RUNNER_TEMP,{NFS_JOB_ENV} "
 PLANNED_LANE_JOBS = frozenset(
     {
         "ci.yml:scaffold-plan",
@@ -844,6 +846,62 @@ def test_every_acquiring_script_is_accounted_for() -> None:
     assert installing == {"scripts/ci/prepare-local-runtime-fixtures.sh"}
 
 
+def test_nfs_acquisition_uses_one_runner_ubuntu_scope() -> None:
+    mode = "--runner-ubuntu-apt"
+    fixture = "scripts/ci/prepare-local-runtime-fixtures.sh"
+    prepare = f"{BUDGET_PRESERVING_SUDO}{fixture} prepare"
+    workflows = repository_workflows()
+    fixture_script = (ROOT / fixture).read_text()
+    apt_script = (ROOT / "scripts/ci/apt_install.sh").read_text()
+    scoped_helper = (ROOT / "scripts/ci/ubuntu_nfs_apt.py").read_text()
+    linux_steps = step_list(job_of(workflows, "ci.yml", "scaffold-tests"))
+
+    opted_in = [
+        (location, step.get("id"), str(step["run"]).splitlines())
+        for location, job in jobs_of(workflows)
+        for step in step_list(job)
+        if mode in str(step.get("run", ""))
+    ]
+    default_preparations = [
+        (location, step.get("id"))
+        for location, job in jobs_of(workflows)
+        for step in step_list(job)
+        if prepare in str(step.get("run", "")).splitlines()
+    ]
+    mermaid = step_list(job_of(workflows, "ci.yml", "mermaid"))
+    teardown = next(
+        str(step["run"]) for step in linux_steps if step.get("id") == "teardown"
+    )
+
+    assert len(opted_in) == 1
+    location, step_id, lines = opted_in[0]
+    assert (location, step_id) == ("ci.yml:scaffold-tests", "preparation")
+    assert f"{NFS_PREPARATION_SUDO}{fixture} prepare {mode}" in lines
+    assert set(default_preparations) == {
+        ("ci.yml:scaffold-tests-macos", "preparation"),
+        ("ci.yml:scaffold-tests-macos-general", "preparation"),
+    }
+    assert any(
+        step.get("run")
+        == f"{BUDGET_PRESERVING_SUDO}bash scripts/ci/apt_install.sh ripgrep"
+        for step in mermaid
+    )
+    assert 'prepare:Linux) prepare_common; prepare_linux "$@" ;;' in fixture_script
+    assert 'apt_install.sh" "$@" nfs-kernel-server' in fixture_script
+    assert "if [[ ${1:-} == --runner-ubuntu-apt ]]; then" in apt_script
+    assert "target=(--scoped-nfs)" in apt_script
+    assert 'acquire.py" run 90 --' in apt_script
+    assert 'ubuntu_nfs_apt.py" "${target[@]}"' in apt_script
+    assert 'f"Dir::Etc::sourcelist={source}"' in scoped_helper
+    assert '"Dir::Etc::sourceparts=/dev/null"' in scoped_helper
+    assert 'update_options = ("--no-list-cleanup",)' in scoped_helper
+    assert '"/usr/bin/apt-get", *APT_OPTIONS, *scope, *update_options' in scoped_helper
+    assert "sudo --preserve-env=" + NFS_JOB_ENV in teardown
+    assert "--cleanup-nfs || status=1" in teardown
+    assert f"sudo {fixture} teardown || status=1" in teardown
+    assert 'exit "$status"' in teardown
+
+
 def test_every_job_acquisition_worst_case_fits_its_deadline() -> None:
     jobs = [
         (
@@ -1118,6 +1176,11 @@ def unverified_tool_setups(workflows: Workflows) -> list[str]:
             for line in str(step.get("run", "")).splitlines()
             if any(marker in line for marker in PRIVILEGED_ACQUISITIONS)
             and BUDGET_PRESERVING_SUDO not in line
+            and not (
+                location == "ci.yml:scaffold-tests"
+                and NFS_PREPARATION_SUDO in line
+                and line.endswith(" prepare --runner-ubuntu-apt")
+            )
         )
     return violations
 
