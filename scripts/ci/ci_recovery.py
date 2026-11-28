@@ -9,8 +9,8 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from http.client import HTTPResponse
-from typing import Literal, cast
+from http.client import HTTPException, HTTPResponse
+from typing import Literal, Protocol, cast
 
 API_HOST = "api.github.com"
 LOG_HOST = re.compile(r"productionresultssa[0-9]{1,3}\.blob\.core\.windows\.net")
@@ -449,12 +449,15 @@ class Client:
         encoded = "" if not query else "?" + urllib.parse.urlencode(query)
         return f"https://{API_HOST}/repos/{self.repository}/{path}{encoded}"
 
+    @property
+    def rerun_url(self) -> str:
+        return self.url(f"actions/runs/{self.trigger}/rerun")
+
     def request(self, url: str, method: str = "GET") -> urllib.request.Request:
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != "https" or parts.hostname != API_HOST:
             raise RecoveryError("refused a request outside the API host")
-        rerun = self.url(f"actions/runs/{self.trigger}/rerun")
-        if method != "GET" and (method, url) != ("POST", rerun):
+        if method != "GET" and (method, url) != ("POST", self.rerun_url):
             raise RecoveryError("refused a write other than the triggering rerun")
         request = urllib.request.Request(f"https://{url[8:]}", method=method)
         request.add_unredirected_header("Authorization", "Bearer " + self.token)
@@ -466,7 +469,17 @@ class Client:
         response = self.opener.open(request, timeout=30)
         if not isinstance(response, HTTPResponse):
             raise RecoveryError("unexpected response type")
+        return self.read_response(request, response)
+
+    def read_response(
+        self, request: urllib.request.Request, response: HTTPResponse
+    ) -> tuple[int, bytes, str]:
         with response:
+            if response.status == 502 and (request.get_method(), request.full_url) == (
+                "POST",
+                self.rerun_url,
+            ):
+                return response.status, b"", ""
             body = response.read(BODY_LIMIT + 1)
             location = response.headers.get("Location") or ""
             status = response.status
@@ -557,15 +570,18 @@ class Client:
         data = mapping(self.get_json(f"contents/{path}", {"ref": sha(ref)}))
         return sha(data["sha"])
 
-    def rerun(self) -> bool:
-        status, _, _ = self.send(
-            self.request(self.url(f"actions/runs/{self.trigger}/rerun"), "POST")
-        )
-        if status == 201:
-            return True
-        if status in {403, 409} and self.run(self.trigger).run_attempt > 1:
-            return False
-        raise RecoveryError(f"rerun request returned {status}")
+    def rerun(self) -> int:
+        status, _, _ = self.send(self.request(self.rerun_url, "POST"))
+        return status
+
+
+class RerunService(Protocol):
+    @property
+    def trigger(self) -> int: ...
+
+    def run(self, run_id: int) -> Run: ...
+
+    def rerun(self) -> int: ...
 
 
 def collect(client: Client, run: Run, checkout: str) -> Evidence:
@@ -668,7 +684,7 @@ def run_record(
     }
 
 
-def confirm(client: Client, run_id: int, clock: Callable[[], float]) -> int:
+def confirm(client: RerunService, run_id: int, clock: Callable[[], float]) -> int:
     deadline = clock() + CONFIRM_SECONDS
     while True:
         attempt = client.run(run_id).run_attempt
@@ -677,6 +693,30 @@ def confirm(client: Client, run_id: int, clock: Callable[[], float]) -> int:
         if clock() >= deadline:
             raise RecoveryError("the rerun attempt did not appear in time")
         time.sleep(5)
+
+
+def observed_second_attempt(client: RerunService, original: Run) -> int | None:
+    try:
+        observed = client.run(client.trigger)
+    except (
+        RecoveryError,
+        OSError,
+        HTTPException,
+        ValueError,
+        KeyError,
+        RecursionError,
+    ):
+        return None
+    if (
+        observed.run_attempt == 2
+        and observed.id == original.id == client.trigger
+        and observed.repository_id == original.repository_id
+        and observed.head_repository_id == original.head_repository_id
+        and observed.head_sha == original.head_sha
+        and observed.tree_id == original.tree_id
+    ):
+        return observed.run_attempt
+    return None
 
 
 def main() -> int:
@@ -693,22 +733,43 @@ def main() -> int:
         decision = classify(evidence)
     else:
         decision = Decision("skip", early)
+    return report_recovery(
+        client, run, decision, evidence, os.environ["GITHUB_STEP_SUMMARY"]
+    )
+
+
+def report_recovery(
+    client: RerunService,
+    run: Run,
+    decision: Decision,
+    evidence: Evidence | None,
+    summary_path: str,
+) -> int:
     jobs = [job_record(item, evidence) for item in decision.jobs]
     for record in jobs:
         emit(record)
     attempt: int | None = None
+    status: int | None = None
     if decision.verdict == "rerun":
-        if client.rerun():
+        status = client.rerun()
+        if status == 201:
             attempt = confirm(client, run.id, time.monotonic)
-        else:
+        elif status == 502:
+            attempt = observed_second_attempt(client, run)
+        elif status in {403, 409} and client.run(client.trigger).run_attempt > 1:
             decision = dataclasses.replace(
                 decision, verdict="skip", reason="limit_used"
             )
+        else:
+            raise RecoveryError(f"rerun request returned {status}")
     summary = run_record(run, decision, evidence, attempt)
+    if status == 502:
+        summary["rerun_http_status"] = status
+        summary["rerun_readback"] = "attempt_observed" if attempt else "unconfirmed"
     emit(summary)
-    with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+    with open(summary_path, "a", encoding="utf-8") as stream:
         stream.write("\n".join([*table_lines([summary]), *table_lines(jobs)]) + "\n")
-    return 0
+    return 1 if status == 502 else 0
 
 
 if __name__ == "__main__":
