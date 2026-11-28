@@ -96,6 +96,16 @@ from tests.ir.test_cost_models import (
             dict(cache_creation_5m="2", cache_creation_1h=None),
             "2",
         ),
+        (
+            dict(output_tokens=1000000, reasoning_tokens=250000),
+            dict(output=None, reasoning="6"),
+            None,
+        ),
+        (
+            dict(output_tokens=1000000, reasoning_tokens=250000),
+            dict(output="5", reasoning=None),
+            None,
+        ),
     ],
 )
 def test_usage_pricing_avoids_double_counting(
