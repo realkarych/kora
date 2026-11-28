@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
@@ -85,6 +86,7 @@ async def seed_event(
     node_id: str | None = None,
     payload: JsonObject | None = None,
     kind: str = "run.succeeded",
+    at: datetime = START,
 ) -> str:
     seeder = Seeder(connection)
     event_id = seeder.new_id() if event_id is None else event_id
@@ -98,7 +100,7 @@ async def seed_event(
             kind=kind,
             actor=actor,
             payload={"private": "p" * payload_size} if payload is None else payload,
-            at=START,
+            at=at,
             **seeder.stamps(),
         )
     )

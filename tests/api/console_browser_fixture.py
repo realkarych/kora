@@ -16,6 +16,7 @@ import tempfile
 from collections.abc import AsyncGenerator
 from contextlib import ExitStack, asynccontextmanager, closing
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -67,6 +68,7 @@ from tests.plugins.authentication.support import seed_case
 from tests.support.databases import copy_sqlite_template, prepare_sqlite_template
 
 PAGE_SIZE = 20
+EVENT_TIME = datetime(2026, 10, 20, 22, 30, 0, 123456, UTC)
 PRIVATE_PAYLOAD = "private-installed-browser-event-payload"
 INERT_EVENT = "<img src=x onerror=alert(1)>"
 OPENER_PRIVATE_MARKER = "private-installed-browser-mcp-override"
@@ -155,6 +157,7 @@ async def seed_data(database: Database) -> BrowserData:
                 event_id=event_id,
                 payload={"private": PRIVATE_PAYLOAD},
                 kind=INERT_EVENT if index == PAGE_SIZE else "run.created",
+                at=EVENT_TIME,
             )
     return BrowserData(
         f"run_{run}",
@@ -536,7 +539,12 @@ async def browser_exchange(
             elif action == "append-event":
                 async with database.transaction() as writer:
                     newest = await seed_event(
-                        writer, data.scope, SYSTEM, 0, event_id=f"{PAGE_SIZE + 2:026d}"
+                        writer,
+                        data.scope,
+                        SYSTEM,
+                        0,
+                        event_id=f"{PAGE_SIZE + 2:026d}",
+                        at=EVENT_TIME,
                     )
                 async with httpx.AsyncClient(
                     base_url=environment["KORA_URL"],
