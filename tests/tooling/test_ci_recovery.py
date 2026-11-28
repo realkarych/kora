@@ -1,12 +1,16 @@
 import dataclasses
 import datetime
 import json
+import socket
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from http.client import HTTPResponse
 from pathlib import Path
 
 import pytest
 
 from scripts.ci.ci_recovery import (
+    BODY_LIMIT,
     CEL_PRODUCER_STEPS,
     Client,
     Evidence,
@@ -18,6 +22,7 @@ from scripts.ci.ci_recovery import (
     mapping,
     parse_job,
     parse_run,
+    report_recovery,
     sequence,
     text,
 )
@@ -472,6 +477,108 @@ def test_fork_run_is_skipped() -> None:
     assert decision.reason == "fork"
 
 
+class RerunFake:
+    def __init__(self, trigger: int, status: int, observation: Run | Exception) -> None:
+        self.trigger = trigger
+        self.status = status
+        self.observation = observation
+        self.requests: list[tuple[str, int]] = []
+
+    def rerun(self) -> int:
+        self.requests.append(("POST", self.trigger))
+        return self.status
+
+    def run(self, run_id: int) -> Run:
+        self.requests.append(("GET", run_id))
+        if isinstance(self.observation, Exception):
+            raise self.observation
+        return self.observation
+
+
+@pytest.mark.parametrize(
+    ("observed_fields", "expected_attempt"),
+    [
+        ({}, 2),
+        ({"run_attempt": 1}, None),
+        ({"run_attempt": 3}, None),
+        ({"id": 1}, None),
+        ({"repository_id": 1}, None),
+        ({"head_repository_id": 1}, None),
+        ({"head_sha": "a" * 40}, None),
+        ({"tree_id": "b" * 40}, None),
+        (RecoveryError("unreported readback detail"), None),
+        (KeyError("unreported readback detail"), None),
+        (TimeoutError("unreported readback detail"), None),
+    ],
+)
+def test_gateway_refusal_reports_original_decision_and_observed_attempt(
+    observed_fields: dict[str, int | str] | Exception,
+    expected_attempt: int | None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    evidence = recorded("unacquired_storage_lane")
+    decision = classify(evidence)
+    observation = (
+        observed_fields
+        if isinstance(observed_fields, Exception)
+        else dataclasses.replace(evidence.run, **({"run_attempt": 2} | observed_fields))
+    )
+    service = RerunFake(evidence.run.id, 502, observation)
+    summary_path = tmp_path / "summary.md"
+
+    result = report_recovery(
+        service, evidence.run, decision, evidence, str(summary_path)
+    )
+    captured = capsys.readouterr().out
+    *jobs, report = [mapping(json.loads(line)) for line in captured.splitlines()]
+    summary = summary_path.read_text()
+
+    assert result == 1
+    assert service.requests == [("POST", evidence.run.id), ("GET", evidence.run.id)]
+    assert report["verdict"] == "rerun"
+    assert report["reason"] == "infrastructure"
+    assert report["run_id"] == evidence.run.id
+    assert report["rerun_http_status"] == 502
+    assert report["rerun_attempt"] == expected_attempt
+    readback = "attempt_observed" if expected_attempt is not None else "unconfirmed"
+    assert report["rerun_readback"] == readback
+    assert f"| `{expected_attempt}` | `502` | `{readback}` |" in summary
+    assert [(row["job_id"], row["class"]) for row in jobs] == [
+        (item.job.id, item.kind) for item in decision.jobs
+    ]
+    assert all(f"| `{item.job.id}` |" in summary for item in decision.jobs)
+    assert "unreported readback detail" not in captured + summary
+
+
+@pytest.mark.parametrize(
+    ("status", "verdict"), [(201, "rerun"), (403, "skip"), (409, "skip")]
+)
+def test_rerun_success_and_concurrent_attempt_keep_their_reports(
+    status: int, verdict: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    evidence = recorded("unacquired_storage_lane")
+    decision = classify(evidence)
+    service = RerunFake(
+        evidence.run.id, status, dataclasses.replace(evidence.run, run_attempt=2)
+    )
+    summary_path = tmp_path / "summary.md"
+
+    result = report_recovery(
+        service, evidence.run, decision, evidence, str(summary_path)
+    )
+    report = mapping(json.loads(capsys.readouterr().out.splitlines()[-1]))
+    summary = summary_path.read_text()
+
+    assert result == 0
+    assert service.requests == [("POST", evidence.run.id), ("GET", evidence.run.id)]
+    assert report["verdict"] == verdict
+    assert report["reason"] == ("infrastructure" if status == 201 else "limit_used")
+    assert report["rerun_attempt"] == (2 if status == 201 else None)
+    assert "rerun_http_status" not in report
+    assert "rerun_readback" not in summary
+
+
 def test_token_header_is_not_redirected() -> None:
     client = Client(REPOSITORY, BEARER, TRIGGER)
 
@@ -527,6 +634,48 @@ def test_client_allows_only_the_rerun_of_the_triggering_run() -> None:
         client.request(client.url(f"actions/runs/{TRIGGER}"), "DELETE")
     with pytest.raises(RecoveryError, match="triggering rerun"):
         client.request(client.url(f"actions/runs/{TRIGGER}/rerun-failed-jobs"), "POST")
+
+
+def response_headers(status: int, size: int) -> bytes:
+    return f"HTTP/1.1 {status} Status\r\nContent-Length: {size}\r\n\r\n".encode("ascii")
+
+
+def test_triggering_post_closes_gateway_response_before_reading_body() -> None:
+    client = Client(REPOSITORY, BEARER, TRIGGER)
+    request = client.request(client.rerun_url, "POST")
+    reader, peer = socket.socketpair()
+    with reader, peer:
+        reader.settimeout(1)
+        peer.sendall(response_headers(502, BODY_LIMIT + 1))
+        response = HTTPResponse(reader, method=request.get_method())
+        response.begin()
+
+        result = client.read_response(request, response)
+
+        assert result == (502, b"", "")
+        assert response.isclosed()
+        assert response.closed
+
+
+@pytest.mark.parametrize(("method", "status"), [("GET", 502), ("POST", 201)])
+def test_other_native_responses_keep_the_body_limit(method: str, status: int) -> None:
+    client = Client(REPOSITORY, BEARER, TRIGGER)
+    request = client.request(client.rerun_url, method)
+    body = b"x" * (BODY_LIMIT + 1)
+    reader, peer = socket.socketpair()
+    with reader, peer, ThreadPoolExecutor(max_workers=1) as writer:
+        reader.settimeout(5)
+        peer.settimeout(5)
+        sent = writer.submit(peer.sendall, response_headers(status, len(body)) + body)
+        response = HTTPResponse(reader, method=request.get_method())
+        response.begin()
+
+        with pytest.raises(RecoveryError, match="response exceeds its size limit"):
+            client.read_response(request, response)
+        sent.result(timeout=5)
+
+        assert response.isclosed()
+        assert response.closed
 
 
 def test_client_refuses_unlisted_paths_and_values() -> None:
